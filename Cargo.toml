@@ -1,0 +1,45 @@
+[package]
+name = "benchmark"
+version = "0.1.0"
+edition = "2021"
+
+
+description = "A FalkorDB Benchmark"
+homepage = "https://www.falkordb.com/"
+readme = "readme.md"
+repository = "https://github.com/FalkorDB/benchmark"
+license = "MIT"
+categories = ["database"]
+keywords = ["database", "graph-database", "database-driver", "falkordb", "benchmark"]
+
+
+[lib]
+name = "benchmark"
+path = "src/lib.rs"
+
+[[bin]]
+name = "benchmark"
+path = "src/main.rs"
+
+[dependencies]
+neo4rs = "0.8.0"
+thiserror = "1.0.64"
+tracing = "0.1.40"
+tracing-subscriber = "0.3.18"
+tokio = { version = "1.41.0", features = ["full"] }
+futures = "0.3.31"
+rand = "0.8.5"
+histogram = "0.11"
+tokio-util = "0.7"
+reqwest-streams = { version = "0.8.0", features = ["json"] }
+reqwest = "0.12.9"
+async-trait = "0.1.83"
+[dev-dependencies]
+criterion = { version = "0.5.1", features = ["html_reports", "async_tokio"] }
+
+[[bench]]
+name = "neo4j_simple"
+harness = false
+
+
+
