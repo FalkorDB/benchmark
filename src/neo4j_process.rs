@@ -1,33 +1,112 @@
-use crate::error::BenchmarkError::FailedToSpawnNeo4jError;
-use crate::error::BenchmarkResult;
-use std::process::Stdio;
+use crate::error::BenchmarkError::{FailedToSpawnNeo4jError, OtherError};
+use crate::error::{BenchmarkError, BenchmarkResult};
+use crate::scenario::Spec;
+use crate::utils::{create_directory_if_not_exists, spawn_command};
+use std::process::{ExitStatus, Output, Stdio};
+use tokio::fs;
 use tokio::process::{Child, Command};
 use tokio::time::{sleep, Duration};
 use tracing::{info, trace};
 
 #[derive(Debug, Clone)]
 pub struct Neo4jProcess {
-    path: String,
+    home: String,
 }
 
 impl Neo4jProcess {}
 
 impl Neo4jProcess {
-    pub fn new(path: String) -> Neo4jProcess {
-        Neo4jProcess { path }
+    pub fn new(home: String) -> Neo4jProcess {
+        Neo4jProcess { home }
+    }
+
+    fn neo4j_binary(&self) -> String {
+        format!("{}/bin/neo4j", self.home.clone())
+    }
+
+    fn neo4j_pid(&self) -> String {
+        format!("{}/run/neo4j.pid", self.home.clone())
+    }
+    fn neo4j_admin(&self) -> String {
+        format!("{}/bin/neo4j-admin", self.home.clone())
+    }
+    fn neo4j_backup(&self) -> String {
+        format!("{}/backup/", self.home.clone())
+    }
+
+    pub(crate) async fn dump<'a>(&self, spec: Spec<'a>) -> BenchmarkResult<Output> {
+        if fs::metadata(&self.neo4j_pid()).await.is_ok() {
+            return Err(OtherError(
+                "Cannot dump DB because it is running.".to_string(),
+            ));
+        }
+        let command = self.neo4j_admin();
+        let backup_path = spec.backup_path();
+        info!("Dumping DB to {}", backup_path);
+        create_directory_if_not_exists(&backup_path).await?;
+
+        let args = [
+            "database",
+            "dump",
+            "--overwrite-destination=true",
+            "--to-path",
+            backup_path.as_str(),
+            "neo4j",
+        ];
+        spawn_command(command.as_str(), &args).await
+    }
+
+    async fn restore(&self) -> BenchmarkResult<Output> {
+        info!("Restoring DB");
+        if fs::metadata(&self.neo4j_pid()).await.is_ok() {
+            return Err(OtherError(
+                "Cannot restore DB because it is running.".to_string(),
+            ));
+        }
+        let command = self.neo4j_admin();
+        let backup_path = self.neo4j_backup();
+
+        let args = [
+            "database",
+            "load",
+            "--from-path",
+            backup_path.as_str(),
+            "--overwrite-destination=true",
+            "neo4j",
+        ];
+        spawn_command(command.as_str(), &args).await
+    }
+    async fn clean_db(&self) -> BenchmarkResult<Output> {
+        info!("Cleaning DB");
+        if fs::metadata(&self.neo4j_pid()).await.is_ok() {
+            return Err(OtherError(
+                "Cannot clean DB because it is running.".to_string(),
+            ));
+        }
+        let home = self.home.clone();
+        let databases = format!("{}/data/databases/*", &home);
+        let transactions = format!("{}/data/transactions/*", &home);
+        let args = ["-Rf", &databases, &transactions];
+        spawn_command("rm", &args).await
     }
 
     pub async fn start(&self) -> BenchmarkResult<Child> {
-        trace!("Starting Neo4j process: {} console", self.path);
+        trace!("Starting Neo4j process: {} console", self.neo4j_binary());
+        if fs::metadata(&self.neo4j_pid()).await.is_ok() {
+            self.stop().await?;
+        }
         info!("Starting Neo4j process");
-        let child = Command::new(self.path.clone())
+        let child = Command::new(self.neo4j_binary())
             .arg("console")
             .stdout(Stdio::null()) // Redirect stdout to null
             .spawn()
             .map_err(|e| {
                 FailedToSpawnNeo4jError(
                     e,
-                    format!("Failed to spawn Neo4j process, cmd: {} console", self.path)
+                    format!(
+                        "Failed to spawn Neo4j process, cmd: {} console",
+                        self.neo4j_binary()
+                    )
                         .to_string(),
                 )
             })?;
@@ -41,42 +120,32 @@ impl Neo4jProcess {
         Ok(child)
     }
 
-    pub async fn stop(&self) -> BenchmarkResult<()> {
-        trace!("Starting Neo4j process: {} stop", self.path);
+    pub async fn stop(&self) -> BenchmarkResult<Output> {
         info!("Stopping Neo4j process");
-        Command::new(self.path.clone())
-            .arg("stop")
-            .output()
-            .await
-            .map_err(|e| {
-                FailedToSpawnNeo4jError(
-                    e,
-                    format!("Failed to spawn Neo4j process, path: {} stop", self.path).to_string(),
-                )
-            })?;
-        Ok(())
+
+        let command = self.neo4j_binary();
+
+        let args = ["stop"];
+
+        spawn_command(command.as_str(), &args).await
     }
 
     pub async fn is_running(&self) -> BenchmarkResult<bool> {
-        trace!("Starting Neo4j process: {} status", self.path);
-        let out = Command::new(self.path.clone())
-            .arg("status")
-            .output()
-            .await
-            .map_err(|e| {
-                FailedToSpawnNeo4jError(
-                    e,
-                    format!("Failed to spawn Neo4j process, path: {} status", self.path)
-                        .to_string(),
-                )
-            })?;
-        if String::from_utf8_lossy(&out.stderr)
-            .trim()
-            .contains("Neo4j is not running.")
-        {
-            Ok(false)
-        } else {
-            Ok(true)
+        trace!("Starting Neo4j process: {} status", self.neo4j_binary());
+        let command = self.neo4j_binary();
+
+        let args = ["status"];
+
+        let output = spawn_command(command.as_str(), &args).await;
+        match output {
+            Ok(output) => {
+                if output.status.success() {
+                    Ok(true)
+                } else {
+                    Ok(false)
+                }
+            }
+            Err(_) => Ok(false),
         }
     }
 }

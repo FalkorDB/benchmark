@@ -1,10 +1,11 @@
-#![allow(unused_variables, unused_imports, dead_code)]
-
 mod error;
 mod line_stream;
+mod neo4j;
 mod neo4j_client;
 mod neo4j_process;
 pub mod scenario;
+mod utils;
+mod foo;
 
 use crate::error::BenchmarkResult;
 use crate::scenario::{Size, Vendor};
@@ -13,7 +14,7 @@ use histogram::Histogram;
 use scenario::Spec;
 use std::time::Duration;
 use tokio::time::Instant;
-use tracing::{info, trace, Level};
+use tracing::{error, info, trace, Level};
 use tracing_subscriber::FmtSubscriber;
 
 #[tokio::main]
@@ -26,68 +27,63 @@ async fn main() -> BenchmarkResult<()> {
         .finish();
 
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
+    let spec = Spec::new(scenario::Name::Users, Size::Small, Vendor::Neo4j);
+    let neo4j = neo4j::Neo4j::new();
 
-    let neo4j_path = String::from("/Users/barak/dev/benchmark/downloads/neo4j_local/bin/neo4j");
-    let neo4j = neo4j_process::Neo4jProcess::new(neo4j_path);
+
     neo4j.start().await?;
 
-    let uri = "127.0.0.1:7687";
-    let user = "neo4j";
-    let pass = "h6u4krd10";
-
-    let client =
-        neo4j_client::Neo4jClient::new(uri.to_string(), user.to_string(), pass.to_string()).await?;
-
-    let query1 = r#"CREATE
-  (n1:Person {name: 'Alice'}),
-  (n2:Person {name: 'Bob'}),
-  (n3:Person {name: 'Charlie'}),
-  (n4:Person {name: 'David'}),
-  (n5:Person {name: 'Eve'})
-RETURN n1, n2, n3, n4, n5"#;
-
-    let query2 = r#"WITH range(1, 10000) AS ids
-UNWIND ids AS id
-CREATE (n:Dog {id: id})
-    RETURN n"#;
-
-    let query3 = r#"MATCH (n:Dog)
-RETURN n"#;
-
-    let query4 = r#"MATCH (n:Node)
-WHERE n.id % 2 = 1
-RETURN sum(n.id) AS totalOddIdSum"#;
+    let client = neo4j.client().await?;
 
     let mut histogram = Histogram::new(7, 64).unwrap();
-    for iteration in 0..100 {
-        let start = Instant::now();
-        let mut stream = client.execute_query_str(query4).await?;
-        let mut counter = 0;
-        while let Some(Ok(row)) = stream.next().await {
-            info!("Row: {:?}", row);
-            counter += 1;
+
+    let mut lines = spec.init_data_iterator().await?;
+    let mut counter = 0;
+    let start = Instant::now();
+    for line_or_error in lines {
+        counter += 1;
+        if counter % 1000 == 0 {
+            info!("---> done with {} queries at {:?}", counter, start.elapsed());
         }
-        let duration = start.elapsed();
-        histogram.increment(duration.as_micros() as u64).unwrap();
-        info!(
-            "Iteration {}, Duration: {:?}, counter {}",
-            iteration, duration, counter
-        );
+        match line_or_error {
+            Ok(line) => {
+                // info!("line: {}", line);
+                if line.clone().trim() == ";" {
+                    continue;
+                }
+                trace!("executing {}", line);
+                let start = Instant::now();
+                let mut stream = client.execute_query_str(line.as_str()).await?;
+                while let Some(Ok(row)) = stream.next().await {
+                    trace!("Row: {:?}", row);
+                }
+                let duration = start.elapsed();
+                // info!("Duration: {:?}, counter {}", duration, counter);
+                histogram.increment(duration.as_micros() as u64).unwrap();
+            }
+            Err(error) => {
+                error!("error: {:?}", error);
+            }
+        }
     }
-    let p50 = histogram.percentile(90.0).unwrap().unwrap().end();
-    let p90 = histogram.percentile(90.0).unwrap().unwrap().end();
-    let p99 = histogram.percentile(99.0).unwrap().unwrap().end();
-    info!("p50: {:?}", Duration::from_micros(p50));
-    info!("p90: {:?}", Duration::from_micros(p90));
-    info!("p99: {:?}", Duration::from_micros(p99));
 
-    neo4j.stop().await?;
+    info!("---> done with {} queries at {:?}", counter, start.elapsed());
+    neo4j.clone().stop().await?;
+    neo4j.dump(spec.clone()).await?;
+    info!("---> historam");
+    let p50 = histogram
+        .percentile(50.0)
+        .map(|r| r.map(|b| Duration::from_micros(b.end())));
+    let p90 = histogram
+        .percentile(90.0)
+        .map(|r| r.map(|b| Duration::from_micros(b.end())));
+    let p99 = histogram
+        .percentile(99.0)
+        .map(|r| r.map(|b| Duration::from_micros(b.end())));
+    info!("p50: {:?}", p50);
+    info!("p90: {:?}", p90);
+    info!("p99: {:?}", p99);
 
-    let spec = scenario::Spec::new(scenario::Name::Pokec, scenario::Size::Small, Vendor::Neo4j);
-    let mut line_stream = spec.stream_data().await?;
-    while let Some(line) = line_stream.try_next().await? {
-        info!("{}", line);
-    }
     info!("---> Done");
     Ok(())
 }

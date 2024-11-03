@@ -13,6 +13,8 @@ pub enum BenchmarkError {
     ReqwestError(#[from] reqwest::Error),
     #[error("Stream body error: {0}")]
     StreamBodyError(#[from] StreamBodyError),
+    #[error("Failed to download a file error: {0}")]
+    FailedToDownloadFileError(String),
     #[error("Other error: {0}")]
     OtherError(String),
 }

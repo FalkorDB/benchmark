@@ -2,10 +2,12 @@ use crate::error::BenchmarkError::OtherError;
 use crate::error::BenchmarkResult;
 use crate::neo4j_client::Neo4jClient;
 use crate::neo4j_process::Neo4jProcess;
+use crate::scenario::Spec;
 use futures::Stream;
 use neo4rs::Row;
 use std::env;
 use std::pin::Pin;
+use std::process::Output;
 
 #[derive(Clone)]
 pub struct Neo4j {
@@ -33,7 +35,7 @@ impl Neo4j {
     }
 
     pub fn neo4j_process(&self) -> Neo4jProcess {
-        Neo4jProcess::new(format!("{}/bin/neo4j", self.neo4j_home))
+        Neo4jProcess::new(self.neo4j_home.clone())
     }
 
     pub async fn start(&self) -> BenchmarkResult<()> {
@@ -46,18 +48,22 @@ impl Neo4j {
         Ok(())
     }
 
+    pub async fn dump<'a>(&self, spec: Spec<'a>) -> BenchmarkResult<Output> {
+        self.neo4j_process().dump(spec).await
+    }
+
     pub async fn client(&self) -> BenchmarkResult<Neo4jClient> {
         Neo4jClient::new(
             self.uri.to_string(),
             self.user.to_string(),
             self.password.to_string(),
         )
-        .await
+            .await
     }
     pub async fn execute_query<'a>(
         &mut self,
         q: String,
-    ) -> BenchmarkResult<Pin<Box<dyn Stream<Item = BenchmarkResult<Row>> + Send + 'a>>> {
+    ) -> BenchmarkResult<Pin<Box<dyn Stream<Item=BenchmarkResult<Row>> + Send + 'a>>> {
         if self.neo4j.is_none() {
             // Initialize the Neo4j client
             let client = Neo4jClient::new(
@@ -65,7 +71,7 @@ impl Neo4j {
                 self.user.to_string(),
                 self.password.to_string(),
             )
-            .await?;
+                .await?;
             self.neo4j = Some(client);
         }
         match self.neo4j {

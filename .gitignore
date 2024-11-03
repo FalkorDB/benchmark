@@ -3,3 +3,5 @@
 *.ipr
 .idea
 downloads
+cache
+backups

@@ -13,14 +13,6 @@ categories = ["database"]
 keywords = ["database", "graph-database", "database-driver", "falkordb", "benchmark"]
 
 
-[lib]
-name = "benchmark"
-path = "src/lib.rs"
-
-[[bin]]
-name = "benchmark"
-path = "src/main.rs"
-
 [dependencies]
 neo4rs = "0.8.0"
 thiserror = "1.0.64"
@@ -30,16 +22,18 @@ tokio = { version = "1.41.0", features = ["full"] }
 futures = "0.3.31"
 rand = "0.8.5"
 histogram = "0.11"
-tokio-util = "0.7"
+tokio-util = { version = "0.7" }
 reqwest-streams = { version = "0.8.0", features = ["json"] }
-reqwest = "0.12.9"
+reqwest = { version = "0.12.9", features = ["gzip"] }
 async-trait = "0.1.83"
-[dev-dependencies]
-criterion = { version = "0.5.1", features = ["html_reports", "async_tokio"] }
+strum = "0.26.3"
+strum_macros = "0.26.4"
+tokio-stream = "0.1.16"
+bytes = "1.8.0"
 
-[[bench]]
-name = "neo4j_simple"
-harness = false
+[dev-dependencies]
+
+
 
 
 
