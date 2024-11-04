@@ -6,3 +6,6 @@ downloads
 cache
 backups
 *.so
+redis-data
+redis-server
+t.sh
