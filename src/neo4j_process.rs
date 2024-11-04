@@ -4,7 +4,6 @@ use crate::scenario::Spec;
 use crate::utils::{create_directory_if_not_exists, spawn_command};
 use std::fs;
 use std::process::{Child, Command, Output, Stdio};
-use std::thread::sleep;
 use std::time::Duration;
 use tracing::{info, trace};
 
@@ -30,6 +29,7 @@ impl Neo4jProcess {
         format!("{}/bin/neo4j-admin", self.home.clone())
     }
 
+    #[allow(dead_code)]
     fn neo4j_backup(&self) -> String {
         format!("{}/backup/", self.home.clone())
     }
@@ -59,6 +59,8 @@ impl Neo4jProcess {
         ];
         spawn_command(command.as_str(), &args).await
     }
+
+    #[allow(dead_code)]
 
     async fn restore(&self) -> BenchmarkResult<Output> {
         info!("Restoring DB");

@@ -3,7 +3,6 @@ use crate::error::BenchmarkError::{
 };
 use crate::error::{BenchmarkError, BenchmarkResult};
 use futures::stream::Stream;
-use futures::TryFutureExt;
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
 use std::env;
@@ -12,8 +11,8 @@ use std::process::Output;
 use std::str;
 use std::time::Duration;
 use tokio::fs::File;
+use tokio::io::AsyncWriteExt;
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 use tokio::time::sleep;
 use tokio::{fs, io};
@@ -123,15 +122,6 @@ pub(crate) async fn kill_process(pid: u32) -> BenchmarkResult<()> {
         Ok(_) => Ok(()),
         Err(nix::Error::ESRCH) => Err(OtherError(format!("No process with pid {} found", pid))),
         Err(e) => Err(OtherError(format!("Failed to kill process {}: {}", pid, e))),
-    }
-}
-
-pub(crate) async fn remove_dir_recursive(path: impl AsRef<Path>) -> BenchmarkResult<()> {
-    let path_ref = path.as_ref();
-    match fs::remove_dir_all(path_ref).await {
-        Ok(_) => Ok(()),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(OtherError(e.to_string())),
     }
 }
 

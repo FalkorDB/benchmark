@@ -105,6 +105,7 @@ async fn init_falkor(
         .execute_query_stream(data_iterator, &mut histogram)
         .await?;
     info!("importing done at {:?}", start.elapsed());
+    falkor.disconnect().await?;
     falkor.stop().await;
 
     show_historgam(&mut histogram);

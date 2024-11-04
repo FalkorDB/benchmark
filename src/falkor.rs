@@ -7,14 +7,9 @@ use crate::utils::{
 use falkordb::{AsyncGraph, FalkorClientBuilder, LazyResultSet, QueryResult};
 use futures::StreamExt;
 use histogram::Histogram;
-use neo4rs::{query, Row};
-use std::pin::Pin;
-use std::process::{Child, Command, Output, Stdio};
-use std::thread::sleep;
+use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 use std::{env, io};
-use tokio::fs;
-use tokio::time::timeout;
 use tracing::{error, info, trace};
 
 #[derive(Clone)]

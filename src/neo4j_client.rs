@@ -7,7 +7,7 @@ use neo4rs::{query, Graph, Row};
 use std::pin::Pin;
 use tokio::io;
 use tokio::time::Instant;
-use tracing::{error, info, trace};
+use tracing::{error, trace};
 
 #[derive(Clone)]
 pub struct Neo4jClient {
