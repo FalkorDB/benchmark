@@ -1,17 +1,12 @@
-use crate::error::BenchmarkError::OtherError;
 use crate::error::BenchmarkResult;
 use crate::neo4j_client::Neo4jClient;
 use crate::neo4j_process::Neo4jProcess;
 use crate::scenario::Spec;
-use futures::Stream;
-use neo4rs::Row;
 use std::env;
-use std::pin::Pin;
 use std::process::Output;
 
 #[derive(Clone)]
 pub struct Neo4j {
-    neo4j: Option<Neo4jClient>,
     uri: String,
     user: String,
     password: String,
@@ -26,7 +21,6 @@ impl Neo4j {
         let user = env::var("NEO4J_USER").unwrap_or_else(|_| String::from("neo4j"));
         let password = env::var("NEO4J_PASSWORD").unwrap_or_else(|_| String::from("h6u4krd10"));
         Neo4j {
-            neo4j: None,
             uri,
             user,
             password,
@@ -43,40 +37,28 @@ impl Neo4j {
         Ok(())
     }
 
+    pub(crate) async fn clean_db(&self) -> BenchmarkResult<Output> {
+        self.neo4j_process().clean_db().await
+    }
+
     pub async fn stop(self) -> BenchmarkResult<()> {
         self.neo4j_process().stop().await?;
         Ok(())
     }
 
-    pub async fn dump<'a>(&self, spec: Spec<'a>) -> BenchmarkResult<Output> {
+    pub async fn dump<'a>(
+        &self,
+        spec: Spec<'a>,
+    ) -> BenchmarkResult<Output> {
         self.neo4j_process().dump(spec).await
     }
 
-    pub async fn client(&self) -> BenchmarkResult<Neo4jClient> {
+    pub(crate) async fn client(&self) -> BenchmarkResult<Neo4jClient> {
         Neo4jClient::new(
             self.uri.to_string(),
             self.user.to_string(),
             self.password.to_string(),
         )
-            .await
-    }
-    pub async fn execute_query<'a>(
-        &mut self,
-        q: String,
-    ) -> BenchmarkResult<Pin<Box<dyn Stream<Item=BenchmarkResult<Row>> + Send + 'a>>> {
-        if self.neo4j.is_none() {
-            // Initialize the Neo4j client
-            let client = Neo4jClient::new(
-                self.uri.to_string(),
-                self.user.to_string(),
-                self.password.to_string(),
-            )
-                .await?;
-            self.neo4j = Some(client);
-        }
-        match self.neo4j {
-            Some(ref client) => client.execute_query(q).await,
-            None => Err(OtherError("Neo4j client not initialized".to_string())),
-        }
+        .await
     }
 }

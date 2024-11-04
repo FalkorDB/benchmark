@@ -1,29 +1,33 @@
 #![allow(dead_code)]
 
 use crate::error::BenchmarkResult;
-use crate::foo::read_lines;
-use crate::utils::{create_directory_if_not_exists, download_file, url_file_name};
+use crate::utils::{create_directory_if_not_exists, download_file, read_lines, url_file_name};
+use clap::ValueEnum;
+use futures::Stream;
+use std::fs;
 use std::io;
+use std::pin::Pin;
 use strum_macros::Display;
-use tokio::fs;
 use tracing::info;
 
-#[derive(Debug, Clone, Display)]
+#[derive(Debug, Clone, Display, Copy, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
 pub enum Size {
     Small,
     Medium,
     Large,
 }
 
-#[derive(Debug, Clone, Display)]
+#[derive(Debug, Clone, Display, Copy, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
 pub enum Name {
     Users,
 }
 
-#[derive(Debug, Clone, Display)]
+#[derive(Debug, Clone, Display, Copy, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
 pub enum Vendor {
     Neo4j,
+    Falkor,
 }
+
 #[derive(Debug, Clone)]
 pub struct Spec<'a> {
     pub(crate) name: Name,
@@ -34,7 +38,6 @@ pub struct Spec<'a> {
     data_url: &'a str,
     index_url: &'a str,
 }
-
 
 impl<'a> Spec<'a> {
     pub fn new(
@@ -61,8 +64,7 @@ impl<'a> Spec<'a> {
                 data_url: "https://s3.eu-west-1.amazonaws.com/deps.memgraph.io/dataset/pokec/benchmark/pokec_medium_import.cypher",
                 index_url: "https://s3.eu-west-1.amazonaws.com/deps.memgraph.io/dataset/pokec/benchmark/neo4j.cypher",
             },
-            (Name::Users, Size::Large)
-            => Spec {
+            (Name::Users, Size::Large) => Spec {
                 name: Name::Users,
                 size: Size::Large,
                 vertices: 1632803,
@@ -78,20 +80,35 @@ impl<'a> Spec<'a> {
         format!("./backups/{}/{}/{}", self.vendor, self.name, self.size)
     }
 
-    pub(crate) async fn init_data_iterator(&self) -> BenchmarkResult<impl Iterator<Item=io::Result<String>>> {
+    pub(crate) async fn init_data_iterator(
+        &self
+    ) -> BenchmarkResult<Pin<Box<dyn Stream<Item = io::Result<String>> + Send>>> {
         let cached = self.cache(self.data_url.as_ref()).await?;
-        info!("getting data from cache file {}", cached);
-        read_lines(cached)
+        info!("Loading data from cache file {}", cached);
+        Ok(Box::pin(read_lines(cached).await?))
+    }
+    pub(crate) async fn init_index_iterator(
+        &self
+    ) -> BenchmarkResult<Pin<Box<dyn Stream<Item = io::Result<String>> + Send>>> {
+        let cached = self.cache(self.index_url.as_ref()).await?;
+        info!("Loading indexes from cache file {}", cached);
+        Ok(Box::pin(read_lines(cached).await?))
     }
 
-    pub(crate) async fn cache(&self, url: &str) -> BenchmarkResult<String> {
+    pub(crate) async fn cache(
+        &self,
+        url: &str,
+    ) -> BenchmarkResult<String> {
         let file_name = url_file_name(url);
         let cache_dir = format!("./cache/{}/{}/{}", self.vendor, self.name, self.size);
         create_directory_if_not_exists(cache_dir.as_str()).await?;
         let cache_file = format!("{}/{}", cache_dir, file_name);
         // if cache_file not exists copy it from url
-        if fs::metadata(cache_file.clone()).await.is_err() {
-            info!("writing data from {} to file  {}", url, cache_file);
+        if fs::metadata(cache_file.clone()).is_err() {
+            info!(
+                "Downloading data from {} to a cache file {}",
+                url, cache_file
+            );
             download_file(url, cache_file.as_str()).await?;
         }
         Ok(cache_file)

@@ -1,0 +1,1 @@
+- [ ] add stack trace to falkordb-rs

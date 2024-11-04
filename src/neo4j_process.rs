@@ -1,19 +1,17 @@
-use crate::error::BenchmarkError::{FailedToSpawnNeo4jError, OtherError};
-use crate::error::{BenchmarkError, BenchmarkResult};
+use crate::error::BenchmarkError::{FailedToSpawnProcessError, OtherError};
+use crate::error::BenchmarkResult;
 use crate::scenario::Spec;
 use crate::utils::{create_directory_if_not_exists, spawn_command};
-use std::process::{ExitStatus, Output, Stdio};
-use tokio::fs;
-use tokio::process::{Child, Command};
-use tokio::time::{sleep, Duration};
+use std::fs;
+use std::process::{Child, Command, Output, Stdio};
+use std::thread::sleep;
+use std::time::Duration;
 use tracing::{info, trace};
 
 #[derive(Debug, Clone)]
 pub struct Neo4jProcess {
     home: String,
 }
-
-impl Neo4jProcess {}
 
 impl Neo4jProcess {
     pub fn new(home: String) -> Neo4jProcess {
@@ -27,21 +25,27 @@ impl Neo4jProcess {
     fn neo4j_pid(&self) -> String {
         format!("{}/run/neo4j.pid", self.home.clone())
     }
+
     fn neo4j_admin(&self) -> String {
         format!("{}/bin/neo4j-admin", self.home.clone())
     }
+
     fn neo4j_backup(&self) -> String {
         format!("{}/backup/", self.home.clone())
     }
 
-    pub(crate) async fn dump<'a>(&self, spec: Spec<'a>) -> BenchmarkResult<Output> {
-        if fs::metadata(&self.neo4j_pid()).await.is_ok() {
+    pub(crate) async fn dump<'a>(
+        &self,
+        spec: Spec<'a>,
+    ) -> BenchmarkResult<Output> {
+        if fs::metadata(&self.neo4j_pid()).is_ok() {
             return Err(OtherError(
                 "Cannot dump DB because it is running.".to_string(),
             ));
         }
-        let command = self.neo4j_admin();
         let backup_path = spec.backup_path();
+
+        let command = self.neo4j_admin();
         info!("Dumping DB to {}", backup_path);
         create_directory_if_not_exists(&backup_path).await?;
 
@@ -58,7 +62,7 @@ impl Neo4jProcess {
 
     async fn restore(&self) -> BenchmarkResult<Output> {
         info!("Restoring DB");
-        if fs::metadata(&self.neo4j_pid()).await.is_ok() {
+        if fs::metadata(&self.neo4j_pid()).is_ok() {
             return Err(OtherError(
                 "Cannot restore DB because it is running.".to_string(),
             ));
@@ -76,9 +80,10 @@ impl Neo4jProcess {
         ];
         spawn_command(command.as_str(), &args).await
     }
-    async fn clean_db(&self) -> BenchmarkResult<Output> {
+
+    pub(crate) async fn clean_db(&self) -> BenchmarkResult<Output> {
         info!("Cleaning DB");
-        if fs::metadata(&self.neo4j_pid()).await.is_ok() {
+        if fs::metadata(&self.neo4j_pid()).is_ok() {
             return Err(OtherError(
                 "Cannot clean DB because it is running.".to_string(),
             ));
@@ -92,7 +97,7 @@ impl Neo4jProcess {
 
     pub async fn start(&self) -> BenchmarkResult<Child> {
         trace!("Starting Neo4j process: {} console", self.neo4j_binary());
-        if fs::metadata(&self.neo4j_pid()).await.is_ok() {
+        if fs::metadata(&self.neo4j_pid()).is_ok() {
             self.stop().await?;
         }
         info!("Starting Neo4j process");
@@ -101,22 +106,22 @@ impl Neo4jProcess {
             .stdout(Stdio::null()) // Redirect stdout to null
             .spawn()
             .map_err(|e| {
-                FailedToSpawnNeo4jError(
+                FailedToSpawnProcessError(
                     e,
                     format!(
                         "Failed to spawn Neo4j process, cmd: {} console",
                         self.neo4j_binary()
                     )
-                        .to_string(),
+                    .to_string(),
                 )
             })?;
 
         while !self.is_running().await? {
-            sleep(Duration::from_secs(1)).await;
+            tokio::time::sleep(Duration::from_secs(1)).await;
         }
-        let pid: Option<u32> = child.id();
+        let pid: u32 = child.id();
 
-        trace!("Neo4j is running: {:?}", pid);
+        trace!("Neo4j is running: {}", pid);
         Ok(child)
     }
 

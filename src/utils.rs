@@ -1,16 +1,24 @@
-use crate::error::BenchmarkError::{FailedToDownloadFileError, FailedToSpawnNeo4jError};
-use crate::error::BenchmarkResult;
-use futures::stream::{self, Stream};
-use std::io::Cursor;
-// use futures::StreamExt;
-use std::pin::Pin;
+use crate::error::BenchmarkError::{
+    FailedToDownloadFileError, FailedToSpawnProcessError, OtherError,
+};
+use crate::error::{BenchmarkError, BenchmarkResult};
+use futures::stream::Stream;
+use futures::TryFutureExt;
+use nix::sys::signal::{kill, Signal};
+use nix::unistd::Pid;
+use std::env;
+use std::path::Path;
 use std::process::Output;
-use tokio::fs;
-use tokio::fs::{copy, File};
-use tokio::io::{self, AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader, Lines};
+use std::str;
+use std::time::Duration;
+use tokio::fs::File;
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
-use tracing::info;
-
+use tokio::time::sleep;
+use tokio::{fs, io};
+use tokio_stream::StreamExt;
+use tracing::{error, info, trace, warn};
 
 pub(crate) async fn spawn_command(
     command: &str,
@@ -21,8 +29,8 @@ pub(crate) async fn spawn_command(
     if !output.status.success() {
         let args_str = args.join(" ");
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(FailedToSpawnNeo4jError(
-            std::io::Error::new(std::io::ErrorKind::Other, "Process failed"),
+        return Err(FailedToSpawnProcessError(
+            io::Error::new(std::io::ErrorKind::Other, "Process failed"),
             format!(
                 "Failed to spawn Neo4j process, path: {} with args: {}, Error: {}",
                 command, args_str, stderr
@@ -31,6 +39,22 @@ pub(crate) async fn spawn_command(
     }
     Ok(output)
 }
+
+pub(crate) async fn file_exists(file_path: &str) -> bool {
+    fs::metadata(file_path).await.is_ok()
+}
+pub(crate) async fn delete_file(file_path: &str) -> bool {
+    fs::remove_file(file_path).await.is_ok()
+}
+
+pub(crate) fn falkor_shared_lib_path() -> BenchmarkResult<String> {
+    if let Ok(path) = env::current_dir() {
+        Ok(format!("{}/falkordb.so", path.display()))
+    } else {
+        Err(OtherError("Failed to get current directory".to_string()))
+    }
+}
+
 pub(crate) async fn create_directory_if_not_exists(dir_path: &str) -> BenchmarkResult<()> {
     // Check if the directory exists
     if fs::metadata(dir_path).await.is_err() {
@@ -48,7 +72,7 @@ pub(crate) async fn download_file(
     url: &str,
     file_name: &str,
 ) -> BenchmarkResult<()> {
-    info!("Downloading to file {} from {}", file_name , url);
+    info!("Downloading to file {} from {}", file_name, url);
     // Send a GET request to the specified URL
     let client = reqwest::Client::builder().gzip(true).build()?;
     let response = client.get(url).send().await?;
@@ -57,11 +81,9 @@ pub(crate) async fn download_file(
     if response.status().is_success() {
         // Create a new file to write the downloaded content to
         let mut file = File::create(file_name).await?;
-
-        // Copy the response body into the file
-        let content = response.bytes().await?;
-        file.write_all(&content).await?;
-        // copy(&mut content.as_ref(), &mut file).await?;
+        let bytes = response.bytes().await?;
+        file.write_all(&bytes).await?;
+        file.flush().await?;
 
         Ok(())
     } else {
@@ -72,9 +94,121 @@ pub(crate) async fn download_file(
                 response.status(),
                 url
             )
-                .to_string(),
+            .to_string(),
         ))
     }
 }
 
+pub(crate) async fn read_lines<P>(
+    filename: P
+) -> BenchmarkResult<impl Stream<Item = Result<String, std::io::Error>>>
+where
+    P: AsRef<Path>,
+{
+    // Open the file asynchronously
+    let file = File::open(filename).await?;
 
+    // Create a buffered reader
+    let reader = BufReader::new(file);
+
+    let stream = tokio_stream::wrappers::LinesStream::new(reader.lines())
+        .map(|res| res.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)));
+
+    Ok(stream)
+}
+
+pub(crate) async fn kill_process(pid: u32) -> BenchmarkResult<()> {
+    let pid = Pid::from_raw(pid as i32);
+    match kill(pid, Signal::SIGKILL) {
+        Ok(_) => Ok(()),
+        Err(nix::Error::ESRCH) => Err(OtherError(format!("No process with pid {} found", pid))),
+        Err(e) => Err(OtherError(format!("Failed to kill process {}: {}", pid, e))),
+    }
+}
+
+pub(crate) async fn remove_dir_recursive(path: impl AsRef<Path>) -> BenchmarkResult<()> {
+    let path_ref = path.as_ref();
+    match fs::remove_dir_all(path_ref).await {
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(OtherError(e.to_string())),
+    }
+}
+
+pub(crate) async fn get_command_pid(cmd: impl AsRef<str>) -> BenchmarkResult<Option<u32>> {
+    let cmd = cmd.as_ref();
+    let output = Command::new("ps")
+        .args(&["aux"])
+        .output()
+        .await
+        .map_err(|e| BenchmarkError::IoError(e))?;
+
+    if output.status.success() {
+        let stdout = str::from_utf8(&output.stdout)
+            .map_err(|e| OtherError(format!("UTF-8 conversion error: {}", e)))?;
+
+        for line in stdout.lines() {
+            if line.contains(cmd) && !line.contains("grep") {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() > 1 {
+                    return parts[1]
+                        .parse::<u32>()
+                        .map(Some)
+                        .map_err(|e| OtherError(format!("Failed to parse PID: {}", e)));
+                }
+            }
+        }
+        Ok(None)
+    } else {
+        Err(OtherError(format!(
+            "ps command failed with exit code: {:?}",
+            output.status.code()
+        )))
+    }
+}
+
+pub(crate) async fn ping_redis() -> BenchmarkResult<()> {
+    let client = redis::Client::open("redis://127.0.0.1:6379/")?;
+    let mut con = client.get_multiplexed_async_connection().await?;
+
+    let pong: String = redis::cmd("PING").query_async(&mut con).await?;
+    trace!("Redis ping response: {}", pong);
+    if pong == "PONG" {
+        Ok(())
+    } else {
+        Err(OtherError(format!(
+            "Unexpected response from Redis: {}",
+            pong
+        )))
+    }
+}
+
+pub(crate) async fn wait_for_redis_ready(
+    max_attempts: u32,
+    delay: Duration,
+) -> BenchmarkResult<()> {
+    for attempt in 1..=max_attempts {
+        match ping_redis().await {
+            Ok(_) => {
+                info!("Redis is ready after {} attempt(s)", attempt);
+                return Ok(());
+            }
+            Err(e) => {
+                if attempt < max_attempts {
+                    warn!(
+                        "Attempt {} failed to connect to Redis: {}. Retrying...",
+                        attempt, e
+                    );
+                    sleep(delay).await;
+                } else {
+                    error!("Failed to connect to Redis after {} attempts", max_attempts);
+                    return Err(BenchmarkError::OtherError(format!(
+                        "Redis not ready after {} attempts",
+                        max_attempts
+                    )));
+                }
+            }
+        }
+    }
+    unreachable!()
+}

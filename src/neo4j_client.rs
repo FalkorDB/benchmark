@@ -1,13 +1,13 @@
 use crate::error::BenchmarkError::Neo4rsError;
 use crate::error::BenchmarkResult;
 use futures::stream::TryStreamExt;
-use futures::Stream;
+use futures::{Stream, StreamExt};
+use histogram::Histogram;
 use neo4rs::{query, Graph, Row};
 use std::pin::Pin;
-use tracing::trace;
-
-// type QueryResult = Result<Row, Error>;
-// type QueryStream = impl Stream<Item=QueryResult>;
+use tokio::io;
+use tokio::time::Instant;
+use tracing::{error, info, trace};
 
 #[derive(Clone)]
 pub struct Neo4jClient {
@@ -26,7 +26,7 @@ impl Neo4jClient {
         Ok(Neo4jClient { graph })
     }
 
-    pub async fn execute_query_str(
+    pub(crate) async fn execute_query(
         &self,
         q: &str,
     ) -> BenchmarkResult<Pin<Box<dyn Stream<Item = BenchmarkResult<Row>> + Send>>> {
@@ -36,13 +36,37 @@ impl Neo4jClient {
         Ok(Box::pin(stream))
     }
 
-    pub async fn execute_query(
+    pub(crate) async fn execute_query_stream<S>(
         &self,
-        q: String,
-    ) -> BenchmarkResult<Pin<Box<dyn Stream<Item = BenchmarkResult<Row>> + Send>>> {
-        trace!("Executing query: {}", q);
-        let result = self.graph.execute(query(q.as_str())).await?;
-        let stream = result.into_stream().map_err(|e| e.into());
-        Ok(Box::pin(stream))
+        mut stream: S,
+        histogram: &mut Histogram,
+    ) -> BenchmarkResult<()>
+    where
+        S: StreamExt<Item = Result<String, io::Error>> + Unpin,
+    {
+        while let Some(line_or_error) = stream.next().await {
+            match line_or_error {
+                Ok(line) => {
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() || trimmed == ";" {
+                        continue;
+                    }
+                    let start = Instant::now();
+                    let mut results = self.execute_query(line.as_str()).await?;
+                    while let Some(row_or_error) = results.next().await {
+                        match row_or_error {
+                            Ok(row) => {
+                                trace!("Row: {:?}", row);
+                            }
+                            Err(e) => error!("Error reading row: {}", e),
+                        }
+                    }
+                    let duration = start.elapsed();
+                    histogram.increment(duration.as_micros() as u64)?;
+                }
+                Err(e) => eprintln!("Error reading line: {}", e),
+            }
+        }
+        Ok(())
     }
 }
