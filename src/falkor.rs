@@ -1,16 +1,21 @@
 use crate::error::BenchmarkError::{FailedToSpawnProcessError, OtherError};
 use crate::error::BenchmarkResult;
+use crate::scenario::Size;
 use crate::utils::{
-    create_directory_if_not_exists, delete_file, falkor_shared_lib_path, get_command_pid,
-    kill_process, wait_for_redis_ready,
+    create_directory_if_not_exists, delete_file, falkor_shared_lib_path, file_exists,
+    get_command_pid, kill_process, redis_save, wait_for_redis_ready,
 };
 use falkordb::{AsyncGraph, FalkorClientBuilder, LazyResultSet, QueryResult};
-use futures::StreamExt;
+use futures::{Stream, StreamExt};
 use histogram::Histogram;
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 use std::{env, io};
+use tokio::fs;
 use tracing::{error, info, trace};
+
+const REDIS_DUMP_FILE: &str = "./redis-data/dump.rdb";
+const REDIS_DATA_DIR: &str = "./redis-data";
 
 #[derive(Clone)]
 pub struct Connected(AsyncGraph);
@@ -27,7 +32,7 @@ impl Falkor<Disconnected> {
     pub fn new() -> Falkor<Disconnected> {
         let default = falkor_shared_lib_path().unwrap();
         let path = env::var("FALKOR_PATH").unwrap_or_else(|_| default);
-        info!("Falkor shared lib path: {}", path);
+        info!("falkor shared lib path: {}", path);
         Falkor {
             path,
             graph: Disconnected,
@@ -73,7 +78,7 @@ impl Falkor<Connected> {
         histogram: &mut Histogram,
     ) -> BenchmarkResult<()>
     where
-        S: StreamExt<Item = Result<String, io::Error>> + Unpin,
+        S: Stream<Item = Result<String, io::Error>> + Unpin,
     {
         while let Some(line_or_error) = stream.next().await {
             match line_or_error {
@@ -100,11 +105,11 @@ impl Falkor<Connected> {
 
 impl<U> Falkor<U> {
     pub async fn start(&self) -> BenchmarkResult<Child> {
-        self.stop().await;
-        create_directory_if_not_exists("./redis-data").await?;
+        self.stop(false).await?;
+        create_directory_if_not_exists(REDIS_DATA_DIR).await?;
         let command = "redis-server";
-        let args = ["--dir", "./redis-data", "--loadmodule", self.path.as_str()];
-        info!("Starting Falkor process: {} {}", command, args.join(" "));
+        let args = ["--dir", REDIS_DATA_DIR, "--loadmodule", self.path.as_str()];
+        info!("starting falkor: {} {}", command, args.join(" "));
 
         let child = Command::new(command)
             .args(args)
@@ -114,7 +119,7 @@ impl<U> Falkor<U> {
                 FailedToSpawnProcessError(
                     e,
                     format!(
-                        "Failed to spawn falkor process, cmd: {} {}",
+                        "failed to spawn falkor process, cmd: {} {}",
                         command,
                         args.join(" ")
                     )
@@ -125,29 +130,105 @@ impl<U> Falkor<U> {
         let pid: u32 = child.id();
         self.wait_for_ready().await?;
 
-        info!("Falkor is running: {}", pid);
+        info!("falkor is running: {}", pid);
         Ok(child)
     }
 
     async fn wait_for_ready(&self) -> BenchmarkResult<()> {
-        info!("wait_for_ready");
         wait_for_redis_ready(10, Duration::from_millis(500)).await
     }
 
-    pub(crate) async fn clean_db(&self) -> bool {
-        self.stop().await;
-        delete_file("./redis-data/dump.rdb").await
+    pub(crate) async fn clean_db(&self) -> BenchmarkResult<()> {
+        self.stop(false).await?;
+        info!("deleting: {}", REDIS_DUMP_FILE);
+        delete_file(REDIS_DUMP_FILE).await?;
+        Ok(())
     }
 
     pub(crate) async fn get_redis_pid(&self) -> BenchmarkResult<Option<u32>> {
         get_command_pid("redis-server").await
     }
-    pub(crate) async fn stop(&self) -> bool {
+
+    pub(crate) async fn stop(
+        &self,
+        flash: bool,
+    ) -> BenchmarkResult<()> {
         if let Ok(Some(pid)) = self.get_redis_pid().await {
-            info!("Killing Falkor: {}", pid);
-            kill_process(pid).await.is_ok()
+            info!("stopping falkor: {}", pid);
+            if flash {
+                info!("asking redis to save all data to disk");
+                redis_save().await?;
+                self.wait_for_ready().await?;
+            }
+            kill_process(pid).await?;
+            info!("falkor stopped: {}", pid);
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn save_db(
+        &self,
+        size: Size,
+    ) -> BenchmarkResult<()> {
+        if let Ok(Some(pid)) = self.get_redis_pid().await {
+            Err(OtherError(format!(
+                "Can't save the dump file: {}, while falkor is running",
+                pid
+            )))
         } else {
-            false
+            let target = format!(
+                "{}/{}_dump.rdb",
+                REDIS_DATA_DIR,
+                size.to_string().to_lowercase()
+            );
+            info!(
+                "saving redis dump file {} to {}",
+                REDIS_DUMP_FILE,
+                target.as_str()
+            );
+            fs::copy(REDIS_DUMP_FILE, target.as_str()).await?;
+            Ok(())
+        }
+    }
+
+    pub(crate) async fn restore_db(
+        &self,
+        size: Size,
+    ) -> BenchmarkResult<()> {
+        let source = format!(
+            "{}/{}_dump.rdb",
+            REDIS_DATA_DIR,
+            size.to_string().to_lowercase()
+        );
+        if let Ok(Some(pid)) = self.get_redis_pid().await {
+            return Err(OtherError(format!(
+                "Can't restore the dump file: {}, while falkor is running {}",
+                source, pid
+            )));
+        }
+        info!("copy {} to {}", source, REDIS_DUMP_FILE);
+        if file_exists(source.as_str()).await {
+            fs::copy(source.as_str(), REDIS_DUMP_FILE).await?;
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn dump_exists_or_error(
+        &self,
+        size: Size,
+    ) -> BenchmarkResult<()> {
+        let path = format!(
+            "{}/{}_dump.rdb",
+            REDIS_DATA_DIR,
+            size.to_string().to_lowercase()
+        );
+        if !file_exists(path.as_str()).await {
+            return Err(OtherError(format!(
+                "Dump file not found: {}",
+                path.as_str()
+            )));
+        } else {
+            Ok(())
         }
     }
 }

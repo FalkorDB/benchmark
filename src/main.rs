@@ -4,12 +4,14 @@ mod falkor;
 mod neo4j;
 mod neo4j_client;
 mod neo4j_process;
+mod queries;
 pub mod scenario;
 mod utils;
 
 use crate::cli::Commands;
 use crate::cli::Commands::GenerateAutoComplete;
 use crate::error::BenchmarkResult;
+use crate::falkor::{Connected, Disconnected, Falkor};
 use crate::scenario::{Size, Spec, Vendor};
 use crate::utils::{delete_file, file_exists};
 use clap::{Command, CommandFactory, Parser};
@@ -68,6 +70,12 @@ async fn main() -> BenchmarkResult<()> {
         }
         Commands::Run { vendor, size } => {
             info!("Running benchmark {} {}", vendor, size);
+            match vendor {
+                Vendor::Neo4j => {}
+                Vendor::Falkor => {
+                    run_falkor(size).await?;
+                }
+            }
         }
 
         Commands::Clear {
@@ -82,6 +90,31 @@ async fn main() -> BenchmarkResult<()> {
     Ok(())
 }
 
+async fn run_falkor(size: Size) -> BenchmarkResult<()> {
+    let falkor: Falkor<Disconnected> = falkor::Falkor::new();
+    // stop falkor if it is running
+    falkor.stop(false).await?;
+    // if dump not present return error
+    falkor.dump_exists_or_error(size).await?;
+    // restore the dump
+    falkor.restore_db(size).await?;
+    // start falkor
+    falkor.start().await?;
+    // connect to falkor
+    let mut falkor: Falkor<Connected> = falkor.connect().await?;
+    let mut _histogram = Histogram::new(7, 64)?;
+    // execute a query
+    let mut results = falkor
+        .execute_query("MATCH (u:User) RETURN COUNT(u) AS userCount;")
+        .await?;
+    // read the result
+    while let Some(nodes) = results.data.next() {
+        info!("Row: {:?}", nodes);
+    }
+    // stop falkor
+    falkor.stop(false).await
+}
+
 async fn init_falkor(
     size: Size,
     _force: bool,
@@ -90,23 +123,25 @@ async fn init_falkor(
     let spec = Spec::new(scenario::Name::Users, size, Vendor::Neo4j);
     let falkor = falkor::Falkor::new();
 
-    falkor.clean_db().await;
+    falkor.clean_db().await?;
+    // falkor.restore_db(size).await?;
 
     falkor.start().await?;
-    info!("Writing data");
+    info!("writing index and data");
     // let index_iterator = spec.init_index_iterator().await?;
     let mut falkor = falkor.connect().await?;
     let start = Instant::now();
     falkor
-        .execute_query("CREATE INDEX FOR (u:User) ON (u.id)")
+        .execute_query("CREATE INDEX FOR (u:User) ON (u.id);")
         .await?;
     let data_iterator = spec.init_data_iterator().await?;
     falkor
         .execute_query_stream(data_iterator, &mut histogram)
         .await?;
-    info!("importing done at {:?}", start.elapsed());
+    info!("writing done, took: {:?}", start.elapsed());
     falkor.disconnect().await?;
-    falkor.stop().await;
+    falkor.stop(true).await?;
+    falkor.save_db(size).await?;
 
     show_historgam(&mut histogram);
     Ok(())
@@ -164,7 +199,7 @@ async fn init_neo4j(
             return Ok(());
         }
     } else {
-        delete_file(backup_path.as_str()).await;
+        delete_file(backup_path.as_str()).await?;
         neo4j.clean_db().await?;
         // @ todo delete the data and index file as well
         // delete_file(spec.cache(spec.data_url.as_ref()).await?.as_str()).await;

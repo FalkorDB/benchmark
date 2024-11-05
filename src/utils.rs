@@ -17,7 +17,7 @@ use tokio::process::Command;
 use tokio::time::sleep;
 use tokio::{fs, io};
 use tokio_stream::StreamExt;
-use tracing::{error, info, trace, warn};
+use tracing::{error, info, trace};
 
 pub(crate) async fn spawn_command(
     command: &str,
@@ -42,8 +42,11 @@ pub(crate) async fn spawn_command(
 pub(crate) async fn file_exists(file_path: &str) -> bool {
     fs::metadata(file_path).await.is_ok()
 }
-pub(crate) async fn delete_file(file_path: &str) -> bool {
-    fs::remove_file(file_path).await.is_ok()
+pub(crate) async fn delete_file(file_path: &str) -> BenchmarkResult<()> {
+    if file_exists(file_path).await {
+        fs::remove_file(file_path).await?;
+    }
+    Ok(())
 }
 
 pub(crate) fn falkor_shared_lib_path() -> BenchmarkResult<String> {
@@ -180,14 +183,15 @@ pub(crate) async fn wait_for_redis_ready(
     for attempt in 1..=max_attempts {
         match ping_redis().await {
             Ok(_) => {
-                info!("Redis is ready after {} attempt(s)", attempt);
+                trace!("redis is ready after {} attempt(s)", attempt);
                 return Ok(());
             }
             Err(e) => {
                 if attempt < max_attempts {
-                    warn!(
+                    trace!(
                         "Attempt {} failed to connect to Redis: {}. Retrying...",
-                        attempt, e
+                        attempt,
+                        e
                     );
                     sleep(delay).await;
                 } else {
@@ -201,4 +205,20 @@ pub(crate) async fn wait_for_redis_ready(
         }
     }
     unreachable!()
+}
+
+pub(crate) async fn redis_save() -> BenchmarkResult<()> {
+    let client = redis::Client::open("redis://127.0.0.1:6379/")?;
+    let mut con = client.get_multiplexed_async_connection().await?;
+
+    let pong: String = redis::cmd("SAVE").query_async(&mut con).await?;
+    trace!("Redis SAVE response: {}", pong);
+    if pong == "OK" {
+        Ok(())
+    } else {
+        Err(OtherError(format!(
+            "Unexpected response from Redis: {}",
+            pong
+        )))
+    }
 }

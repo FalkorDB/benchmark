@@ -1,1 +1,2 @@
-- [ ] add stack trace to falkordb-rs
+- [x] return meaningful errors falkordb-rs when redis return error.
+- [ ] generate a pool of query to be execute as the benchmark.
