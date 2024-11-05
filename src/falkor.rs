@@ -57,10 +57,11 @@ impl Falkor<Connected> {
             graph: Disconnected,
         })
     }
-    pub(crate) async fn execute_query(
+    pub(crate) async fn execute_query<T: AsRef<str>>(
         &mut self,
-        q: &str,
+        q: T,
     ) -> BenchmarkResult<QueryResult<LazyResultSet>> {
+        let q = q.as_ref();
         trace!("Executing query: {}", q);
         let graph = &mut self.graph.0;
         let falkor_result = graph.query(q).with_timeout(5000).execute().await;
@@ -87,6 +88,7 @@ impl Falkor<Connected> {
                     if trimmed.is_empty() || trimmed == ";" {
                         continue;
                     }
+                    info!("Executing query: {}", line);
                     let start = Instant::now();
                     let mut results = self.execute_query(line.as_str()).await?;
                     while let Some(nodes) = results.data.next() {

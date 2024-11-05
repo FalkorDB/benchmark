@@ -4,7 +4,8 @@ mod falkor;
 mod neo4j;
 mod neo4j_client;
 mod neo4j_process;
-mod queries;
+mod queries_repository;
+mod query;
 pub mod scenario;
 mod utils;
 
@@ -12,12 +13,13 @@ use crate::cli::Commands;
 use crate::cli::Commands::GenerateAutoComplete;
 use crate::error::BenchmarkResult;
 use crate::falkor::{Connected, Disconnected, Falkor};
+use crate::queries_repository::Queries;
 use crate::scenario::{Size, Spec, Vendor};
 use crate::utils::{delete_file, file_exists};
 use clap::{Command, CommandFactory, Parser};
 use clap_complete::{generate, Generator};
 use cli::Cli;
-use futures::StreamExt;
+use futures::{stream, StreamExt};
 use histogram::Histogram;
 use std::io;
 use std::time::Duration;
@@ -102,15 +104,23 @@ async fn run_falkor(size: Size) -> BenchmarkResult<()> {
     falkor.start().await?;
     // connect to falkor
     let mut falkor: Falkor<Connected> = falkor.connect().await?;
-    let mut _histogram = Histogram::new(7, 64)?;
-    // execute a query
-    let mut results = falkor
-        .execute_query("MATCH (u:User) RETURN COUNT(u) AS userCount;")
+    let mut histogram = Histogram::new(7, 64)?;
+    // generate queries
+    let count = 100000;
+    let queries_repository = queries_repository::UsersQueriesRepository::new(9998, 121716);
+    let queries = queries_repository
+        .random_queries(count)
+        .iter()
+        .map(|q| Ok(q.to_cypher()))
+        .collect::<Vec<Result<String, io::Error>>>();
+    info!("running {} queries", count);
+    let start = Instant::now();
+    falkor
+        .execute_query_stream(stream::iter(queries), &mut histogram)
         .await?;
-    // read the result
-    while let Some(nodes) = results.data.next() {
-        info!("Row: {:?}", nodes);
-    }
+    let elapsed = start.elapsed();
+    show_historgam(histogram);
+    info!("running {} queries took {:?}", count, elapsed);
     // stop falkor
     falkor.stop(false).await
 }
@@ -143,11 +153,11 @@ async fn init_falkor(
     falkor.stop(true).await?;
     falkor.save_db(size).await?;
 
-    show_historgam(&mut histogram);
+    show_historgam(histogram);
     Ok(())
 }
 
-fn show_historgam(histogram: &mut Histogram) {
+fn show_historgam(histogram: Histogram) {
     for percentile in 1..=99 {
         let p = histogram
             .percentile(percentile as f64)
@@ -227,7 +237,7 @@ async fn init_neo4j(
     neo4j.dump(spec.clone()).await?;
     info!("---> histogram");
 
-    show_historgam(&mut histogram);
+    show_historgam(histogram);
 
     info!("---> Done");
     Ok(())

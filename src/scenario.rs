@@ -33,8 +33,8 @@ pub struct Spec<'a> {
     pub(crate) name: Name,
     pub(crate) vendor: Vendor,
     pub(crate) size: Size,
-    vertices: u64,
-    edges: u64,
+    pub(crate) vertices: u64,
+    pub(crate) edges: u64,
     data_url: &'a str,
     index_url: &'a str,
 }
@@ -49,7 +49,7 @@ impl<'a> Spec<'a> {
             (Name::Users, Size::Small) => Spec {
                 name: Name::Users,
                 size: Size::Small,
-                vertices: 10000,
+                vertices: 10000, // max user id 9998 min user id 1
                 edges: 121716,
                 vendor,
                 data_url: "https://s3.eu-west-1.amazonaws.com/deps.memgraph.io/dataset/pokec/benchmark/pokec_small_import.cypher",
