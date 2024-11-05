@@ -1,5 +1,4 @@
 // CYPHER name_param = "Niccolò Machiavelli" birth_year_param = 1469 MATCH (p:Person {name: $name_param, birth_year: $birth_year_param}) RETURN p
-use crate::queries_repository::Queries;
 use serde_json::json;
 use std::collections::HashMap;
 #[derive(Debug, Default, Clone)]
@@ -18,6 +17,7 @@ impl Query {
         let params_str = param_strings.join(" ");
         format!("CYPHER {} {}", params_str, self.text)
     }
+    #[allow(dead_code)]
     pub fn to_bolt(&self) -> (String, String) {
         let query = self.text.clone();
         let params = json!(self

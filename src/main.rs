@@ -106,7 +106,7 @@ async fn run_falkor(size: Size) -> BenchmarkResult<()> {
     let mut falkor: Falkor<Connected> = falkor.connect().await?;
     let mut histogram = Histogram::new(7, 64)?;
     // generate queries
-    let count = 100000;
+    let count = 10000;
     let queries_repository = queries_repository::UsersQueriesRepository::new(9998, 121716);
     let queries = queries_repository
         .random_queries(count)

@@ -88,7 +88,7 @@ impl Falkor<Connected> {
                     if trimmed.is_empty() || trimmed == ";" {
                         continue;
                     }
-                    info!("Executing query: {}", line);
+                    trace!("Executing query: {}", line);
                     let start = Instant::now();
                     let mut results = self.execute_query(line.as_str()).await?;
                     while let Some(nodes) = results.data.next() {

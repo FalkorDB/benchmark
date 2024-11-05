@@ -9,3 +9,4 @@ backups
 redis-data
 redis-server
 t.sh
+*.log
