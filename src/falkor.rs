@@ -1,5 +1,7 @@
 use crate::error::BenchmarkError::{FailedToSpawnProcessError, OtherError};
 use crate::error::BenchmarkResult;
+use crate::metrics_collector::MetricsCollector;
+use crate::queries_repository::QueryType;
 use crate::scenario::Size;
 use crate::utils::{
     create_directory_if_not_exists, delete_file, falkor_shared_lib_path, file_exists,
@@ -73,6 +75,33 @@ impl Falkor<Connected> {
             }
         }
     }
+    pub(crate) async fn execute_query_iterator(
+        &mut self,
+        iter: Box<dyn Iterator<Item = (String, QueryType, String)> + '_>,
+        metric_collector: &mut MetricsCollector,
+    ) -> BenchmarkResult<()> {
+        for (name, query_type, query) in iter {
+            let start = Instant::now();
+            let mut results = self.execute_query(query.as_str()).await?;
+            // let mut size = 0;
+            // let results: Vec<FalkorValue> = results.data.flatten().collect();
+            // info!("Results: {:?}", results);
+            let stats = results.stats.join(", ");
+            while let Some(nodes) = results.data.next() {
+                trace!("Row: {:?}", nodes);
+            }
+            let duration = start.elapsed();
+            metric_collector.record(
+                duration,
+                name.as_str(),
+                query_type,
+                query.as_str(),
+                stats.as_str(),
+            )?;
+        }
+        Ok(())
+    }
+
     pub(crate) async fn execute_query_stream<S>(
         &mut self,
         mut stream: S,

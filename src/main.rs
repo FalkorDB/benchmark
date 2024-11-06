@@ -1,6 +1,7 @@
 mod cli;
 mod error;
 mod falkor;
+mod metrics_collector;
 mod neo4j;
 mod neo4j_client;
 mod neo4j_process;
@@ -13,13 +14,14 @@ use crate::cli::Commands;
 use crate::cli::Commands::GenerateAutoComplete;
 use crate::error::BenchmarkResult;
 use crate::falkor::{Connected, Disconnected, Falkor};
+use crate::metrics_collector::MetricsCollector;
 use crate::queries_repository::Queries;
 use crate::scenario::{Size, Spec, Vendor};
 use crate::utils::{delete_file, file_exists};
 use clap::{Command, CommandFactory, Parser};
 use clap_complete::{generate, Generator};
 use cli::Cli;
-use futures::{stream, StreamExt};
+use futures::StreamExt;
 use histogram::Histogram;
 use std::io;
 use std::time::Duration;
@@ -51,7 +53,7 @@ async fn main() -> BenchmarkResult<()> {
             force,
             dry_run,
         } => {
-            info!("Running benchmark {} {} {}", vendor, size, force);
+            info!("Init benchmark {} {} {}", vendor, size, force);
             match vendor {
                 Vendor::Neo4j => {
                     if dry_run {
@@ -71,7 +73,7 @@ async fn main() -> BenchmarkResult<()> {
             }
         }
         Commands::Run { vendor, size } => {
-            info!("Running benchmark {} {}", vendor, size);
+            info!("Run benchmark {} {}", vendor, size);
             match vendor {
                 Vendor::Neo4j => {}
                 Vendor::Falkor => {
@@ -85,7 +87,7 @@ async fn main() -> BenchmarkResult<()> {
             size,
             force,
         } => {
-            info!("Clearing benchmark {} {} {}", vendor, size, force);
+            info!("Clear benchmark {} {} {}", vendor, size, force);
         }
     }
 
@@ -104,22 +106,23 @@ async fn run_falkor(size: Size) -> BenchmarkResult<()> {
     falkor.start().await?;
     // connect to falkor
     let mut falkor: Falkor<Connected> = falkor.connect().await?;
-    let mut histogram = Histogram::new(7, 64)?;
+    let mut metric_collector = MetricsCollector::new()?;
     // generate queries
     let count = 10000;
     let queries_repository = queries_repository::UsersQueriesRepository::new(9998, 121716);
-    let queries = queries_repository
-        .random_queries(count)
-        .iter()
-        .map(|q| Ok(q.to_cypher()))
-        .collect::<Vec<Result<String, io::Error>>>();
+    let queries = Box::new(
+        queries_repository
+            .random_queries(count)
+            .map(|(q_name, q_type, q)| (q_name, q_type, q.to_cypher())),
+    );
+
     info!("running {} queries", count);
     let start = Instant::now();
     falkor
-        .execute_query_stream(stream::iter(queries), &mut histogram)
+        .execute_query_iterator(queries, &mut metric_collector)
         .await?;
     let elapsed = start.elapsed();
-    show_historgam(histogram);
+    println!("{}", metric_collector.markdown_report());
     info!("running {} queries took {:?}", count, elapsed);
     // stop falkor
     falkor.stop(false).await

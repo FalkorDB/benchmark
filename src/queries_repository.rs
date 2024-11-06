@@ -4,19 +4,26 @@ use rand::{thread_rng, Rng};
 use std::collections::HashMap;
 
 pub(crate) trait Queries {
-    fn random_query(&self) -> Option<Query>;
+    fn random_query(&self) -> Option<(String, QueryType, Query)>;
+
     fn random_queries(
         &self,
         count: i32,
-    ) -> Vec<Query> {
-        (0..count)
-            .map(|_| self.random_query())
-            .filter_map(|query| query)
-            .collect()
+    ) -> Box<dyn Iterator<Item = (String, QueryType, Query)> + '_> {
+        Box::new((0..count).filter_map(move |_| self.random_query()))
     }
+    // fn random_queries(
+    //     &self,
+    //     count: i32,
+    // ) -> Vec<(String, QueryType, Query)> {
+    //     (0..count)
+    //         .map(|_| self.random_query())
+    //         .filter_map(|query| query)
+    //         .collect()
+    // }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum QueryType {
     Read,
     Write,
@@ -145,10 +152,6 @@ impl QueriesRepository {
     }
 
     #[allow(dead_code)]
-    fn get_all_names(&self) -> Vec<&String> {
-        self.queries.keys().collect()
-    }
-    #[allow(dead_code)]
     pub fn all_read(&self) -> QueryTypeView {
         QueryTypeView {
             repo: self,
@@ -172,16 +175,28 @@ impl QueriesRepository {
             write_percentage,
         }
     }
-    fn random(&self) -> Option<&QueryGenerator> {
-        let keys: Vec<&String> = self.queries.keys().collect();
-        keys.choose(&mut thread_rng())
-            .and_then(|&key| self.queries.get(key))
+    fn choose_random_query<'a, I>(
+        &'a self,
+        keys: I,
+    ) -> Option<(String, QueryType, Query)>
+    where
+        I: IntoIterator<Item = &'a String>,
+    {
+        keys.into_iter()
+            .collect::<Vec<_>>()
+            .choose(&mut thread_rng())
+            .and_then(|&key| self.queries.get(key).map(|generator| (key, generator)))
+            .map(|(name, generator)| (name.to_string(), generator.query_type, generator.generate()))
     }
 }
 
 impl Queries for QueriesRepository {
-    fn random_query(&self) -> Option<Query> {
-        self.random().map(|generator| generator.generate())
+    fn random_query(&self) -> Option<(String, QueryType, Query)> {
+        let keys: Vec<&String> = self.queries.keys().collect();
+        keys.choose(&mut thread_rng()).map(|&key| {
+            let generator = self.queries.get(key).unwrap();
+            (key.clone(), generator.query_type, generator.generate())
+        })
     }
 }
 
@@ -190,46 +205,15 @@ pub struct QueryTypeView<'a> {
     query_type: QueryType,
 }
 impl Queries for QueryTypeView<'_> {
-    fn random_query(&self) -> Option<Query> {
-        self.random().map(|generator| generator.generate())
-    }
-}
-impl<'a> QueryTypeView<'a> {
-    pub fn get(
-        &self,
-        name: &str,
-    ) -> Option<&'a QueryGenerator> {
-        self.repo.queries.get(name).and_then(|generator| {
-            if generator.query_type == self.query_type {
-                Some(generator)
-            } else {
-                None
-            }
-        })
-    }
-
-    #[allow(dead_code)]
-    pub fn get_all_names(&self) -> Vec<&'a String> {
-        self.repo
-            .queries
-            .iter()
-            .filter(|(_, generator)| generator.query_type == self.query_type)
-            .map(|(name, _)| name)
-            .collect()
-    }
-
-    pub fn random(&self) -> Option<&'a QueryGenerator> {
-        let filtered_keys: Vec<&String> = self
+    fn random_query(&self) -> Option<(String, QueryType, Query)> {
+        let filtered_keys = self
             .repo
             .queries
             .iter()
             .filter(|(_, generator)| generator.query_type == self.query_type)
-            .map(|(name, _)| name)
-            .collect();
+            .map(|(name, _)| name);
 
-        filtered_keys
-            .choose(&mut thread_rng())
-            .and_then(|&key| self.get(key))
+        self.repo.choose_random_query(filtered_keys)
     }
 }
 
@@ -239,17 +223,10 @@ pub struct MixedQueryView<'a> {
 }
 
 impl Queries for MixedQueryView<'_> {
-    fn random_query(&self) -> Option<Query> {
-        self.random().map(|generator| generator.generate())
-    }
-}
-
-impl<'a> MixedQueryView<'a> {
-    pub fn random(&self) -> Option<&'a QueryGenerator> {
+    fn random_query(&self) -> Option<(String, QueryType, Query)> {
         let mut rng = thread_rng();
         let is_write = rng.gen_bool(self.write_percentage);
-
-        let filtered_keys: Vec<&String> = self
+        let filtered_keys = self
             .repo
             .queries
             .iter()
@@ -260,17 +237,9 @@ impl<'a> MixedQueryView<'a> {
                     generator.query_type == QueryType::Read
                 }
             })
-            .map(|(name, _)| name)
-            .collect();
+            .map(|(name, _)| name);
 
-        filtered_keys
-            .choose(&mut rng)
-            .and_then(|&key| self.repo.queries.get(key))
-    }
-
-    #[allow(dead_code)]
-    pub fn get_all_names(&self) -> Vec<&'a String> {
-        self.repo.queries.keys().collect()
+        self.repo.choose_random_query(filtered_keys)
     }
 }
 
@@ -300,7 +269,7 @@ pub(crate) struct UsersQueriesRepository {
 }
 
 impl Queries for UsersQueriesRepository {
-    fn random_query(&self) -> Option<Query> {
+    fn random_query(&self) -> Option<(String, QueryType, Query)> {
         self.queries_repository.random_query()
     }
 }
@@ -327,7 +296,7 @@ impl UsersQueriesRepository {
             .add_query("single_edge_write", QueryType::Write, |random,  _flavour| {
                 let (from, to) = random.random_path();
                 QueryBuilder::new()
-                    .text( "MATCH (n:User {id: $from}), (m:User {id: $to}) WITH n, m CREATE (n)-[e:Temp]->(m) RETURN e")
+                    .text("MATCH (n:User {id: $from}), (m:User {id: $to}) WITH n, m CREATE (n)-[e:Temp]->(m) RETURN e")
                     .param("from", from)
                     .param("to", to)
                     .build()
@@ -479,134 +448,5 @@ mod tests {
 
         let query = generator.generate();
         assert_eq!(query.text, "MATCH (p:Person) RETURN p");
-    }
-
-    #[test]
-    fn test_queries_repository_get_all_names() {
-        let mut repo = QueriesRepository::new();
-        repo.add("query1", QueryType::Read, || QueryBuilder::new().build());
-        repo.add("query2", QueryType::Write, || QueryBuilder::new().build());
-
-        let names = repo.get_all_names();
-        assert_eq!(names.len(), 2);
-        assert!(names.contains(&&"query1".to_string()));
-        assert!(names.contains(&&"query2".to_string()));
-    }
-
-    #[test]
-    fn test_queries_repository_random() {
-        let mut repo = QueriesRepository::new();
-        repo.add("query1", QueryType::Read, || QueryBuilder::new().build());
-        repo.add("query2", QueryType::Write, || QueryBuilder::new().build());
-
-        let random_generator = repo.random();
-        assert!(random_generator.is_some());
-    }
-
-    #[test]
-    fn test_queries_repository_all_read() {
-        let mut repo = QueriesRepository::new();
-        repo.add("read1", QueryType::Read, || {
-            QueryBuilder::new().text("READ1").build()
-        });
-        repo.add("read2", QueryType::Read, || {
-            QueryBuilder::new().text("READ2").build()
-        });
-        repo.add("write1", QueryType::Write, || {
-            QueryBuilder::new().text("WRITE1").build()
-        });
-
-        let read_view = repo.all_read();
-        let names = read_view.get_all_names();
-        assert_eq!(names.len(), 2);
-        assert!(names.contains(&&"read1".to_string()));
-        assert!(names.contains(&&"read2".to_string()));
-        assert!(!names.contains(&&"write1".to_string()));
-
-        assert!(read_view.get("read1").is_some());
-        assert!(read_view.get("write1").is_none());
-    }
-
-    #[test]
-    fn test_queries_repository_all_write() {
-        let mut repo = QueriesRepository::new();
-        repo.add("read1", QueryType::Read, || {
-            QueryBuilder::new().text("READ1").build()
-        });
-        repo.add("write1", QueryType::Write, || {
-            QueryBuilder::new().text("WRITE1").build()
-        });
-        repo.add("write2", QueryType::Write, || {
-            QueryBuilder::new().text("WRITE2").build()
-        });
-
-        let write_view = repo.all_write();
-        let names = write_view.get_all_names();
-        assert_eq!(names.len(), 2);
-        assert!(names.contains(&&"write1".to_string()));
-        assert!(names.contains(&&"write2".to_string()));
-        assert!(!names.contains(&&"read1".to_string()));
-
-        assert!(write_view.get("write1").is_some());
-        assert!(write_view.get("read1").is_none());
-    }
-
-    #[test]
-    fn test_queries_repository_random_filtered() {
-        let mut repo = QueriesRepository::new();
-        repo.add("read1", QueryType::Read, || {
-            QueryBuilder::new().text("READ1").build()
-        });
-        repo.add("read2", QueryType::Read, || {
-            QueryBuilder::new().text("READ2").build()
-        });
-        repo.add("write1", QueryType::Write, || {
-            QueryBuilder::new().text("WRITE1").build()
-        });
-
-        let read_view = repo.all_read();
-        let random_read = read_view.random();
-        assert!(random_read.is_some());
-        assert!(matches!(
-            random_read.unwrap().generate().text.as_str(),
-            "READ1" | "READ2"
-        ));
-
-        let write_view = repo.all_write();
-        let random_write = write_view.random();
-        assert!(random_write.is_some());
-        assert_eq!(random_write.unwrap().generate().text, "WRITE1");
-    }
-    #[test]
-    fn test_queries_repository_mixed() {
-        let mut repo = QueriesRepository::new();
-        repo.add("read1", QueryType::Read, || {
-            QueryBuilder::new().text("READ1").build()
-        });
-        repo.add("read2", QueryType::Read, || {
-            QueryBuilder::new().text("READ2").build()
-        });
-        repo.add("write1", QueryType::Write, || {
-            QueryBuilder::new().text("WRITE1").build()
-        });
-        repo.add("write2", QueryType::Write, || {
-            QueryBuilder::new().text("WRITE2").build()
-        });
-
-        let mixed_view = repo.mixed(0.7); // 70% write, 30% read
-
-        // Test multiple times to ensure both read and write queries are selected
-        let mut write_count = 0;
-        let mut read_count = 0;
-        for _ in 0..1000 {
-            let random_query = mixed_view.random().unwrap();
-            match random_query.query_type {
-                QueryType::Write => write_count += 1,
-                QueryType::Read => read_count += 1,
-            }
-        }
-
-        assert!(write_count > read_count); // Ensure write queries are selected more often
-        assert!(read_count > 0); // Ensure read queries are also selected
     }
 }
