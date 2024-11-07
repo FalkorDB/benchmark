@@ -41,8 +41,8 @@ impl Neo4j {
         self.neo4j_process().clean_db().await
     }
 
-    pub async fn stop(self) -> BenchmarkResult<()> {
-        self.neo4j_process().stop().await?;
+    pub async fn stop(&self) -> BenchmarkResult<()> {
+        self.neo4j_process().stop(true).await?;
         Ok(())
     }
 
@@ -51,6 +51,12 @@ impl Neo4j {
         spec: Spec<'a>,
     ) -> BenchmarkResult<Output> {
         self.neo4j_process().dump(spec).await
+    }
+    pub(crate) async fn restore_db<'a>(
+        &self,
+        spec: Spec<'a>,
+    ) -> BenchmarkResult<Output> {
+        self.neo4j_process().restore(spec).await
     }
 
     pub(crate) async fn client(&self) -> BenchmarkResult<Neo4jClient> {

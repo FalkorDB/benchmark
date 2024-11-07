@@ -113,14 +113,13 @@ impl Falkor<Connected> {
         for (name, query_type, query) in iter {
             let start = Instant::now();
             let mut results = self.execute_query(query.as_str()).await?;
-            // let mut size = 0;
-            // let results: Vec<FalkorValue> = results.data.flatten().collect();
-            // info!("Results: {:?}", results);
-            let stats = results.stats.join(", ");
+            let mut rows = 0;
             while let Some(nodes) = results.data.next() {
                 trace!("Row: {:?}", nodes);
+                rows += 1;
             }
             let duration = start.elapsed();
+            let stats = format!("{}, {} rows returned", results.stats.join(", "), rows);
             metric_collector.record(
                 duration,
                 name.as_str(),

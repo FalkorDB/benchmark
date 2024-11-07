@@ -1,11 +1,13 @@
 // CYPHER name_param = "Niccolò Machiavelli" birth_year_param = 1469 MATCH (p:Person {name: $name_param, birth_year: $birth_year_param}) RETURN p
-use serde_json::json;
+use neo4rs::BoltType;
 use std::collections::HashMap;
+
 #[derive(Debug, Default, Clone)]
 pub struct Query {
     pub text: String,
     pub params: HashMap<String, QueryParam>,
 }
+
 impl Query {
     pub fn to_cypher(&self) -> String {
         let mut param_strings: Vec<String> = self
@@ -17,15 +19,16 @@ impl Query {
         let params_str = param_strings.join(" ");
         format!("CYPHER {} {}", params_str, self.text)
     }
-    #[allow(dead_code)]
-    pub fn to_bolt(&self) -> (String, String) {
+
+    pub fn to_bolt(&self) -> (String, Vec<(String, QueryParam)>) {
         let query = self.text.clone();
-        let params = json!(self
+        let params: Vec<(String, QueryParam)> = self
             .params
+            .clone()
             .iter()
-            .map(|(k, v)| (k, v.to_json()))
-            .collect::<HashMap<_, _>>());
-        (query, params.to_string())
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        (query, params)
     }
 }
 
@@ -37,21 +40,23 @@ pub enum QueryParam {
     Boolean(bool),
 }
 
+impl Into<BoltType> for QueryParam {
+    fn into(self) -> BoltType {
+        match self {
+            QueryParam::String(s) => s.into(),
+            QueryParam::Integer(i) => i.into(),
+            QueryParam::Float(f) => f.into(),
+            QueryParam::Boolean(b) => b.into(),
+        }
+    }
+}
 impl QueryParam {
-    fn to_cypher_string(&self) -> String {
+    pub(crate) fn to_cypher_string(&self) -> String {
         match self {
             QueryParam::String(s) => format!("\"{}\"", s.replace("\"", "\\\"")),
             QueryParam::Integer(i) => i.to_string(),
             QueryParam::Float(f) => f.to_string(),
             QueryParam::Boolean(b) => b.to_string(),
-        }
-    }
-    fn to_json(&self) -> serde_json::Value {
-        match self {
-            QueryParam::String(s) => json!(s),
-            QueryParam::Integer(i) => json!(i),
-            QueryParam::Float(f) => json!(f),
-            QueryParam::Boolean(b) => json!(b),
         }
     }
 }
@@ -175,24 +180,6 @@ mod tests {
     }
 
     #[test]
-    fn test_query_to_bolt() {
-        let query = QueryBuilder::new()
-            .text("MATCH (p:Person {name: $name, birth_year: $birth_year}) RETURN p")
-            .param("name", "Niccolò Machiavelli")
-            .param("birth_year", 1469)
-            .build();
-
-        let (bolt_query, bolt_params) = query.to_bolt();
-        assert_eq!(
-            bolt_query,
-            "MATCH (p:Person {name: $name, birth_year: $birth_year}) RETURN p"
-        );
-        let params: serde_json::Value = serde_json::from_str(&bolt_params).unwrap();
-        assert_eq!(params["name"], "Niccolò Machiavelli");
-        assert_eq!(params["birth_year"], 1469);
-    }
-
-    #[test]
     fn test_query_param_to_cypher_string() {
         assert_eq!(
             QueryParam::String("test".to_string()).to_cypher_string(),
@@ -201,17 +188,6 @@ mod tests {
         assert_eq!(QueryParam::Integer(42).to_cypher_string(), "42");
         assert_eq!(QueryParam::Float(3.14).to_cypher_string(), "3.14");
         assert_eq!(QueryParam::Boolean(true).to_cypher_string(), "true");
-    }
-
-    #[test]
-    fn test_query_param_to_json() {
-        assert_eq!(
-            QueryParam::String("test".to_string()).to_json(),
-            json!("test")
-        );
-        assert_eq!(QueryParam::Integer(42).to_json(), json!(42));
-        assert_eq!(QueryParam::Float(3.14).to_json(), json!(3.14f32));
-        assert_eq!(QueryParam::Boolean(true).to_json(), json!(true));
     }
 
     #[test]

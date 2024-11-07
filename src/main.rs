@@ -12,6 +12,7 @@ mod utils;
 
 use crate::cli::Commands;
 use crate::cli::Commands::GenerateAutoComplete;
+use crate::error::BenchmarkError::OtherError;
 use crate::error::BenchmarkResult;
 use crate::falkor::{Connected, Disconnected, Falkor};
 use crate::metrics_collector::MetricsCollector;
@@ -82,7 +83,9 @@ async fn main() -> BenchmarkResult<()> {
                 vendor, size, queries
             );
             match vendor {
-                Vendor::Neo4j => {}
+                Vendor::Neo4j => {
+                    run_neo4j(size, queries).await?;
+                }
                 Vendor::Falkor => {
                     run_falkor(size, queries).await?;
                 }
@@ -101,6 +104,56 @@ async fn main() -> BenchmarkResult<()> {
     Ok(())
 }
 
+async fn run_neo4j(
+    size: Size,
+    number_of_queries: u64,
+) -> BenchmarkResult<()> {
+    let neo4j = neo4j::Neo4j::new();
+    // stop neo4j if it is running
+    neo4j.stop().await?;
+    // restore the dump
+    let spec = Spec::new(scenario::Name::Users, size, Vendor::Neo4j);
+    neo4j.restore_db(spec).await?;
+    // start neo4j
+    neo4j.start().await?;
+    let client = neo4j.client().await?;
+    info!("client connected to neo4j");
+    // get the graph size
+    let (node_count, relation_count) = client.graph_size().await?;
+    let mut metric_collector =
+        MetricsCollector::new(node_count, relation_count, number_of_queries, "Neo4J")?;
+    // generate queries
+    let queries_repository = queries_repository::UsersQueriesRepository::new(9998, 121716);
+    let queries = Box::new(
+        queries_repository
+            .random_queries(number_of_queries)
+            .map(|(q_name, q_type, q)| (q_name, q_type, q.to_bolt())),
+    );
+    info!(
+        "graph has {} nodes and {} relations",
+        format_number(node_count),
+        format_number(relation_count)
+    );
+    info!("running {} queries", format_number(number_of_queries));
+    let start = Instant::now();
+    client
+        .clone()
+        .execute_query_iterator(queries, &mut metric_collector)
+        .await?;
+    let elapsed = start.elapsed();
+    let report_file = "neo4j-results.md";
+    info!("report was written to {}", report_file);
+    write_to_file(report_file, metric_collector.markdown_report().as_str()).await?;
+    info!(
+        "running {} queries took {:?}",
+        format_number(number_of_queries),
+        elapsed
+    );
+    neo4j.stop().await?;
+    // stop neo4j
+    // write the report
+    Ok(())
+}
 async fn run_falkor(
     size: Size,
     number_of_queries: u64,
@@ -128,7 +181,7 @@ async fn run_falkor(
             .map(|(q_name, q_type, q)| (q_name, q_type, q.to_cypher())),
     );
     info!(
-        "graph as {} nodes and {} relations",
+        "graph has {} nodes and {} relations",
         format_number(node_count),
         format_number(relation_count)
     );
@@ -173,6 +226,13 @@ async fn init_falkor(
     falkor
         .execute_query_stream(data_iterator, &mut histogram)
         .await?;
+    let (node_count, relation_count) = falkor.graph_size().await?;
+    info!(
+        "{} nodes and {} relations were imported at {:?}",
+        format_number(node_count),
+        format_number(relation_count),
+        start.elapsed()
+    );
     info!("writing done, took: {:?}", start.elapsed());
     falkor.disconnect().await?;
     falkor.stop(true).await?;
@@ -235,7 +295,15 @@ async fn init_neo4j(
         }
     } else {
         delete_file(backup_path.as_str()).await?;
-        neo4j.clean_db().await?;
+        let out = neo4j.clean_db().await?;
+        info!(
+            "neo clean_db std_error returns {} ",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        info!(
+            "neo clean_db std_out returns {} ",
+            String::from_utf8_lossy(&out.stdout)
+        );
         // @ todo delete the data and index file as well
         // delete_file(spec.cache(spec.data_url.as_ref()).await?.as_str()).await;
     }
@@ -243,7 +311,19 @@ async fn init_neo4j(
     neo4j.start().await?;
 
     let client = neo4j.client().await?;
-
+    let (node_count, relation_count) = client.graph_size().await?;
+    info!(
+        "node count: {}, relation count: {}",
+        format_number(node_count),
+        format_number(relation_count)
+    );
+    if node_count != 0 || relation_count != 0 {
+        error!(
+            "graph is not empty, node count: {}, relation count: {}",
+            node_count, relation_count
+        );
+        return Err(OtherError("graph is not empty".to_string()));
+    }
     let mut histogram = Histogram::new(7, 64)?;
 
     let mut index_stream = spec.init_index_iterator().await?;
@@ -257,7 +337,13 @@ async fn init_neo4j(
     client
         .execute_query_stream(&mut data_stream, &mut histogram)
         .await?;
-    info!("importing done at {:?}", start.elapsed());
+    let (node_count, relation_count) = client.graph_size().await?;
+    info!(
+        "{} nodes and {} relations were imported at {:?}",
+        format_number(node_count),
+        format_number(relation_count),
+        start.elapsed()
+    );
     neo4j.clone().stop().await?;
     neo4j.dump(spec.clone()).await?;
     info!("---> histogram");

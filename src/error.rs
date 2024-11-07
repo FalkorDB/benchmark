@@ -9,6 +9,8 @@ pub enum BenchmarkError {
     FailedToSpawnProcessError(std::io::Error, String),
     #[error("Neo4j client error: {0}")]
     Neo4rsError(#[from] neo4rs::Error),
+    #[error("Neo4j de serialization error: {0}")]
+    Neo4rsDeError(#[from] neo4rs::DeError),
     #[error("histogram error: {0}")]
     HistogramError(#[from] histogram::Error),
     #[error("Reqwest client error: {0}")]

@@ -23,6 +23,7 @@ pub(crate) async fn spawn_command(
     command: &str,
     args: &[&str],
 ) -> BenchmarkResult<Output> {
+    info!("Spawning command: {} {}", command, args.join(" "));
     let output = Command::new(command).args(args).output().await?;
 
     if !output.status.success() {
@@ -44,6 +45,7 @@ pub(crate) async fn file_exists(file_path: &str) -> bool {
 }
 pub(crate) async fn delete_file(file_path: &str) -> BenchmarkResult<()> {
     if file_exists(file_path).await {
+        info!("Deleting file: {}", file_path);
         fs::remove_file(file_path).await?;
     }
     Ok(())
