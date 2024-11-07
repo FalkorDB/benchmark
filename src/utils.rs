@@ -222,3 +222,24 @@ pub(crate) async fn redis_save() -> BenchmarkResult<()> {
         )))
     }
 }
+pub(crate) async fn write_to_file(
+    file_path: &str,
+    content: &str,
+) -> BenchmarkResult<()> {
+    let mut file = File::create(file_path).await?;
+    file.write_all(content.as_bytes()).await?;
+    file.flush().await?;
+    Ok(())
+}
+pub(crate) fn format_number(num: u64) -> String {
+    let mut s = String::new();
+    let num_str = num.to_string();
+    let a = num_str.chars().rev().enumerate();
+    for (i, c) in a {
+        if i != 0 && i % 3 == 0 {
+            s.insert(0, ',');
+        }
+        s.insert(0, c);
+    }
+    s
+}

@@ -10,3 +10,4 @@ redis-data
 redis-server
 t.sh
 *.log
+falkor-results.md

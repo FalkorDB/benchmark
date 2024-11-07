@@ -7,6 +7,7 @@ use crate::utils::{
     create_directory_if_not_exists, delete_file, falkor_shared_lib_path, file_exists,
     get_command_pid, kill_process, redis_save, wait_for_redis_ready,
 };
+use falkordb::FalkorValue::I64;
 use falkordb::{AsyncGraph, FalkorClientBuilder, LazyResultSet, QueryResult};
 use futures::{Stream, StreamExt};
 use histogram::Histogram;
@@ -59,6 +60,35 @@ impl Falkor<Connected> {
             graph: Disconnected,
         })
     }
+    pub(crate) async fn graph_size(&self) -> BenchmarkResult<(u64, u64)> {
+        let mut graph = self.graph.0.clone();
+        let mut falkor_result = graph
+            .query("MATCH (n) RETURN count(n) as count")
+            .with_timeout(5000)
+            .execute()
+            .await?;
+        let node_count = self.extract_u64_value(&mut falkor_result)?;
+        let mut falkor_result = graph
+            .query("MATCH ()-->() RETURN count(*) AS relationshipCount")
+            .with_timeout(5000)
+            .execute()
+            .await?;
+        let relation_count = self.extract_u64_value(&mut falkor_result)?;
+        Ok((node_count, relation_count))
+    }
+
+    fn extract_u64_value(
+        &self,
+        falkor_result: &mut QueryResult<LazyResultSet>,
+    ) -> BenchmarkResult<u64> {
+        match falkor_result.data.next().as_deref() {
+            Some([I64(value)]) => Ok(*value as u64),
+            _ => Err(OtherError(
+                "Value not found or not of expected type".to_string(),
+            )),
+        }
+    }
+
     pub(crate) async fn execute_query<T: AsRef<str>>(
         &mut self,
         q: T,
@@ -139,7 +169,14 @@ impl<U> Falkor<U> {
         self.stop(false).await?;
         create_directory_if_not_exists(REDIS_DATA_DIR).await?;
         let command = "redis-server";
-        let args = ["--dir", REDIS_DATA_DIR, "--loadmodule", self.path.as_str()];
+        let args = [
+            "--dir",
+            REDIS_DATA_DIR,
+            "--loadmodule",
+            self.path.as_str(),
+            "CACHE_SIZE",
+            "40",
+        ];
         info!("starting falkor: {} {}", command, args.join(" "));
 
         let child = Command::new(command)
@@ -254,10 +291,10 @@ impl<U> Falkor<U> {
             size.to_string().to_lowercase()
         );
         if !file_exists(path.as_str()).await {
-            return Err(OtherError(format!(
+            Err(OtherError(format!(
                 "Dump file not found: {}",
                 path.as_str()
-            )));
+            )))
         } else {
             Ok(())
         }

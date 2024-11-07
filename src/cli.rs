@@ -58,5 +58,14 @@ pub(crate) enum Commands {
         vendor: Vendor,
         #[arg(short, long, value_enum)]
         size: crate::scenario::Size,
+        #[arg(
+            short,
+            long,
+            required = false,
+            default_value_t = 10000,
+            default_missing_value = "10000",
+            help = "Number of queries in this benchmark run"
+        )]
+        queries: u64,
     },
 }

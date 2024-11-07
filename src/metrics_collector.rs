@@ -1,18 +1,32 @@
 use crate::error::BenchmarkResult;
 use crate::queries_repository::QueryType;
+use crate::utils::format_number;
 use histogram::Histogram;
 use std::collections::HashMap;
 use std::time::Duration;
 
 pub(crate) struct MetricsCollector {
+    vendor: &'static str,
+    node_count: u64,
+    relation_count: u64,
+    query_count: u64,
     histogram_for_type: HashMap<String, Histogram>,
     worst_call_for_type: HashMap<String, (String, String, Duration)>,
     total_calls_for_type: HashMap<String, u64>,
 }
 
 impl MetricsCollector {
-    pub(crate) fn new() -> BenchmarkResult<Self> {
+    pub(crate) fn new(
+        node_count: u64,
+        relation_count: u64,
+        query_count: u64,
+        vendor: &'static str,
+    ) -> BenchmarkResult<Self> {
         Ok(Self {
+            vendor,
+            node_count,
+            relation_count,
+            query_count,
             histogram_for_type: HashMap::new(),
             worst_call_for_type: HashMap::new(),
             total_calls_for_type: HashMap::new(),
@@ -76,7 +90,15 @@ impl MetricsCollector {
     pub(crate) fn markdown_report(&self) -> String {
         let ordered_operations = order_keys_by_p(&self.histogram_for_type, 99.0);
         let ordered_operations = reorder_rows(ordered_operations, &["all", "read", "write"]);
-        let mut report = String::from("| Query | Total Calls | 50th Percentile | 95th Percentile | 99th Percentile | Worst Time | Worst Call | Worst Call Statistics |\n");
+
+        let mut report = String::from(format!(
+            "vendor: {}\n\nnodes: {}\n\nrelations: {}\n\nqueries: {}\n\n",
+            self.vendor,
+            format_number(self.node_count),
+            format_number(self.relation_count),
+            format_number(self.query_count)
+        ));
+        report.push_str("| Query | Total Calls | 50th Percentile | 95th Percentile | 99th Percentile | Worst Time | Worst Call | Worst Call Statistics |\n");
         report.push_str("|-----------|-------------|-----------------|-----------------|-----------------|------------|------------|------------|\n");
 
         // Add rows for other operation types
@@ -88,7 +110,7 @@ impl MetricsCollector {
 
         for operation in ordered_operations {
             if let Some(row) = rows.get(operation.as_str()) {
-                report.push_str(&format!("| {} | {}\n", operation, row));
+                report.push_str(&format!("| {} | {}|\n", operation, row));
             }
         }
 
@@ -128,7 +150,7 @@ impl MetricsCollector {
 
         let row = format!(
             "{} | {} | {} | {} | {} | `{}` | `{}`",
-            total_calls,
+            format_number(*total_calls),
             self.format_percentile(histogram, 50.0),
             self.format_percentile(histogram, 95.0),
             self.format_percentile(histogram, 99.0),

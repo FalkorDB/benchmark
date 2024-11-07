@@ -17,7 +17,7 @@ use crate::falkor::{Connected, Disconnected, Falkor};
 use crate::metrics_collector::MetricsCollector;
 use crate::queries_repository::Queries;
 use crate::scenario::{Size, Spec, Vendor};
-use crate::utils::{delete_file, file_exists};
+use crate::utils::{delete_file, file_exists, format_number, write_to_file};
 use clap::{Command, CommandFactory, Parser};
 use clap_complete::{generate, Generator};
 use cli::Cli;
@@ -72,12 +72,19 @@ async fn main() -> BenchmarkResult<()> {
                 }
             }
         }
-        Commands::Run { vendor, size } => {
-            info!("Run benchmark {} {}", vendor, size);
+        Commands::Run {
+            vendor,
+            size,
+            queries,
+        } => {
+            info!(
+                "Run benchmark vendor: {}, graph-size:{}, queries: {}",
+                vendor, size, queries
+            );
             match vendor {
                 Vendor::Neo4j => {}
                 Vendor::Falkor => {
-                    run_falkor(size).await?;
+                    run_falkor(size, queries).await?;
                 }
             }
         }
@@ -94,7 +101,10 @@ async fn main() -> BenchmarkResult<()> {
     Ok(())
 }
 
-async fn run_falkor(size: Size) -> BenchmarkResult<()> {
+async fn run_falkor(
+    size: Size,
+    number_of_queries: u64,
+) -> BenchmarkResult<()> {
     let falkor: Falkor<Disconnected> = falkor::Falkor::new();
     // stop falkor if it is running
     falkor.stop(false).await?;
@@ -106,24 +116,36 @@ async fn run_falkor(size: Size) -> BenchmarkResult<()> {
     falkor.start().await?;
     // connect to falkor
     let mut falkor: Falkor<Connected> = falkor.connect().await?;
-    let mut metric_collector = MetricsCollector::new()?;
+    // get the graph size
+    let (node_count, relation_count) = falkor.graph_size().await?;
+    let mut metric_collector =
+        MetricsCollector::new(node_count, relation_count, number_of_queries, "FalkorDB")?;
     // generate queries
-    let count = 10000;
     let queries_repository = queries_repository::UsersQueriesRepository::new(9998, 121716);
     let queries = Box::new(
         queries_repository
-            .random_queries(count)
+            .random_queries(number_of_queries)
             .map(|(q_name, q_type, q)| (q_name, q_type, q.to_cypher())),
     );
-
-    info!("running {} queries", count);
+    info!(
+        "graph as {} nodes and {} relations",
+        format_number(node_count),
+        format_number(relation_count)
+    );
+    info!("running {} queries", format_number(number_of_queries));
     let start = Instant::now();
     falkor
         .execute_query_iterator(queries, &mut metric_collector)
         .await?;
     let elapsed = start.elapsed();
-    println!("{}", metric_collector.markdown_report());
-    info!("running {} queries took {:?}", count, elapsed);
+    let report_file = "falkor-results.md";
+    info!("report was written to {}", report_file);
+    write_to_file(report_file, metric_collector.markdown_report().as_str()).await?;
+    info!(
+        "running {} queries took {:?}",
+        format_number(number_of_queries),
+        elapsed
+    );
     // stop falkor
     falkor.stop(false).await
 }

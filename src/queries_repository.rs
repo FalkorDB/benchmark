@@ -8,19 +8,10 @@ pub(crate) trait Queries {
 
     fn random_queries(
         &self,
-        count: i32,
+        count: u64,
     ) -> Box<dyn Iterator<Item = (String, QueryType, Query)> + '_> {
         Box::new((0..count).filter_map(move |_| self.random_query()))
     }
-    // fn random_queries(
-    //     &self,
-    //     count: i32,
-    // ) -> Vec<(String, QueryType, Query)> {
-    //     (0..count)
-    //         .map(|_| self.random_query())
-    //         .filter_map(|query| query)
-    //         .collect()
-    // }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
