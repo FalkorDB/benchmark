@@ -284,6 +284,7 @@ async fn init_neo4j(
 ) -> BenchmarkResult<()> {
     let spec = Spec::new(scenario::Name::Users, size, Vendor::Neo4j);
     let neo4j = neo4j::Neo4j::new();
+    let _ = neo4j.stop().await?;
     let backup_path = format!("{}/neo4j.dump", spec.backup_path());
     if !force {
         if file_exists(backup_path.as_str()).await && !force {

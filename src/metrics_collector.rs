@@ -2,9 +2,11 @@ use crate::error::BenchmarkResult;
 use crate::queries_repository::QueryType;
 use crate::utils::format_number;
 use histogram::Histogram;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Duration;
 
+#[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct MetricsCollector {
     vendor: &'static str,
     node_count: u64,

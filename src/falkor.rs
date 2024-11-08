@@ -15,6 +15,7 @@ use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 use std::{env, io};
 use tokio::fs;
+use tokio::time::sleep;
 use tracing::{error, info, trace};
 
 const REDIS_DUMP_FILE: &str = "./redis-data/dump.rdb";
@@ -220,7 +221,7 @@ impl<U> Falkor<U> {
         &self,
         flash: bool,
     ) -> BenchmarkResult<()> {
-        if let Ok(Some(pid)) = self.get_redis_pid().await {
+        while let Ok(Some(pid)) = self.get_redis_pid().await {
             info!("stopping falkor: {}", pid);
             if flash {
                 info!("asking redis to save all data to disk");
@@ -229,6 +230,7 @@ impl<U> Falkor<U> {
             }
             kill_process(pid).await?;
             info!("falkor stopped: {}", pid);
+            sleep(Duration::from_millis(200)).await;
         }
         Ok(())
     }

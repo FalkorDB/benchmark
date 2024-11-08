@@ -11,6 +11,7 @@ mkdir -p "$DOWNLOADS"
 rm -rf "$NEO4J_DIR"
 mkdir -p "$NEO4J_DIR" "$NEO4J_DATA_DIR" "$NEO4J_LOGS_DIR"
 curl -L "$NEO4J_DOWNLOAD_URL" | tar -xz -C "$NEO4J_DIR" --strip-components=1
+echo "dbms.usage_report.enabled=false" >> "$NEO4J_DIR/conf/neo4j.conf"
 
 NEO4J_PASSWORD="h6u4krd10"
 echo "changing neo4j password for user neo4j to $NEO4J_PASSWORD"
