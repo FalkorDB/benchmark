@@ -144,6 +144,12 @@ async fn run_neo4j(
     let report_file = "neo4j-results.md";
     info!("report was written to {}", report_file);
     write_to_file(report_file, metric_collector.markdown_report().as_str()).await?;
+    metric_collector
+        .save(format!(
+            "neo4j-metrics_{}_q{}.json",
+            size, number_of_queries
+        ))
+        .await?;
     info!(
         "running {} queries took {:?}",
         format_number(number_of_queries),
@@ -194,6 +200,12 @@ async fn run_falkor(
     let report_file = "falkor-results.md";
     info!("report was written to {}", report_file);
     write_to_file(report_file, metric_collector.markdown_report().as_str()).await?;
+    metric_collector
+        .save(format!(
+            "falkor-metrics_{}_q{}.json",
+            size, number_of_queries
+        ))
+        .await?;
     info!(
         "running {} queries took {:?}",
         format_number(number_of_queries),

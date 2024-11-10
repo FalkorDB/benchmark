@@ -21,6 +21,8 @@ pub enum BenchmarkError {
     FalkorDBError(#[from] FalkorDBError),
     #[error("Redis error: {0}")]
     RedisError(#[from] redis::RedisError),
+    #[error("Serde error: {0}")]
+    SerdeError(#[from] serde_json::Error),
     #[error("Other error: {0}")]
     OtherError(String),
 }

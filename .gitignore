@@ -11,3 +11,5 @@ redis-server
 t.sh
 *.log
 falkor-results.md
+falkor-metrics*.json
+neo4j-metrics*.json

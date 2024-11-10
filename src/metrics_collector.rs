@@ -4,7 +4,9 @@ use crate::utils::format_number;
 use histogram::Histogram;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::Path;
 use std::time::Duration;
+use tokio::io::AsyncWriteExt;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct MetricsCollector {
@@ -82,6 +84,16 @@ impl MetricsCollector {
             self.record_operation(duration, "write", query, statistics)?;
         }
         self.record_operation(duration, operation, query, statistics)
+    }
+
+    pub(crate) async fn save(
+        &self,
+        path: impl AsRef<Path>,
+    ) -> BenchmarkResult<()> {
+        let json = serde_json::to_string_pretty(self)?;
+        let mut file = tokio::fs::File::create(path).await?;
+        file.write_all(json.as_bytes()).await?;
+        Ok(())
     }
 
     // using histogram from https://github.com/pelikan-io/rustcommon/blob/main/histogram/src/standard.rs

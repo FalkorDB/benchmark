@@ -25,7 +25,7 @@ histogram = { version = "0.11", features = ["serde"] }
 tokio-util = { version = "0.7", features = ["io"] }
 reqwest = { version = "0.12.9", features = ["gzip"] }
 async-trait = "0.1.83"
-strum = "0.26.3"
+strum = { version = "0.26.3", features = ["derive"] }
 strum_macros = "0.26.4"
 tokio-stream = { version = "0.1.16", features = ["io-util"] }
 bytes = "1.8.0"

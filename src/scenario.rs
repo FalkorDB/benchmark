@@ -11,6 +11,7 @@ use strum_macros::Display;
 use tracing::info;
 
 #[derive(Debug, Clone, Display, Copy, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
+#[strum(serialize_all = "lowercase")]
 pub enum Size {
     Small,
     Medium,
@@ -18,11 +19,13 @@ pub enum Size {
 }
 
 #[derive(Debug, Clone, Display, Copy, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
+#[strum(serialize_all = "lowercase")]
 pub enum Name {
     Users,
 }
 
 #[derive(Debug, Clone, Display, Copy, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
+#[strum(serialize_all = "lowercase")]
 pub enum Vendor {
     Neo4j,
     Falkor,
