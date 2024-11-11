@@ -5,7 +5,6 @@ mod falkor;
 mod metrics_collector;
 mod neo4j;
 mod neo4j_client;
-mod neo4j_process;
 mod queries_repository;
 mod query;
 pub mod scenario;
@@ -133,7 +132,7 @@ async fn run_neo4j(
 ) -> BenchmarkResult<()> {
     let neo4j = neo4j::Neo4j::new();
     // stop neo4j if it is running
-    neo4j.stop().await?;
+    neo4j.stop(false).await?;
     // restore the dump
     let spec = Spec::new(scenario::Name::Users, size, Vendor::Neo4j);
     neo4j.restore_db(spec).await?;
@@ -182,7 +181,7 @@ async fn run_neo4j(
         format_number(number_of_queries),
         elapsed
     );
-    neo4j.stop().await?;
+    neo4j.stop(true).await?;
     // stop neo4j
     // write the report
     Ok(())
@@ -327,7 +326,7 @@ async fn init_neo4j(
 ) -> BenchmarkResult<()> {
     let spec = Spec::new(scenario::Name::Users, size, Vendor::Neo4j);
     let neo4j = neo4j::Neo4j::new();
-    let _ = neo4j.stop().await?;
+    let _ = neo4j.stop(false).await?;
     let backup_path = format!("{}/neo4j.dump", spec.backup_path());
     if !force {
         if file_exists(backup_path.as_str()).await && !force {
@@ -388,7 +387,7 @@ async fn init_neo4j(
         format_number(relation_count),
         start.elapsed()
     );
-    neo4j.clone().stop().await?;
+    neo4j.clone().stop(true).await?;
     neo4j.dump(spec.clone()).await?;
     info!("---> histogram");
 
