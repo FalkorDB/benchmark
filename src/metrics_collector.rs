@@ -6,25 +6,44 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
-use tokio::io::AsyncWriteExt;
+use tokio::fs::File;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub(crate) struct MetricsCollector {
-    vendor: &'static str,
-    node_count: u64,
-    relation_count: u64,
-    query_count: u64,
-    histogram_for_type: HashMap<String, Histogram>,
-    worst_call_for_type: HashMap<String, (String, String, Duration)>,
-    total_calls_for_type: HashMap<String, u64>,
+    pub(crate) vendor: String,
+    pub(crate) node_count: u64,
+    pub(crate) relation_count: u64,
+    pub(crate) query_count: u64,
+    pub(crate) histogram_for_type: HashMap<String, Histogram>,
+    pub(crate) worst_call_for_type: HashMap<String, (String, String, Duration)>,
+    pub(crate) total_calls_for_type: HashMap<String, u64>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub(crate) struct Percentile {
+    pub(crate) vendor: String,
+    pub(crate) node_count: u64,
+    pub(crate) relation_count: u64,
+    pub(crate) query_count: u64,
+    pub(crate) histogram_for_type: HashMap<String, Vec<f32>>,
+    pub(crate) worst_call_for_type: HashMap<String, (String, String, Duration)>,
+    pub(crate) total_calls_for_type: HashMap<String, u64>,
 }
 
 impl MetricsCollector {
+    pub async fn from_file(path: impl AsRef<Path>) -> BenchmarkResult<Self> {
+        let mut file = File::open(path).await?;
+        let mut contents = String::new();
+        file.read_to_string(&mut contents).await?;
+        Ok(serde_json::from_str::<MetricsCollector>(&contents)?)
+    }
+
     pub(crate) fn new(
         node_count: u64,
         relation_count: u64,
         query_count: u64,
-        vendor: &'static str,
+        vendor: String,
     ) -> BenchmarkResult<Self> {
         Ok(Self {
             vendor,
@@ -91,11 +110,40 @@ impl MetricsCollector {
         path: impl AsRef<Path>,
     ) -> BenchmarkResult<()> {
         let json = serde_json::to_string_pretty(self)?;
-        let mut file = tokio::fs::File::create(path).await?;
+        let mut file = File::create(path).await?;
         file.write_all(json.as_bytes()).await?;
         Ok(())
     }
 
+    pub(crate) fn to_percentile(&self) -> Percentile {
+        let mut percentile = Percentile {
+            vendor: self.vendor.clone(),
+            node_count: self.node_count,
+            relation_count: self.relation_count,
+            query_count: self.query_count,
+            histogram_for_type: HashMap::new(),
+            worst_call_for_type: self.worst_call_for_type.clone(),
+            total_calls_for_type: self.total_calls_for_type.clone(),
+        };
+
+        for (operation, histogram) in &self.histogram_for_type {
+            let mut percentiles = Vec::new();
+            for p in &[
+                10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 95.0, 99.0,
+            ] {
+                // format_duration_ms(&Duration::from_micros(b.end()))
+                let percentile = histogram.percentile(*p).unwrap_or(None).map_or(0.0, |b| {
+                    format_duration_to_f32(&Duration::from_micros(b.end()))
+                });
+                percentiles.push(percentile);
+            }
+            percentile
+                .histogram_for_type
+                .insert(operation.clone(), percentiles);
+        }
+
+        percentile
+    }
     // using histogram from https://github.com/pelikan-io/rustcommon/blob/main/histogram/src/standard.rs
     // return a markdown report that consist of
     // - table with the columns: operation, total calls, 50th percentile, 95th percentile, 99th percentile, worst time, worst call
@@ -226,4 +274,10 @@ fn reorder_rows(
 fn format_duration_ms(duration: &Duration) -> String {
     let total_ms = duration.as_secs_f64() * 1000.0;
     format!("{:.3}ms", total_ms)
+}
+
+fn format_duration_to_f32(duration: &Duration) -> f32 {
+    let total_ms = duration.as_secs_f64() * 1000.0;
+    let as_str = format!("{:.1}", total_ms);
+    as_str.parse::<f32>().unwrap()
 }

@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta content="width=device-width, initial-scale=1.0" name="viewport">
+    <title>Chart.js Example</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels"></script>
+    <style>
+        .chart-container {
+            width: 800px;
+            margin: 20px auto;
+        }
+
+        .hidden {
+            display: none;
+        }
+
+        .links {
+            /*text-align: center;*/
+            margin-top: 20px;
+        }
+
+        a {
+            margin: 0 10px;
+            cursor: pointer;
+            text-decoration: underline;
+            color: blue;
+        }
+        #container {
+            display: flex;
+            justify-content: space-between;
+        }
+        #list-container {
+            flex: 1;
+            margin-right: 20px;
+            max-width: 400px;
+            /*flex-basis: 300px;*/
+
+        }
+        #table-container {
+            flex: 2;
+        }
+        table {
+            border-collapse: collapse;
+            width: 100%;
+        }
+        th, td {
+            padding: 8px;
+            text-align: left;
+            border-bottom: 1px solid #DDD;
+        }
+        tr:hover {background-color: #D6EEEE;}
+    </style>
+</head>
+<body>
+<div class="chart-container" id="chart-container">
+</div>
+
+<div id="container">
+    <div class="links" id="list-container">
+        <ul id="links_ul">
+        </ul>
+    </div>
+    <div id="table-container">
+        <table id="example-table" style="width: 100%;">
+            <thead>
+            <tr>
+                <th>Vendor</th>
+                <th>Total Calls</th>
+                <th>Worst Call</th>
+                <th>Worst Call Time</th>
+                <th>More Info</th>
+            </tr>
+            </thead>
+            <tbody id="example-table-body">
+            </tbody>
+
+        </table>
+    </div>
+</div>
+
+<script>
+    Chart.register(ChartDataLabels);
+    const runs = {{data}};
+    let keys = Object.keys(runs.run_1.histogram_for_type);
+    keys.forEach(create_chart);
+    // sort keys by p99
+    keys.sort(function(a, b){
+        return Math.max(runs.run_1.histogram_for_type[b][10] - runs.run_1.histogram_for_type[a][10],
+            runs.run_2.histogram_for_type[b][10] - runs.run_2.histogram_for_type[a][10]);
+    });
+    function create_chart(key){
+        let canvas = document.createElement("canvas");
+        canvas.id = key;
+        let div = document.createElement("div");
+        div.id = key + "_div";
+        if(key != 'all'){
+            div.classList.add('hidden');
+        }
+        div.appendChild(canvas);
+        document.getElementById('chart-container').appendChild(div);
+        const ctx =  canvas.getContext('2d');
+        let datasets1 = get_data_set(runs.run_1, key);
+        datasets1.borderColor = 'rgb(255,102,199)';
+        datasets1.backgroundColor = 'rgba(255,102,196,0.94)';
+        let datasets2 = get_data_set(runs.run_2, key);
+        datasets2.borderColor = 'rgb(75,132,192)';
+        datasets2.backgroundColor = 'rgba(75,134,192,0.59)';
+        new Chart(ctx, {
+            type: 'bar',
+            data: {
+                labels: ['p10', 'p20', 'p30', 'p40', 'p50', 'p60', 'p70', 'p80', 'p90', 'p95', 'p99'], // X-axis labels
+                datasets: [datasets1, datasets2]
+            },
+            options: {
+                responsive: true,
+                scales: {
+                    y: {
+                        beginAtZero: true // Start Y-axis at zero
+                    }
+                },
+                plugins: {
+                    datalabels: {
+                        anchor: 'end',
+                        align: 'top',
+                        // formatter: Math.round,
+                        font: {
+                            weight: 'bold'
+                        }
+                    }
+                }
+            }
+        });
+    }
+    function get_data_set(run, key){
+        return {
+            vandor: run.vendor,
+            label: run.vendor + ' (' + key + ")",
+            data: run.histogram_for_type[key],
+            fill: false,
+            key : key,
+            total_calls : run.total_calls_for_type[key],
+            worst_call : run.worst_call_for_type[key],
+        };
+    }
+    keys.forEach(create_toggle_link);
+    show_table_of(keys[0]);
+    function create_toggle_link(key){
+        let link = document.createElement("a");
+        let li = document.createElement("li");
+        li.appendChild(link);
+        link.id = key + "_link";
+        link.innerHTML = "Show " + key;
+        link.addEventListener('click', function () {
+            let div = document.getElementById(key + "_div");
+            div.classList.remove('hidden');
+            keys.forEach(function(k){
+                if(k != key){
+                    document.getElementById(k + "_div").classList.add('hidden');
+                }
+            });
+            show_table_of(key);
+        });
+        document.getElementById('links_ul').appendChild(li);
+
+    }
+    function show_table_of(key){
+        let r1 = create_table_row(key, runs.run_1);
+        let r2 = create_table_row(key, runs.run_2);
+        let body = document.getElementById('example-table-body');
+        body.innerHTML = "";
+        body.appendChild(r1);
+        body.appendChild(r2);
+    }
+    function create_table_row(key, run){
+        let tr = document.createElement("tr");
+        let td1 = document.createElement("td");
+        let td2 = document.createElement("td");
+        let td3 = document.createElement("td");
+        let td4 = document.createElement("td");
+        let td5 = document.createElement("td");
+        td1.innerHTML = run.vendor;
+        td2.innerHTML = run.total_calls_for_type[key].toString();
+        td3.innerHTML = run.worst_call_for_type[key][0];
+        td3.style.fontFamily =  "Arial, sans-serif";
+        td3.style.fontSize = "14px";
+        td4.innerHTML = (run.worst_call_for_type[key][2]['nanos'] / 1000000).toFixed(2) + " ms";
+        td5.innerHTML = run.worst_call_for_type[key][1];
+        tr.appendChild(td1);
+        tr.appendChild(td2);
+        tr.appendChild(td3);
+        tr.appendChild(td4);
+        tr.appendChild(td5);
+        return tr;
+    }
+
+
+</script>
+</body>
+</html>
+

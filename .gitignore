@@ -13,3 +13,4 @@ t.sh
 falkor-results.md
 falkor-metrics*.json
 neo4j-metrics*.json
+html

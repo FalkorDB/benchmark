@@ -1,4 +1,5 @@
 mod cli;
+mod compare_template;
 mod error;
 mod falkor;
 mod metrics_collector;
@@ -12,6 +13,7 @@ mod utils;
 
 use crate::cli::Commands;
 use crate::cli::Commands::GenerateAutoComplete;
+use crate::compare_template::{CompareRuns, CompareTemplate};
 use crate::error::BenchmarkError::OtherError;
 use crate::error::BenchmarkResult;
 use crate::falkor::{Connected, Disconnected, Falkor};
@@ -19,6 +21,7 @@ use crate::metrics_collector::MetricsCollector;
 use crate::queries_repository::Queries;
 use crate::scenario::{Size, Spec, Vendor};
 use crate::utils::{delete_file, file_exists, format_number, write_to_file};
+use askama::Template;
 use clap::{Command, CommandFactory, Parser};
 use clap_complete::{generate, Generator};
 use cli::Cli;
@@ -99,6 +102,26 @@ async fn main() -> BenchmarkResult<()> {
         } => {
             info!("Clear benchmark {} {} {}", vendor, size, force);
         }
+        Commands::Compare { file1, file2 } => {
+            info!(
+                "Compare benchmark {} {}",
+                file1.path().display(),
+                file2.path().display()
+            );
+            let collector_1 = MetricsCollector::from_file(file1.path()).await?;
+            let collector_2 = MetricsCollector::from_file(file2.path()).await?;
+            info!("got both collectors");
+            let compare_runs = CompareRuns {
+                run_1: collector_1.to_percentile(),
+                run_2: collector_2.to_percentile(),
+            };
+            let json = serde_json::to_string_pretty(&compare_runs)?;
+            info!("{}", json);
+            let compare_template = CompareTemplate { data: compare_runs };
+            let compare_report = compare_template.render().unwrap();
+            write_to_file("html/compare.html", compare_report.as_str()).await?;
+            println!("{}", compare_report);
+        }
     }
 
     Ok(())
@@ -120,8 +143,12 @@ async fn run_neo4j(
     info!("client connected to neo4j");
     // get the graph size
     let (node_count, relation_count) = client.graph_size().await?;
-    let mut metric_collector =
-        MetricsCollector::new(node_count, relation_count, number_of_queries, "Neo4J")?;
+    let mut metric_collector = MetricsCollector::new(
+        node_count,
+        relation_count,
+        number_of_queries,
+        "Neo4J".to_owned(),
+    )?;
     // generate queries
     let queries_repository = queries_repository::UsersQueriesRepository::new(9998, 121716);
     let queries = Box::new(
@@ -177,8 +204,12 @@ async fn run_falkor(
     let mut falkor: Falkor<Connected> = falkor.connect().await?;
     // get the graph size
     let (node_count, relation_count) = falkor.graph_size().await?;
-    let mut metric_collector =
-        MetricsCollector::new(node_count, relation_count, number_of_queries, "FalkorDB")?;
+    let mut metric_collector = MetricsCollector::new(
+        node_count,
+        relation_count,
+        number_of_queries,
+        "FalkorDB".to_owned(),
+    )?;
     // generate queries
     let queries_repository = queries_repository::UsersQueriesRepository::new(9998, 121716);
     let queries = Box::new(
