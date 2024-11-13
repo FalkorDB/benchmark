@@ -147,7 +147,7 @@ pub(crate) async fn get_command_pid(cmd: impl AsRef<str>) -> BenchmarkResult<u32
                 continue;
             }
             if line.contains(cmd) {
-                if let parts @ [pid, command, stat, ..] =
+                if let [pid, command, stat, ..] =
                     line.split_whitespace().collect::<Vec<_>>().as_slice()
                 {
                     if command.contains(cmd) {
