@@ -118,6 +118,7 @@ impl Falkor<Connected> {
             let mut rows = 0;
             while let Some(nodes) = results.data.next() {
                 trace!("Row: {:?}", nodes);
+                rows += 1;
             }
             let duration = start.elapsed();
             count += 1;

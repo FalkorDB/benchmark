@@ -72,6 +72,7 @@ impl Neo4jClient {
             let mut rows = 0;
             while let Ok(Some(row)) = result.next().await {
                 trace!("Row: {:?}", row);
+                rows += 1;
             }
 
             let duration = start.elapsed();
