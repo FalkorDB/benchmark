@@ -221,15 +221,18 @@ impl<U> Falkor<U> {
         &self,
         flash: bool,
     ) -> BenchmarkResult<()> {
-        while let Ok(Some(pid)) = self.get_redis_pid().await {
-            info!("stopping falkor: {}", pid);
+        if let Ok(Some(pid)) = self.get_redis_pid().await {
             if flash {
                 info!("asking redis to save all data to disk");
                 redis_save().await?;
                 self.wait_for_ready().await?;
             }
+            info!("stopping falkor: {}", pid);
             kill_process(pid).await?;
             info!("falkor stopped: {}", pid);
+        }
+        while let Ok(Some(pid)) = self.get_redis_pid().await {
+            info!("waiting for falkor (pid) to stop: {}", pid);
             sleep(Duration::from_millis(200)).await;
         }
         Ok(())
