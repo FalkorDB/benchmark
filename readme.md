@@ -49,3 +49,8 @@ from `~/`
 - `./target/release/benchmark init --vendor falkor -s small`
 - `./target/release/benchmark init --vendor neo4j -s small`
 
+### Data
+
+The data is based on https://www.kaggle.com/datasets/wolfram77/graphs-snap-soc-pokec
+licensed: https://creativecommons.org/licenses/by/4.0/
+

@@ -143,6 +143,7 @@ pub(crate) async fn get_command_pid(cmd: impl AsRef<str>) -> BenchmarkResult<Opt
             .map_err(|e| OtherError(format!("UTF-8 conversion error: {}", e)))?;
 
         for line in stdout.lines() {
+            info!("got ps line {}", line);
             if line.contains(cmd) && !line.contains("grep") {
                 let parts: Vec<&str> = line.split_whitespace().collect();
                 if parts.len() > 1 {
