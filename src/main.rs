@@ -259,7 +259,7 @@ async fn init_falkor(
     let mut histogram = Histogram::new(7, 64)?;
     let spec = Spec::new(scenario::Name::Users, size, Vendor::Neo4j);
     let falkor = falkor::Falkor::new();
-
+    falkor.stop(false).await?;
     falkor.clean_db().await?;
     // falkor.restore_db(size).await?;
 
@@ -269,7 +269,7 @@ async fn init_falkor(
     let mut falkor = falkor.connect().await?;
     let start = Instant::now();
     falkor
-        .execute_query("CREATE INDEX FOR (u:User) ON (u.id);")
+        .execute_query("CREATE INDEX FOR (u:User) ON (u.id)")
         .await?;
     let data_iterator = spec.init_data_iterator().await?;
     falkor

@@ -1,5 +1,5 @@
 use crate::error::BenchmarkError::{
-    FailedToDownloadFileError, FailedToSpawnProcessError, OtherError,
+    FailedToDownloadFileError, FailedToSpawnProcessError, OtherError, ProcessNofFoundError,
 };
 use crate::error::{BenchmarkError, BenchmarkResult};
 use futures::stream::Stream;
@@ -130,10 +130,10 @@ pub(crate) async fn kill_process(pid: u32) -> BenchmarkResult<()> {
     }
 }
 
-pub(crate) async fn get_command_pid(cmd: impl AsRef<str>) -> BenchmarkResult<Option<u32>> {
+pub(crate) async fn get_command_pid(cmd: impl AsRef<str>) -> BenchmarkResult<u32> {
     let cmd = cmd.as_ref();
     let output = Command::new("ps")
-        .args(&["aux"])
+        .args(&["-eo", "pid,command"])
         .output()
         .await
         .map_err(|e| BenchmarkError::IoError(e))?;
@@ -142,20 +142,27 @@ pub(crate) async fn get_command_pid(cmd: impl AsRef<str>) -> BenchmarkResult<Opt
         let stdout = str::from_utf8(&output.stdout)
             .map_err(|e| OtherError(format!("UTF-8 conversion error: {}", e)))?;
 
-        for line in stdout.lines() {
-            info!("got ps line {}", line);
-            if line.contains(cmd) && !line.contains("grep") {
+        for (index, line) in stdout.lines().enumerate() {
+            if index == 0 || line.contains("grep") {
+                continue;
+            }
+            if line.contains(cmd) {
+                info!("got ps line {}", line);
                 let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() > 1 {
-                    return parts[1]
+                info!("parts: {:?}, len is {}", parts, parts.len());
+                if parts.len() > 0 {
+                    return parts[0]
                         .parse::<u32>()
-                        .map(Some)
                         .map_err(|e| OtherError(format!("Failed to parse PID: {}", e)));
                 }
             }
         }
-        Ok(None)
+        Err(ProcessNofFoundError(cmd.to_string()))
     } else {
+        error!(
+            "ps command failed with exit code: {:?}",
+            output.status.code()
+        );
         Err(OtherError(format!(
             "ps command failed with exit code: {:?}",
             output.status.code()

@@ -23,6 +23,8 @@ pub enum BenchmarkError {
     RedisError(#[from] redis::RedisError),
     #[error("Serde error: {0}")]
     SerdeError(#[from] serde_json::Error),
+    #[error("Process with name {0} not found")]
+    ProcessNofFoundError(String),
     #[error("Other error: {0}")]
     OtherError(String),
 }

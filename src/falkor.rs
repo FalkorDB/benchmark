@@ -213,7 +213,7 @@ impl<U> Falkor<U> {
         Ok(())
     }
 
-    pub(crate) async fn get_redis_pid(&self) -> BenchmarkResult<Option<u32>> {
+    pub(crate) async fn get_redis_pid(&self) -> BenchmarkResult<u32> {
         get_command_pid("redis-server").await
     }
 
@@ -221,7 +221,7 @@ impl<U> Falkor<U> {
         &self,
         flash: bool,
     ) -> BenchmarkResult<()> {
-        if let Ok(Some(pid)) = self.get_redis_pid().await {
+        if let Ok(pid) = self.get_redis_pid().await {
             if flash {
                 info!("asking redis to save all data to disk");
                 redis_save().await?;
@@ -231,7 +231,7 @@ impl<U> Falkor<U> {
             kill_process(pid).await?;
             info!("falkor stopped: {}", pid);
         }
-        while let Ok(Some(pid)) = self.get_redis_pid().await {
+        while let Ok(pid) = self.get_redis_pid().await {
             info!("waiting for falkor (pid) to stop: {}", pid);
             sleep(Duration::from_millis(200)).await;
         }
@@ -242,7 +242,7 @@ impl<U> Falkor<U> {
         &self,
         size: Size,
     ) -> BenchmarkResult<()> {
-        if let Ok(Some(pid)) = self.get_redis_pid().await {
+        if let Ok(pid) = self.get_redis_pid().await {
             Err(OtherError(format!(
                 "Can't save the dump file: {}, while falkor is running",
                 pid
@@ -272,7 +272,7 @@ impl<U> Falkor<U> {
             REDIS_DATA_DIR,
             size.to_string().to_lowercase()
         );
-        if let Ok(Some(pid)) = self.get_redis_pid().await {
+        if let Ok(pid) = self.get_redis_pid().await {
             return Err(OtherError(format!(
                 "Can't restore the dump file: {}, while falkor is running {}",
                 source, pid
