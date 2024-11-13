@@ -133,7 +133,7 @@ pub(crate) async fn kill_process(pid: u32) -> BenchmarkResult<()> {
 pub(crate) async fn get_command_pid(cmd: impl AsRef<str>) -> BenchmarkResult<u32> {
     let cmd = cmd.as_ref();
     let output = Command::new("ps")
-        .args(&["-eo", "pid,command"])
+        .args(&["-eo", "pid,command,stat"])
         .output()
         .await
         .map_err(|e| BenchmarkError::IoError(e))?;
@@ -148,12 +148,18 @@ pub(crate) async fn get_command_pid(cmd: impl AsRef<str>) -> BenchmarkResult<u32
             }
             if line.contains(cmd) {
                 info!("got ps line {}", line);
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                info!("parts: {:?}, len is {}", parts, parts.len());
-                if parts.len() > 0 {
-                    return parts[0]
-                        .parse::<u32>()
-                        .map_err(|e| OtherError(format!("Failed to parse PID: {}", e)));
+                if let parts @ [pid, command, stat, ..] =
+                    line.split_whitespace().collect::<Vec<_>>().as_slice()
+                {
+                    if command.contains(cmd) {
+                        info!("parts: {:?}", parts);
+                        if stat.contains("Z") {
+                            continue;
+                        }
+                        return pid
+                            .parse::<u32>()
+                            .map_err(|e| OtherError(format!("Failed to parse PID: {}", e)));
+                    }
                 }
             }
         }
