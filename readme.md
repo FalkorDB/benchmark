@@ -56,6 +56,7 @@ from `~/`
 
 ##### comparing the results
 
+- `mkdir -p html`
 - `./target/release/benchmark compare falkor-metrics_small_q100000.json neo4j-metrics_small_q100000.json`
 
 ### Data
