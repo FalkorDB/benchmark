@@ -10,7 +10,7 @@ use neo4rs::{query, Graph, Row};
 use std::pin::Pin;
 use tokio::io;
 use tokio::time::Instant;
-use tracing::{error, trace};
+use tracing::{error, info, trace};
 
 #[derive(Clone)]
 pub struct Neo4jClient {
@@ -72,6 +72,9 @@ impl Neo4jClient {
             while let Ok(Some(row)) = result.next().await {
                 trace!("Row: {:?}", row);
                 rows += 1;
+                if rows % 10000 == 0 {
+                    info!("{} rows executed", rows);
+                }
             }
 
             let duration = start.elapsed();

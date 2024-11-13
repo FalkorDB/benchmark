@@ -44,10 +44,19 @@ from `~/`
 
 #### run the benchmark
 
-##### init the database
+##### init the databases
 
 - `./target/release/benchmark init --vendor falkor -s small`
 - `./target/release/benchmark init --vendor neo4j -s small`
+
+##### run the benchmarks
+
+- `./target/release/benchmark run --vendor falkor -ssmall -q100000`
+- `./target/release/benchmark run --vendor neo4j -ssmall -q100000`
+
+##### comparing the results
+
+- `./target/release/benchmark compare falkor-metrics_small_q100000.json neo4j-metrics_small_q100000.json`
 
 ### Data
 

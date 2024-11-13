@@ -118,6 +118,9 @@ impl Falkor<Connected> {
             while let Some(nodes) = results.data.next() {
                 trace!("Row: {:?}", nodes);
                 rows += 1;
+                if rows % 10000 == 0 {
+                    info!("{} rows executed", rows);
+                }
             }
             let duration = start.elapsed();
             let stats = format!("{}, {} rows returned", results.stats.join(", "), rows);

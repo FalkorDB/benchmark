@@ -147,12 +147,10 @@ pub(crate) async fn get_command_pid(cmd: impl AsRef<str>) -> BenchmarkResult<u32
                 continue;
             }
             if line.contains(cmd) {
-                info!("got ps line {}", line);
                 if let parts @ [pid, command, stat, ..] =
                     line.split_whitespace().collect::<Vec<_>>().as_slice()
                 {
                     if command.contains(cmd) {
-                        info!("parts: {:?}", parts);
                         if stat.starts_with("Z") || stat.contains("<defunct>") {
                             continue;
                         }
