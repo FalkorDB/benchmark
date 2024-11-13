@@ -153,7 +153,7 @@ pub(crate) async fn get_command_pid(cmd: impl AsRef<str>) -> BenchmarkResult<u32
                 {
                     if command.contains(cmd) {
                         info!("parts: {:?}", parts);
-                        if stat.starts_with("Z") || stat.eq("<defunct>") {
+                        if stat.starts_with("Z") || stat.contains("<defunct>") {
                             continue;
                         }
                         return pid
