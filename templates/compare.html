@@ -8,7 +8,7 @@
     <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels"></script>
     <style>
         .chart-container {
-            width: 800px;
+            width: 1200px;
             margin: 20px auto;
         }
 
@@ -54,6 +54,8 @@
     </style>
 </head>
 <body>
+
+
 <div class="chart-container" id="chart-container">
 </div>
 
@@ -79,10 +81,90 @@
         </table>
     </div>
 </div>
+<div class="header-tables" style="display: flex; justify-content: space-between;">
+    <table border="1" style="border-collapse: collapse; width: 40%; margin: 40px;">
+        <tr>
+            <th style="padding: 10px; background-color: #f2f2f2;">Property</th>
+            <th style="padding: 10px; background-color: #f2f2f2;">Value</th>
+        </tr>
+        <tr>
+            <td style="padding: 10px;">Vendor</td>
+            <td id="vendor-run1" style="padding: 10px;"></td>
+        </tr>
+        <tr>
+            <td style="padding: 10px;">Operating System</td>
+            <td id="os-run1" style="padding: 10px;"></td>
+        </tr>
+        <tr>
+            <td style="padding: 10px;">Architecture</td>
+            <td id="arch-run1" style="padding: 10px;"></td>
+        </tr>
+        <tr>
+            <td style="padding: 10px;">CPU Count</td>
+            <td id="cpu_count-run1" style="padding: 10px;"></td>
+        </tr>
+        <tr>
+            <td style="padding: 10px;">Core Count</td>
+            <td id="core_count-run1" style="padding: 10px;"></td>
+        </tr>
+        <tr>
+            <td style="padding: 10px;">Total Memory (KB)</td>
+            <td id="total_memory_kb-run1" style="padding: 10px;"></td>
+        </tr>
+        <tr>
+            <td style="padding: 10px;">Free Memory (KB)</td>
+            <td id="free_memory_kb-run1" style="padding: 10px;"></td>
+        </tr>
+        <tr>
+            <td style="padding: 10px;">Hostname</td>
+            <td id="hostname-run1" style="padding: 10px;"></td>
+        </tr>
+    </table>
+    <table border="1" style="border-collapse: collapse; width: 40%; margin: 40px;">
+        <tr>
+            <th style="padding: 10px; background-color: #f2f2f2;">Property</th>
+            <th style="padding: 10px; background-color: #f2f2f2;">Value</th>
+        </tr>
+        <tr>
+            <td style="padding: 10px;">Vendor</td>
+            <td id="vendor-run2" style="padding: 10px;"></td>
+        </tr>
+        <tr>
+            <td style="padding: 10px;">Operating System</td>
+            <td id="os-run2" style="padding: 10px;"></td>
+        </tr>
+        <tr>
+            <td style="padding: 10px;">Architecture</td>
+            <td id="arch-run2" style="padding: 10px;"></td>
+        </tr>
+        <tr>
+            <td style="padding: 10px;">CPU Count</td>
+            <td id="cpu_count-run2" style="padding: 10px;"></td>
+        </tr>
+        <tr>
+            <td style="padding: 10px;">Core Count</td>
+            <td id="core_count-run2" style="padding: 10px;"></td>
+        </tr>
+        <tr>
+            <td style="padding: 10px;">Total Memory (KB)</td>
+            <td id="total_memory_kb-run2" style="padding: 10px;"></td>
+        </tr>
+        <tr>
+            <td style="padding: 10px;">Free Memory (KB)</td>
+            <td id="free_memory_kb-run2" style="padding: 10px;"></td>
+        </tr>
+        <tr>
+            <td style="padding: 10px;">Hostname</td>
+            <td id="hostname-run2" style="padding: 10px;"></td>
+        </tr>
+    </table>
+</div>
+
 
 <script>
     Chart.register(ChartDataLabels);
     const runs = {{data}};
+    fill_vendors_table(runs);
     let keys = Object.keys(runs.run_1.histogram_for_type);
     keys.forEach(create_chart);
     // sort keys by p99
@@ -195,6 +277,44 @@
         return tr;
     }
 
+    function fill_vendors_table(runs){
+        let metadata1 = runs.run_1.machine_metadata;
+        let vendor1 = runs.run_1.vendor;
+        let os1 = metadata1.os;
+        let arch1 = metadata1.arch;
+        let cpu_count1 = metadata1.cpu_count;
+        let core_count1 = metadata1.cores_count;
+        let total_memory_kb1 = metadata1.total_memory_kb;
+        let free_memory_kb1 = metadata1.free_memory_kb;
+        let hostname1 = metadata1.hostname;
+        document.getElementById('vendor-run1').textContent = vendor1;
+        document.getElementById('os-run1').textContent = os1;
+        document.getElementById('arch-run1').textContent = arch1;
+        document.getElementById('cpu_count-run1').textContent = cpu_count1;
+        document.getElementById('core_count-run1').textContent = core_count1;
+        document.getElementById('total_memory_kb-run1').textContent = total_memory_kb1;
+        document.getElementById('free_memory_kb-run1').textContent = free_memory_kb1;
+        document.getElementById('hostname-run1').textContent = hostname1;
+
+        let metadata2 = runs.run_2.machine_metadata;
+        let vendor2 = runs.run_2.vendor;
+        let os2 = metadata2.os;
+        let arch2 = metadata2.arch;
+        let cpu_count2 = metadata2.cpu_count;
+        let core_count2 = metadata2.cores_count;
+        let total_memory_kb2 = metadata2.total_memory_kb;
+        let free_memory_kb2 = metadata2.free_memory_kb;
+        let hostname2 = metadata1.hostname;
+        document.getElementById('vendor-run2').textContent = vendor2;
+        document.getElementById('os-run2').textContent = os2;
+        document.getElementById('arch-run2').textContent = arch2;
+        document.getElementById('cpu_count-run2').textContent = cpu_count2;
+        document.getElementById('core_count-run2').textContent = core_count2;
+        document.getElementById('total_memory_kb-run2').textContent = total_memory_kb2;
+        document.getElementById('free_memory_kb-run2').textContent = free_memory_kb2;
+        document.getElementById('hostname-run2').textContent = hostname2;
+
+    }
 
 </script>
 </body>

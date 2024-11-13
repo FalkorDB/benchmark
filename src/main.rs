@@ -16,7 +16,7 @@ use crate::compare_template::{CompareRuns, CompareTemplate};
 use crate::error::BenchmarkError::OtherError;
 use crate::error::BenchmarkResult;
 use crate::falkor::{Connected, Disconnected, Falkor};
-use crate::metrics_collector::MetricsCollector;
+use crate::metrics_collector::{MachineMetadata, MetricsCollector};
 use crate::queries_repository::Queries;
 use crate::scenario::{Size, Spec, Vendor};
 use crate::utils::{delete_file, file_exists, format_number, write_to_file};
@@ -80,16 +80,18 @@ async fn main() -> BenchmarkResult<()> {
             size,
             queries,
         } => {
+            let machine_metadata = MachineMetadata::new();
             info!(
-                "Run benchmark vendor: {}, graph-size:{}, queries: {}",
-                vendor, size, queries
+                "Run benchmark vendor: {}, graph-size:{}, queries: {}, machine_metadata: {:?}",
+                vendor, size, queries, machine_metadata
             );
+
             match vendor {
                 Vendor::Neo4j => {
-                    run_neo4j(size, queries).await?;
+                    run_neo4j(size, queries, machine_metadata).await?;
                 }
                 Vendor::Falkor => {
-                    run_falkor(size, queries).await?;
+                    run_falkor(size, queries, machine_metadata).await?;
                 }
             }
         }
@@ -114,12 +116,13 @@ async fn main() -> BenchmarkResult<()> {
                 run_1: collector_1.to_percentile(),
                 run_2: collector_2.to_percentile(),
             };
-            let json = serde_json::to_string_pretty(&compare_runs)?;
-            info!("{}", json);
+            // let json = serde_json::to_string_pretty(&compare_runs)?;
+            // info!("{}", json);
             let compare_template = CompareTemplate { data: compare_runs };
             let compare_report = compare_template.render().unwrap();
             write_to_file("html/compare.html", compare_report.as_str()).await?;
-            println!("{}", compare_report);
+            info!("report was written to html/compare.html");
+            // println!("{}", compare_report);
         }
     }
 
@@ -129,6 +132,7 @@ async fn main() -> BenchmarkResult<()> {
 async fn run_neo4j(
     size: Size,
     number_of_queries: u64,
+    machine_metadata: MachineMetadata,
 ) -> BenchmarkResult<()> {
     let neo4j = neo4j::Neo4j::new();
     // stop neo4j if it is running
@@ -147,6 +151,7 @@ async fn run_neo4j(
         relation_count,
         number_of_queries,
         "Neo4J".to_owned(),
+        machine_metadata,
     )?;
     // generate queries
     let queries_repository = queries_repository::UsersQueriesRepository::new(9998, 121716);
@@ -189,6 +194,7 @@ async fn run_neo4j(
 async fn run_falkor(
     size: Size,
     number_of_queries: u64,
+    machine_metadata: MachineMetadata,
 ) -> BenchmarkResult<()> {
     let falkor: Falkor<Disconnected> = falkor::Falkor::new();
     // stop falkor if it is running
@@ -208,6 +214,7 @@ async fn run_falkor(
         relation_count,
         number_of_queries,
         "FalkorDB".to_owned(),
+        machine_metadata,
     )?;
     // generate queries
     let queries_repository = queries_repository::UsersQueriesRepository::new(9998, 121716);

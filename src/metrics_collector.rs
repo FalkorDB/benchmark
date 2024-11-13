@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
+use sysinfo::System;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -18,6 +19,8 @@ pub(crate) struct MetricsCollector {
     pub(crate) histogram_for_type: HashMap<String, Histogram>,
     pub(crate) worst_call_for_type: HashMap<String, (String, String, Duration)>,
     pub(crate) total_calls_for_type: HashMap<String, u64>,
+    pub(crate) machine_metadata: MachineMetadata,
+    pub(crate) total_operations_duration: Duration,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -29,6 +32,42 @@ pub(crate) struct Percentile {
     pub(crate) histogram_for_type: HashMap<String, Vec<f32>>,
     pub(crate) worst_call_for_type: HashMap<String, (String, String, Duration)>,
     pub(crate) total_calls_for_type: HashMap<String, u64>,
+    pub(crate) machine_metadata: MachineMetadata,
+    pub(crate) total_operations_duration: Duration,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub(crate) struct MachineMetadata {
+    pub(crate) os: String,
+    pub(crate) arch: String,
+    pub(crate) cpu_count: usize,
+    pub(crate) cores_count: usize,
+    pub(crate) total_memory_kb: u64,
+    pub(crate) free_memory_kb: u64,
+    pub(crate) hostname: String,
+}
+impl MachineMetadata {
+    pub(crate) fn new() -> MachineMetadata {
+        let mut sys = System::new_all();
+        sys.refresh_all();
+        let os = std::env::consts::OS.into();
+        let arch = std::env::consts::ARCH.into();
+        let cpu_count = sys.cpus().len();
+        let cores_count = sys.physical_core_count().unwrap_or(0);
+        let total_memory_kb = sys.total_memory();
+        let free_memory_kb = sys.used_memory();
+        let hostname = System::host_name().unwrap_or_else(|| "Unknown".to_string());
+
+        MachineMetadata {
+            os,
+            arch,
+            cpu_count,
+            cores_count,
+            total_memory_kb,
+            free_memory_kb,
+            hostname,
+        }
+    }
 }
 
 impl MetricsCollector {
@@ -44,6 +83,7 @@ impl MetricsCollector {
         relation_count: u64,
         query_count: u64,
         vendor: String,
+        machine_metadata: MachineMetadata,
     ) -> BenchmarkResult<Self> {
         Ok(Self {
             vendor,
@@ -53,6 +93,8 @@ impl MetricsCollector {
             histogram_for_type: HashMap::new(),
             worst_call_for_type: HashMap::new(),
             total_calls_for_type: HashMap::new(),
+            machine_metadata,
+            total_operations_duration: Duration::default(),
         })
     }
 
@@ -85,7 +127,6 @@ impl MetricsCollector {
             .total_calls_for_type
             .entry(operation.to_string())
             .or_insert(0) += 1;
-
         Ok(())
     }
     pub(crate) fn record(
@@ -96,6 +137,7 @@ impl MetricsCollector {
         query: &str,
         statistics: &str,
     ) -> BenchmarkResult<()> {
+        self.total_operations_duration += duration;
         self.record_operation(duration, "all", query, statistics)?;
         if operation_type == QueryType::Read {
             self.record_operation(duration, "read", query, statistics)?;
@@ -124,6 +166,8 @@ impl MetricsCollector {
             histogram_for_type: HashMap::new(),
             worst_call_for_type: self.worst_call_for_type.clone(),
             total_calls_for_type: self.total_calls_for_type.clone(),
+            machine_metadata: self.machine_metadata.clone(),
+            total_operations_duration: self.total_operations_duration,
         };
 
         for (operation, histogram) in &self.histogram_for_type {
