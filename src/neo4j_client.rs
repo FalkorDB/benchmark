@@ -55,6 +55,7 @@ impl Neo4jClient {
         >,
         metric_collector: &mut MetricsCollector,
     ) -> BenchmarkResult<()> {
+        let mut count = 0u64;
         for (name, query_type, (q, params)) in iter {
             let query_and_params = format!(
                 "{}, [{}]",
@@ -71,13 +72,13 @@ impl Neo4jClient {
             let mut rows = 0;
             while let Ok(Some(row)) = result.next().await {
                 trace!("Row: {:?}", row);
-                rows += 1;
-                if rows % 10000 == 0 {
-                    info!("{} rows executed", rows);
-                }
             }
 
             let duration = start.elapsed();
+            count += 1;
+            if count % 10000 == 0 {
+                info!("Executed {} queries", count);
+            }
             let stats = format!("{} rows returned", rows);
             metric_collector.record(
                 duration,

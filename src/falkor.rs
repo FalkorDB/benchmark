@@ -111,18 +111,19 @@ impl Falkor<Connected> {
         iter: Box<dyn Iterator<Item = (String, QueryType, String)> + '_>,
         metric_collector: &mut MetricsCollector,
     ) -> BenchmarkResult<()> {
+        let mut count = 0u64;
         for (name, query_type, query) in iter {
             let start = Instant::now();
             let mut results = self.execute_query(query.as_str()).await?;
             let mut rows = 0;
             while let Some(nodes) = results.data.next() {
                 trace!("Row: {:?}", nodes);
-                rows += 1;
-                if rows % 10000 == 0 {
-                    info!("{} rows executed", rows);
-                }
             }
             let duration = start.elapsed();
+            count += 1;
+            if count % 10000 == 0 {
+                info!("{} queries executed", count);
+            }
             let stats = format!("{}, {} rows returned", results.stats.join(", "), rows);
             metric_collector.record(
                 duration,
@@ -151,6 +152,7 @@ impl Falkor<Connected> {
                         continue;
                     }
                     trace!("Executing query: {}", line);
+                    let mut count = 0u64;
                     let start = Instant::now();
                     let mut results = self.execute_query(line.as_str()).await?;
                     while let Some(nodes) = results.data.next() {
@@ -158,6 +160,10 @@ impl Falkor<Connected> {
                     }
 
                     let duration = start.elapsed();
+                    count += 1;
+                    if count % 10000 == 0 {
+                        info!("{} queries executed", count);
+                    }
                     histogram.increment(duration.as_micros() as u64)?;
                 }
                 Err(e) => error!("Error reading line: {}", e),
