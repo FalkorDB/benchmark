@@ -208,19 +208,19 @@ impl UsersQueriesRepository {
     ) -> UsersQueriesRepository {
         let queries_repository = QueriesRepositoryBuilder::new(vertices, edges)
             .flavour(Flavour::FalkorDB)
-            .add_query("single_vertex_read", QueryType::Read, |random,  _flavour, rng| {
+            .add_query("single_vertex_read", QueryType::Read, |random, _flavour, rng| {
                 QueryBuilder::new()
                     .text("MATCH (n:User {id : $id}) RETURN n")
                     .param("id", random.random_vertex(rng))
                     .build()
             })
-            .add_query("single_vertex_write", QueryType::Write, |random,  _flavour, rng| {
+            .add_query("single_vertex_write", QueryType::Write, |random, _flavour, rng| {
                 QueryBuilder::new()
                     .text("CREATE (n:UserTemp {id : $id}) RETURN n")
                     .param("id", random.random_vertex(rng))
                     .build()
             })
-            .add_query("single_edge_write", QueryType::Write, |random,  _flavour, rng| {
+            .add_query("single_edge_write", QueryType::Write, |random, _flavour, rng| {
                 let (from, to) = random.random_path(rng);
                 QueryBuilder::new()
                     .text("MATCH (n:User {id: $from}), (m:User {id: $to}) WITH n, m CREATE (n)-[e:Temp]->(m) RETURN e")
@@ -228,22 +228,7 @@ impl UsersQueriesRepository {
                     .param("to", to)
                     .build()
             })
-            .add_query("aggregate", QueryType::Read, |_random,  _flavour, _rng| {
-                QueryBuilder::new()
-                    .text("MATCH (n:User) RETURN n.age, COUNT(*)")
-                    .build()
-            })
-            .add_query("aggregate_distinct", QueryType::Read, |_random,  _flavour, _rng| {
-                QueryBuilder::new()
-                    .text("MATCH (n:User) RETURN COUNT(DISTINCT n.age)")
-                    .build()
-            })
-            .add_query("aggregate_with_filter", QueryType::Read, |_random,  _flavour, _rng| {
-                QueryBuilder::new()
-                    .text("MATCH (n:User) WHERE n.age >= 18 RETURN n.age, COUNT(*)")
-                    .build()
-            })
-            .add_query("aggregate_expansion_1", QueryType::Read, |random,  _flavour, rng|{
+            .add_query("aggregate_expansion_1", QueryType::Read, |random, _flavour, rng| {
                 QueryBuilder::new()
                     .text("MATCH (s:User {id: $id})-->(n:User) RETURN n.id")
                     .param("id", random.random_vertex(rng))
@@ -252,14 +237,14 @@ impl UsersQueriesRepository {
             .add_query(
                 "aggregate_expansion_1_with_filter",
                 QueryType::Read,
-                |random,  _flavour, rng| {
+                |random, _flavour, rng| {
                     QueryBuilder::new()
                         .text("MATCH (s:User {id: $id})-->(n:User)  WHERE n.age >= 18  RETURN n.id")
                         .param("id", random.random_vertex(rng))
                         .build()
                 },
             )
-            .add_query("aggregate_expansion_2", QueryType::Read, |random,  _flavour, rng| {
+            .add_query("aggregate_expansion_2", QueryType::Read, |random, _flavour, rng| {
                 QueryBuilder::new()
                     .text("MATCH (s:User {id: $id})-->()-->(n:User) RETURN DISTINCT n.id")
                     .param("id", random.random_vertex(rng))
@@ -268,7 +253,7 @@ impl UsersQueriesRepository {
             .add_query(
                 "aggregate_expansion_2_with_filter",
                 QueryType::Read,
-                |random,  _flavour, rng| {
+                |random, _flavour, rng| {
                     QueryBuilder::new()
                         .text("MATCH (s:User {id: $id})-->()-->(n:User)  WHERE n.age >= 18  RETURN DISTINCT n.id")
                         .param("id", random.random_vertex(rng))
@@ -278,7 +263,7 @@ impl UsersQueriesRepository {
             .add_query(
                 "aggregate_expansion_3",
                 QueryType::Read,
-                |random,  _flavour, rng| {
+                |random, _flavour, rng| {
                     QueryBuilder::new()
                         .text("MATCH (s:User {id: $id})-->()-->()-->(n:User) RETURN DISTINCT n.id")
                         .param("id", random.random_vertex(rng))
@@ -288,9 +273,9 @@ impl UsersQueriesRepository {
             .add_query(
                 "aggregate_expansion_3_with_filter",
                 QueryType::Read,
-                |random,  _flavour, rng| {
+                |random, _flavour, rng| {
                     QueryBuilder::new()
-                        .text("MATCH (s:User {id: $id})-->()-->()-->(n:User)  WHERE n.age >= 18  RETURN DISTINCT n.id",)
+                        .text("MATCH (s:User {id: $id})-->()-->()-->(n:User)  WHERE n.age >= 18  RETURN DISTINCT n.id")
                         .param("id", random.random_vertex(rng))
                         .build()
                 },
@@ -298,7 +283,7 @@ impl UsersQueriesRepository {
             .add_query(
                 "aggregate_expansion_4",
                 QueryType::Read,
-                |random,  _flavour, rng|{
+                |random, _flavour, rng| {
                     QueryBuilder::new()
                         .text("MATCH (s:User {id: $id})-->()-->()-->()-->(n:User) RETURN DISTINCT n.id")
                         .param("id", random.random_vertex(rng))
@@ -308,49 +293,9 @@ impl UsersQueriesRepository {
             .add_query(
                 "aggregate_expansion_4_with_filter",
                 QueryType::Read,
-                |random,  _flavour, rng| {
+                |random, _flavour, rng| {
                     QueryBuilder::new()
                         .text("MATCH (s:User {id: $id})-->()-->()-->()-->(n:User)  WHERE n.age >= 18 RETURN DISTINCT n.id")
-                        .param("id", random.random_vertex(rng))
-                        .build()
-                },
-            )
-            .add_query(
-                "neighbours_2",
-                QueryType::Read,
-                |random,  _flavour, rng|{
-                    QueryBuilder::new()
-                        .text("MATCH (s:User {id: $id})-[*1..2]->(n:User) RETURN DISTINCT n.id")
-                        .param("id", random.random_vertex(rng))
-                        .build()
-                },
-            )
-            .add_query(
-                "neighbours_2_with_filter",
-                QueryType::Read,
-                |random,  _flavour, rng|{
-                    QueryBuilder::new()
-                        .text("MATCH (s:User {id: $id})-[*1..2]->(n:User)  WHERE n.age >= 18  RETURN DISTINCT n.id")
-                        .param("id", random.random_vertex(rng))
-                        .build()
-                },
-            )
-            .add_query(
-                "neighbours_2_with_data",
-                QueryType::Read,
-                |random,  _flavour, rng| {
-                    QueryBuilder::new()
-                        .text( "MATCH (s:User {id: $id})-[*1..2]->(n:User) RETURN DISTINCT n.id, n")
-                        .param("id", random.random_vertex(rng))
-                        .build()
-                },
-            )
-            .add_query(
-                "neighbours_2_with_data_and_filter",
-                QueryType::Read,
-                |random,  _flavour, rng| {
-                    QueryBuilder::new()
-                        .text( "MATCH (s:User {id: $id})-[*1..2]->(n:User) WHERE n.age >= 18 RETURN DISTINCT n.id, n")
                         .param("id", random.random_vertex(rng))
                         .build()
                 },
