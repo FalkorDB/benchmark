@@ -22,24 +22,19 @@ tokio = { version = "1.41.0", features = ["full"] }
 futures = "0.3.31"
 rand = "0.8.5"
 histogram = { version = "0.11", features = ["serde"] }
-tokio-util = { version = "0.7", features = ["io"] }
 reqwest = { version = "0.12.9", features = ["gzip"] }
-async-trait = "0.1.83"
 strum = { version = "0.26.3", features = ["derive"] }
 strum_macros = "0.26.4"
 tokio-stream = { version = "0.1.16", features = ["io-util"] }
-bytes = "1.8.0"
 clap = { version = "4.5.20", features = ["cargo", "derive", "env"] }
 clap_complete = "4.5.36"
 nix = { version = "0.29.0", features = ["process", "signal"] }
 falkordb = { version = "0.1.6", features = ["tokio"] }
 #falkordb = { path = "/Users/barak/dev/falkordb-rs", features = ["tokio"] }
 redis = { version = "0.27.5", features = ["tokio-comp"] }
-log = "0.4.22"
 serde = { version = "1.0.214", features = ["derive"] }
 serde_json = "1.0.132"
 askama = "0.12.1"
-hostname = "0.4.0"
 sysinfo = "0.32.0"
 rand_pcg = "0.3.1"
 

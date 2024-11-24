@@ -153,7 +153,8 @@ impl QueriesRepository {
 
 impl Queries for QueriesRepository {
     fn random_query(&mut self) -> Option<(String, QueryType, Query)> {
-        let keys: Vec<&String> = self.queries.keys().collect();
+        let mut keys: Vec<&String> = self.queries.keys().collect();
+        keys.sort();
         keys.choose(&mut self.rng).map(|&key| {
             let generator = self.queries.get(key).unwrap();
             (
@@ -187,7 +188,6 @@ impl RandomUtil {
         while end == start {
             end = self.random_vertex(rng);
         }
-
         (start, end)
     }
 }
