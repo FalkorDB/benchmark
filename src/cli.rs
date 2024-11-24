@@ -7,6 +7,15 @@ use std::str::FromStr;
 #[derive(Parser, Debug)]
 #[command(name = "benchmark", version, about="falkor benchmark tool", long_about = None, arg_required_else_help(true), propagate_version(true))]
 pub(crate) struct Cli {
+    #[arg(
+        short,
+        long,
+        required = false,
+        default_value_t = false,
+        default_missing_value = "true",
+        help = "report telemetry to OTEL on the same machine"
+    )]
+    pub(crate) otel: bool,
     #[command(subcommand)]
     pub(crate) command: Commands,
 }

@@ -8,7 +8,7 @@ use crate::utils::{
     get_command_pid, kill_process, redis_save, wait_for_redis_ready,
 };
 use falkordb::FalkorValue::I64;
-use falkordb::{AsyncGraph, FalkorClientBuilder, LazyResultSet, QueryResult};
+use falkordb::{AsyncGraph, FalkorClientBuilder, FalkorResult, LazyResultSet, QueryResult};
 use futures::{Stream, StreamExt};
 use histogram::Histogram;
 use std::process::{Child, Command};
@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use std::{env, io};
 use tokio::fs;
 use tokio::time::sleep;
-use tracing::{error, info, trace};
+use tracing::{error, info, instrument, trace};
 
 const REDIS_DUMP_FILE: &str = "./redis-data/dump.rdb";
 const REDIS_DATA_DIR: &str = "./redis-data";
@@ -90,7 +90,43 @@ impl Falkor<Connected> {
         }
     }
 
+    #[instrument(skip(self, q), fields(query = %q.as_ref()))]
     pub(crate) async fn execute_query<T: AsRef<str>>(
+        &mut self,
+        _query_type: QueryType,
+        _query_template: String,
+        q: T,
+    ) -> BenchmarkResult<QueryResult<LazyResultSet>> {
+        let q = q.as_ref().to_owned();
+        trace!("Executing query: {}", q);
+        let graph = &mut self.graph.0;
+        let falkor_result = Self::call_server(q.clone(), graph).await;
+        Self::read_reply(q, falkor_result)
+    }
+
+    #[instrument(skip(graph))]
+    async fn call_server(
+        q: String,
+        graph: &mut AsyncGraph,
+    ) -> FalkorResult<QueryResult<LazyResultSet>> {
+        graph.query(q).with_timeout(5000).execute().await
+    }
+
+    #[instrument(skip(falkor_result))]
+    fn read_reply(
+        q: String,
+        falkor_result: FalkorResult<QueryResult<LazyResultSet>>,
+    ) -> BenchmarkResult<QueryResult<LazyResultSet>> {
+        match falkor_result {
+            Ok(query_result) => Ok(query_result),
+            Err(e) => {
+                error!("Error executing query: {}, error: {}", q, e);
+                Err(OtherError(e.to_string()))
+            }
+        }
+    }
+
+    pub(crate) async fn execute_query_un_trace<T: AsRef<str>>(
         &mut self,
         q: T,
     ) -> BenchmarkResult<QueryResult<LazyResultSet>> {
@@ -112,9 +148,11 @@ impl Falkor<Connected> {
         metric_collector: &mut MetricsCollector,
     ) -> BenchmarkResult<()> {
         let mut count = 0u64;
-        for (name, query_type, query) in iter {
+        for (query_template, query_type, query) in iter {
             let start = Instant::now();
-            let mut results = self.execute_query(query.as_str()).await?;
+            let mut results = self
+                .execute_query(query_type.clone(), query_template.clone(), query.as_str())
+                .await?;
             let mut rows = 0;
             while let Some(nodes) = results.data.next() {
                 trace!("Row: {:?}", nodes);
@@ -128,7 +166,7 @@ impl Falkor<Connected> {
             let stats = format!("{}, {} rows returned", results.stats.join(", "), rows);
             metric_collector.record(
                 duration,
-                name.as_str(),
+                query_template.as_str(),
                 query_type,
                 query.as_str(),
                 stats.as_str(),
@@ -155,7 +193,7 @@ impl Falkor<Connected> {
                     trace!("Executing query: {}", line);
                     let mut count = 0u64;
                     let start = Instant::now();
-                    let mut results = self.execute_query(line.as_str()).await?;
+                    let mut results = self.execute_query_un_trace(line.as_str()).await?;
                     while let Some(nodes) = results.data.next() {
                         trace!("Row: {:?}", nodes);
                     }
