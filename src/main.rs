@@ -154,7 +154,7 @@ async fn run_neo4j(
         machine_metadata,
     )?;
     // generate queries
-    let queries_repository = queries_repository::UsersQueriesRepository::new(9998, 121716);
+    let mut queries_repository = queries_repository::UsersQueriesRepository::new(9998, 121716);
     let queries = Box::new(
         queries_repository
             .random_queries(number_of_queries)
@@ -217,7 +217,7 @@ async fn run_falkor(
         machine_metadata,
     )?;
     // generate queries
-    let queries_repository = queries_repository::UsersQueriesRepository::new(9998, 121716);
+    let mut queries_repository = queries_repository::UsersQueriesRepository::new(9998, 121716);
     let queries = Box::new(
         queries_repository
             .random_queries(number_of_queries)

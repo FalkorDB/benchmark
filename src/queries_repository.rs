@@ -1,13 +1,14 @@
 use crate::query::{Query, QueryBuilder};
 use rand::seq::SliceRandom;
-use rand::{thread_rng, Rng};
+use rand::{Rng, RngCore, SeedableRng};
+use rand_pcg::{Lcg64Xsh32, Pcg32};
 use std::collections::HashMap;
 
 pub(crate) trait Queries {
-    fn random_query(&self) -> Option<(String, QueryType, Query)>;
+    fn random_query(&mut self) -> Option<(String, QueryType, Query)>;
 
     fn random_queries(
-        &self,
+        &mut self,
         count: u64,
     ) -> Box<dyn Iterator<Item = (String, QueryType, Query)> + '_> {
         Box::new((0..count).filter_map(move |_| self.random_query()))
@@ -29,7 +30,7 @@ struct Empty;
 
 pub struct QueryGenerator {
     query_type: QueryType,
-    generator: Box<dyn Fn() -> Query>,
+    generator: Box<dyn Fn(&mut dyn RngCore) -> Query>,
 }
 
 impl QueryGenerator {
@@ -38,7 +39,7 @@ impl QueryGenerator {
         generator: F,
     ) -> Self
     where
-        F: Fn() -> Query + 'static,
+        F: Fn(&mut dyn RngCore) -> Query + 'static,
     {
         QueryGenerator {
             query_type,
@@ -46,15 +47,18 @@ impl QueryGenerator {
         }
     }
 
-    pub fn generate(&self) -> Query {
-        (self.generator)()
+    pub fn generate(
+        &self,
+        rng: &mut dyn RngCore,
+    ) -> Query {
+        (self.generator)(rng)
     }
 }
 
 pub struct QueriesRepositoryBuilder<U> {
     vertices: i32,
     edges: i32,
-    queries: Vec<(String, QueryType, Box<dyn Fn() -> Query>)>,
+    queries: Vec<(String, QueryType, Box<dyn Fn(&mut dyn RngCore) -> Query>)>,
     flavour: U,
 }
 
@@ -90,7 +94,7 @@ impl QueriesRepositoryBuilder<Flavour> {
         generator: F,
     ) -> Self
     where
-        F: Fn(&RandomUtil, Flavour) -> Query + 'static,
+        F: Fn(&RandomUtil, Flavour, &mut dyn RngCore) -> Query + 'static,
     {
         let vertices = self.vertices;
         let edges = self.edges;
@@ -98,12 +102,12 @@ impl QueriesRepositoryBuilder<Flavour> {
         self.queries.push((
             name.into(),
             query_type,
-            Box::new(move || {
+            Box::new(move |rng| {
                 let random = RandomUtil {
                     vertices,
                     _edges: edges,
                 };
-                generator(&random, flavour)
+                generator(&random, flavour, rng)
             }),
         ));
         self
@@ -121,12 +125,16 @@ impl QueriesRepositoryBuilder<Flavour> {
 
 pub struct QueriesRepository {
     queries: HashMap<String, QueryGenerator>,
+    rng: Lcg64Xsh32,
 }
 
 impl QueriesRepository {
     fn new() -> Self {
+        let seed: u64 = 42;
+        let rng: Lcg64Xsh32 = Pcg32::seed_from_u64(seed);
         QueriesRepository {
             queries: HashMap::new(),
+            rng,
         }
     }
 
@@ -136,101 +144,24 @@ impl QueriesRepository {
         query_type: QueryType,
         generator: F,
     ) where
-        F: Fn() -> Query + 'static,
+        F: Fn(&mut dyn RngCore) -> Query + 'static,
     {
         self.queries
             .insert(name.into(), QueryGenerator::new(query_type, generator));
     }
-
-    #[allow(dead_code)]
-    pub fn all_read(&self) -> QueryTypeView {
-        QueryTypeView {
-            repo: self,
-            query_type: QueryType::Read,
-        }
-    }
-    #[allow(dead_code)]
-    pub fn all_write(&self) -> QueryTypeView {
-        QueryTypeView {
-            repo: self,
-            query_type: QueryType::Write,
-        }
-    }
-    #[allow(dead_code)]
-    pub fn mixed(
-        &self,
-        write_percentage: f64,
-    ) -> MixedQueryView {
-        MixedQueryView {
-            repo: self,
-            write_percentage,
-        }
-    }
-    fn choose_random_query<'a, I>(
-        &'a self,
-        keys: I,
-    ) -> Option<(String, QueryType, Query)>
-    where
-        I: IntoIterator<Item = &'a String>,
-    {
-        keys.into_iter()
-            .collect::<Vec<_>>()
-            .choose(&mut thread_rng())
-            .and_then(|&key| self.queries.get(key).map(|generator| (key, generator)))
-            .map(|(name, generator)| (name.to_string(), generator.query_type, generator.generate()))
-    }
 }
 
 impl Queries for QueriesRepository {
-    fn random_query(&self) -> Option<(String, QueryType, Query)> {
+    fn random_query(&mut self) -> Option<(String, QueryType, Query)> {
         let keys: Vec<&String> = self.queries.keys().collect();
-        keys.choose(&mut thread_rng()).map(|&key| {
+        keys.choose(&mut self.rng).map(|&key| {
             let generator = self.queries.get(key).unwrap();
-            (key.clone(), generator.query_type, generator.generate())
+            (
+                key.clone(),
+                generator.query_type,
+                generator.generate(&mut self.rng),
+            )
         })
-    }
-}
-
-pub struct QueryTypeView<'a> {
-    repo: &'a QueriesRepository,
-    query_type: QueryType,
-}
-impl Queries for QueryTypeView<'_> {
-    fn random_query(&self) -> Option<(String, QueryType, Query)> {
-        let filtered_keys = self
-            .repo
-            .queries
-            .iter()
-            .filter(|(_, generator)| generator.query_type == self.query_type)
-            .map(|(name, _)| name);
-
-        self.repo.choose_random_query(filtered_keys)
-    }
-}
-
-pub struct MixedQueryView<'a> {
-    repo: &'a QueriesRepository,
-    write_percentage: f64,
-}
-
-impl Queries for MixedQueryView<'_> {
-    fn random_query(&self) -> Option<(String, QueryType, Query)> {
-        let mut rng = thread_rng();
-        let is_write = rng.gen_bool(self.write_percentage);
-        let filtered_keys = self
-            .repo
-            .queries
-            .iter()
-            .filter(|(_, generator)| {
-                if is_write {
-                    generator.query_type == QueryType::Write
-                } else {
-                    generator.query_type == QueryType::Read
-                }
-            })
-            .map(|(name, _)| name);
-
-        self.repo.choose_random_query(filtered_keys)
     }
 }
 
@@ -239,17 +170,22 @@ struct RandomUtil {
     _edges: i32,
 }
 impl RandomUtil {
-    fn random_vertex(&self) -> i32 {
-        let mut rng = thread_rng();
+    fn random_vertex(
+        &self,
+        rng: &mut dyn RngCore,
+    ) -> i32 {
         rng.gen_range(1..=self.vertices)
     }
-    fn random_path(&self) -> (i32, i32) {
-        let start = self.random_vertex();
-        let mut end = self.random_vertex();
+    fn random_path(
+        &self,
+        rng: &mut dyn RngCore,
+    ) -> (i32, i32) {
+        let start = self.random_vertex(rng);
+        let mut end = self.random_vertex(rng);
 
         // Ensure start and end are different
         while end == start {
-            end = self.random_vertex();
+            end = self.random_vertex(rng);
         }
 
         (start, end)
@@ -260,7 +196,7 @@ pub(crate) struct UsersQueriesRepository {
 }
 
 impl Queries for UsersQueriesRepository {
-    fn random_query(&self) -> Option<(String, QueryType, Query)> {
+    fn random_query(&mut self) -> Option<(String, QueryType, Query)> {
         self.queries_repository.random_query()
     }
 }
@@ -272,150 +208,150 @@ impl UsersQueriesRepository {
     ) -> UsersQueriesRepository {
         let queries_repository = QueriesRepositoryBuilder::new(vertices, edges)
             .flavour(Flavour::FalkorDB)
-            .add_query("single_vertex_read", QueryType::Read, |random,  _flavour| {
+            .add_query("single_vertex_read", QueryType::Read, |random,  _flavour, rng| {
                 QueryBuilder::new()
                     .text("MATCH (n:User {id : $id}) RETURN n")
-                    .param("id", random.random_vertex())
+                    .param("id", random.random_vertex(rng))
                     .build()
             })
-            .add_query("single_vertex_write", QueryType::Write, |random,  _flavour| {
+            .add_query("single_vertex_write", QueryType::Write, |random,  _flavour, rng| {
                 QueryBuilder::new()
                     .text("CREATE (n:UserTemp {id : $id}) RETURN n")
-                    .param("id", random.random_vertex())
+                    .param("id", random.random_vertex(rng))
                     .build()
             })
-            .add_query("single_edge_write", QueryType::Write, |random,  _flavour| {
-                let (from, to) = random.random_path();
+            .add_query("single_edge_write", QueryType::Write, |random,  _flavour, rng| {
+                let (from, to) = random.random_path(rng);
                 QueryBuilder::new()
                     .text("MATCH (n:User {id: $from}), (m:User {id: $to}) WITH n, m CREATE (n)-[e:Temp]->(m) RETURN e")
                     .param("from", from)
                     .param("to", to)
                     .build()
             })
-            .add_query("aggregate", QueryType::Read, |_random,  _flavour| {
+            .add_query("aggregate", QueryType::Read, |_random,  _flavour, _rng| {
                 QueryBuilder::new()
                     .text("MATCH (n:User) RETURN n.age, COUNT(*)")
                     .build()
             })
-            .add_query("aggregate_distinct", QueryType::Read, |_random,  _flavour| {
+            .add_query("aggregate_distinct", QueryType::Read, |_random,  _flavour, _rng| {
                 QueryBuilder::new()
                     .text("MATCH (n:User) RETURN COUNT(DISTINCT n.age)")
                     .build()
             })
-            .add_query("aggregate_with_filter", QueryType::Read, |_random,  _flavour| {
+            .add_query("aggregate_with_filter", QueryType::Read, |_random,  _flavour, _rng| {
                 QueryBuilder::new()
                     .text("MATCH (n:User) WHERE n.age >= 18 RETURN n.age, COUNT(*)")
                     .build()
             })
-            .add_query("aggregate_expansion_1", QueryType::Read, |random,  _flavour|{
+            .add_query("aggregate_expansion_1", QueryType::Read, |random,  _flavour, rng|{
                 QueryBuilder::new()
                     .text("MATCH (s:User {id: $id})-->(n:User) RETURN n.id")
-                    .param("id", random.random_vertex())
+                    .param("id", random.random_vertex(rng))
                     .build()
             })
             .add_query(
                 "aggregate_expansion_1_with_filter",
                 QueryType::Read,
-                |random,  _flavour| {
+                |random,  _flavour, rng| {
                     QueryBuilder::new()
                         .text("MATCH (s:User {id: $id})-->(n:User)  WHERE n.age >= 18  RETURN n.id")
-                        .param("id", random.random_vertex())
+                        .param("id", random.random_vertex(rng))
                         .build()
                 },
             )
-            .add_query("aggregate_expansion_2", QueryType::Read, |random,  _flavour| {
+            .add_query("aggregate_expansion_2", QueryType::Read, |random,  _flavour, rng| {
                 QueryBuilder::new()
                     .text("MATCH (s:User {id: $id})-->()-->(n:User) RETURN DISTINCT n.id")
-                    .param("id", random.random_vertex())
+                    .param("id", random.random_vertex(rng))
                     .build()
             })
             .add_query(
                 "aggregate_expansion_2_with_filter",
                 QueryType::Read,
-                |random,  _flavour| {
+                |random,  _flavour, rng| {
                     QueryBuilder::new()
                         .text("MATCH (s:User {id: $id})-->()-->(n:User)  WHERE n.age >= 18  RETURN DISTINCT n.id")
-                        .param("id", random.random_vertex())
+                        .param("id", random.random_vertex(rng))
                         .build()
                 },
             )
             .add_query(
                 "aggregate_expansion_3",
                 QueryType::Read,
-                |random,  _flavour| {
+                |random,  _flavour, rng| {
                     QueryBuilder::new()
                         .text("MATCH (s:User {id: $id})-->()-->()-->(n:User) RETURN DISTINCT n.id")
-                        .param("id", random.random_vertex())
+                        .param("id", random.random_vertex(rng))
                         .build()
                 },
             )
             .add_query(
                 "aggregate_expansion_3_with_filter",
                 QueryType::Read,
-                |random,  _flavour| {
+                |random,  _flavour, rng| {
                     QueryBuilder::new()
                         .text("MATCH (s:User {id: $id})-->()-->()-->(n:User)  WHERE n.age >= 18  RETURN DISTINCT n.id",)
-                        .param("id", random.random_vertex())
+                        .param("id", random.random_vertex(rng))
                         .build()
                 },
             )
             .add_query(
                 "aggregate_expansion_4",
                 QueryType::Read,
-                |random,  _flavour|{
+                |random,  _flavour, rng|{
                     QueryBuilder::new()
                         .text("MATCH (s:User {id: $id})-->()-->()-->()-->(n:User) RETURN DISTINCT n.id")
-                        .param("id", random.random_vertex())
+                        .param("id", random.random_vertex(rng))
                         .build()
                 },
             )
             .add_query(
                 "aggregate_expansion_4_with_filter",
                 QueryType::Read,
-                |random,  _flavour| {
+                |random,  _flavour, rng| {
                     QueryBuilder::new()
                         .text("MATCH (s:User {id: $id})-->()-->()-->()-->(n:User)  WHERE n.age >= 18 RETURN DISTINCT n.id")
-                        .param("id", random.random_vertex())
+                        .param("id", random.random_vertex(rng))
                         .build()
                 },
             )
             .add_query(
                 "neighbours_2",
                 QueryType::Read,
-                |random,  _flavour|{
+                |random,  _flavour, rng|{
                     QueryBuilder::new()
                         .text("MATCH (s:User {id: $id})-[*1..2]->(n:User) RETURN DISTINCT n.id")
-                        .param("id", random.random_vertex())
+                        .param("id", random.random_vertex(rng))
                         .build()
                 },
             )
             .add_query(
                 "neighbours_2_with_filter",
                 QueryType::Read,
-                |random,  _flavour|{
+                |random,  _flavour, rng|{
                     QueryBuilder::new()
                         .text("MATCH (s:User {id: $id})-[*1..2]->(n:User)  WHERE n.age >= 18  RETURN DISTINCT n.id")
-                        .param("id", random.random_vertex())
+                        .param("id", random.random_vertex(rng))
                         .build()
                 },
             )
             .add_query(
                 "neighbours_2_with_data",
                 QueryType::Read,
-                |random,  _flavour| {
+                |random,  _flavour, rng| {
                     QueryBuilder::new()
                         .text( "MATCH (s:User {id: $id})-[*1..2]->(n:User) RETURN DISTINCT n.id, n")
-                        .param("id", random.random_vertex())
+                        .param("id", random.random_vertex(rng))
                         .build()
                 },
             )
             .add_query(
                 "neighbours_2_with_data_and_filter",
                 QueryType::Read,
-                |random,  _flavour| {
+                |random,  _flavour, rng| {
                     QueryBuilder::new()
                         .text( "MATCH (s:User {id: $id})-[*1..2]->(n:User) WHERE n.age >= 18 RETURN DISTINCT n.id, n")
-                        .param("id", random.random_vertex())
+                        .param("id", random.random_vertex(rng))
                         .build()
                 },
             )
@@ -437,7 +373,9 @@ mod tests {
                 .build()
         });
 
-        let query = generator.generate();
+        let seed: u64 = 42;
+        let mut rng: Lcg64Xsh32 = Pcg32::seed_from_u64(seed);
+        let query = generator.generate(&mut rng);
         assert_eq!(query.text, "MATCH (p:Person) RETURN p");
     }
 }
