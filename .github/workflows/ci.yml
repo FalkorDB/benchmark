@@ -8,7 +8,7 @@ on:
     branches:
       - main
   workflow_dispatch:
-    
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -19,7 +19,7 @@ jobs:
 
     strategy:
       matrix:
-        toolchain: [ stable, beta, nightly ]
+        toolchain: [ stable ]
 
     steps:
       - name: Checkout code
