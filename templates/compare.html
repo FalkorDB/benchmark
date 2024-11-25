@@ -70,8 +70,7 @@
             <tr>
                 <th>Vendor</th>
                 <th>Total Calls</th>
-                <th>Worst Call</th>
-                <th>Worst Call Time</th>
+                <th>Worst Query</th>
                 <th>More Info</th>
             </tr>
             </thead>
@@ -177,7 +176,7 @@
         canvas.id = key;
         let div = document.createElement("div");
         div.id = key + "_div";
-        if(key != 'all'){
+        if(key !== 'all'){
             div.classList.add('hidden');
         }
         div.appendChild(canvas);
@@ -238,7 +237,7 @@
             let div = document.getElementById(key + "_div");
             div.classList.remove('hidden');
             keys.forEach(function(k){
-                if(k != key){
+                if(k !== key){
                     document.getElementById(k + "_div").classList.add('hidden');
                 }
             });
@@ -260,14 +259,12 @@
         let td1 = document.createElement("td");
         let td2 = document.createElement("td");
         let td3 = document.createElement("td");
-        let td4 = document.createElement("td");
         let td5 = document.createElement("td");
         td1.innerHTML = run.vendor;
         td2.innerHTML = run.total_calls_for_type[key].toString();
         td3.innerHTML = run.worst_call_for_type[key][0];
         td3.style.fontFamily =  "Arial, sans-serif";
         td3.style.fontSize = "14px";
-        td4.innerHTML = (run.worst_call_for_type[key][2]['nanos'] / 1000000).toFixed(2) + " ms";
         td5.innerHTML = run.worst_call_for_type[key][1];
         tr.appendChild(td1);
         tr.appendChild(td2);

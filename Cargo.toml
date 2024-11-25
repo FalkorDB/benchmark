@@ -36,13 +36,24 @@ askama = "0.12.1"
 sysinfo = "0.32.0"
 rand_pcg = "0.3.1"
 
-opentelemetry = { version = "0.19", features = ["rt-tokio", "metrics"] }
-opentelemetry-otlp = { version = "0.12.0", features = ["tonic", "metrics", "trace", "tokio"] }
+
 tracing = "0.1.40"
+#tracing-core = "0.1.32"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
-tracing-opentelemetry = "0.19.0"
-opentelemetry-semantic-conventions = "0.11.0"
-opentelemetry_sdk = { version = "0.19.0", features = ["rt-tokio", "metrics"] }
+
+opentelemetry = { version = "0.22" }
+opentelemetry_sdk = { version = "0.22.1", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.15.0", features = ["tonic"] }
+tracing-opentelemetry = "0.23.0"
+opentelemetry-semantic-conventions = "0.14.0"
+
+#opentelemetry = { version = "0.19", features = ["rt-tokio", "metrics"] }
+#opentelemetry-otlp = { version = "0.12.0", features = ["tonic", "metrics", "trace", "tokio"] }
+#tracing = "0.1.40"
+#tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
+#tracing-opentelemetry = "0.19.0"
+#opentelemetry-semantic-conventions = "0.11.0"
+#opentelemetry_sdk = { version = "0.19.0", features = ["rt-tokio", "metrics"] }
 [dev-dependencies]
 
 [profile.release]

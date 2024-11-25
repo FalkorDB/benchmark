@@ -98,7 +98,7 @@ impl Falkor<Connected> {
         q: T,
     ) -> BenchmarkResult<QueryResult<LazyResultSet>> {
         let q = q.as_ref().to_owned();
-        trace!("Executing query: {}", q);
+        info!("Executing query: {}", q);
         let graph = &mut self.graph.0;
         let falkor_result = Self::call_server(q.clone(), graph).await;
         Self::read_reply(q, falkor_result)

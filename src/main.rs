@@ -33,50 +33,57 @@ use opentelemetry_semantic_conventions::resource::SERVICE_NAME;
 use std::io;
 use std::time::Duration;
 use tokio::time::Instant;
-use tracing::{error, info, Level};
-use tracing_opentelemetry::OpenTelemetryLayer;
+use tracing::{error, info};
 use tracing_subscriber::fmt::Layer;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::{EnvFilter, FmtSubscriber, Registry};
+use tracing_subscriber::{EnvFilter, Registry};
 
 #[tokio::main]
 async fn main() -> BenchmarkResult<()> {
     let mut cmd = Cli::command();
     let cli = Cli::parse();
 
-    let fmt_layer = Layer::new();
+    let fmt_layer = Layer::new().pretty();
     let filter_layer = EnvFilter::try_from_default_env()
         .or_else(|_| EnvFilter::try_new("info"))
         .unwrap();
 
-    if cli.otel {
+    let _drop_tracer = if cli.otel {
         let resource = Resource::new(vec![KeyValue::new(SERVICE_NAME, "otel-demo1")]);
         let otel_tracer = opentelemetry_otlp::new_pipeline()
             .tracing()
             .with_trace_config(Config::default().with_resource(resource.clone()))
             .with_exporter(opentelemetry_otlp::new_exporter().tonic())
             .with_batch_config(
-                opentelemetry::sdk::trace::BatchConfig::default()
+                opentelemetry_sdk::trace::BatchConfigBuilder::default()
                     .with_max_queue_size(2048 * 10)
-                    .with_max_concurrent_exports(10),
+                    .with_max_concurrent_exports(10)
+                    .build(),
             )
-            .install_batch(opentelemetry::runtime::Tokio)
+            .install_batch(opentelemetry_sdk::runtime::Tokio)
             .unwrap();
-        let otel_layer = OpenTelemetryLayer::new(otel_tracer);
-        let subscriber = Registry::default()
+        // let otel_layer = OpenTelemetryLayer::new(otel_tracer);
+        let otel_layer = tracing_opentelemetry::layer().with_tracer(otel_tracer);
+        Registry::default()
             .with(filter_layer)
             .with(fmt_layer)
-            .with(otel_layer);
-        tracing::subscriber::set_global_default(subscriber)
-            .expect("setting default subscriber failed");
+            .with(otel_layer)
+            .try_init()
+            .unwrap();
+        // tracing::subscriber::set_global_default(subscriber)
+        //     .expect("setting default subscriber failed");
+        Some(DropTracer)
     } else {
-        let subscriber = tracing_subscriber::Registry::default()
+        Registry::default()
             .with(filter_layer)
-            .with(fmt_layer);
-        tracing::subscriber::set_global_default(subscriber)
-            .expect("setting default subscriber failed");
-    }
+            .with(fmt_layer)
+            .try_init()
+            .unwrap();
+        // tracing::subscriber::set_global_default(subscriber)
+        //     .expect("setting default subscriber failed");
+        None
+    };
 
     match cli.command {
         GenerateAutoComplete { shell } => {
@@ -443,4 +450,12 @@ fn print_completions<G: Generator>(
     cmd: &mut Command,
 ) {
     generate(gen, cmd, cmd.get_name().to_string(), &mut io::stdout());
+}
+
+struct DropTracer;
+
+impl Drop for DropTracer {
+    fn drop(&mut self) {
+        global::shutdown_tracer_provider();
+    }
 }
