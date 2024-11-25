@@ -312,7 +312,7 @@ mod tests {
 
     #[test]
     fn test_query_generator() {
-        let generator = QueryGenerator::new(QueryType::Read, || {
+        let generator = QueryGenerator::new(QueryType::Read, |_rng| {
             QueryBuilder::new()
                 .text("MATCH (p:Person) RETURN p")
                 .build()

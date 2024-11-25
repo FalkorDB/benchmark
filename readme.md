@@ -1,3 +1,6 @@
+[![Cargo Build & Test](https://github.com/FalkorDB/benchmark/actions/workflows/ci.yml/badge.svg)](https://github.com/FalkorDB/benchmark/actions/workflows/ci.yml)
+
+
 Install on Ubuntu
 =================
 
