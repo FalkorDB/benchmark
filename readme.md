@@ -3,6 +3,8 @@
 [![Discord](https://img.shields.io/discord/1146782921294884966.svg?style=social&logo=discord)](https://discord.com/invite/99y2Ubh6tg)
 [![Twitter](https://img.shields.io/twitter/follow/falkordb?style=social)](https://twitter.com/falkordb)
 
+[View the Benchmark Results](https://falkordb.github.io/benchmark/index.html)
+
 Install on Ubuntu
 =================
 
@@ -68,4 +70,7 @@ from `~/`
 
 The data is based on https://www.kaggle.com/datasets/wolfram77/graphs-snap-soc-pokec
 licensed: https://creativecommons.org/licenses/by/4.0/
+
+
+
 
