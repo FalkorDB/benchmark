@@ -101,7 +101,7 @@ impl Falkor<Connected> {
         info!("Executing query: {}", q);
         let graph = &mut self.graph.0;
         let falkor_result = Self::call_server(q.clone(), graph).await;
-        Self::read_reply(q, falkor_result)
+        Self::read_reply(falkor_result)
     }
 
     #[instrument(skip(graph))]
@@ -114,13 +114,12 @@ impl Falkor<Connected> {
 
     #[instrument(skip(falkor_result))]
     fn read_reply(
-        q: String,
-        falkor_result: FalkorResult<QueryResult<LazyResultSet>>,
+        falkor_result: FalkorResult<QueryResult<LazyResultSet>>
     ) -> BenchmarkResult<QueryResult<LazyResultSet>> {
         match falkor_result {
             Ok(query_result) => Ok(query_result),
             Err(e) => {
-                error!("Error executing query: {}, error: {}", q, e);
+                error!("Error {} while executing query", e);
                 Err(OtherError(e.to_string()))
             }
         }
@@ -213,6 +212,17 @@ impl Falkor<Connected> {
 }
 
 impl<U> Falkor<U> {
+    pub async fn client(&self) -> BenchmarkResult<FalkorBenchmarkClient> {
+        let connection_info = "falkor://127.0.0.1:6379".try_into()?;
+        let client = FalkorClientBuilder::new_async()
+            .with_connection_info(connection_info)
+            .build()
+            .await?;
+        Ok(FalkorBenchmarkClient {
+            graph: client.select_graph("falkor"),
+        })
+    }
+
     pub async fn start(&self) -> BenchmarkResult<Child> {
         self.stop(false).await?;
         create_directory_if_not_exists(REDIS_DATA_DIR).await?;
@@ -349,6 +359,53 @@ impl<U> Falkor<U> {
             )))
         } else {
             Ok(())
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct FalkorBenchmarkClient {
+    graph: AsyncGraph,
+}
+
+impl FalkorBenchmarkClient {
+    #[instrument(skip(self, _query_name),fields(query = %query, query_name = %_query_name))]
+    pub(crate) async fn execute_query<'a>(
+        &'a mut self,
+        _query_name: &'a str,
+        query: &'a str,
+    ) {
+        let falkor_result = self.graph.query(query).with_timeout(5000).execute().await;
+        Self::read_reply(falkor_result)
+    }
+
+    #[instrument(skip(self, queries))]
+    pub(crate) async fn execute_queries(
+        &mut self,
+        queries: Vec<(String, QueryType, String)>,
+    ) {
+        for (query_name, _query_type, query) in queries.into_iter() {
+            let _res = self
+                .execute_query(query_name.as_str(), query.as_str())
+                .await;
+            // info!(
+            //     "executed: query_name={}, query_type={:?}, query:{} ",
+            //     query_name, query_type, query
+            // );
+        }
+    }
+
+    #[instrument(skip(reply))]
+    fn read_reply<'a>(reply: FalkorResult<QueryResult<LazyResultSet<'a>>>) {
+        match reply {
+            Ok(_) => {
+                tracing::Span::current().record("result", &"success");
+                // info!("Query executed successfully");
+            }
+            Err(e) => {
+                tracing::Span::current().record("result", &"failure");
+                error!("Error executing query: {}", e);
+            }
         }
     }
 }

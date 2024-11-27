@@ -5,6 +5,7 @@ mod falkor;
 mod metrics_collector;
 mod neo4j;
 mod neo4j_client;
+mod prometheus_endpoint;
 mod queries_repository;
 mod query;
 pub mod scenario;
@@ -17,7 +18,7 @@ use crate::error::BenchmarkError::OtherError;
 use crate::error::BenchmarkResult;
 use crate::falkor::{Connected, Disconnected, Falkor};
 use crate::metrics_collector::{MachineMetadata, MetricsCollector};
-use crate::queries_repository::Queries;
+use crate::queries_repository::{Queries, QueryType};
 use crate::scenario::{Size, Spec, Vendor};
 use crate::utils::{delete_file, file_exists, format_number, write_to_file};
 use askama::Template;
@@ -26,64 +27,25 @@ use clap_complete::{generate, Generator};
 use cli::Cli;
 use futures::StreamExt;
 use histogram::Histogram;
-use opentelemetry::{global, KeyValue};
-use opentelemetry_sdk::trace::Config;
-use opentelemetry_sdk::Resource;
-use opentelemetry_semantic_conventions::resource::SERVICE_NAME;
 use std::io;
 use std::time::Duration;
+use tokio::task::JoinHandle;
 use tokio::time::Instant;
-use tracing::{error, info};
-use tracing_subscriber::fmt::Layer;
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::{EnvFilter, Registry};
+use tracing::{error, info, instrument, Instrument};
 
 #[tokio::main]
 async fn main() -> BenchmarkResult<()> {
     let mut cmd = Cli::command();
     let cli = Cli::parse();
 
-    let fmt_layer = Layer::new().pretty();
-    let filter_layer = EnvFilter::try_from_default_env()
-        .or_else(|_| EnvFilter::try_new("info"))
-        .unwrap();
+    tracing_subscriber::fmt()
+        .pretty()
+        .with_file(true)
+        .with_line_number(true)
+        .with_thread_ids(true)
+        .init();
 
-    let _drop_tracer = if cli.otel {
-        let resource = Resource::new(vec![KeyValue::new(SERVICE_NAME, "otel-demo1")]);
-        let otel_tracer = opentelemetry_otlp::new_pipeline()
-            .tracing()
-            .with_trace_config(Config::default().with_resource(resource.clone()))
-            .with_exporter(opentelemetry_otlp::new_exporter().tonic())
-            .with_batch_config(
-                opentelemetry_sdk::trace::BatchConfigBuilder::default()
-                    .with_max_queue_size(2048 * 10)
-                    .with_max_concurrent_exports(10)
-                    .build(),
-            )
-            .install_batch(opentelemetry_sdk::runtime::Tokio)
-            .unwrap();
-        // let otel_layer = OpenTelemetryLayer::new(otel_tracer);
-        let otel_layer = tracing_opentelemetry::layer().with_tracer(otel_tracer);
-        Registry::default()
-            .with(filter_layer)
-            .with(fmt_layer)
-            .with(otel_layer)
-            .try_init()
-            .unwrap();
-        // tracing::subscriber::set_global_default(subscriber)
-        //     .expect("setting default subscriber failed");
-        Some(DropTracer)
-    } else {
-        Registry::default()
-            .with(filter_layer)
-            .with(fmt_layer)
-            .try_init()
-            .unwrap();
-        // tracing::subscriber::set_global_default(subscriber)
-        //     .expect("setting default subscriber failed");
-        None
-    };
+    let prometheus_endpoint = prometheus_endpoint::PrometheusEndpoint::new();
 
     match cli.command {
         GenerateAutoComplete { shell } => {
@@ -120,6 +82,7 @@ async fn main() -> BenchmarkResult<()> {
             vendor,
             size,
             queries,
+            parallel,
         } => {
             let machine_metadata = MachineMetadata::new();
             info!(
@@ -132,7 +95,7 @@ async fn main() -> BenchmarkResult<()> {
                     run_neo4j(size, queries, machine_metadata).await?;
                 }
                 Vendor::Falkor => {
-                    run_falkor(size, queries, machine_metadata).await?;
+                    run_falkor(size, queries, machine_metadata, parallel).await?;
                 }
             }
         }
@@ -166,7 +129,7 @@ async fn main() -> BenchmarkResult<()> {
             // println!("{}", compare_report);
         }
     }
-
+    drop(prometheus_endpoint);
     Ok(())
 }
 
@@ -232,10 +195,12 @@ async fn run_neo4j(
     // write the report
     Ok(())
 }
+#[instrument]
 async fn run_falkor(
     size: Size,
     number_of_queries: u64,
     machine_metadata: MachineMetadata,
+    parallel: usize,
 ) -> BenchmarkResult<()> {
     let falkor: Falkor<Disconnected> = falkor::Falkor::new();
     // stop falkor if it is running
@@ -257,23 +222,37 @@ async fn run_falkor(
         "FalkorDB".to_owned(),
         machine_metadata,
     )?;
-    // generate queries
-    let mut queries_repository = queries_repository::UsersQueriesRepository::new(9998, 121716);
-    let queries = Box::new(
-        queries_repository
-            .random_queries(number_of_queries)
-            .map(|(q_name, q_type, q)| (q_name, q_type, q.to_cypher())),
-    );
+
     info!(
         "graph has {} nodes and {} relations",
         format_number(node_count),
         format_number(relation_count)
     );
     info!("running {} queries", format_number(number_of_queries));
+
+    let mut queries_repository = queries_repository::UsersQueriesRepository::new(9998, 121716);
+    let queries: Vec<(String, QueryType, String)> = queries_repository
+        .random_queries(number_of_queries)
+        .map(|(q_name, q_type, q)| (q_name, q_type, q.to_cypher()))
+        .collect::<Vec<_>>();
+
+    let mut handles = Vec::with_capacity(parallel);
     let start = Instant::now();
-    falkor
-        .execute_query_iterator(queries, &mut metric_collector)
-        .await?;
+    for spawn_id in 0..parallel {
+        let queries = queries.clone();
+        let handle = spawn_worker(&mut falkor, queries, spawn_id).await?;
+        handles.push(handle);
+    }
+
+    let mut results = Vec::with_capacity(handles.len());
+    for handle in handles {
+        // Await each handle to get the result of the task
+        match handle.await {
+            Ok(result) => results.push(result),
+            Err(e) => eprintln!("Task failed: {:?}", e),
+        }
+    }
+
     let elapsed = start.elapsed();
     let report_file = "falkor-results.md";
     info!("report was written to {}", report_file);
@@ -291,6 +270,24 @@ async fn run_falkor(
     );
     // stop falkor
     falkor.stop(false).await
+}
+
+#[instrument(skip(falkor, queries, _spawn_id), fields(spawn_id = _spawn_id, vendor = "falkor",  query_count = queries.len()))]
+async fn spawn_worker(
+    falkor: &mut Falkor<Connected>,
+    queries: Vec<(String, QueryType, String)>,
+    _spawn_id: usize,
+) -> BenchmarkResult<JoinHandle<()>> {
+    let queries = queries.clone();
+    let mut graph = falkor.client().await?;
+    let handle = tokio::spawn(
+        async move {
+            graph.execute_queries(queries).await;
+        }
+        .instrument(tracing::Span::current()),
+    );
+
+    Ok(handle)
 }
 
 async fn init_falkor(
@@ -450,12 +447,4 @@ fn print_completions<G: Generator>(
     cmd: &mut Command,
 ) {
     generate(gen, cmd, cmd.get_name().to_string(), &mut io::stdout());
-}
-
-struct DropTracer;
-
-impl Drop for DropTracer {
-    fn drop(&mut self) {
-        global::shutdown_tracer_provider();
-    }
 }
