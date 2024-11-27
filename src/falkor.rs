@@ -7,6 +7,7 @@ use crate::utils::{
     create_directory_if_not_exists, delete_file, falkor_shared_lib_path, file_exists,
     get_command_pid, kill_process, redis_save, wait_for_redis_ready,
 };
+use crate::{OPERATION_COUNTER, OPERATION_ERROR_COUNTER};
 use falkordb::FalkorValue::I64;
 use falkordb::{AsyncGraph, FalkorClientBuilder, FalkorResult, LazyResultSet, QueryResult};
 use futures::{Stream, StreamExt};
@@ -16,7 +17,7 @@ use std::time::{Duration, Instant};
 use std::{env, io};
 use tokio::fs;
 use tokio::time::sleep;
-use tracing::{error, info, instrument, trace};
+use tracing::{error, field, info, instrument, trace};
 
 const REDIS_DUMP_FILE: &str = "./redis-data/dump.rdb";
 const REDIS_DATA_DIR: &str = "./redis-data";
@@ -101,7 +102,7 @@ impl Falkor<Connected> {
         info!("Executing query: {}", q);
         let graph = &mut self.graph.0;
         let falkor_result = Self::call_server(q.clone(), graph).await;
-        Self::read_reply(q, falkor_result)
+        Self::read_reply(falkor_result)
     }
 
     #[instrument(skip(graph))]
@@ -114,13 +115,12 @@ impl Falkor<Connected> {
 
     #[instrument(skip(falkor_result))]
     fn read_reply(
-        q: String,
-        falkor_result: FalkorResult<QueryResult<LazyResultSet>>,
+        falkor_result: FalkorResult<QueryResult<LazyResultSet>>
     ) -> BenchmarkResult<QueryResult<LazyResultSet>> {
         match falkor_result {
             Ok(query_result) => Ok(query_result),
             Err(e) => {
-                error!("Error executing query: {}, error: {}", q, e);
+                error!("Error {} while executing query", e);
                 Err(OtherError(e.to_string()))
             }
         }
@@ -213,6 +213,17 @@ impl Falkor<Connected> {
 }
 
 impl<U> Falkor<U> {
+    pub async fn client(&self) -> BenchmarkResult<FalkorBenchmarkClient> {
+        let connection_info = "falkor://127.0.0.1:6379".try_into()?;
+        let client = FalkorClientBuilder::new_async()
+            .with_connection_info(connection_info)
+            .build()
+            .await?;
+        Ok(FalkorBenchmarkClient {
+            graph: client.select_graph("falkor"),
+        })
+    }
+
     pub async fn start(&self) -> BenchmarkResult<Child> {
         self.stop(false).await?;
         create_directory_if_not_exists(REDIS_DATA_DIR).await?;
@@ -349,6 +360,67 @@ impl<U> Falkor<U> {
             )))
         } else {
             Ok(())
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct FalkorBenchmarkClient {
+    graph: AsyncGraph,
+}
+
+impl FalkorBenchmarkClient {
+    #[instrument(skip(self, queries))]
+    pub(crate) async fn execute_queries(
+        &mut self,
+        spawn_id: usize,
+        queries: Vec<(String, QueryType, String)>,
+    ) {
+        let spawn_id = spawn_id.to_string();
+        for (query_name, _query_type, query) in queries.into_iter() {
+            let _res = self
+                .execute_query(spawn_id.as_str(), query_name.as_str(), query.as_str())
+                .await;
+            // info!("executed: query_name={}, query:{} ", query_name, query);
+        }
+    }
+
+    #[instrument(skip(self), fields(query = %query, query_name = %query_name))]
+    pub(crate) async fn execute_query<'a>(
+        &'a mut self,
+        spawn_id: &'a str,
+        query_name: &'a str,
+        query: &'a str,
+    ) {
+        // "vendor", "type", "name", "dataset", "dataset_size"
+        OPERATION_COUNTER
+            .with_label_values(&["falkor", spawn_id, "", query_name, "", ""])
+            .inc();
+        let falkor_result = self.graph.query(query).with_timeout(5000).execute().await;
+        Self::read_reply(spawn_id, query_name, falkor_result)
+    }
+
+    #[instrument(skip(reply), fields(result = field::Empty, error_type = field::Empty))]
+    fn read_reply(
+        spawn_id: &str,
+        query_name: &str,
+        reply: FalkorResult<QueryResult<LazyResultSet>>,
+    ) {
+        match reply {
+            Ok(_) => {
+                tracing::Span::current().record("result", &"success");
+                // info!("Query executed successfully");
+            }
+            Err(e) => {
+                OPERATION_ERROR_COUNTER
+                    .with_label_values(&["falkor", spawn_id, "", query_name, "", ""])
+                    .inc();
+                // tracing::Span::current().record("result", &"failure");
+                let error_type = std::any::type_name_of_val(&e);
+                tracing::Span::current().record("result", &"failure");
+                tracing::Span::current().record("error_type", &error_type);
+                error!("Error executing query: {:?}", e);
+            }
         }
     }
 }
