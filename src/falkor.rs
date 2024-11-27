@@ -7,6 +7,7 @@ use crate::utils::{
     create_directory_if_not_exists, delete_file, falkor_shared_lib_path, file_exists,
     get_command_pid, kill_process, redis_save, wait_for_redis_ready,
 };
+use crate::{OPERATION_COUNTER, OPERATION_ERROR_COUNTER};
 use falkordb::FalkorValue::I64;
 use falkordb::{AsyncGraph, FalkorClientBuilder, FalkorResult, LazyResultSet, QueryResult};
 use futures::{Stream, StreamExt};
@@ -16,7 +17,7 @@ use std::time::{Duration, Instant};
 use std::{env, io};
 use tokio::fs;
 use tokio::time::sleep;
-use tracing::{error, info, instrument, trace};
+use tracing::{error, field, info, instrument, trace};
 
 const REDIS_DUMP_FILE: &str = "./redis-data/dump.rdb";
 const REDIS_DATA_DIR: &str = "./redis-data";
@@ -369,42 +370,56 @@ pub(crate) struct FalkorBenchmarkClient {
 }
 
 impl FalkorBenchmarkClient {
-    #[instrument(skip(self, _query_name),fields(query = %query, query_name = %_query_name))]
-    pub(crate) async fn execute_query<'a>(
-        &'a mut self,
-        _query_name: &'a str,
-        query: &'a str,
-    ) {
-        let falkor_result = self.graph.query(query).with_timeout(5000).execute().await;
-        Self::read_reply(falkor_result)
-    }
-
     #[instrument(skip(self, queries))]
     pub(crate) async fn execute_queries(
         &mut self,
+        spawn_id: usize,
         queries: Vec<(String, QueryType, String)>,
     ) {
+        let spawn_id = spawn_id.to_string();
         for (query_name, _query_type, query) in queries.into_iter() {
             let _res = self
-                .execute_query(query_name.as_str(), query.as_str())
+                .execute_query(spawn_id.as_str(), query_name.as_str(), query.as_str())
                 .await;
-            // info!(
-            //     "executed: query_name={}, query_type={:?}, query:{} ",
-            //     query_name, query_type, query
-            // );
+            // info!("executed: query_name={}, query:{} ", query_name, query);
         }
     }
 
-    #[instrument(skip(reply))]
-    fn read_reply<'a>(reply: FalkorResult<QueryResult<LazyResultSet<'a>>>) {
+    #[instrument(skip(self), fields(query = %query, query_name = %query_name))]
+    pub(crate) async fn execute_query<'a>(
+        &'a mut self,
+        spawn_id: &'a str,
+        query_name: &'a str,
+        query: &'a str,
+    ) {
+        // "vendor", "type", "name", "dataset", "dataset_size"
+        OPERATION_COUNTER
+            .with_label_values(&["falkor", spawn_id, "", query_name, "", ""])
+            .inc();
+        let falkor_result = self.graph.query(query).with_timeout(5000).execute().await;
+        Self::read_reply(spawn_id, query_name, falkor_result)
+    }
+
+    #[instrument(skip(reply), fields(result = field::Empty, error_type = field::Empty))]
+    fn read_reply(
+        spawn_id: &str,
+        query_name: &str,
+        reply: FalkorResult<QueryResult<LazyResultSet>>,
+    ) {
         match reply {
             Ok(_) => {
                 tracing::Span::current().record("result", &"success");
                 // info!("Query executed successfully");
             }
             Err(e) => {
+                OPERATION_ERROR_COUNTER
+                    .with_label_values(&["falkor", spawn_id, "", query_name, "", ""])
+                    .inc();
+                // tracing::Span::current().record("result", &"failure");
+                let error_type = std::any::type_name_of_val(&e);
                 tracing::Span::current().record("result", &"failure");
-                error!("Error executing query: {}", e);
+                tracing::Span::current().record("error_type", &error_type);
+                error!("Error executing query: {:?}", e);
             }
         }
     }

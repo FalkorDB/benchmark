@@ -27,12 +27,42 @@ use clap_complete::{generate, Generator};
 use cli::Cli;
 use futures::StreamExt;
 use histogram::Histogram;
+use lazy_static::lazy_static;
+use prometheus::{register_counter_vec, CounterVec};
 use std::io;
 use std::time::Duration;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tracing::{error, info, instrument, Instrument};
 
+lazy_static! {
+    pub(crate) static ref OPERATION_COUNTER: CounterVec = register_counter_vec!(
+        "operations_total",
+        "Total number of operations processed",
+        &[
+            "vendor",
+            "spawn_id",
+            "type",
+            "name",
+            "dataset",
+            "dataset_size"
+        ]
+    )
+    .unwrap();
+    pub(crate) static ref OPERATION_ERROR_COUNTER: CounterVec = register_counter_vec!(
+        "operations_error_total",
+        "Total number of operations failed",
+        &[
+            "vendor",
+            "spawn_id",
+            "type",
+            "name",
+            "dataset",
+            "dataset_size"
+        ]
+    )
+    .unwrap();
+}
 #[tokio::main]
 async fn main() -> BenchmarkResult<()> {
     let mut cmd = Cli::command();
@@ -272,17 +302,18 @@ async fn run_falkor(
     falkor.stop(false).await
 }
 
-#[instrument(skip(falkor, queries, _spawn_id), fields(spawn_id = _spawn_id, vendor = "falkor",  query_count = queries.len()))]
+#[instrument(skip(falkor, queries), fields(vendor = "falkor",  query_count = queries.len()))]
 async fn spawn_worker(
     falkor: &mut Falkor<Connected>,
     queries: Vec<(String, QueryType, String)>,
-    _spawn_id: usize,
+    spawn_id: usize,
 ) -> BenchmarkResult<JoinHandle<()>> {
+    info!("spawning worker");
     let queries = queries.clone();
     let mut graph = falkor.client().await?;
     let handle = tokio::spawn(
         async move {
-            graph.execute_queries(queries).await;
+            graph.execute_queries(spawn_id, queries).await;
         }
         .instrument(tracing::Span::current()),
     );
