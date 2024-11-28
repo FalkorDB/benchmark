@@ -3,7 +3,7 @@
 [![Discord](https://img.shields.io/discord/1146782921294884966.svg?style=social&logo=discord)](https://discord.com/invite/99y2Ubh6tg)
 [![Twitter](https://img.shields.io/twitter/follow/falkordb?style=social)](https://twitter.com/falkordb)
 
-![falkor benchmarks logo](https://falkordb.github.io/benchmark/falkor_benchamrks.png)
+![falkor benchmarks logo](https://falkordb.github.io/benchmark/images/falkor_benchamrks.png)
 
 [View the Benchmark Results](https://falkordb.github.io/benchmark/index.html)
 
