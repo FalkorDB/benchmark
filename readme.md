@@ -123,7 +123,7 @@ A: Yes, through Redis persistence mechanisms (RDB/AOF). Additional persistence o
 
 ### Integration
 **Q: Does FalkorDB support common programming languages?**  
-A: Yes, through Redis clients and the Bolt protocol, supporting major languages including Python, Java, Go, and Node.js.
+A: Yes, through FalkorDB has set of clients in all these programming langauges and more see [official clients](https://docs.falkordb.com/clients.html)
 
 ### Production Use
 **Q: Is FalkorDB production-ready?**  
