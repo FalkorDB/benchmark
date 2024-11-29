@@ -51,7 +51,7 @@ impl Into<BoltType> for QueryParam {
     }
 }
 impl QueryParam {
-    pub(crate) fn to_cypher_string(&self) -> String {
+    pub fn to_cypher_string(&self) -> String {
         match self {
             QueryParam::String(s) => format!("\"{}\"", s.replace("\"", "\\\"")),
             QueryParam::Integer(i) => i.to_string(),

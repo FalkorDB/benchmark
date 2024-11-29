@@ -6,13 +6,13 @@ use std::str::FromStr;
 
 #[derive(Parser, Debug)]
 #[command(name = "benchmark", version, about="falkor benchmark tool", long_about = None, arg_required_else_help(true), propagate_version(true))]
-pub(crate) struct Cli {
+pub struct Cli {
     #[command(subcommand)]
-    pub(crate) command: Commands,
+    pub command: Commands,
 }
 
 #[derive(Subcommand, Debug)]
-pub(crate) enum Commands {
+pub enum Commands {
     #[command(arg_required_else_help = true)]
     GenerateAutoComplete { shell: Shell },
     #[command(arg_required_else_help = true)]
@@ -89,7 +89,7 @@ pub(crate) enum Commands {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct ExistingJsonFile(PathBuf);
+pub struct ExistingJsonFile(PathBuf);
 
 impl ExistingJsonFile {
     pub fn path(&self) -> &PathBuf {

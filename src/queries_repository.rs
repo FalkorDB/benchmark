@@ -4,7 +4,7 @@ use rand::{Rng, RngCore, SeedableRng};
 use rand_pcg::{Lcg64Xsh32, Pcg32};
 use std::collections::HashMap;
 
-pub(crate) trait Queries {
+pub trait Queries {
     fn random_query(&mut self) -> Option<(String, QueryType, Query)>;
 
     fn random_queries(
@@ -21,7 +21,7 @@ pub enum QueryType {
     Write,
 }
 #[derive(Debug, PartialEq, Eq, Copy, Clone)]
-pub(crate) enum Flavour {
+pub enum Flavour {
     FalkorDB,
     _Neo4j,
 }
@@ -74,7 +74,7 @@ impl QueriesRepositoryBuilder<Empty> {
             flavour: Empty,
         }
     }
-    pub(crate) fn flavour(
+    pub fn flavour(
         self,
         flavour: Flavour,
     ) -> QueriesRepositoryBuilder<Flavour> {
@@ -191,7 +191,7 @@ impl RandomUtil {
         (start, end)
     }
 }
-pub(crate) struct UsersQueriesRepository {
+pub struct UsersQueriesRepository {
     queries_repository: QueriesRepository,
 }
 

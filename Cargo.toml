@@ -42,6 +42,15 @@ tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
 prometheus = { version = "0.13.4", features = ["gen"] }
 lazy_static = "1.5"
 hyper = { version = "0.14.31", features = ["server", "runtime", "http1", "tcp"] }
+libc = "0.2.161"
+
+[[bin]]
+name = "falkor_process"
+path = "src/bin/falkor_process_main.rs"
+
+[[bin]]
+name = "benchmark"
+path = "src/main.rs"
 
 [dev-dependencies]
 

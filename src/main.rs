@@ -1,68 +1,27 @@
-mod cli;
-mod compare_template;
-mod error;
-mod falkor;
-mod metrics_collector;
-mod neo4j;
-mod neo4j_client;
-mod prometheus_endpoint;
-mod queries_repository;
-mod query;
-pub mod scenario;
-mod utils;
+// mod cli;
 
-use crate::cli::Commands;
-use crate::cli::Commands::GenerateAutoComplete;
-use crate::compare_template::{CompareRuns, CompareTemplate};
-use crate::error::BenchmarkError::OtherError;
-use crate::error::BenchmarkResult;
-use crate::falkor::{Connected, Disconnected, Falkor};
-use crate::metrics_collector::{MachineMetadata, MetricsCollector};
-use crate::queries_repository::{Queries, QueryType};
-use crate::scenario::{Size, Spec, Vendor};
-use crate::utils::{delete_file, file_exists, format_number, write_to_file};
 use askama::Template;
+use benchmark::cli::Cli;
+use benchmark::cli::Commands;
+use benchmark::cli::Commands::GenerateAutoComplete;
+use benchmark::compare_template::{CompareRuns, CompareTemplate};
+use benchmark::error::BenchmarkError::OtherError;
+use benchmark::error::BenchmarkResult;
+use benchmark::falkor::{Connected, Disconnected, Falkor};
+use benchmark::metrics_collector::{MachineMetadata, MetricsCollector};
+use benchmark::queries_repository::{Queries, QueryType};
+use benchmark::scenario::{Size, Spec, Vendor};
+use benchmark::utils::{delete_file, file_exists, format_number, write_to_file};
 use clap::{Command, CommandFactory, Parser};
 use clap_complete::{generate, Generator};
-use cli::Cli;
 use futures::StreamExt;
 use histogram::Histogram;
-use lazy_static::lazy_static;
-use prometheus::{register_counter_vec, CounterVec};
 use std::io;
 use std::time::Duration;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tracing::{error, info, instrument, Instrument};
 
-lazy_static! {
-    pub(crate) static ref OPERATION_COUNTER: CounterVec = register_counter_vec!(
-        "operations_total",
-        "Total number of operations processed",
-        &[
-            "vendor",
-            "spawn_id",
-            "type",
-            "name",
-            "dataset",
-            "dataset_size"
-        ]
-    )
-    .unwrap();
-    pub(crate) static ref OPERATION_ERROR_COUNTER: CounterVec = register_counter_vec!(
-        "operations_error_total",
-        "Total number of operations failed",
-        &[
-            "vendor",
-            "spawn_id",
-            "type",
-            "name",
-            "dataset",
-            "dataset_size"
-        ]
-    )
-    .unwrap();
-}
 #[tokio::main]
 async fn main() -> BenchmarkResult<()> {
     let mut cmd = Cli::command();
@@ -75,7 +34,7 @@ async fn main() -> BenchmarkResult<()> {
         .with_thread_ids(true)
         .init();
 
-    let prometheus_endpoint = prometheus_endpoint::PrometheusEndpoint::new();
+    let prometheus_endpoint = benchmark::prometheus_endpoint::PrometheusEndpoint::new();
 
     match cli.command {
         GenerateAutoComplete { shell } => {
@@ -168,11 +127,11 @@ async fn run_neo4j(
     number_of_queries: u64,
     machine_metadata: MachineMetadata,
 ) -> BenchmarkResult<()> {
-    let neo4j = neo4j::Neo4j::new();
+    let neo4j = benchmark::neo4j::Neo4j::new();
     // stop neo4j if it is running
     neo4j.stop(false).await?;
     // restore the dump
-    let spec = Spec::new(scenario::Name::Users, size, Vendor::Neo4j);
+    let spec = Spec::new(benchmark::scenario::Name::Users, size, Vendor::Neo4j);
     neo4j.restore_db(spec).await?;
     // start neo4j
     neo4j.start().await?;
@@ -188,7 +147,8 @@ async fn run_neo4j(
         machine_metadata,
     )?;
     // generate queries
-    let mut queries_repository = queries_repository::UsersQueriesRepository::new(9998, 121716);
+    let mut queries_repository =
+        benchmark::queries_repository::UsersQueriesRepository::new(9998, 121716);
     let queries = Box::new(
         queries_repository
             .random_queries(number_of_queries)
@@ -232,7 +192,7 @@ async fn run_falkor(
     machine_metadata: MachineMetadata,
     parallel: usize,
 ) -> BenchmarkResult<()> {
-    let falkor: Falkor<Disconnected> = falkor::Falkor::new();
+    let falkor: Falkor<Disconnected> = benchmark::falkor::Falkor::new();
     // stop falkor if it is running
     falkor.stop(false).await?;
     // if dump not present return error
@@ -260,7 +220,8 @@ async fn run_falkor(
     );
     info!("running {} queries", format_number(number_of_queries));
 
-    let mut queries_repository = queries_repository::UsersQueriesRepository::new(9998, 121716);
+    let mut queries_repository =
+        benchmark::queries_repository::UsersQueriesRepository::new(9998, 121716);
     let queries: Vec<(String, QueryType, String)> = queries_repository
         .random_queries(number_of_queries)
         .map(|(q_name, q_type, q)| (q_name, q_type, q.to_cypher()))
@@ -326,8 +287,8 @@ async fn init_falkor(
     _force: bool,
 ) -> BenchmarkResult<()> {
     let mut histogram = Histogram::new(7, 64)?;
-    let spec = Spec::new(scenario::Name::Users, size, Vendor::Neo4j);
-    let falkor = falkor::Falkor::new();
+    let spec = Spec::new(benchmark::scenario::Name::Users, size, Vendor::Neo4j);
+    let falkor = benchmark::falkor::Falkor::new();
     falkor.stop(false).await?;
     falkor.clean_db().await?;
     // falkor.restore_db(size).await?;
@@ -337,6 +298,8 @@ async fn init_falkor(
     // let index_iterator = spec.init_index_iterator().await?;
     let mut falkor = falkor.connect().await?;
     let start = Instant::now();
+
+    let falkor_client = falkor.client().await?;
     falkor
         .execute_query_un_trace("CREATE INDEX FOR (u:User) ON (u.id)")
         .await?;
@@ -371,7 +334,7 @@ fn show_historgam(histogram: Histogram) {
 }
 
 async fn dry_init_neo4j(size: Size) -> BenchmarkResult<()> {
-    let spec = Spec::new(scenario::Name::Users, size, Vendor::Neo4j);
+    let spec = Spec::new(benchmark::scenario::Name::Users, size, Vendor::Neo4j);
     let mut data_stream = spec.init_data_iterator().await?;
     let mut success = 0;
     let mut error = 0;
@@ -400,8 +363,8 @@ async fn init_neo4j(
     size: Size,
     force: bool,
 ) -> BenchmarkResult<()> {
-    let spec = Spec::new(scenario::Name::Users, size, Vendor::Neo4j);
-    let neo4j = neo4j::Neo4j::new();
+    let spec = Spec::new(benchmark::scenario::Name::Users, size, Vendor::Neo4j);
+    let neo4j = benchmark::neo4j::Neo4j::new();
     let _ = neo4j.stop(false).await?;
     let backup_path = format!("{}/neo4j.dump", spec.backup_path());
     if !force {

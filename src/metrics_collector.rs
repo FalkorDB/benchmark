@@ -11,43 +11,43 @@ use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub(crate) struct MetricsCollector {
-    pub(crate) vendor: String,
-    pub(crate) node_count: u64,
-    pub(crate) relation_count: u64,
-    pub(crate) query_count: u64,
-    pub(crate) histogram_for_type: HashMap<String, Histogram>,
-    pub(crate) worst_call_for_type: HashMap<String, (String, String, Duration)>,
-    pub(crate) total_calls_for_type: HashMap<String, u64>,
-    pub(crate) machine_metadata: MachineMetadata,
-    pub(crate) total_operations_duration: Duration,
+pub struct MetricsCollector {
+    pub vendor: String,
+    pub node_count: u64,
+    pub relation_count: u64,
+    pub query_count: u64,
+    pub histogram_for_type: HashMap<String, Histogram>,
+    pub worst_call_for_type: HashMap<String, (String, String, Duration)>,
+    pub total_calls_for_type: HashMap<String, u64>,
+    pub machine_metadata: MachineMetadata,
+    pub total_operations_duration: Duration,
 }
 
 #[derive(Debug, Serialize, Clone)]
-pub(crate) struct Percentile {
-    pub(crate) vendor: String,
-    pub(crate) node_count: u64,
-    pub(crate) relation_count: u64,
-    pub(crate) query_count: u64,
-    pub(crate) histogram_for_type: HashMap<String, Vec<f32>>,
-    pub(crate) worst_call_for_type: HashMap<String, (String, String, Duration)>,
-    pub(crate) total_calls_for_type: HashMap<String, u64>,
-    pub(crate) machine_metadata: MachineMetadata,
-    pub(crate) total_operations_duration: Duration,
+pub struct Percentile {
+    pub vendor: String,
+    pub node_count: u64,
+    pub relation_count: u64,
+    pub query_count: u64,
+    pub histogram_for_type: HashMap<String, Vec<f32>>,
+    pub worst_call_for_type: HashMap<String, (String, String, Duration)>,
+    pub total_calls_for_type: HashMap<String, u64>,
+    pub machine_metadata: MachineMetadata,
+    pub total_operations_duration: Duration,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub(crate) struct MachineMetadata {
-    pub(crate) os: String,
-    pub(crate) arch: String,
-    pub(crate) cpu_count: usize,
-    pub(crate) cores_count: usize,
-    pub(crate) total_memory_kb: u64,
-    pub(crate) free_memory_kb: u64,
-    pub(crate) hostname: String,
+pub struct MachineMetadata {
+    pub os: String,
+    pub arch: String,
+    pub cpu_count: usize,
+    pub cores_count: usize,
+    pub total_memory_kb: u64,
+    pub free_memory_kb: u64,
+    pub hostname: String,
 }
 impl MachineMetadata {
-    pub(crate) fn new() -> MachineMetadata {
+    pub fn new() -> MachineMetadata {
         let mut sys = System::new_all();
         sys.refresh_all();
         let os = std::env::consts::OS.into();
@@ -78,7 +78,7 @@ impl MetricsCollector {
         Ok(serde_json::from_str::<MetricsCollector>(&contents)?)
     }
 
-    pub(crate) fn new(
+    pub fn new(
         node_count: u64,
         relation_count: u64,
         query_count: u64,
@@ -129,7 +129,7 @@ impl MetricsCollector {
             .or_insert(0) += 1;
         Ok(())
     }
-    pub(crate) fn record(
+    pub fn record(
         &mut self,
         duration: Duration,
         operation: &str,
@@ -147,7 +147,7 @@ impl MetricsCollector {
         self.record_operation(duration, operation, query, statistics)
     }
 
-    pub(crate) async fn save(
+    pub async fn save(
         &self,
         path: impl AsRef<Path>,
     ) -> BenchmarkResult<()> {
@@ -157,7 +157,7 @@ impl MetricsCollector {
         Ok(())
     }
 
-    pub(crate) fn to_percentile(&self) -> Percentile {
+    pub fn to_percentile(&self) -> Percentile {
         let mut percentile = Percentile {
             vendor: self.vendor.clone(),
             node_count: self.node_count,
@@ -193,7 +193,7 @@ impl MetricsCollector {
     // - table with the columns: operation, total calls, 50th percentile, 95th percentile, 99th percentile, worst time, worst call
     //   sorted by 99th percentile call in descending order
     //   operations is one of all, read, write, and specific operation types
-    pub(crate) fn markdown_report(&self) -> String {
+    pub fn markdown_report(&self) -> String {
         let ordered_operations = order_keys_by_p(&self.histogram_for_type, 99.0);
         let ordered_operations = reorder_rows(ordered_operations, &["all", "read", "write"]);
 

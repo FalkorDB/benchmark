@@ -217,6 +217,7 @@ dependencies = [
  "histogram",
  "hyper 0.14.31",
  "lazy_static",
+ "libc",
  "neo4rs",
  "nix",
  "prometheus",

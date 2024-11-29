@@ -19,7 +19,7 @@ use tokio::{fs, io};
 use tokio_stream::StreamExt;
 use tracing::{error, info, trace};
 
-pub(crate) async fn spawn_command(
+pub async fn spawn_command(
     command: &str,
     args: &[&str],
 ) -> BenchmarkResult<Output> {
@@ -40,10 +40,10 @@ pub(crate) async fn spawn_command(
     Ok(output)
 }
 
-pub(crate) async fn file_exists(file_path: &str) -> bool {
+pub async fn file_exists(file_path: &str) -> bool {
     fs::metadata(file_path).await.is_ok()
 }
-pub(crate) async fn delete_file(file_path: &str) -> BenchmarkResult<()> {
+pub async fn delete_file(file_path: &str) -> BenchmarkResult<()> {
     if file_exists(file_path).await {
         info!("Deleting file: {}", file_path);
         fs::remove_file(file_path).await?;
@@ -51,7 +51,7 @@ pub(crate) async fn delete_file(file_path: &str) -> BenchmarkResult<()> {
     Ok(())
 }
 
-pub(crate) fn falkor_shared_lib_path() -> BenchmarkResult<String> {
+pub fn falkor_shared_lib_path() -> BenchmarkResult<String> {
     if let Ok(path) = env::current_dir() {
         Ok(format!("{}/falkordb.so", path.display()))
     } else {
@@ -59,7 +59,7 @@ pub(crate) fn falkor_shared_lib_path() -> BenchmarkResult<String> {
     }
 }
 
-pub(crate) async fn create_directory_if_not_exists(dir_path: &str) -> BenchmarkResult<()> {
+pub async fn create_directory_if_not_exists(dir_path: &str) -> BenchmarkResult<()> {
     // Check if the directory exists
     if fs::metadata(dir_path).await.is_err() {
         // If it doesn't exist, create the directory
@@ -68,11 +68,11 @@ pub(crate) async fn create_directory_if_not_exists(dir_path: &str) -> BenchmarkR
     Ok(())
 }
 
-pub(crate) fn url_file_name(url: &str) -> String {
+pub fn url_file_name(url: &str) -> String {
     let url_parts: Vec<&str> = url.split('/').collect();
     url_parts[url_parts.len() - 1].to_string()
 }
-pub(crate) async fn download_file(
+pub async fn download_file(
     url: &str,
     file_name: &str,
 ) -> BenchmarkResult<()> {
@@ -103,7 +103,7 @@ pub(crate) async fn download_file(
     }
 }
 
-pub(crate) async fn read_lines<P>(
+pub async fn read_lines<P>(
     filename: P
 ) -> BenchmarkResult<impl Stream<Item = Result<String, std::io::Error>>>
 where
@@ -121,7 +121,7 @@ where
     Ok(stream)
 }
 
-pub(crate) async fn kill_process(pid: u32) -> BenchmarkResult<()> {
+pub async fn kill_process(pid: u32) -> BenchmarkResult<()> {
     let pid = Pid::from_raw(pid as i32);
     match kill(pid, Signal::SIGKILL) {
         Ok(_) => Ok(()),
@@ -130,7 +130,7 @@ pub(crate) async fn kill_process(pid: u32) -> BenchmarkResult<()> {
     }
 }
 
-pub(crate) async fn get_command_pid(cmd: impl AsRef<str>) -> BenchmarkResult<u32> {
+pub async fn get_command_pid(cmd: impl AsRef<str>) -> BenchmarkResult<u32> {
     let cmd = cmd.as_ref();
     let output = Command::new("ps")
         .args(&["-eo", "pid,command,stat"])
@@ -174,7 +174,7 @@ pub(crate) async fn get_command_pid(cmd: impl AsRef<str>) -> BenchmarkResult<u32
     }
 }
 
-pub(crate) async fn ping_redis() -> BenchmarkResult<()> {
+pub async fn ping_redis() -> BenchmarkResult<()> {
     let client = redis::Client::open("redis://127.0.0.1:6379/")?;
     let mut con = client.get_multiplexed_async_connection().await?;
 
@@ -190,7 +190,7 @@ pub(crate) async fn ping_redis() -> BenchmarkResult<()> {
     }
 }
 
-pub(crate) async fn wait_for_redis_ready(
+pub async fn wait_for_redis_ready(
     max_attempts: u32,
     delay: Duration,
 ) -> BenchmarkResult<()> {
@@ -221,7 +221,7 @@ pub(crate) async fn wait_for_redis_ready(
     unreachable!()
 }
 
-pub(crate) async fn redis_save() -> BenchmarkResult<()> {
+pub async fn redis_save() -> BenchmarkResult<()> {
     let client = redis::Client::open("redis://127.0.0.1:6379/")?;
     let mut con = client.get_multiplexed_async_connection().await?;
 
@@ -236,7 +236,7 @@ pub(crate) async fn redis_save() -> BenchmarkResult<()> {
         )))
     }
 }
-pub(crate) async fn write_to_file(
+pub async fn write_to_file(
     file_path: &str,
     content: &str,
 ) -> BenchmarkResult<()> {
@@ -245,7 +245,7 @@ pub(crate) async fn write_to_file(
     file.flush().await?;
     Ok(())
 }
-pub(crate) fn format_number(num: u64) -> String {
+pub fn format_number(num: u64) -> String {
     let mut s = String::new();
     let num_str = num.to_string();
     let a = num_str.chars().rev().enumerate();

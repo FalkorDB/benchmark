@@ -28,7 +28,7 @@ pub struct Connected(AsyncGraph);
 pub struct Disconnected;
 
 #[derive(Clone)]
-pub(crate) struct Falkor<U> {
+pub struct Falkor<U> {
     path: String,
     graph: U,
 }
@@ -62,7 +62,7 @@ impl Falkor<Connected> {
             graph: Disconnected,
         })
     }
-    pub(crate) async fn graph_size(&self) -> BenchmarkResult<(u64, u64)> {
+    pub async fn graph_size(&self) -> BenchmarkResult<(u64, u64)> {
         let mut graph = self.graph.0.clone();
         let mut falkor_result = graph
             .query("MATCH (n) RETURN count(n) as count")
@@ -92,7 +92,7 @@ impl Falkor<Connected> {
     }
 
     #[instrument(skip(self, q), fields(query = %q.as_ref()))]
-    pub(crate) async fn execute_query<T: AsRef<str>>(
+    pub async fn execute_query<T: AsRef<str>>(
         &mut self,
         _query_type: QueryType,
         _query_template: String,
@@ -126,7 +126,7 @@ impl Falkor<Connected> {
         }
     }
 
-    pub(crate) async fn execute_query_un_trace<T: AsRef<str>>(
+    pub async fn execute_query_un_trace<T: AsRef<str>>(
         &mut self,
         q: T,
     ) -> BenchmarkResult<QueryResult<LazyResultSet>> {
@@ -142,7 +142,7 @@ impl Falkor<Connected> {
             }
         }
     }
-    pub(crate) async fn execute_query_iterator(
+    pub async fn execute_query_iterator(
         &mut self,
         iter: Box<dyn Iterator<Item = (String, QueryType, String)> + '_>,
         metric_collector: &mut MetricsCollector,
@@ -175,7 +175,7 @@ impl Falkor<Connected> {
         Ok(())
     }
 
-    pub(crate) async fn execute_query_stream<S>(
+    pub async fn execute_query_stream<S>(
         &mut self,
         mut stream: S,
         histogram: &mut Histogram,
@@ -265,18 +265,18 @@ impl<U> Falkor<U> {
         wait_for_redis_ready(10, Duration::from_millis(500)).await
     }
 
-    pub(crate) async fn clean_db(&self) -> BenchmarkResult<()> {
+    pub async fn clean_db(&self) -> BenchmarkResult<()> {
         self.stop(false).await?;
         info!("deleting: {}", REDIS_DUMP_FILE);
         delete_file(REDIS_DUMP_FILE).await?;
         Ok(())
     }
 
-    pub(crate) async fn get_redis_pid(&self) -> BenchmarkResult<u32> {
+    pub async fn get_redis_pid(&self) -> BenchmarkResult<u32> {
         get_command_pid("redis-server").await
     }
 
-    pub(crate) async fn stop(
+    pub async fn stop(
         &self,
         flash: bool,
     ) -> BenchmarkResult<()> {
@@ -297,7 +297,7 @@ impl<U> Falkor<U> {
         Ok(())
     }
 
-    pub(crate) async fn save_db(
+    pub async fn save_db(
         &self,
         size: Size,
     ) -> BenchmarkResult<()> {
@@ -322,7 +322,7 @@ impl<U> Falkor<U> {
         }
     }
 
-    pub(crate) async fn restore_db(
+    pub async fn restore_db(
         &self,
         size: Size,
     ) -> BenchmarkResult<()> {
@@ -344,7 +344,7 @@ impl<U> Falkor<U> {
         Ok(())
     }
 
-    pub(crate) async fn dump_exists_or_error(
+    pub async fn dump_exists_or_error(
         &self,
         size: Size,
     ) -> BenchmarkResult<()> {
@@ -365,13 +365,13 @@ impl<U> Falkor<U> {
 }
 
 #[derive(Clone)]
-pub(crate) struct FalkorBenchmarkClient {
+pub struct FalkorBenchmarkClient {
     graph: AsyncGraph,
 }
 
 impl FalkorBenchmarkClient {
     #[instrument(skip(self, queries))]
-    pub(crate) async fn execute_queries(
+    pub async fn execute_queries(
         &mut self,
         spawn_id: usize,
         queries: Vec<(String, QueryType, String)>,
@@ -386,7 +386,7 @@ impl FalkorBenchmarkClient {
     }
 
     #[instrument(skip(self), fields(query = %query, query_name = %query_name))]
-    pub(crate) async fn execute_query<'a>(
+    pub async fn execute_query<'a>(
         &'a mut self,
         spawn_id: &'a str,
         query_name: &'a str,

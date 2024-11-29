@@ -29,7 +29,7 @@ impl Neo4jClient {
         Ok(Neo4jClient { graph })
     }
 
-    pub(crate) async fn graph_size(&self) -> BenchmarkResult<(u64, u64)> {
+    pub async fn graph_size(&self) -> BenchmarkResult<(u64, u64)> {
         let mut result = self
             .graph
             .execute(query("MATCH (n) RETURN count(n) as count"))
@@ -48,7 +48,7 @@ impl Neo4jClient {
         }
         Ok((number_of_nodes, number_of_relationships))
     }
-    pub(crate) async fn execute_query_iterator(
+    pub async fn execute_query_iterator(
         &mut self,
         iter: Box<
             dyn Iterator<Item = (String, QueryType, (String, Vec<(String, QueryParam)>))> + '_,
@@ -92,7 +92,7 @@ impl Neo4jClient {
         Ok(())
     }
 
-    pub(crate) async fn execute_query(
+    pub async fn execute_query(
         &self,
         q: &str,
     ) -> BenchmarkResult<Pin<Box<dyn Stream<Item = BenchmarkResult<Row>> + Send>>> {
@@ -102,7 +102,7 @@ impl Neo4jClient {
         Ok(Box::pin(stream))
     }
 
-    pub(crate) async fn execute_query_stream<S>(
+    pub async fn execute_query_stream<S>(
         &self,
         mut stream: S,
         histogram: &mut Histogram,

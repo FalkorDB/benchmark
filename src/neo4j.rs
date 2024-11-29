@@ -33,14 +33,14 @@ impl Neo4j {
         }
     }
 
-    pub(crate) async fn restore_db<'a>(
+    pub async fn restore_db<'a>(
         &self,
         spec: Spec<'a>,
     ) -> BenchmarkResult<Output> {
         self.restore(spec).await
     }
 
-    pub(crate) async fn client(&self) -> BenchmarkResult<Neo4jClient> {
+    pub async fn client(&self) -> BenchmarkResult<Neo4jClient> {
         Neo4jClient::new(
             self.uri.to_string(),
             self.user.to_string(),
@@ -61,7 +61,7 @@ impl Neo4j {
         format!("{}/bin/neo4j-admin", self.neo4j_home.clone())
     }
 
-    pub(crate) async fn dump<'a>(
+    pub async fn dump<'a>(
         &self,
         spec: Spec<'a>,
     ) -> BenchmarkResult<Output> {
@@ -87,7 +87,7 @@ impl Neo4j {
         spawn_command(command.as_str(), &args).await
     }
 
-    pub(crate) async fn restore<'a>(
+    pub async fn restore<'a>(
         &self,
         spec: Spec<'a>,
     ) -> BenchmarkResult<Output> {
@@ -111,7 +111,7 @@ impl Neo4j {
         spawn_command(command.as_str(), &args).await
     }
 
-    pub(crate) async fn clean_db(&self) -> BenchmarkResult<Output> {
+    pub async fn clean_db(&self) -> BenchmarkResult<Output> {
         info!("cleaning DB");
         loop {
             if fs::metadata(&self.neo4j_pid()).await.is_ok() {

@@ -7,13 +7,13 @@ use tokio::task;
 use tokio::task::JoinHandle;
 use tracing::{error, info};
 
-pub(crate) struct PrometheusEndpoint {
+pub struct PrometheusEndpoint {
     shutdown_tx: Option<Sender<()>>,
     server_thread: Option<JoinHandle<()>>,
 }
 
 impl PrometheusEndpoint {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
         let server_thread = task::spawn(async {

@@ -5,14 +5,14 @@ use std::fmt;
 
 #[derive(Template)]
 #[template(path = "compare.html", escape = "none", ext = "html")]
-pub(crate) struct CompareTemplate {
-    pub(crate) data: CompareRuns,
+pub struct CompareTemplate {
+    pub data: CompareRuns,
 }
 
 #[derive(Serialize)]
-pub(crate) struct CompareRuns {
-    pub(crate) run_1: Percentile,
-    pub(crate) run_2: Percentile,
+pub struct CompareRuns {
+    pub run_1: Percentile,
+    pub run_2: Percentile,
 }
 
 impl fmt::Display for CompareRuns {
