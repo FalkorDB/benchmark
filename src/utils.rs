@@ -105,7 +105,7 @@ pub async fn download_file(
 
 pub async fn read_lines<P>(
     filename: P
-) -> BenchmarkResult<impl Stream<Item = Result<String, std::io::Error>>>
+) -> BenchmarkResult<impl Stream<Item = Result<String, io::Error>>>
 where
     P: AsRef<Path>,
 {
@@ -115,8 +115,20 @@ where
     // Create a buffered reader
     let reader = BufReader::new(file);
 
-    let stream = tokio_stream::wrappers::LinesStream::new(reader.lines())
-        .map(|res| res.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)));
+    let stream = tokio_stream::wrappers::LinesStream::new(reader.lines()).filter_map(|res| {
+        match res {
+            Ok(line) => {
+                // filter out empty lines or lines that contain only a semicolon
+                let trimmed_line = line.trim();
+                if trimmed_line.is_empty() || trimmed_line == ";" {
+                    None
+                } else {
+                    Some(Ok(line))
+                }
+            }
+            Err(e) => Some(Err(e)), // Propagate errors
+        }
+    });
 
     Ok(stream)
 }

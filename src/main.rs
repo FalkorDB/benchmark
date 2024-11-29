@@ -7,7 +7,7 @@ use benchmark::cli::Commands::GenerateAutoComplete;
 use benchmark::compare_template::{CompareRuns, CompareTemplate};
 use benchmark::error::BenchmarkError::OtherError;
 use benchmark::error::BenchmarkResult;
-use benchmark::falkor::{Connected, Disconnected, Falkor};
+use benchmark::falkor::{Falkor, Started, Stopped};
 use benchmark::metrics_collector::{MachineMetadata, MetricsCollector};
 use benchmark::queries_repository::{Queries, QueryType};
 use benchmark::scenario::{Size, Spec, Vendor};
@@ -81,10 +81,10 @@ async fn main() -> BenchmarkResult<()> {
 
             match vendor {
                 Vendor::Neo4j => {
-                    run_neo4j(size, queries, machine_metadata).await?;
+                    run_neo4j(size, queries).await?;
                 }
                 Vendor::Falkor => {
-                    run_falkor(size, queries, machine_metadata, parallel).await?;
+                    run_falkor(size, queries, parallel).await?;
                 }
             }
         }
@@ -125,7 +125,6 @@ async fn main() -> BenchmarkResult<()> {
 async fn run_neo4j(
     size: Size,
     number_of_queries: u64,
-    machine_metadata: MachineMetadata,
 ) -> BenchmarkResult<()> {
     let neo4j = benchmark::neo4j::Neo4j::new();
     // stop neo4j if it is running
@@ -144,7 +143,6 @@ async fn run_neo4j(
         relation_count,
         number_of_queries,
         "Neo4J".to_owned(),
-        machine_metadata,
     )?;
     // generate queries
     let mut queries_repository =
@@ -189,29 +187,19 @@ async fn run_neo4j(
 async fn run_falkor(
     size: Size,
     number_of_queries: u64,
-    machine_metadata: MachineMetadata,
     parallel: usize,
 ) -> BenchmarkResult<()> {
-    let falkor: Falkor<Disconnected> = benchmark::falkor::Falkor::new();
-    // stop falkor if it is running
-    falkor.stop(false).await?;
+    let falkor: Falkor<Stopped> = benchmark::falkor::Falkor::new();
+
     // if dump not present return error
     falkor.dump_exists_or_error(size).await?;
     // restore the dump
     falkor.restore_db(size).await?;
     // start falkor
-    falkor.start().await?;
-    // connect to falkor
-    let mut falkor: Falkor<Connected> = falkor.connect().await?;
+    let mut falkor = falkor.start().await?;
+
     // get the graph size
     let (node_count, relation_count) = falkor.graph_size().await?;
-    let mut metric_collector = MetricsCollector::new(
-        node_count,
-        relation_count,
-        number_of_queries,
-        "FalkorDB".to_owned(),
-        machine_metadata,
-    )?;
 
     info!(
         "graph has {} nodes and {} relations",
@@ -245,27 +233,19 @@ async fn run_falkor(
     }
 
     let elapsed = start.elapsed();
-    let report_file = "falkor-results.md";
-    info!("report was written to {}", report_file);
-    write_to_file(report_file, metric_collector.markdown_report().as_str()).await?;
-    metric_collector
-        .save(format!(
-            "falkor-metrics_{}_q{}.json",
-            size, number_of_queries
-        ))
-        .await?;
     info!(
         "running {} queries took {:?}",
         format_number(number_of_queries),
         elapsed
     );
     // stop falkor
-    falkor.stop(false).await
+    let _stopped = falkor.stop().await?;
+    Ok(())
 }
 
 #[instrument(skip(falkor, queries), fields(vendor = "falkor",  query_count = queries.len()))]
 async fn spawn_worker(
-    falkor: &mut Falkor<Connected>,
+    falkor: &mut Falkor<Started>,
     queries: Vec<(String, QueryType, String)>,
     spawn_id: usize,
 ) -> BenchmarkResult<JoinHandle<()>> {
@@ -286,27 +266,39 @@ async fn init_falkor(
     size: Size,
     _force: bool,
 ) -> BenchmarkResult<()> {
-    let mut histogram = Histogram::new(7, 64)?;
     let spec = Spec::new(benchmark::scenario::Name::Users, size, Vendor::Neo4j);
     let falkor = benchmark::falkor::Falkor::new();
-    falkor.stop(false).await?;
     falkor.clean_db().await?;
-    // falkor.restore_db(size).await?;
 
-    falkor.start().await?;
+    let falkor = falkor.start().await?;
     info!("writing index and data");
     // let index_iterator = spec.init_index_iterator().await?;
-    let mut falkor = falkor.connect().await?;
     let start = Instant::now();
 
-    let falkor_client = falkor.client().await?;
-    falkor
-        .execute_query_un_trace("CREATE INDEX FOR (u:User) ON (u.id)")
+    let mut falkor_client = falkor.client().await?;
+    falkor_client
+        .execute_query(
+            "main",
+            "create_index",
+            "CREATE INDEX FOR (u:User) ON (u.id)",
+        )
         .await?;
-    let data_iterator = spec.init_data_iterator().await?;
-    falkor
-        .execute_query_stream(data_iterator, &mut histogram)
-        .await?;
+
+    let mut data_iterator = spec.init_data_iterator().await?;
+
+    while let Some(result) = data_iterator.next().await {
+        match result {
+            Ok(query) => {
+                falkor_client
+                    .execute_query("loader", "", query.as_str())
+                    .await?;
+            }
+            Err(e) => {
+                error!("error {}", e);
+            }
+        }
+    }
+
     let (node_count, relation_count) = falkor.graph_size().await?;
     info!(
         "{} nodes and {} relations were imported at {:?}",
@@ -315,11 +307,9 @@ async fn init_falkor(
         start.elapsed()
     );
     info!("writing done, took: {:?}", start.elapsed());
-    falkor.disconnect().await?;
-    falkor.stop(true).await?;
+    let falkor = falkor.stop().await?;
     falkor.save_db(size).await?;
 
-    show_historgam(histogram);
     Ok(())
 }
 

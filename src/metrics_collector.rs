@@ -19,7 +19,6 @@ pub struct MetricsCollector {
     pub histogram_for_type: HashMap<String, Histogram>,
     pub worst_call_for_type: HashMap<String, (String, String, Duration)>,
     pub total_calls_for_type: HashMap<String, u64>,
-    pub machine_metadata: MachineMetadata,
     pub total_operations_duration: Duration,
 }
 
@@ -32,7 +31,6 @@ pub struct Percentile {
     pub histogram_for_type: HashMap<String, Vec<f32>>,
     pub worst_call_for_type: HashMap<String, (String, String, Duration)>,
     pub total_calls_for_type: HashMap<String, u64>,
-    pub machine_metadata: MachineMetadata,
     pub total_operations_duration: Duration,
 }
 
@@ -83,7 +81,6 @@ impl MetricsCollector {
         relation_count: u64,
         query_count: u64,
         vendor: String,
-        machine_metadata: MachineMetadata,
     ) -> BenchmarkResult<Self> {
         Ok(Self {
             vendor,
@@ -93,7 +90,6 @@ impl MetricsCollector {
             histogram_for_type: HashMap::new(),
             worst_call_for_type: HashMap::new(),
             total_calls_for_type: HashMap::new(),
-            machine_metadata,
             total_operations_duration: Duration::default(),
         })
     }
@@ -166,7 +162,6 @@ impl MetricsCollector {
             histogram_for_type: HashMap::new(),
             worst_call_for_type: self.worst_call_for_type.clone(),
             total_calls_for_type: self.total_calls_for_type.clone(),
-            machine_metadata: self.machine_metadata.clone(),
             total_operations_duration: self.total_operations_duration,
         };
 

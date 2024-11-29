@@ -1,6 +1,8 @@
 use crate::error::BenchmarkError::FailedToSpawnProcessError;
 use crate::error::BenchmarkResult;
 use crate::utils::{create_directory_if_not_exists, falkor_shared_lib_path};
+use nix::sys::signal::{kill, Signal};
+use nix::unistd::Pid;
 use std::env;
 use std::sync::Arc;
 use tokio::process::{Child, Command};
@@ -103,18 +105,41 @@ impl FalkorProcess {
         });
     }
 
-    pub async fn kill(&mut self) -> BenchmarkResult<()> {
+    pub async fn terminate(&mut self) -> BenchmarkResult<()> {
+        info!("Terminating FalkorProcess");
         // Lock the state mutex to access the child process
         let mut state_lock = self.state.lock().await;
 
         // Set should_monitor to false to prevent restarting
         state_lock.should_monitor = false;
 
-        // Attempt to kill the child process
         if let Some(pid) = state_lock.child.id() {
-            match state_lock.child.kill().await {
-                Ok(_) => info!("Killed falkor process with PID: {}", pid),
-                Err(e) => error!("Failed to kill falkor process: {:?}, with PID: {}", e, pid),
+            let pid = Pid::from_raw(pid as i32);
+
+            // Send SIGTERM signal to request graceful termination
+            match kill(pid, Signal::SIGTERM) {
+                Ok(_) => {
+                    info!("Sent SIGTERM signal to falkor process with PID: {}", pid);
+
+                    // Optionally wait for the process to exit
+                    if let Err(e) = tokio::time::timeout(
+                        std::time::Duration::from_secs(60),
+                        state_lock.child.wait(),
+                    )
+                    .await
+                    {
+                        error!(
+                            "Timed out waiting for falkor process with PID: {} to exit: {:?}",
+                            pid, e
+                        );
+                    } else {
+                        info!("Falkor process with PID: {} exited successfully", pid);
+                    }
+                }
+                Err(e) => error!(
+                    "Failed to send SIGTERM signal to falkor process: {:?}, with PID: {}",
+                    e, pid
+                ),
             }
         } else {
             error!("Failed to get PID of falkor process");
@@ -127,19 +152,14 @@ impl FalkorProcess {
 impl Drop for FalkorProcess {
     fn drop(&mut self) {
         info!("Dropping FalkorProcess");
-        // Use a separate runtime for blocking calls
-        let state_clone = Arc::clone(&self.state);
-        tokio::task::spawn_blocking(move || {
-            // Create a new Tokio runtime for blocking calls
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            rt.block_on(async {
-                let mut state_lock = state_clone.lock().await;
-                state_lock.should_monitor = false;
-                if let Err(e) = state_lock.child.kill().await {
-                    // Call kill asynchronously
-                    error!("Failed to kill falkor process during drop: {:?}", e);
-                }
-            });
-        });
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        match rt.block_on(async { self.terminate().await }) {
+            Ok(_) => {
+                info!("FalkorProcess terminated successfully");
+            }
+            Err(_) => {
+                error!("Failed to terminate FalkorProcess");
+            }
+        }
     }
 }
