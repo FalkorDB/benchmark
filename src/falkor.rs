@@ -192,11 +192,20 @@ impl FalkorBenchmarkClient {
         queries: Vec<(String, QueryType, String)>,
     ) {
         let spawn_id = spawn_id.to_string();
-        for (query_name, _query_type, query) in queries.into_iter() {
+        for (index, (query_name, _query_type, query)) in queries.into_iter().enumerate() {
             let _res = self
                 .execute_query(spawn_id.as_str(), query_name.as_str(), query.as_str())
                 .await;
-            // info!("executed: query_name={}, query:{} ", query_name, query);
+            // info!(
+            //     "executed: query_name={}, query:{}, res {:?}",
+            //     query_name, query, _res
+            // );
+            if let Err(e) = _res {
+                error!(
+                    "Error executing query: {}, the error is: {:?}, index is: {}",
+                    query, e, index
+                );
+            }
         }
     }
 
