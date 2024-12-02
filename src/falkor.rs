@@ -122,6 +122,7 @@ impl<U> Falkor<U> {
         let connection_info = "falkor://127.0.0.1:6379".try_into()?;
         let client = FalkorClientBuilder::new_async()
             .with_connection_info(connection_info)
+            .with_num_connections(nonzero::nonzero!(1u8))
             .build()
             .await?;
         Ok(FalkorBenchmarkClient {

@@ -1,6 +1,9 @@
 use crate::error::BenchmarkError::{FailedToSpawnProcessError, OtherError};
 use crate::error::BenchmarkResult;
-use crate::utils::{create_directory_if_not_exists, falkor_shared_lib_path};
+use crate::utils::{
+    create_directory_if_not_exists, delete_file, falkor_logs_path, falkor_shared_lib_path,
+};
+use crate::FALKOR_RESTART_COUNTER;
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
 use std::env;
@@ -8,7 +11,7 @@ use std::sync::Arc;
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
-use tracing::{error, info};
+use tracing::{error, info, trace};
 
 const REDIS_DATA_DIR: &str = "./redis-data";
 pub struct FalkorProcess {
@@ -23,7 +26,10 @@ struct State {
 
 impl FalkorProcess {
     pub async fn new() -> BenchmarkResult<Self> {
+        let falkor_log_path = Self::get_falkor_log_path()?;
+        delete_file(falkor_log_path.as_str()).await?;
         let child = Self::spawn_process().await?;
+        FALKOR_RESTART_COUNTER.reset();
         let should_monitor = true;
         let state = State {
             child,
@@ -37,28 +43,34 @@ impl FalkorProcess {
             let mut state = state_arc.lock().await;
             state.handles.push(handle);
         }
-        let state_arc_clone = Arc::clone(&state_arc);
-        let handle = Self::monitor_server(state_arc_clone);
-        {
-            let mut state = state_arc.lock().await;
-            state.handles.push(handle);
-        }
+        // let state_arc_clone = Arc::clone(&state_arc);
+        // let handle = Self::monitor_server(state_arc_clone);
+        // {
+        //     let mut state = state_arc.lock().await;
+        //     state.handles.push(handle);
+        // }
         Ok(FalkorProcess { state: state_arc })
     }
 
     async fn spawn_process() -> BenchmarkResult<Child> {
         create_directory_if_not_exists(REDIS_DATA_DIR).await?;
+        // let _ = tokio::fs::remove_dir_all(REDIS_LOGS_DIR).await;
+        // create_directory_if_not_exists(REDIS_LOGS_DIR).await?;
         let default_so_path = falkor_shared_lib_path()?;
         let default_so_path = env::var("FALKOR_PATH").unwrap_or_else(|_| default_so_path.clone());
-
+        let falkor_log_path = Self::get_falkor_log_path()?;
         let command = "redis-server";
         let args = [
             "--dir",
             REDIS_DATA_DIR,
+            "--logfile",
+            falkor_log_path.as_str(),
             "--loadmodule",
             default_so_path.as_str(),
             "CACHE_SIZE",
             "40",
+            "MAX_QUEUED_QUERIES",
+            "100",
         ];
 
         info!("starting falkor: {} {}", command, args.join(" "));
@@ -81,6 +93,14 @@ impl FalkorProcess {
         }
         Ok(child)
     }
+
+    fn get_falkor_log_path() -> BenchmarkResult<String> {
+        let default_falkor_log_path = falkor_logs_path()?;
+        let falkor_log_path =
+            env::var("FALKOR_LOG_PATH").unwrap_or_else(|_| default_falkor_log_path.clone());
+        Ok(falkor_log_path)
+    }
+
     fn monitor_process(arc_state: Arc<Mutex<State>>) -> JoinHandle<()> {
         tokio::spawn(async move {
             loop {
@@ -99,6 +119,7 @@ impl FalkorProcess {
                             Ok(new_child) => {
                                 *child_lock = new_child;
                                 info!("Restarted falkor process with PID: {:?}", child_lock.id());
+                                FALKOR_RESTART_COUNTER.inc();
                             }
                             Err(e) => {
                                 error!("Failed to restart falkor process: {:?}", e);
@@ -107,7 +128,7 @@ impl FalkorProcess {
                         }
                     }
                     Ok(None) => {
-                        info!("falkor process is running with PID: {:?}", child_lock.id());
+                        // info!("falkor process is running with PID: {:?}", child_lock.id());
                     }
                     Err(e) => {
                         error!("Failed to check falkor process status: {:?}", e);
@@ -148,12 +169,12 @@ impl FalkorProcess {
         let command = redis::cmd("GRAPH.INFO");
         let redis_value = con.send_packed_command(&command).await?;
         let (running_queries, waiting_queries) = redis_to_query_info(redis_value)?;
-        info!(
+        trace!(
             "Running Queries ({}):  {:?}",
             running_queries.len(),
             running_queries
         );
-        info!(
+        trace!(
             "Waiting Queries ({}): {:?}",
             waiting_queries.len(),
             waiting_queries
@@ -217,36 +238,20 @@ impl FalkorProcess {
     }
 }
 
-impl Drop for FalkorProcess {
-    fn drop(&mut self) {
-        info!("Dropping FalkorProcess");
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        match rt.block_on(async { self.terminate().await }) {
-            Ok(_) => {
-                info!("FalkorProcess terminated successfully");
-            }
-            Err(_) => {
-                error!("Failed to terminate FalkorProcess");
-            }
-        }
-    }
-}
-
-/*
-1) "# Running queries"
-2) 1)  1) "Received at"
-       2) (integer) 1732952858
-       3) "Graph name"
-       4) "falkor"
-       5) "Query"
-       6) "CYPHER id = 5610 MATCH (s:User {id: $id})-->()-->()-->(n:User) RETURN DISTINCT n.id"
-       7) "Execution duration"
-       8) "1.1392910000000003"
-       9) "Replicated command"
-      10) (integer) 0
-3) "# Waiting queries"
-4) (empty array)
- */
+// impl Drop for FalkorProcess {
+//     fn drop(&mut self) {
+//         info!("Dropping FalkorProcess");
+//         let rt = tokio::runtime::Runtime::new().unwrap();
+//         match rt.block_on(async { self.terminate().await }) {
+//             Ok(_) => {
+//                 info!("FalkorProcess terminated successfully");
+//             }
+//             Err(_) => {
+//                 error!("Failed to terminate FalkorProcess");
+//             }
+//         }
+//     }
+// }
 
 #[derive(Debug)]
 #[allow(dead_code)]

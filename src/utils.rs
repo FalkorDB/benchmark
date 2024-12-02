@@ -58,6 +58,13 @@ pub fn falkor_shared_lib_path() -> BenchmarkResult<String> {
         Err(OtherError("Failed to get current directory".to_string()))
     }
 }
+pub fn falkor_logs_path() -> BenchmarkResult<String> {
+    if let Ok(path) = env::current_dir() {
+        Ok(format!("{}/falkordb.log", path.display()))
+    } else {
+        Err(OtherError("Failed to get current directory".to_string()))
+    }
+}
 
 pub async fn create_directory_if_not_exists(dir_path: &str) -> BenchmarkResult<()> {
     // Check if the directory exists

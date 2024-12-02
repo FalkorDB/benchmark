@@ -1,5 +1,5 @@
 use lazy_static::lazy_static;
-use prometheus::{register_counter_vec, CounterVec};
+use prometheus::{register_counter, register_counter_vec, Counter, CounterVec};
 
 pub mod cli;
 pub mod compare_template;
@@ -40,6 +40,11 @@ lazy_static! {
             "dataset",
             "dataset_size"
         ]
+    )
+    .unwrap();
+    pub static ref FALKOR_RESTART_COUNTER: Counter = register_counter!(
+        "falkordb_restarts_total",
+        "Total number of restart for falkordb server",
     )
     .unwrap();
 }

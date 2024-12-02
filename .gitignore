@@ -14,3 +14,7 @@ falkor-results.md
 falkor-metrics*.json
 neo4j-metrics*.json
 html
+falkordb.log
+.DS_Store
+dump.rdb
+index.html
