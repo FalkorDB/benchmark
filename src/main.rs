@@ -9,7 +9,7 @@ use benchmark::error::BenchmarkError::OtherError;
 use benchmark::error::BenchmarkResult;
 use benchmark::falkor::{Falkor, Started, Stopped};
 use benchmark::metrics_collector::{MachineMetadata, MetricsCollector};
-use benchmark::queries_repository::{Queries, QueryType};
+use benchmark::queries_repository::PreparedQuery;
 use benchmark::scenario::{Size, Spec, Vendor};
 use benchmark::utils::{delete_file, file_exists, format_number, write_to_file};
 use clap::{Command, CommandFactory, Parser};
@@ -17,6 +17,7 @@ use clap_complete::{generate, Generator};
 use futures::StreamExt;
 use histogram::Histogram;
 use std::io;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
@@ -138,20 +139,11 @@ async fn run_neo4j(
     info!("client connected to neo4j");
     // get the graph size
     let (node_count, relation_count) = client.graph_size().await?;
-    let mut metric_collector = MetricsCollector::new(
-        node_count,
-        relation_count,
-        number_of_queries,
-        "Neo4J".to_owned(),
-    )?;
+
     // generate queries
-    let mut queries_repository =
+    let queries_repository =
         benchmark::queries_repository::UsersQueriesRepository::new(9998, 121716);
-    let queries = Box::new(
-        queries_repository
-            .random_queries(number_of_queries)
-            .map(|(q_name, q_type, q)| (q_name, q_type, q.to_bolt())),
-    );
+    let queries = Box::new(queries_repository.random_queries(number_of_queries));
     info!(
         "graph has {} nodes and {} relations",
         format_number(node_count),
@@ -159,20 +151,11 @@ async fn run_neo4j(
     );
     info!("running {} queries", format_number(number_of_queries));
     let start = Instant::now();
-    client
-        .clone()
-        .execute_query_iterator(queries, &mut metric_collector)
-        .await?;
+    client.clone().execute_query_iterator(queries).await?;
     let elapsed = start.elapsed();
     let report_file = "neo4j-results.md";
     info!("report was written to {}", report_file);
-    write_to_file(report_file, metric_collector.markdown_report().as_str()).await?;
-    metric_collector
-        .save(format!(
-            "neo4j-metrics_{}_q{}.json",
-            size, number_of_queries
-        ))
-        .await?;
+
     info!(
         "running {} queries took {:?}",
         format_number(number_of_queries),
@@ -189,6 +172,11 @@ async fn run_falkor(
     number_of_queries: u64,
     parallel: usize,
 ) -> BenchmarkResult<()> {
+    if parallel == 0 {
+        return Err(OtherError(
+            "Parallelism level must be greater than zero.".to_string(),
+        ));
+    }
     let falkor: Falkor<Stopped> = benchmark::falkor::Falkor::new();
 
     // if dump not present return error
@@ -196,7 +184,7 @@ async fn run_falkor(
     // restore the dump
     falkor.restore_db(size).await?;
     // start falkor
-    let mut falkor = falkor.start().await?;
+    let falkor = falkor.start().await?;
 
     // get the graph size
     let (node_count, relation_count) = falkor.graph_size().await?;
@@ -208,18 +196,10 @@ async fn run_falkor(
     );
     info!("running {} queries", format_number(number_of_queries));
 
-    let mut queries_repository =
-        benchmark::queries_repository::UsersQueriesRepository::new(9998, 121716);
-    let queries: Vec<(String, QueryType, String)> = queries_repository
-        .random_queries(number_of_queries)
-        .map(|(q_name, q_type, q)| (q_name, q_type, q.to_cypher()))
-        .collect::<Vec<_>>();
-
     let mut handles = Vec::with_capacity(parallel);
     let start = Instant::now();
     for spawn_id in 0..parallel {
-        let queries = queries.clone();
-        let handle = spawn_worker(&mut falkor, queries, spawn_id).await?;
+        let handle = spawn_worker(&falkor, number_of_queries, spawn_id).await?;
         handles.push(handle);
     }
 
@@ -243,21 +223,26 @@ async fn run_falkor(
     Ok(())
 }
 
-#[instrument(skip(falkor, queries), fields(vendor = "falkor",  query_count = queries.len()))]
+#[instrument(skip(falkor), fields(vendor = "falkor"))]
 async fn spawn_worker(
-    falkor: &mut Falkor<Started>,
-    queries: Vec<(String, QueryType, String)>,
+    falkor: &Falkor<Started>,
+    number_of_queries: u64,
     spawn_id: usize,
 ) -> BenchmarkResult<JoinHandle<()>> {
     info!("spawning worker");
-    let queries = queries.clone();
     let mut graph = falkor.client().await?;
-    let handle = tokio::spawn(
+    let queries_repository =
+        benchmark::queries_repository::UsersQueriesRepository::new(9998, 121716);
+    let queries: Box<dyn Iterator<Item = PreparedQuery> + Send + Sync> =
+        queries_repository.random_queries(number_of_queries);
+
+    let handle = tokio::spawn({
+        let queries_arc = Arc::new(queries);
         async move {
-            graph.execute_queries(spawn_id, queries).await;
+            graph.execute_queries(spawn_id, queries_arc).await;
         }
-        .instrument(tracing::Span::current()),
-    );
+        .instrument(tracing::Span::current())
+    });
 
     Ok(handle)
 }

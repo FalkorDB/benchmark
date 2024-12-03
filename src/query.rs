@@ -1,8 +1,9 @@
 // CYPHER name_param = "Niccolò Machiavelli" birth_year_param = 1469 MATCH (p:Person {name: $name_param, birth_year: $birth_year_param}) RETURN p
 use neo4rs::BoltType;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Query {
     pub text: String,
     pub params: HashMap<String, QueryParam>,
@@ -30,9 +31,19 @@ impl Query {
             .collect();
         (query, params)
     }
+    pub fn to_bolt_struct(&self) -> Bolt {
+        let (query, params) = self.to_bolt();
+        Bolt { query, params }
+    }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct Bolt {
+    pub query: String,
+    pub params: Vec<(String, QueryParam)>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum QueryParam {
     String(String),
     Integer(i32),

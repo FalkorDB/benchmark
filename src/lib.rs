@@ -1,5 +1,7 @@
 use lazy_static::lazy_static;
-use prometheus::{register_counter, register_counter_vec, Counter, CounterVec};
+use prometheus::{
+    register_counter, register_counter_vec, register_gauge, Counter, CounterVec, Gauge,
+};
 
 pub mod cli;
 pub mod compare_template;
@@ -45,6 +47,16 @@ lazy_static! {
     pub static ref FALKOR_RESTART_COUNTER: Counter = register_counter!(
         "falkordb_restarts_total",
         "Total number of restart for falkordb server",
+    )
+    .unwrap();
+    pub static ref FALKOR_RUNNING_REQUESTS_GAUGE: Gauge = register_gauge!(
+        "falkordb_running_requests",
+        "The number of request that run now by the falkordb server",
+    )
+    .unwrap();
+    pub static ref FALKOR_WAITING_REQUESTS_GAUGE: Gauge = register_gauge!(
+        "falkordb_waiting_requests",
+        "The number of request that waiting to run by the falkordb server",
     )
     .unwrap();
 }

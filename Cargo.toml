@@ -50,6 +50,10 @@ name = "falkor_process"
 path = "src/bin/falkor_process_main.rs"
 
 [[bin]]
+name = "prepare_queries"
+path = "src/bin/prepare_queries_main.rs"
+
+[[bin]]
 name = "benchmark"
 path = "src/main.rs"
 

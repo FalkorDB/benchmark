@@ -3,7 +3,7 @@ use crate::error::BenchmarkResult;
 use crate::utils::{
     create_directory_if_not_exists, delete_file, falkor_logs_path, falkor_shared_lib_path,
 };
-use crate::FALKOR_RESTART_COUNTER;
+use crate::{FALKOR_RESTART_COUNTER, FALKOR_RUNNING_REQUESTS_GAUGE, FALKOR_WAITING_REQUESTS_GAUGE};
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
 use std::env;
@@ -43,12 +43,12 @@ impl FalkorProcess {
             let mut state = state_arc.lock().await;
             state.handles.push(handle);
         }
-        // let state_arc_clone = Arc::clone(&state_arc);
-        // let handle = Self::monitor_server(state_arc_clone);
-        // {
-        //     let mut state = state_arc.lock().await;
-        //     state.handles.push(handle);
-        // }
+        let state_arc_clone = Arc::clone(&state_arc);
+        let handle = Self::monitor_server(state_arc_clone);
+        {
+            let mut state = state_arc.lock().await;
+            state.handles.push(handle);
+        }
         Ok(FalkorProcess { state: state_arc })
     }
 
@@ -185,6 +185,8 @@ impl FalkorProcess {
         if !waiting_queries.is_empty() {
             error!("Waiting queries found: {:?}", waiting_queries);
         }
+        FALKOR_RUNNING_REQUESTS_GAUGE.set(running_queries.len() as f64);
+        FALKOR_WAITING_REQUESTS_GAUGE.set(waiting_queries.len() as f64);
         Ok(())
     }
 

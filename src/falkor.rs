@@ -1,7 +1,7 @@
 use crate::error::BenchmarkError::OtherError;
 use crate::error::BenchmarkResult;
 use crate::falkor_process::FalkorProcess;
-use crate::queries_repository::QueryType;
+use crate::queries_repository::PreparedQuery;
 use crate::scenario::Size;
 use crate::utils::{
     delete_file, falkor_shared_lib_path, file_exists, get_command_pid, redis_save,
@@ -11,6 +11,7 @@ use crate::{OPERATION_COUNTER, OPERATION_ERROR_COUNTER};
 use falkordb::FalkorValue::I64;
 use falkordb::{AsyncGraph, FalkorClientBuilder, FalkorResult, LazyResultSet, QueryResult};
 use std::env;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::fs;
 use tracing::{error, info};
@@ -186,25 +187,31 @@ pub struct FalkorBenchmarkClient {
 }
 
 impl FalkorBenchmarkClient {
-    // #[instrument(skip(self, queries))]
     pub async fn execute_queries(
         &mut self,
         spawn_id: usize,
-        queries: Vec<(String, QueryType, String)>,
+        queries: Arc<Box<dyn Iterator<Item = PreparedQuery> + Send + Sync>>,
     ) {
         let spawn_id = spawn_id.to_string();
-        for (index, (query_name, _query_type, query)) in queries.into_iter().enumerate() {
-            let _res = self
-                .execute_query(spawn_id.as_str(), query_name.as_str(), query.as_str())
-                .await;
-            // info!(
-            //     "executed: query_name={}, query:{}, res {:?}",
-            //     query_name, query, _res
-            // );
-            if let Err(e) = _res {
+        match Arc::try_unwrap(queries) {
+            Ok(queries) => {
+                for PreparedQuery { q_name, cypher, .. } in queries {
+                    let res = self
+                        .execute_query(spawn_id.as_str(), q_name.as_str(), cypher.as_str())
+                        .await;
+                    // info!(
+                    //     "executed: query_name={}, query:{}, res {:?}",
+                    //     query_name, query, _res
+                    // );
+                    if let Err(e) = res {
+                        error!("Error executing query: {}, the error is: {:?}", cypher, e);
+                    }
+                }
+            }
+            Err(arc) => {
                 error!(
-                    "Error executing query: {}, the error is: {:?}, index is: {}",
-                    query, e, index
+                    "Failed to unwrap queries iterator, Remaining references count: {}",
+                    Arc::strong_count(&arc)
                 );
             }
         }
