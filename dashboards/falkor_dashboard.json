@@ -449,32 +449,7 @@
           },
           "unit": "µs"
         },
-        "overrides": [
-          {
-            "__systemRef": "hideSeriesFrom",
-            "matcher": {
-              "id": "byNames",
-              "options": {
-                "mode": "exclude",
-                "names": [
-                  "graph.QUERY"
-                ],
-                "prefix": "All except:",
-                "readOnly": true
-              }
-            },
-            "properties": [
-              {
-                "id": "custom.hideFrom",
-                "value": {
-                  "legend": false,
-                  "tooltip": false,
-                  "viz": true
-                }
-              }
-            ]
-          }
-        ]
+        "overrides": []
       },
       "gridPos": {
         "h": 7,
@@ -499,7 +474,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "redis_commands_latencies_usec_count",
+          "expr": "rate(redis_commands_latencies_usec_count[1m])",
           "legendFormat": "{{ cmd }}",
           "range": true,
           "refId": "A"
@@ -984,7 +959,8 @@
                 "value": 80
               }
             ]
-          }
+          },
+          "unit": "locale"
         },
         "overrides": []
       },
@@ -1076,7 +1052,8 @@
                 "value": 80
               }
             ]
-          }
+          },
+          "unit": "locale"
         },
         "overrides": []
       },
@@ -1169,7 +1146,7 @@
               }
             ]
           },
-          "unit": "none"
+          "unit": "locale"
         },
         "overrides": []
       },
@@ -1200,7 +1177,7 @@
             "uid": "PBFA97CFB590B2093"
           },
           "editorMode": "code",
-          "expr": "sum by (vendor)  (operations_error_total{vendor=\"falkor\"})",
+          "expr": "sum by (vendor)  (operations_error_total{vendor=\"falkor\"}) or vector(0)",
           "hide": false,
           "instant": false,
           "legendFormat": "all errors",
@@ -1267,7 +1244,8 @@
                 "value": 80
               }
             ]
-          }
+          },
+          "unit": "locale"
         },
         "overrides": []
       },
@@ -1294,7 +1272,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "sum by (vendor) (operations_total{vendor=\"falkor\"}) - sum by (vendor) (operations_error_total{job=\"falkor_benchmark\"})",
+          "expr": "sum by (vendor) (operations_total{vendor=\"falkor\"}) - sum by (vendor) (operations_error_total{job=\"falkor_benchmark\"}) or (sum by (vendor) (operations_total{vendor=\"falkor\"}) )",
           "legendFormat": "__auto",
           "range": true,
           "refId": "A"
@@ -1322,6 +1300,6 @@
   "timezone": "browser",
   "title": "Falkor DB",
   "uid": "be57mvv016874b",
-  "version": 8,
+  "version": 14,
   "weekStart": ""
 }
