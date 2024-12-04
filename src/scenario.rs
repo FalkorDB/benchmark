@@ -33,11 +33,11 @@ pub enum Vendor {
 
 #[derive(Debug, Clone)]
 pub struct Spec<'a> {
-    pub(crate) name: Name,
-    pub(crate) vendor: Vendor,
-    pub(crate) size: Size,
-    pub(crate) vertices: u64,
-    pub(crate) edges: u64,
+    pub name: Name,
+    pub vendor: Vendor,
+    pub size: Size,
+    pub vertices: u64,
+    pub edges: u64,
     data_url: &'a str,
     index_url: &'a str,
 }
@@ -79,18 +79,18 @@ impl<'a> Spec<'a> {
         }
     }
 
-    pub(crate) fn backup_path(&self) -> String {
+    pub fn backup_path(&self) -> String {
         format!("./backups/{}/{}/{}", self.vendor, self.name, self.size)
     }
 
-    pub(crate) async fn init_data_iterator(
+    pub async fn init_data_iterator(
         &self
     ) -> BenchmarkResult<Pin<Box<dyn Stream<Item = io::Result<String>> + Send>>> {
         let cached = self.cache(self.data_url.as_ref()).await?;
         info!("Loading data from cache file {}", cached);
         Ok(Box::pin(read_lines(cached).await?))
     }
-    pub(crate) async fn init_index_iterator(
+    pub async fn init_index_iterator(
         &self
     ) -> BenchmarkResult<Pin<Box<dyn Stream<Item = io::Result<String>> + Send>>> {
         let cached = self.cache(self.index_url.as_ref()).await?;
@@ -98,7 +98,7 @@ impl<'a> Spec<'a> {
         Ok(Box::pin(read_lines(cached).await?))
     }
 
-    pub(crate) async fn cache(
+    pub async fn cache(
         &self,
         url: &str,
     ) -> BenchmarkResult<String> {

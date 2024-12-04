@@ -1,12 +1,11 @@
 use crate::error::BenchmarkError::Neo4rsError;
 use crate::error::BenchmarkResult;
-use crate::metrics_collector::MetricsCollector;
-use crate::queries_repository::QueryType;
-use crate::query::QueryParam;
+use crate::queries_repository::PreparedQuery;
 use futures::stream::TryStreamExt;
 use futures::{Stream, StreamExt};
 use histogram::Histogram;
 use neo4rs::{query, Graph, Row};
+use std::hint::black_box;
 use std::pin::Pin;
 use tokio::io;
 use tokio::time::Instant;
@@ -29,7 +28,7 @@ impl Neo4jClient {
         Ok(Neo4jClient { graph })
     }
 
-    pub(crate) async fn graph_size(&self) -> BenchmarkResult<(u64, u64)> {
+    pub async fn graph_size(&self) -> BenchmarkResult<(u64, u64)> {
         let mut result = self
             .graph
             .execute(query("MATCH (n) RETURN count(n) as count"))
@@ -48,51 +47,30 @@ impl Neo4jClient {
         }
         Ok((number_of_nodes, number_of_relationships))
     }
-    pub(crate) async fn execute_query_iterator(
+    pub async fn execute_query_iterator(
         &mut self,
-        iter: Box<
-            dyn Iterator<Item = (String, QueryType, (String, Vec<(String, QueryParam)>))> + '_,
-        >,
-        metric_collector: &mut MetricsCollector,
+        iter: Box<dyn Iterator<Item = PreparedQuery> + '_>,
     ) -> BenchmarkResult<()> {
         let mut count = 0u64;
-        for (name, query_type, (q, params)) in iter {
-            let query_and_params = format!(
-                "{}, [{}]",
-                q.as_str(),
-                params
-                    .clone()
-                    .iter()
-                    .map(|(k, v)| format!("{}: {}", k, v.to_cypher_string()))
-                    .collect::<Vec<String>>()
-                    .join(", ")
-            );
-            let start = std::time::Instant::now();
-            let mut result = self.graph.execute(query(q.as_str()).params(params)).await?;
-            let mut rows = 0;
+        for PreparedQuery { bolt, .. } in iter {
+            let mut result = self
+                .graph
+                .execute(neo4rs::query(bolt.query.as_str()).params(bolt.params))
+                .await?;
             while let Ok(Some(row)) = result.next().await {
                 trace!("Row: {:?}", row);
-                rows += 1;
+                black_box(row);
             }
 
-            let duration = start.elapsed();
             count += 1;
             if count % 10000 == 0 {
                 info!("Executed {} queries", count);
             }
-            let stats = format!("{} rows returned", rows);
-            metric_collector.record(
-                duration,
-                name.as_str(),
-                query_type,
-                query_and_params.as_str(),
-                stats.as_str(),
-            )?;
         }
         Ok(())
     }
 
-    pub(crate) async fn execute_query(
+    pub async fn execute_query(
         &self,
         q: &str,
     ) -> BenchmarkResult<Pin<Box<dyn Stream<Item = BenchmarkResult<Row>> + Send>>> {
@@ -102,7 +80,7 @@ impl Neo4jClient {
         Ok(Box::pin(stream))
     }
 
-    pub(crate) async fn execute_query_stream<S>(
+    pub async fn execute_query_stream<S>(
         &self,
         mut stream: S,
         histogram: &mut Histogram,

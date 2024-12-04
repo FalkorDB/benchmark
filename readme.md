@@ -103,6 +103,7 @@ The data is based on https://www.kaggle.com/datasets/wolfram77/graphs-snap-soc-p
 licensed: https://creativecommons.org/licenses/by/4.0/
 
 
+
 ## FAQ
 
 ### System Requirements
@@ -140,5 +141,29 @@ A: Install OpenMP:
 **Q: Can I migrate from Neo4j to FalkorDB?**  
 A: Yes, FalkorDB supports the Cypher query language, making migration from Neo4j straightforward. Migration tools are in development.
 
+
+### Grafana and Prometheus
+
+- Accessing grafana http://localhost:3000
+- Accessing prometheus http://localhost:9090
+- sum by (vendor, spawn_id)  (rate(operations_total{vendor="falkor"}[1m]))
+  redis
+- rate(redis_commands_processed_total{instance=~"redis-exporter:9121"}[1m])
+- redis_connected_clients{instance=~"redis-exporter:9121"}
+- topk(5, irate(redis_commands_total{instance=~"redis-exporter:9121"} [1m]))
+- redis_blocked_clients
+- redis_commands_total
+- redis_commands_failed_calls_total
+- redis_commands_latencies_usec_count
+- redis_commands_rejected_calls_total
+- redis_io_threaded_reads_processed
+- redis_io_threaded_writes_processed
+- redis_io_threads_active
+- redis_memory_max_bytes
+- redis_memory_used_bytes
+- redis_memory_used_peak_bytes
+- redis_memory_used_vm_total
+- redis_process_id
+=======
 
 
