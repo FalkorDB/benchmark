@@ -118,6 +118,17 @@ async fn main() -> BenchmarkResult<()> {
             info!("report was written to html/compare.html");
             // println!("{}", compare_report);
         }
+        Commands::PrepareQueries {
+            dataset_size,
+            number_of_queries,
+            number_of_workers,
+            name,
+        } => {
+            info!(
+                "Prepare queries dataset_size: {}, number_of_queries: {}, number_of_workers: {}, name: {}",
+                dataset_size, number_of_queries, number_of_workers, name
+            );
+        }
     }
     drop(prometheus_endpoint);
     Ok(())

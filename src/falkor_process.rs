@@ -3,7 +3,12 @@ use crate::error::BenchmarkResult;
 use crate::utils::{
     create_directory_if_not_exists, delete_file, falkor_logs_path, falkor_shared_lib_path,
 };
-use crate::{FALKOR_RESTART_COUNTER, FALKOR_RUNNING_REQUESTS_GAUGE, FALKOR_WAITING_REQUESTS_GAUGE};
+use crate::{
+    FALKOR_NODES_GAUGE, FALKOR_RELATIONSHIPS_GAUGE, FALKOR_RESTART_COUNTER,
+    FALKOR_RUNNING_REQUESTS_GAUGE, FALKOR_WAITING_REQUESTS_GAUGE,
+};
+use falkordb::FalkorValue::I64;
+use falkordb::{AsyncGraph, FalkorClientBuilder, FalkorConnectionInfo};
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
 use std::env;
@@ -185,9 +190,52 @@ impl FalkorProcess {
         if !waiting_queries.is_empty() {
             error!("Waiting queries found: {:?}", waiting_queries);
         }
-        FALKOR_RUNNING_REQUESTS_GAUGE.set(running_queries.len() as f64);
-        FALKOR_WAITING_REQUESTS_GAUGE.set(waiting_queries.len() as f64);
+
+        let running_queries_len: i64 = running_queries.len() as i64;
+        let waiting_queries_len: i64 = waiting_queries.len() as i64;
+        FALKOR_RUNNING_REQUESTS_GAUGE.set(running_queries_len);
+        FALKOR_WAITING_REQUESTS_GAUGE.set(waiting_queries_len);
+
+        let connection_info: FalkorConnectionInfo = "falkor://127.0.0.1:6379"
+            .try_into()
+            .expect("Invalid connection info");
+        let client = FalkorClientBuilder::new_async()
+            .with_connection_info(connection_info)
+            .build()
+            .await
+            .expect("Failed to build client");
+        let mut graph = client.select_graph("falkor");
+        if let Ok(relationships_number) =
+            Self::execute_i64_query(&mut graph, "MATCH ()-[r]->() RETURN count(r)").await
+        {
+            FALKOR_RELATIONSHIPS_GAUGE.set(relationships_number);
+        }
+        if let Ok(nodes_number) =
+            Self::execute_i64_query(&mut graph, "MATCH (n) RETURN count(n)").await
+        {
+            FALKOR_NODES_GAUGE.set(nodes_number);
+        }
+
         Ok(())
+    }
+
+    async fn execute_i64_query(
+        graph: &mut AsyncGraph,
+        query: &str,
+    ) -> BenchmarkResult<i64> {
+        let mut values = graph.query(query).with_timeout(5000).execute().await?;
+        if let Some(value) = values.data.next() {
+            match value.as_slice() {
+                [I64(i64_value)] => Ok(i64_value.clone()),
+                _ => {
+                    let msg = format!("Unexpected response: {:?} for query {}", value, query);
+                    error!(msg);
+                    Err(OtherError(msg))
+                }
+            }
+        } else {
+            Err(OtherError(format!("No response for query: {}", query)))
+        }
     }
 
     pub async fn terminate(&mut self) -> BenchmarkResult<()> {

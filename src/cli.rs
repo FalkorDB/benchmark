@@ -55,6 +55,22 @@ pub enum Commands {
         force: bool,
     },
 
+    PrepareQueries {
+        #[arg(short, long, value_enum)]
+        dataset_size: crate::scenario::Size,
+        #[arg(short = 'q', long, alias = "queries", default_value_t = 1000000)]
+        number_of_queries: u64,
+        #[arg(
+            short = 'w',
+            long,
+            alias = "workers",
+            alias = "parallel",
+            default_value_t = 1
+        )]
+        number_of_workers: usize,
+        #[arg(short = 'n', long, help = "the name of this query set")]
+        name: String,
+    },
     Run {
         #[arg(short, long, value_enum)]
         vendor: Vendor,

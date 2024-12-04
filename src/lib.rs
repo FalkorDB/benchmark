@@ -1,6 +1,6 @@
 use lazy_static::lazy_static;
 use prometheus::{
-    register_counter, register_counter_vec, register_gauge, Counter, CounterVec, Gauge,
+    register_counter, register_counter_vec, register_int_gauge, Counter, CounterVec, IntGauge,
 };
 
 pub mod cli;
@@ -49,14 +49,24 @@ lazy_static! {
         "Total number of restart for falkordb server",
     )
     .unwrap();
-    pub static ref FALKOR_RUNNING_REQUESTS_GAUGE: Gauge = register_gauge!(
+    pub static ref FALKOR_RUNNING_REQUESTS_GAUGE: IntGauge = register_int_gauge!(
         "falkordb_running_requests",
         "The number of request that run now by the falkordb server",
     )
     .unwrap();
-    pub static ref FALKOR_WAITING_REQUESTS_GAUGE: Gauge = register_gauge!(
+    pub static ref FALKOR_WAITING_REQUESTS_GAUGE: IntGauge = register_int_gauge!(
         "falkordb_waiting_requests",
         "The number of request that waiting to run by the falkordb server",
+    )
+    .unwrap();
+    pub static ref FALKOR_NODES_GAUGE: IntGauge = register_int_gauge!(
+        "falkordb_nodes_total",
+        "Total number of nodes in falkordb graph",
+    )
+    .unwrap();
+    pub static ref FALKOR_RELATIONSHIPS_GAUGE: IntGauge = register_int_gauge!(
+        "falkordb_relationships_total",
+        "Total number of relationships in falkordb graph",
     )
     .unwrap();
 }
