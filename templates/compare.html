@@ -3,7 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta content="width=device-width, initial-scale=1.0" name="viewport">
-    <title>Chart.js Example</title>
+    <title>FalkorDB benchmark</title>
+    <link rel="icon" href="images/favicon.ico" type="image/x-icon">
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels"></script>
     <style>
@@ -196,9 +197,14 @@
             },
             options: {
                 responsive: true,
-                scales: {
-                    y: {
-                        beginAtZero: true // Start Y-axis at zero
+                y: {
+                    beginAtZero: true, // Start Y-axis at zero
+                    type: 'linear',
+                    position: 'left',
+                    ticks: {
+                        callback: function(v){
+                            return v + ' ms';
+                        }
                     }
                 },
                 plugins: {
@@ -314,6 +320,9 @@
     }
 
 </script>
+<footer>
+    <p>Created by <a href="https://github.com/FalkorDB/benchmark" target="_blank">FalkorDB benchmark</a></p>
+</footer>
 </body>
 </html>
 
