@@ -19,9 +19,11 @@ use histogram::Histogram;
 use std::io;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::mpsc::Receiver;
+use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
-use tracing::{error, info, instrument, Instrument};
+use tracing::{error, info, instrument};
 
 #[tokio::main]
 async fn main() -> BenchmarkResult<()> {
@@ -207,20 +209,32 @@ async fn run_falkor(
     );
     info!("running {} queries", format_number(number_of_queries));
 
+    // prepare the mpsc channel
+    let (tx, rx) = tokio::sync::mpsc::channel::<PreparedQuery>(100 * number_of_queries as usize);
+    let rx: Arc<Mutex<Receiver<PreparedQuery>>> = Arc::new(Mutex::new(rx));
+
+    // start workers
     let mut handles = Vec::with_capacity(parallel);
-    let start = Instant::now();
+
     for spawn_id in 0..parallel {
-        let handle = spawn_worker(&falkor, number_of_queries, spawn_id).await?;
+        let handle = spawn_worker(&falkor, spawn_id, &rx).await?;
         handles.push(handle);
     }
 
-    let mut results = Vec::with_capacity(handles.len());
+    // send the queries
+    let queries_repository =
+        benchmark::queries_repository::UsersQueriesRepository::new(9998, 121716);
+    let queries: Box<dyn Iterator<Item = PreparedQuery> + Send + Sync> =
+        queries_repository.random_queries(number_of_queries);
+
+    let start = Instant::now();
+
+    // iterate over queries and send them to the workers
+    for query in queries {
+        tx.send(query).await?;
+    }
     for handle in handles {
-        // Await each handle to get the result of the task
-        match handle.await {
-            Ok(result) => results.push(result),
-            Err(e) => eprintln!("Task failed: {:?}", e),
-        }
+        let _ = handle.await;
     }
 
     let elapsed = start.elapsed();
@@ -229,6 +243,7 @@ async fn run_falkor(
         format_number(number_of_queries),
         elapsed
     );
+
     // stop falkor
     let _stopped = falkor.stop().await?;
     Ok(())
@@ -237,22 +252,34 @@ async fn run_falkor(
 #[instrument(skip(falkor), fields(vendor = "falkor"))]
 async fn spawn_worker(
     falkor: &Falkor<Started>,
-    number_of_queries: u64,
-    spawn_id: usize,
+    worker_id: usize,
+    receiver: &Arc<Mutex<Receiver<PreparedQuery>>>,
 ) -> BenchmarkResult<JoinHandle<()>> {
     info!("spawning worker");
-    let mut graph = falkor.client().await?;
-    let queries_repository =
-        benchmark::queries_repository::UsersQueriesRepository::new(9998, 121716);
-    let queries: Box<dyn Iterator<Item = PreparedQuery> + Send + Sync> =
-        queries_repository.random_queries(number_of_queries);
+    let mut client = falkor.client().await?;
+    let receiver = Arc::clone(&receiver);
 
     let handle = tokio::spawn({
-        let queries_arc = Arc::new(queries);
         async move {
-            graph.execute_queries(spawn_id, queries_arc).await;
+            let worker_id = worker_id.to_string();
+            let worker_id_str = worker_id.as_str();
+            let mut counter = 0u32;
+            loop {
+                let mut receiver = receiver.lock().await; // Lock the mutex to access the receiver
+                match receiver.recv().await {
+                    Some(prepared_query) => {
+                        let _ = client
+                            .execute_prepared_query(worker_id_str, prepared_query)
+                            .await;
+                        counter += 1;
+                        if counter % 1000 == 0 {
+                            info!("worker {} processed {} queries", worker_id, counter);
+                        }
+                    }
+                    None => break,
+                }
+            }
         }
-        .instrument(tracing::Span::current())
     });
 
     Ok(handle)
@@ -273,7 +300,7 @@ async fn init_falkor(
 
     let mut falkor_client = falkor.client().await?;
     falkor_client
-        .execute_query(
+        ._execute_query(
             "main",
             "create_index",
             "CREATE INDEX FOR (u:User) ON (u.id)",
@@ -286,7 +313,7 @@ async fn init_falkor(
         match result {
             Ok(query) => {
                 falkor_client
-                    .execute_query("loader", "", query.as_str())
+                    ._execute_query("loader", "", query.as_str())
                     .await?;
             }
             Err(e) => {

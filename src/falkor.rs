@@ -197,7 +197,7 @@ impl FalkorBenchmarkClient {
             Ok(queries) => {
                 for PreparedQuery { q_name, cypher, .. } in queries {
                     let res = self
-                        .execute_query(spawn_id.as_str(), q_name.as_str(), cypher.as_str())
+                        ._execute_query(spawn_id.as_str(), q_name.as_str(), cypher.as_str())
                         .await;
                     // info!(
                     //     "executed: query_name={}, query:{}, res {:?}",
@@ -217,8 +217,24 @@ impl FalkorBenchmarkClient {
         }
     }
 
+    pub async fn execute_prepared_query<S: AsRef<str>>(
+        &mut self,
+        worker_id: S,
+        prepared_query: PreparedQuery,
+    ) -> BenchmarkResult<()> {
+        let PreparedQuery { q_name, cypher, .. } = prepared_query;
+        let worker_id = worker_id.as_ref();
+        let q_name = q_name.as_str();
+        let query = cypher.as_str();
+        let falkor_result = self.graph.query(query).with_timeout(5000).execute().await;
+        OPERATION_COUNTER
+            .with_label_values(&["falkor", worker_id, "", q_name, "", ""])
+            .inc();
+        Self::read_reply(worker_id, q_name, query, falkor_result)
+    }
+
     // #[instrument(skip(self), fields(query = %query, query_name = %query_name))]
-    pub async fn execute_query<'a>(
+    pub async fn _execute_query<'a>(
         &'a mut self,
         spawn_id: &'a str,
         query_name: &'a str,
