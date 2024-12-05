@@ -220,7 +220,7 @@ impl FalkorBenchmarkClient {
     pub async fn execute_prepared_query<S: AsRef<str>>(
         &mut self,
         worker_id: S,
-        prepared_query: PreparedQuery,
+        prepared_query: &PreparedQuery,
     ) -> BenchmarkResult<()> {
         let PreparedQuery { q_name, cypher, .. } = prepared_query;
         let worker_id = worker_id.as_ref();

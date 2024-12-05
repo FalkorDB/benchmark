@@ -19,7 +19,7 @@ use histogram::Histogram;
 use std::io;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc::Receiver;
+use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
@@ -210,30 +210,30 @@ async fn run_falkor(
     info!("running {} queries", format_number(number_of_queries));
 
     // prepare the mpsc channel
-    let (tx, rx) = tokio::sync::mpsc::channel::<PreparedQuery>(100 * number_of_queries as usize);
+    let (tx, rx) = tokio::sync::mpsc::channel::<PreparedQuery>(2000 * parallel);
     let rx: Arc<Mutex<Receiver<PreparedQuery>>> = Arc::new(Mutex::new(rx));
 
-    // start workers
-    let mut handles = Vec::with_capacity(parallel);
+    let mut filler_handles = Vec::with_capacity(2);
+    // iterate over queries and send them to the workers
+    filler_handles.push(fill_queries(number_of_queries, tx.clone())?);
+    filler_handles.push(fill_queries(number_of_queries, tx.clone())?);
 
+    let mut workers_handles = Vec::with_capacity(parallel);
+    // start workers
+    let start = Instant::now();
     for spawn_id in 0..parallel {
         let handle = spawn_worker(&falkor, spawn_id, &rx).await?;
-        handles.push(handle);
+        workers_handles.push(handle);
     }
 
-    // send the queries
-    let queries_repository =
-        benchmark::queries_repository::UsersQueriesRepository::new(9998, 121716);
-    let queries: Box<dyn Iterator<Item = PreparedQuery> + Send + Sync> =
-        queries_repository.random_queries(number_of_queries);
-
-    let start = Instant::now();
-
-    // iterate over queries and send them to the workers
-    for query in queries {
-        tx.send(query).await?;
+    // wait for the filler to finish drop the transmission side
+    // to let the workers know that they should stop
+    for handle in filler_handles {
+        let _ = handle.await;
     }
-    for handle in handles {
+    drop(tx);
+
+    for handle in workers_handles {
         let _ = handle.await;
     }
 
@@ -247,6 +247,28 @@ async fn run_falkor(
     // stop falkor
     let _stopped = falkor.stop().await?;
     Ok(())
+}
+
+fn fill_queries(
+    number_of_queries: u64,
+    tx: Sender<PreparedQuery>,
+) -> BenchmarkResult<JoinHandle<()>> {
+    Ok(tokio::spawn({
+        async move {
+            let queries_repository =
+                benchmark::queries_repository::UsersQueriesRepository::new(9998, 121716);
+            let queries: Box<dyn Iterator<Item = PreparedQuery> + Send + Sync> =
+                queries_repository.random_queries(number_of_queries);
+
+            for query in queries {
+                if let Err(e) = tx.send(query).await {
+                    error!("error filling query: {}, exiting", e);
+                    return;
+                }
+            }
+            info!("fill_queries finished");
+        }
+    }))
 }
 
 #[instrument(skip(falkor), fields(vendor = "falkor"))]
@@ -265,20 +287,40 @@ async fn spawn_worker(
             let worker_id_str = worker_id.as_str();
             let mut counter = 0u32;
             loop {
-                let mut receiver = receiver.lock().await; // Lock the mutex to access the receiver
-                match receiver.recv().await {
+                // get next value and release the mutex
+                let received = receiver.lock().await.recv().await;
+
+                match received {
                     Some(prepared_query) => {
-                        let _ = client
-                            .execute_prepared_query(worker_id_str, prepared_query)
+                        let r = client
+                            .execute_prepared_query(worker_id_str, &prepared_query)
                             .await;
-                        counter += 1;
-                        if counter % 1000 == 0 {
-                            info!("worker {} processed {} queries", worker_id, counter);
+                        match r {
+                            Ok(_) => {
+                                counter += 1;
+                                // info!("worker {} processed query {}", worker_id, counter);
+                                if counter % 1000 == 0 {
+                                    info!("worker {} processed {} queries", worker_id, counter);
+                                }
+                            }
+                            // in case of error sleep for 3 seconds, that will give the benchmark some time to
+                            // accumulate more queries for the time that the system recovers.
+                            Err(_) => {
+                                let seconds_wait = 3u64;
+                                info!(
+                                    "worker {} failed to process query, sleeping for {} seconds",
+                                    worker_id, seconds_wait
+                                );
+                                tokio::time::sleep(Duration::from_secs(seconds_wait)).await;
+                            }
                         }
                     }
-                    None => break,
+                    None => {
+                        break;
+                    }
                 }
             }
+            info!("worker {} finished", worker_id);
         }
     });
 
