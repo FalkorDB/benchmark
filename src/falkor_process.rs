@@ -70,12 +70,15 @@ impl FalkorProcess {
             REDIS_DATA_DIR,
             "--logfile",
             falkor_log_path.as_str(),
+            "--protected-mode",
+            "no",
             "--loadmodule",
             default_so_path.as_str(),
             "CACHE_SIZE",
             "40",
             "MAX_QUEUED_QUERIES",
             "100",
+            // CONFIG SET protected-mode no
         ];
 
         info!("starting falkor: {} {}", command, args.join(" "));
