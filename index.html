@@ -78,9 +78,7 @@
             <thead>
             <tr>
                 <th>Vendor</th>
-                <th>Total Calls</th>
                 <th>Worst Call</th>
-                <th>More Info</th>
             </tr>
             </thead>
             <tbody id="example-table-body">
@@ -864,19 +862,13 @@
     function create_table_row(key, run){
         let tr = document.createElement("tr");
         let td1 = document.createElement("td");
-        let td2 = document.createElement("td");
         let td3 = document.createElement("td");
-        let td5 = document.createElement("td");
         td1.innerHTML = run.vendor;
-        td2.innerHTML = run.total_calls_for_type[key].toString();
         td3.innerHTML = run.worst_call_for_type[key][0];
         td3.style.fontFamily =  "Arial, sans-serif";
         td3.style.fontSize = "14px";
-        td5.innerHTML = run.worst_call_for_type[key][1];
         tr.appendChild(td1);
-        tr.appendChild(td2);
         tr.appendChild(td3);
-        tr.appendChild(td5);
         return tr;
     }
 
