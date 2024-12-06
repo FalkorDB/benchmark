@@ -338,7 +338,7 @@
     "worst_call_for_type": {
       "aggregate_expansion_1_with_filter": [
         "CYPHER id = 4477 MATCH (s:User {id: $id})-->(n:User)  WHERE n.age >= 18  RETURN n.id",
-        "Cached execution: 1, Query internal execution time: 1.969270 milliseconds, 0 rows returned",
+        "Query internal execution time: 1.969270 milliseconds, 0 rows returned",
         {
           "secs": 0,
           "nanos": 2568260
@@ -346,7 +346,7 @@
       ],
       "aggregate_expansion_4_with_filter": [
         "CYPHER id = 3771 MATCH (s:User {id: $id})-->()-->()-->()-->(n:User)  WHERE n.age >= 18 RETURN DISTINCT n.id",
-        "Cached execution: 1, Query internal execution time: 46.323249 milliseconds, 50746 rows returned",
+        "Query internal execution time: 46.323249 milliseconds, 50746 rows returned",
         {
           "secs": 0,
           "nanos": 95212177
@@ -354,7 +354,7 @@
       ],
       "aggregate_expansion_1": [
         "CYPHER id = 4702 MATCH (s:User {id: $id})-->(n:User) RETURN n.id",
-        "Cached execution: 1, Query internal execution time: 1.760510 milliseconds, 5 rows returned",
+        "Query internal execution time: 1.760510 milliseconds, 5 rows returned",
         {
           "secs": 0,
           "nanos": 2539150
@@ -362,7 +362,7 @@
       ],
       "aggregate_expansion_4": [
         "CYPHER id = 6978 MATCH (s:User {id: $id})-->()-->()-->()-->(n:User) RETURN DISTINCT n.id",
-        "Cached execution: 1, Query internal execution time: 75.618828 milliseconds, 88158 rows returned",
+        "Query internal execution time: 75.618828 milliseconds, 88158 rows returned",
         {
           "secs": 0,
           "nanos": 161819786
@@ -370,7 +370,7 @@
       ],
       "write": [
         "CYPHER from = 1256 to = 4849 MATCH (n:User {id: $from}), (m:User {id: $to}) WITH n, m CREATE (n)-[e:Temp]->(m) RETURN e",
-        "Relationships created: 1, Cached execution: 1, Query internal execution time: 0.361830 milliseconds, 1 rows returned",
+        "Relationships created: 1, Query internal execution time: 0.361830 milliseconds, 1 rows returned",
         {
           "secs": 0,
           "nanos": 3661600
@@ -378,7 +378,7 @@
       ],
       "aggregate_expansion_3": [
         "CYPHER id = 2006 MATCH (s:User {id: $id})-->()-->()-->(n:User) RETURN DISTINCT n.id",
-        "Cached execution: 1, Query internal execution time: 31.771910 milliseconds, 32150 rows returned",
+        "Query internal execution time: 31.771910 milliseconds, 32150 rows returned",
         {
           "secs": 0,
           "nanos": 60882359
@@ -394,7 +394,7 @@
       ],
       "single_vertex_read": [
         "CYPHER id = 1719 MATCH (n:User {id : $id}) RETURN n",
-        "Cached execution: 1, Query internal execution time: 0.270230 milliseconds, 1 rows returned",
+        "Query internal execution time: 0.270230 milliseconds, 1 rows returned",
         {
           "secs": 0,
           "nanos": 1685100
@@ -402,7 +402,7 @@
       ],
       "aggregate_expansion_2": [
         "CYPHER id = 2237 MATCH (s:User {id: $id})-->()-->(n:User) RETURN DISTINCT n.id",
-        "Cached execution: 1, Query internal execution time: 7.453129 milliseconds, 11658 rows returned",
+        "Query internal execution time: 7.453129 milliseconds, 11658 rows returned",
         {
           "secs": 0,
           "nanos": 17383609
@@ -410,7 +410,7 @@
       ],
       "aggregate_expansion_2_with_filter": [
         "CYPHER id = 952 MATCH (s:User {id: $id})-->()-->(n:User)  WHERE n.age >= 18  RETURN DISTINCT n.id",
-        "Cached execution: 1, Query internal execution time: 5.363120 milliseconds, 5584 rows returned",
+        "Query internal execution time: 5.363120 milliseconds, 5584 rows returned",
         {
           "secs": 0,
           "nanos": 10369130
@@ -418,7 +418,7 @@
       ],
       "single_edge_write": [
         "CYPHER from = 1256 to = 4849 MATCH (n:User {id: $from}), (m:User {id: $to}) WITH n, m CREATE (n)-[e:Temp]->(m) RETURN e",
-        "Relationships created: 1, Cached execution: 1, Query internal execution time: 0.361830 milliseconds, 1 rows returned",
+        "Relationships created: 1, Query internal execution time: 0.361830 milliseconds, 1 rows returned",
         {
           "secs": 0,
           "nanos": 3661600
@@ -426,7 +426,7 @@
       ],
       "aggregate_expansion_3_with_filter": [
         "CYPHER id = 7408 MATCH (s:User {id: $id})-->()-->()-->(n:User)  WHERE n.age >= 18  RETURN DISTINCT n.id",
-        "Cached execution: 1, Query internal execution time: 21.187540 milliseconds, 30357 rows returned",
+        "Query internal execution time: 21.187540 milliseconds, 30357 rows returned",
         {
           "secs": 0,
           "nanos": 49013939
