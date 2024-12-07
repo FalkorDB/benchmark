@@ -162,7 +162,6 @@ fn prometheus_metrics_reporter() -> (JoinHandle<()>, tokio::sync::oneshot::Sende
 }
 
 async fn report_metrics() -> BenchmarkResult<()> {
-    info!("-->  Reporting metrics");
     let client = redis::Client::open("redis://127.0.0.1:6379/")?;
     let mut con = client.get_multiplexed_async_connection().await?;
     // let graph_info = redis::cmd("GRAPH.INFO").query_async(&mut con).await?;
@@ -291,7 +290,7 @@ async fn execute_i64_query(
     let mut values = graph.query(query).with_timeout(5000).execute().await?;
     if let Some(value) = values.data.next() {
         match value.as_slice() {
-            [I64(i64_value)] => Ok(i64_value.clone()),
+            [I64(i64_value)] => Ok(*i64_value),
             _ => {
                 let msg = format!("Unexpected response: {:?} for query {}", value, query);
                 error!(msg);

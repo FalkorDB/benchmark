@@ -44,8 +44,15 @@ pub struct MachineMetadata {
     pub free_memory_kb: u64,
     pub hostname: String,
 }
+
+impl Default for MachineMetadata {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MachineMetadata {
-    pub fn new() -> MachineMetadata {
+    fn new() -> MachineMetadata {
         let mut sys = System::new_all();
         sys.refresh_all();
         let os = std::env::consts::OS.into();
@@ -192,13 +199,13 @@ impl MetricsCollector {
         let ordered_operations = order_keys_by_p(&self.histogram_for_type, 99.0);
         let ordered_operations = reorder_rows(ordered_operations, &["all", "read", "write"]);
 
-        let mut report = String::from(format!(
+        let mut report = format!(
             "vendor: {}\n\nnodes: {}\n\nrelations: {}\n\nqueries: {}\n\n",
             self.vendor,
             format_number(self.node_count),
             format_number(self.relation_count),
             format_number(self.query_count)
-        ));
+        );
         report.push_str("| Query | Total Calls | 50th Percentile | 95th Percentile | 99th Percentile | Worst Time | Worst Call | Worst Call Statistics |\n");
         report.push_str("|-----------|-------------|-----------------|-----------------|-----------------|------------|------------|------------|\n");
 
@@ -296,13 +303,7 @@ fn reorder_rows(
     let removed: Vec<String> = to_prepend.iter().map(|&s| s.to_string()).collect();
 
     // Remove specified strings and collect them
-    vec.retain(|item| {
-        if to_prepend.contains(&item.as_str()) {
-            false
-        } else {
-            true
-        }
-    });
+    vec.retain(|item| !to_prepend.contains(&item.as_str()));
 
     // Prepend the removed items back to the vector
     vec.splice(0..0, removed);

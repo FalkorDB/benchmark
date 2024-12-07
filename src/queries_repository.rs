@@ -41,10 +41,16 @@ impl QueryGenerator {
     }
 }
 
+// Define a type alias for the function type
+type QueryFn = Box<dyn Fn() -> Query + Send + Sync>;
+
+// Define a type alias for the tuple
+type QueryEntry = (String, QueryType, QueryFn);
+
 pub struct QueriesRepositoryBuilder<U: Send> {
     vertices: i32,
     edges: i32,
-    queries: Vec<(String, QueryType, Box<dyn Fn() -> Query + Send + Sync>)>,
+    queries: Vec<QueryEntry>,
     flavour: U,
 }
 

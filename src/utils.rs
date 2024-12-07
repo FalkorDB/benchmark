@@ -158,10 +158,10 @@ pub async fn kill_process(pid: u32) -> BenchmarkResult<()> {
 pub async fn get_command_pid(cmd: impl AsRef<str>) -> BenchmarkResult<u32> {
     let cmd = cmd.as_ref();
     let output = Command::new("ps")
-        .args(&["-eo", "pid,command,stat"])
+        .args(["-eo", "pid,command,stat"])
         .output()
         .await
-        .map_err(|e| BenchmarkError::IoError(e))?;
+        .map_err(BenchmarkError::IoError)?;
 
     if output.status.success() {
         let stdout = str::from_utf8(&output.stdout)

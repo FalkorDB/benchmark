@@ -32,7 +32,7 @@ pub struct Falkor<U> {
 impl Falkor<Stopped> {
     pub fn new(san: bool) -> Falkor<Stopped> {
         let default = falkor_shared_lib_path().unwrap();
-        let path = env::var("FALKOR_PATH").unwrap_or_else(|_| default);
+        let path = env::var("FALKOR_PATH").unwrap_or(default);
         info!("falkor shared lib path: {}", path);
         Falkor {
             path,
@@ -259,7 +259,7 @@ impl FalkorBenchmarkClient {
     ) -> BenchmarkResult<()> {
         match reply {
             Ok(_) => {
-                tracing::Span::current().record("result", &"success");
+                tracing::Span::current().record("result", "success");
                 Ok(())
             }
             Err(e) => {

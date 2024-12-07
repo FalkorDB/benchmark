@@ -24,7 +24,7 @@ impl Neo4jClient {
     ) -> BenchmarkResult<Neo4jClient> {
         let graph = Graph::new(&uri, user.clone(), password.clone())
             .await
-            .map_err(|e| Neo4rsError(e))?;
+            .map_err(Neo4rsError)?;
         Ok(Neo4jClient { graph })
     }
 

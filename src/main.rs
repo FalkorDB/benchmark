@@ -37,7 +37,7 @@ async fn main() -> BenchmarkResult<()> {
         .with_thread_ids(true)
         .init();
 
-    let prometheus_endpoint = benchmark::prometheus_endpoint::PrometheusEndpoint::new();
+    let prometheus_endpoint = benchmark::prometheus_endpoint::PrometheusEndpoint::default();
 
     match cli.command {
         GenerateAutoComplete { shell } => {
@@ -77,7 +77,7 @@ async fn main() -> BenchmarkResult<()> {
             parallel,
             san,
         } => {
-            let machine_metadata = MachineMetadata::new();
+            let machine_metadata = MachineMetadata::default();
             info!(
                 "Run benchmark vendor: {}, graph-size:{}, queries: {}, machine_metadata: {:?}",
                 vendor, size, queries, machine_metadata
@@ -141,7 +141,7 @@ async fn run_neo4j(
     size: Size,
     number_of_queries: u64,
 ) -> BenchmarkResult<()> {
-    let neo4j = benchmark::neo4j::Neo4j::new();
+    let neo4j = benchmark::neo4j::Neo4j::default();
     // stop neo4j if it is running
     neo4j.stop(false).await?;
     // restore the dump
@@ -215,10 +215,12 @@ async fn run_falkor(
     let (tx, rx) = tokio::sync::mpsc::channel::<PreparedQuery>(2000 * parallel);
     let rx: Arc<Mutex<Receiver<PreparedQuery>>> = Arc::new(Mutex::new(rx));
 
-    let mut filler_handles = Vec::with_capacity(2);
     // iterate over queries and send them to the workers
-    filler_handles.push(fill_queries(number_of_queries, tx.clone())?);
-    filler_handles.push(fill_queries(number_of_queries, tx.clone())?);
+
+    let filler_handles = vec![
+        fill_queries(number_of_queries, tx.clone())?,
+        fill_queries(number_of_queries, tx.clone())?,
+    ];
 
     let mut workers_handles = Vec::with_capacity(parallel);
     // start workers
@@ -281,7 +283,7 @@ async fn spawn_worker(
 ) -> BenchmarkResult<JoinHandle<()>> {
     info!("spawning worker");
     let mut client = falkor.client().await?;
-    let receiver = Arc::clone(&receiver);
+    let receiver = Arc::clone(receiver);
 
     let handle = tokio::spawn({
         async move {
@@ -421,7 +423,7 @@ async fn init_neo4j(
     force: bool,
 ) -> BenchmarkResult<()> {
     let spec = Spec::new(benchmark::scenario::Name::Users, size, Vendor::Neo4j);
-    let neo4j = benchmark::neo4j::Neo4j::new();
+    let neo4j = benchmark::neo4j::Neo4j::default();
     let _ = neo4j.stop(false).await?;
     let backup_path = format!("{}/neo4j.dump", spec.backup_path());
     if !force {

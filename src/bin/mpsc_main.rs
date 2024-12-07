@@ -41,7 +41,7 @@ fn spawn_worker(
     rx: &Arc<Mutex<Receiver<i32>>>,
     worker_id: usize,
 ) -> tokio::task::JoinHandle<()> {
-    let rx_worker = Arc::clone(&rx);
+    let rx_worker = Arc::clone(rx);
     tokio::spawn(async move {
         loop {
             let mut receiver = rx_worker.lock().await; // Lock the mutex to access the receiver

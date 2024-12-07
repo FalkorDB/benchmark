@@ -12,6 +12,10 @@ license = "MIT"
 categories = ["database"]
 keywords = ["database", "graph-database", "database-driver", "falkordb", "benchmark"]
 
+[lints.clippy]
+result_large_err = "allow"
+
+
 
 [dependencies]
 neo4rs = "0.8.0"
@@ -59,6 +63,7 @@ path = "src/bin/mpsc_main.rs"
 [[bin]]
 name = "benchmark"
 path = "src/main.rs"
+
 
 
 [dev-dependencies]

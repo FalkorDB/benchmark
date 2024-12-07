@@ -12,8 +12,14 @@ pub struct PrometheusEndpoint {
     server_thread: Option<JoinHandle<()>>,
 }
 
+impl Default for PrometheusEndpoint {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PrometheusEndpoint {
-    pub fn new() -> Self {
+    fn new() -> Self {
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
         let server_thread = task::spawn(async {
