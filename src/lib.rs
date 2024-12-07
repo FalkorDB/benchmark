@@ -1,6 +1,7 @@
 use lazy_static::lazy_static;
 use prometheus::{
-    register_counter, register_counter_vec, register_int_gauge, Counter, CounterVec, IntGauge,
+    register_counter_vec, register_int_counter, register_int_gauge, CounterVec, IntCounter,
+    IntGauge,
 };
 
 pub mod cli;
@@ -11,11 +12,14 @@ pub mod falkor_process;
 pub mod metrics_collector;
 pub mod neo4j;
 pub mod neo4j_client;
+pub mod process_monitor;
 pub mod prometheus_endpoint;
 pub mod queries_repository;
 pub mod query;
 pub mod scenario;
 pub mod utils;
+
+pub(crate) const REDIS_DATA_DIR: &str = "./redis-data";
 
 lazy_static! {
     pub static ref OPERATION_COUNTER: CounterVec = register_counter_vec!(
@@ -44,7 +48,7 @@ lazy_static! {
         ]
     )
     .unwrap();
-    pub static ref FALKOR_RESTART_COUNTER: Counter = register_counter!(
+    pub static ref FALKOR_RESTART_COUNTER: IntCounter = register_int_counter!(
         "falkordb_restarts_total",
         "Total number of restart for falkordb server",
     )

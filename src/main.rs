@@ -75,6 +75,7 @@ async fn main() -> BenchmarkResult<()> {
             size,
             queries,
             parallel,
+            san,
         } => {
             let machine_metadata = MachineMetadata::new();
             info!(
@@ -87,7 +88,7 @@ async fn main() -> BenchmarkResult<()> {
                     run_neo4j(size, queries).await?;
                 }
                 Vendor::Falkor => {
-                    run_falkor(size, queries, parallel).await?;
+                    run_falkor(size, queries, parallel, san).await?;
                 }
             }
         }
@@ -184,13 +185,14 @@ async fn run_falkor(
     size: Size,
     number_of_queries: u64,
     parallel: usize,
+    san: bool,
 ) -> BenchmarkResult<()> {
     if parallel == 0 {
         return Err(OtherError(
             "Parallelism level must be greater than zero.".to_string(),
         ));
     }
-    let falkor: Falkor<Stopped> = benchmark::falkor::Falkor::new();
+    let falkor: Falkor<Stopped> = benchmark::falkor::Falkor::new(san);
 
     // if dump not present return error
     falkor.dump_exists_or_error(size).await?;
@@ -271,7 +273,7 @@ fn fill_queries(
     }))
 }
 
-#[instrument(skip(falkor), fields(vendor = "falkor"))]
+#[instrument(skip(falkor, receiver), fields(vendor = "falkor"))]
 async fn spawn_worker(
     falkor: &Falkor<Started>,
     worker_id: usize,
@@ -332,7 +334,7 @@ async fn init_falkor(
     _force: bool,
 ) -> BenchmarkResult<()> {
     let spec = Spec::new(benchmark::scenario::Name::Users, size, Vendor::Neo4j);
-    let falkor = benchmark::falkor::Falkor::new();
+    let falkor = benchmark::falkor::Falkor::new(false);
     falkor.clean_db().await?;
 
     let falkor = falkor.start().await?;

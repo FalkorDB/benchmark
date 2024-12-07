@@ -7,7 +7,7 @@ use crate::utils::{
     delete_file, falkor_shared_lib_path, file_exists, get_command_pid, redis_save,
     wait_for_redis_ready,
 };
-use crate::{OPERATION_COUNTER, OPERATION_ERROR_COUNTER};
+use crate::{OPERATION_COUNTER, OPERATION_ERROR_COUNTER, REDIS_DATA_DIR};
 use falkordb::FalkorValue::I64;
 use falkordb::{AsyncGraph, FalkorClientBuilder, FalkorResult, LazyResultSet, QueryResult};
 use std::env;
@@ -17,7 +17,6 @@ use tokio::fs;
 use tracing::{error, info};
 
 const REDIS_DUMP_FILE: &str = "./redis-data/dump.rdb";
-const REDIS_DATA_DIR: &str = "./redis-data";
 
 #[allow(dead_code)]
 pub struct Started(FalkorProcess);
@@ -27,24 +26,27 @@ pub struct Falkor<U> {
     path: String,
     #[allow(dead_code)]
     state: U,
+    san: bool,
 }
 
 impl Falkor<Stopped> {
-    pub fn new() -> Falkor<Stopped> {
+    pub fn new(san: bool) -> Falkor<Stopped> {
         let default = falkor_shared_lib_path().unwrap();
         let path = env::var("FALKOR_PATH").unwrap_or_else(|_| default);
         info!("falkor shared lib path: {}", path);
         Falkor {
             path,
             state: Stopped,
+            san,
         }
     }
     pub async fn start(self) -> BenchmarkResult<Falkor<Started>> {
-        let falkor_process: FalkorProcess = FalkorProcess::new().await?;
+        let falkor_process: FalkorProcess = FalkorProcess::new(self.san).await?;
         Self::wait_for_ready().await?;
         Ok(Falkor {
             path: self.path.clone(),
             state: Started(falkor_process),
+            san: self.san,
         })
     }
     pub async fn clean_db(&self) -> BenchmarkResult<()> {
@@ -79,13 +81,13 @@ impl Falkor<Stopped> {
     }
 }
 impl Falkor<Started> {
-    pub async fn stop(mut self) -> BenchmarkResult<Falkor<Stopped>> {
+    pub async fn stop(self) -> BenchmarkResult<Falkor<Stopped>> {
         redis_save().await?;
         Self::wait_for_ready().await?;
-        self.state.0.terminate().await?;
         Ok(Falkor {
             path: self.path.clone(),
             state: Stopped,
+            san: self.san,
         })
     }
     pub async fn graph_size(&self) -> BenchmarkResult<(u64, u64)> {

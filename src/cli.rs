@@ -94,6 +94,14 @@ pub enum Commands {
             help = "parallelism level"
         )]
         parallel: usize,
+        #[arg(
+            long,
+            required = false,
+            default_value_t = false,
+            default_missing_value = "false",
+            help = "run with SAN=address"
+        )]
+        san: bool,
     },
 
     Compare {
