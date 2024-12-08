@@ -293,7 +293,7 @@ async fn spawn_worker(
                                 Ok(_) => {
                                     counter += 1;
                                     // info!("worker {} processed query {}", worker_id, counter);
-                                    if counter % 10 == 0 {
+                                    if counter % 1000 == 0 {
                                         info!("worker {} processed {} queries", worker_id, counter);
                                     }
                                 }
