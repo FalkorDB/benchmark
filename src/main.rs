@@ -206,7 +206,7 @@ async fn run_falkor(
     // iterate over queries and send them to the workers
 
     let filler_handles = vec![
-        fill_queries(number_of_queries, tx.clone())?,
+        // fill_queries(number_of_queries, tx.clone())?,
         fill_queries(number_of_queries, tx.clone())?,
     ];
 
@@ -255,7 +255,7 @@ fn fill_queries(
             for query in queries {
                 if let Err(e) = tx.send(query).await {
                     error!("error filling query: {}, exiting", e);
-                    return;
+                    break;
                 }
             }
             info!("fill_queries finished");
@@ -310,6 +310,7 @@ async fn spawn_worker(
                             }
                         }
                         None => {
+                            info!("worker {} received None, exiting", worker_id);
                             break;
                         }
                     }
