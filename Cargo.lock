@@ -166,6 +166,7 @@ dependencies = [
  "neo4rs",
  "nix",
  "nonzero",
+ "parking_lot",
  "prometheus",
  "rand",
  "redis",

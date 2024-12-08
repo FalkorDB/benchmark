@@ -32,6 +32,7 @@ async fn main() -> BenchmarkResult<()> {
         .with_thread_ids(true)
         .init();
 
+    detect_deadlock();
     let prometheus_endpoint = benchmark::prometheus_endpoint::PrometheusEndpoint::default();
 
     match cli.command {
@@ -179,7 +180,7 @@ async fn run_falkor(
     info!("running {} queries", format_number(number_of_queries));
 
     // prepare the mpsc channel
-    let (tx, rx) = tokio::sync::mpsc::channel::<PreparedQuery>(2000 * parallel);
+    let (tx, rx) = tokio::sync::mpsc::channel::<PreparedQuery>(20 * parallel);
     let rx: Arc<Mutex<Receiver<PreparedQuery>>> = Arc::new(Mutex::new(rx));
 
     // iterate over queries and send them to the workers
@@ -467,4 +468,23 @@ fn print_completions<G: Generator>(
     cmd: &mut Command,
 ) {
     generate(gen, cmd, cmd.get_name().to_string(), &mut io::stdout());
+}
+
+fn detect_deadlock() {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_secs(10));
+        let deadlocks = parking_lot::deadlock::check_deadlock();
+        if deadlocks.is_empty() {
+            continue;
+        }
+
+        error!("{} deadlocks detected", deadlocks.len());
+        for (i, threads) in deadlocks.iter().enumerate() {
+            error!("Deadlock #{}", i);
+            for t in threads {
+                error!("Thread Id {:#?}", t.thread_id());
+                error!("{:#?}", t.backtrace());
+            }
+        }
+    });
 }

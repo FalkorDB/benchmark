@@ -59,7 +59,7 @@ impl Falkor<Stopped> {
         &self,
         size: Size,
     ) -> BenchmarkResult<()> {
-        if let Ok(_) = self.get_redis_pid().await {
+        if self.get_redis_pid().await.is_ok() {
             redis_shutdown().await?;
         }
 
@@ -147,7 +147,7 @@ impl<U> Falkor<U> {
             REDIS_DATA_DIR,
             size.to_string().to_lowercase()
         );
-        if let Ok(pid) = self.get_redis_pid().await {
+        if self.get_redis_pid().await.is_ok() {
             redis_shutdown().await?;
         }
         info!("copy {} to {}", source, REDIS_DUMP_FILE);
