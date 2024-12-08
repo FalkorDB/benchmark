@@ -4,7 +4,7 @@ use crate::falkor::falkor_process::FalkorProcess;
 use crate::queries_repository::PreparedQuery;
 use crate::scenario::Size;
 use crate::utils::{
-    delete_file, falkor_shared_lib_path, file_exists, get_command_pid, redis_save,
+    delete_file, falkor_shared_lib_path, file_exists, get_command_pid, redis_save, redis_shutdown,
     wait_for_redis_ready,
 };
 use crate::{OPERATION_COUNTER, OPERATION_ERROR_COUNTER, REDIS_DATA_DIR};
@@ -59,25 +59,22 @@ impl Falkor<Stopped> {
         &self,
         size: Size,
     ) -> BenchmarkResult<()> {
-        if let Ok(pid) = self.get_redis_pid().await {
-            Err(OtherError(format!(
-                "Can't save the dump file: {}, while falkor is running",
-                pid
-            )))
-        } else {
-            let target = format!(
-                "{}/{}_dump.rdb",
-                REDIS_DATA_DIR,
-                size.to_string().to_lowercase()
-            );
-            info!(
-                "saving redis dump file {} to {}",
-                REDIS_DUMP_FILE,
-                target.as_str()
-            );
-            fs::copy(REDIS_DUMP_FILE, target.as_str()).await?;
-            Ok(())
+        if let Ok(_) = self.get_redis_pid().await {
+            redis_shutdown().await?;
         }
+
+        let target = format!(
+            "{}/{}_dump.rdb",
+            REDIS_DATA_DIR,
+            size.to_string().to_lowercase()
+        );
+        info!(
+            "saving redis dump file {} to {}",
+            REDIS_DUMP_FILE,
+            target.as_str()
+        );
+        fs::copy(REDIS_DUMP_FILE, target.as_str()).await?;
+        Ok(())
     }
 }
 impl Falkor<Started> {
@@ -151,10 +148,7 @@ impl<U> Falkor<U> {
             size.to_string().to_lowercase()
         );
         if let Ok(pid) = self.get_redis_pid().await {
-            return Err(OtherError(format!(
-                "Can't restore the dump file: {}, while falkor is running {}",
-                source, pid
-            )));
+            redis_shutdown().await?;
         }
         info!("copy {} to {}", source, REDIS_DUMP_FILE);
         if file_exists(source.as_str()).await {
