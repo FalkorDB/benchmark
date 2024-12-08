@@ -19,18 +19,38 @@ use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tracing::{error, info, instrument};
+use tracing_subscriber::filter::LevelFilter;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{fmt, Layer};
 
 #[tokio::main]
 async fn main() -> BenchmarkResult<()> {
     let mut cmd = Cli::command();
     let cli = Cli::parse();
 
-    tracing_subscriber::fmt()
+    let console_layer = console_subscriber::spawn();
+
+    // Create a formatting layer for logging
+    let fmt_layer = fmt::layer()
         .pretty()
         .with_file(true)
         .with_line_number(true)
         .with_thread_ids(true)
-        .init();
+        // .with_filter(filter_fn(|metadata| {
+        //     Exclude events from Tokio
+        // println!("metadata.target() {}", metadata.target());
+        // !metadata.target().starts_with("tokio") && !metadata.target().starts_with("runtime")
+        // }))
+        .with_filter(LevelFilter::INFO);
+
+    // Combine the layers into a single subscriber
+    let subscriber = tracing_subscriber::registry()
+        .with(console_layer) // Add the console layer
+        .with(fmt_layer); // Add the formatting layer
+
+    // Set the combined subscriber as the global default
+    subscriber.init();
 
     detect_deadlock();
     let prometheus_endpoint = benchmark::prometheus_endpoint::PrometheusEndpoint::default();

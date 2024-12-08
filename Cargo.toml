@@ -16,11 +16,10 @@ keywords = ["database", "graph-database", "database-driver", "falkordb", "benchm
 result_large_err = "allow"
 
 
-
 [dependencies]
 neo4rs = "0.8.0"
 thiserror = "2.0.4"
-tokio = { version = "1.42.0", features = ["full"] }
+tokio = { version = "1.42.0", features = ["full", "tracing"] }
 futures = "0.3.31"
 rand = "0.8.5"
 histogram = { version = "0.11", features = ["serde"] }
@@ -45,6 +44,7 @@ lazy_static = "1.5"
 hyper = { version = "0.14.31", features = ["server", "runtime", "http1", "tcp"] }
 nonzero = "0.2.0"
 parking_lot = { version = "0.12.3", features = ["deadlock_detection"] }
+console-subscriber = { version = "0.4.1", features = ["parking_lot"] }
 
 
 [[bin]]
@@ -62,6 +62,8 @@ path = "src/bin/mpsc_main.rs"
 [[bin]]
 name = "benchmark"
 path = "src/main.rs"
+
+
 
 
 
