@@ -103,13 +103,6 @@ pub enum Commands {
         )]
         san: bool,
     },
-
-    Compare {
-        #[arg(required = true)]
-        file1: ExistingJsonFile,
-        #[arg(required = true)]
-        file2: ExistingJsonFile,
-    },
 }
 
 #[derive(Clone, Debug)]

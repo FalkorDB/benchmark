@@ -631,7 +631,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "max_over_time(falkordb_waiting_requests[2m])",
+          "expr": "falkordb_waiting_requests",
           "legendFormat": "__auto",
           "range": true,
           "refId": "A"
@@ -669,7 +669,7 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 5,
+        "h": 6,
         "w": 6,
         "x": 15,
         "y": 12
@@ -760,7 +760,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "max_over_time(falkordb_running_requests[2m])",
+          "expr": "falkordb_running_requests",
           "legendFormat": "__auto",
           "range": true,
           "refId": "A"
@@ -866,7 +866,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "sum by (vendor)  (rate(operations_total{vendor=\"falkor\"}[5m]))",
+          "expr": "sum by (vendor)  (rate(operations_total{vendor=\"falkor\"}[1m]))",
           "legendFormat": "executor {{spawn_id}}",
           "range": true,
           "refId": "A"
@@ -959,7 +959,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "sum by (vendor, spawn_id)  (rate(operations_total{vendor=\"falkor\"}[5m]))",
+          "expr": "sum by (vendor, spawn_id)  (rate(operations_total{vendor=\"falkor\"}[1m]))",
           "legendFormat": "executor {{spawn_id}}",
           "range": true,
           "refId": "A"

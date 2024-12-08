@@ -1,17 +1,12 @@
-// mod cli;
-
-use askama::Template;
 use benchmark::cli::Cli;
 use benchmark::cli::Commands;
 use benchmark::cli::Commands::GenerateAutoComplete;
-use benchmark::compare_template::{CompareRuns, CompareTemplate};
 use benchmark::error::BenchmarkError::OtherError;
 use benchmark::error::BenchmarkResult;
 use benchmark::falkor::{Falkor, Started, Stopped};
-use benchmark::metrics_collector::{MachineMetadata, MetricsCollector};
 use benchmark::queries_repository::PreparedQuery;
 use benchmark::scenario::{Size, Spec, Vendor};
-use benchmark::utils::{delete_file, file_exists, format_number, write_to_file};
+use benchmark::utils::{delete_file, file_exists, format_number};
 use clap::{Command, CommandFactory, Parser};
 use clap_complete::{generate, Generator};
 use futures::StreamExt;
@@ -76,22 +71,14 @@ async fn main() -> BenchmarkResult<()> {
             queries,
             parallel,
             san,
-        } => {
-            let machine_metadata = MachineMetadata::default();
-            info!(
-                "Run benchmark vendor: {}, graph-size:{}, queries: {}, machine_metadata: {:?}",
-                vendor, size, queries, machine_metadata
-            );
-
-            match vendor {
-                Vendor::Neo4j => {
-                    run_neo4j(size, queries).await?;
-                }
-                Vendor::Falkor => {
-                    run_falkor(size, queries, parallel, san).await?;
-                }
+        } => match vendor {
+            Vendor::Neo4j => {
+                run_neo4j(size, queries).await?;
             }
-        }
+            Vendor::Falkor => {
+                run_falkor(size, queries, parallel, san).await?;
+            }
+        },
 
         Commands::Clear {
             vendor,
@@ -100,27 +87,7 @@ async fn main() -> BenchmarkResult<()> {
         } => {
             info!("Clear benchmark {} {} {}", vendor, size, force);
         }
-        Commands::Compare { file1, file2 } => {
-            info!(
-                "Compare benchmark {} {}",
-                file1.path().display(),
-                file2.path().display()
-            );
-            let collector_1 = MetricsCollector::from_file(file1.path()).await?;
-            let collector_2 = MetricsCollector::from_file(file2.path()).await?;
-            info!("got both collectors");
-            let compare_runs = CompareRuns {
-                run_1: collector_1.to_percentile(),
-                run_2: collector_2.to_percentile(),
-            };
-            // let json = serde_json::to_string_pretty(&compare_runs)?;
-            // info!("{}", json);
-            let compare_template = CompareTemplate { data: compare_runs };
-            let compare_report = compare_template.render().unwrap();
-            write_to_file("html/compare.html", compare_report.as_str()).await?;
-            info!("report was written to html/compare.html");
-            // println!("{}", compare_report);
-        }
+
         Commands::PrepareQueries {
             dataset_size,
             number_of_queries,

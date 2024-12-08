@@ -16,16 +16,6 @@ use std::env;
 use tokio::task::JoinHandle;
 use tracing::{error, info};
 
-#[derive(Debug)]
-#[allow(dead_code)]
-struct QueryInfo {
-    received_at: i64,
-    graph_name: String,
-    query: String,
-    execution_duration: f64,
-    replicated_command: i64,
-}
-
 #[derive(Default)]
 pub struct FalkorProcess {
     shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
@@ -169,21 +159,9 @@ async fn report_metrics() -> BenchmarkResult<()> {
     let command = redis::cmd("GRAPH.INFO");
     let redis_value = con.send_packed_command(&command).await?;
     let (running_queries, waiting_queries) = redis_to_query_info(redis_value)?;
-    // trace!(
-    //     "Running Queries ({}):  {:?}",
-    //     running_queries.len(),
-    //     running_queries
-    // );
-    // trace!(
-    //     "Waiting Queries ({}): {:?}",
-    //     waiting_queries.len(),
-    //     waiting_queries
-    // );
 
-    let running_queries_len: i64 = running_queries.len() as i64;
-    let waiting_queries_len: i64 = waiting_queries.len() as i64;
-    FALKOR_RUNNING_REQUESTS_GAUGE.set(running_queries_len);
-    FALKOR_WAITING_REQUESTS_GAUGE.set(waiting_queries_len);
+    FALKOR_RUNNING_REQUESTS_GAUGE.set(running_queries as i64);
+    FALKOR_WAITING_REQUESTS_GAUGE.set(waiting_queries as i64);
 
     let connection_info: FalkorConnectionInfo = "falkor://127.0.0.1:6379"
         .try_into()
@@ -210,7 +188,7 @@ async fn report_metrics() -> BenchmarkResult<()> {
 // first element of the tuple is a vector of running queries
 // second element of the tuple is a vector of waiting
 // use redis_vec_as_query_info to parse each query info
-fn redis_to_query_info(value: redis::Value) -> BenchmarkResult<(Vec<QueryInfo>, Vec<QueryInfo>)> {
+fn redis_to_query_info(value: redis::Value) -> BenchmarkResult<(usize, usize)> {
     // Convert the value into a vector of redis::Value
     let queries = redis_value_as_vec(value)?;
     if queries.len() < 4 {
@@ -219,63 +197,14 @@ fn redis_to_query_info(value: redis::Value) -> BenchmarkResult<(Vec<QueryInfo>, 
             queries
         )));
     }
-    let mut running_queries = Vec::new();
-    let mut waiting_queries = Vec::new();
-
     let running_vec = redis_value_as_vec(queries[1].clone())?;
-    for value in running_vec {
-        if let Ok(query_info) = redis_vec_as_query_info(value) {
-            running_queries.push(query_info);
-        }
-    }
+
     let waiting_vec = redis_value_as_vec(queries[3].clone())?;
-    for value in waiting_vec {
-        if let Ok(query_info) = redis_vec_as_query_info(value) {
-            waiting_queries.push(query_info);
-        }
-    }
+
     // Return the collected running and waiting queries
-    Ok((running_queries, waiting_queries))
+    Ok((running_vec.len(), waiting_vec.len()))
 }
-fn redis_vec_as_query_info(value: redis::Value) -> BenchmarkResult<QueryInfo> {
-    let value = redis_value_as_vec(value)?;
-    if value.len() < 10 {
-        return Err(OtherError(
-            "Insufficient data in Redis response".to_string(),
-        ));
-    }
 
-    let received_at = redis_value_as_int(value[1].clone())?;
-    let graph_name = redis_value_as_string(value[3].clone())?;
-    let query = redis_value_as_string(value[5].clone())?;
-    let execution_duration = redis_value_as_string(value[7].clone())?
-        .parse::<f64>()
-        .map_err(|e| OtherError(format!("Failed to parse execution_duration: {}", e)))?;
-    let replicated_command = redis_value_as_int(value[9].clone())?;
-
-    Ok(QueryInfo {
-        received_at,
-        graph_name,
-        query,
-        execution_duration,
-        replicated_command,
-    })
-}
-fn redis_value_as_string(value: redis::Value) -> BenchmarkResult<String> {
-    match value {
-        redis::Value::BulkString(data) => String::from_utf8(data.clone())
-            .map_err(|_| OtherError(format!("parsing string failed: {:?}", data))),
-        redis::Value::SimpleString(data) => Ok(data),
-        redis::Value::VerbatimString { format: _, text } => Ok(text),
-        _ => Err(OtherError(format!("parsing string failed: {:?}", value))),
-    }
-}
-fn redis_value_as_int(value: redis::Value) -> BenchmarkResult<i64> {
-    match value {
-        redis::Value::Int(int_val) => Ok(int_val),
-        _ => Err(OtherError(format!("parsing int failed: {:?}", value))),
-    }
-}
 fn redis_value_as_vec(value: redis::Value) -> BenchmarkResult<Vec<redis::Value>> {
     match value {
         redis::Value::Array(bulk_val) => Ok(bulk_val),

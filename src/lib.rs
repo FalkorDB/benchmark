@@ -5,11 +5,8 @@ use prometheus::{
 };
 
 pub mod cli;
-pub mod compare_template;
 pub mod error;
 pub mod falkor;
-pub mod falkor_process;
-pub mod metrics_collector;
 pub mod neo4j;
 pub mod neo4j_client;
 pub mod process_monitor;

@@ -1,5 +1,5 @@
 use benchmark::error::BenchmarkResult;
-use benchmark::falkor_process::FalkorProcess;
+use benchmark::falkor::falkor_process::FalkorProcess;
 use std::time::Duration;
 use tracing::info;
 
