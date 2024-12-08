@@ -13,6 +13,7 @@ use falkordb::FalkorValue::I64;
 use falkordb::{AsyncGraph, FalkorClientBuilder, FalkorConnectionInfo};
 use prometheus::core::{AtomicU64, GenericCounter};
 use std::env;
+use tokio::task;
 use tokio::task::JoinHandle;
 use tracing::{error, info};
 
@@ -68,9 +69,13 @@ impl FalkorProcess {
             std::time::Duration::from_secs(5),
         );
         let counter: GenericCounter<AtomicU64> = FALKOR_RESTART_COUNTER.clone();
-        let process_handle = Some(tokio::spawn(async move {
-            let _ = process_monitor.run(counter).await;
-        }));
+        let falkor_process_monitor =
+            task::Builder::new()
+                .name("falkor_process_monitor")
+                .spawn(async move {
+                    let _ = process_monitor.run(counter).await;
+                })?;
+        let process_handle = Some(falkor_process_monitor);
 
         let (prom_process_handle, prom_shutdown_tx) = prometheus_metrics_reporter();
 
@@ -123,32 +128,40 @@ impl Drop for FalkorProcess {
 
 fn prometheus_metrics_reporter() -> (JoinHandle<()>, tokio::sync::oneshot::Sender<()>) {
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
-    let handle = tokio::spawn(async move {
-        match report_metrics().await {
-            Ok(_) => {}
-            Err(e) => {
-                info!("Error reporting metrics: {:?}", e);
+    let handle = task::Builder::new()
+        .name("prometheus_metrics_reporter")
+        .spawn(async move {
+            match report_metrics().await {
+                Ok(_) => {}
+                Err(e) => {
+                    info!("Error reporting metrics: {:?}", e);
+                }
             }
-        }
-        loop {
-            tokio::select! {
+            loop {
+                tokio::select! {
 
-                _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
-                   match report_metrics().await{
-                          Ok(_) => {}
-                          Err(e) => {
-                            info!("Error reporting metrics: {:?}", e);
-                          }
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
+                       match report_metrics().await{
+                              Ok(_) => {}
+                              Err(e) => {
+                                info!("Error reporting metrics: {:?}", e);
+                              }
+                        }
+                    }
+                    _ = &mut shutdown_rx => {
+                        info!("Shutting down prometheus_metrics_reporter");
+                        return;
                     }
                 }
-                _ = &mut shutdown_rx => {
-                    info!("Shutting down prometheus_metrics_reporter");
-                    return;
-                }
             }
+        });
+    match handle {
+        Ok(handle) => (handle, shutdown_tx),
+        Err(e) => {
+            info!("Error starting prometheus_metrics_reporter: {:?}", e);
+            panic!("Error starting prometheus_metrics_reporter: {:?}", e);
         }
-    });
-    (handle, shutdown_tx)
+    }
 }
 
 async fn report_metrics() -> BenchmarkResult<()> {

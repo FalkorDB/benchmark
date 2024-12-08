@@ -43,7 +43,6 @@ prometheus = { version = "0.13.4", features = ["gen"] }
 lazy_static = "1.5"
 hyper = { version = "0.14.31", features = ["server", "runtime", "http1", "tcp"] }
 nonzero = "0.2.0"
-parking_lot = { version = "0.12.3", features = ["deadlock_detection"] }
 console-subscriber = { version = "0.4.1", features = ["parking_lot"] }
 
 

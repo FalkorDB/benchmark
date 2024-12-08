@@ -16,6 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::Mutex;
+use tokio::task;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tracing::{error, info, instrument};
@@ -52,7 +53,6 @@ async fn main() -> BenchmarkResult<()> {
     // Set the combined subscriber as the global default
     subscriber.init();
 
-    detect_deadlock();
     let prometheus_endpoint = benchmark::prometheus_endpoint::PrometheusEndpoint::default();
 
     match cli.command {
@@ -245,7 +245,7 @@ fn fill_queries(
     number_of_queries: u64,
     tx: Sender<PreparedQuery>,
 ) -> BenchmarkResult<JoinHandle<()>> {
-    Ok(tokio::spawn({
+    let handle = task::Builder::new().name("queries_filler").spawn({
         async move {
             let queries_repository =
                 benchmark::queries_repository::UsersQueriesRepository::new(9998, 121716);
@@ -260,7 +260,8 @@ fn fill_queries(
             }
             info!("fill_queries finished");
         }
-    }))
+    })?;
+    Ok(handle)
 }
 
 #[instrument(skip(falkor, receiver), fields(vendor = "falkor"))]
@@ -272,49 +273,50 @@ async fn spawn_worker(
     info!("spawning worker");
     let mut client = falkor.client().await?;
     let receiver = Arc::clone(receiver);
+    let handle = task::Builder::new()
+        .name(format!("graph_client_sender_{}", worker_id).as_str())
+        .spawn({
+            async move {
+                let worker_id = worker_id.to_string();
+                let worker_id_str = worker_id.as_str();
+                let mut counter = 0u32;
+                loop {
+                    // get next value and release the mutex
+                    let received = receiver.lock().await.recv().await;
 
-    let handle = tokio::spawn({
-        async move {
-            let worker_id = worker_id.to_string();
-            let worker_id_str = worker_id.as_str();
-            let mut counter = 0u32;
-            loop {
-                // get next value and release the mutex
-                let received = receiver.lock().await.recv().await;
-
-                match received {
-                    Some(prepared_query) => {
-                        let r = client
-                            .execute_prepared_query(worker_id_str, &prepared_query)
-                            .await;
-                        match r {
-                            Ok(_) => {
-                                counter += 1;
-                                // info!("worker {} processed query {}", worker_id, counter);
-                                if counter % 10 == 0 {
-                                    info!("worker {} processed {} queries", worker_id, counter);
+                    match received {
+                        Some(prepared_query) => {
+                            let r = client
+                                .execute_prepared_query(worker_id_str, &prepared_query)
+                                .await;
+                            match r {
+                                Ok(_) => {
+                                    counter += 1;
+                                    // info!("worker {} processed query {}", worker_id, counter);
+                                    if counter % 10 == 0 {
+                                        info!("worker {} processed {} queries", worker_id, counter);
+                                    }
                                 }
-                            }
-                            // in case of error sleep for 3 seconds, that will give the benchmark some time to
-                            // accumulate more queries for the time that the system recovers.
-                            Err(_) => {
-                                let seconds_wait = 3u64;
-                                info!(
+                                // in case of error sleep for 3 seconds, that will give the benchmark some time to
+                                // accumulate more queries for the time that the system recovers.
+                                Err(_) => {
+                                    let seconds_wait = 3u64;
+                                    info!(
                                     "worker {} failed to process query, sleeping for {} seconds",
                                     worker_id, seconds_wait
                                 );
-                                tokio::time::sleep(Duration::from_secs(seconds_wait)).await;
+                                    tokio::time::sleep(Duration::from_secs(seconds_wait)).await;
+                                }
                             }
                         }
-                    }
-                    None => {
-                        break;
+                        None => {
+                            break;
+                        }
                     }
                 }
+                info!("worker {} finished", worker_id);
             }
-            info!("worker {} finished", worker_id);
-        }
-    });
+        })?;
 
     Ok(handle)
 }
@@ -488,23 +490,4 @@ fn print_completions<G: Generator>(
     cmd: &mut Command,
 ) {
     generate(gen, cmd, cmd.get_name().to_string(), &mut io::stdout());
-}
-
-fn detect_deadlock() {
-    std::thread::spawn(move || loop {
-        std::thread::sleep(Duration::from_secs(10));
-        let deadlocks = parking_lot::deadlock::check_deadlock();
-        if deadlocks.is_empty() {
-            continue;
-        }
-
-        error!("{} deadlocks detected", deadlocks.len());
-        for (i, threads) in deadlocks.iter().enumerate() {
-            error!("Deadlock #{}", i);
-            for t in threads {
-                error!("Thread Id {:#?}", t.thread_id());
-                error!("{:#?}", t.backtrace());
-            }
-        }
-    });
 }
