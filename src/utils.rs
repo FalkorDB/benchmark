@@ -65,6 +65,12 @@ pub fn falkor_logs_path() -> BenchmarkResult<String> {
         Err(OtherError("Failed to get current directory".to_string()))
     }
 }
+pub fn get_falkor_log_path() -> BenchmarkResult<String> {
+    let default_falkor_log_path = falkor_logs_path()?;
+    let falkor_log_path =
+        env::var("FALKOR_LOG_PATH").unwrap_or_else(|_| default_falkor_log_path.clone());
+    Ok(falkor_log_path)
+}
 
 pub async fn create_directory_if_not_exists(dir_path: &str) -> BenchmarkResult<()> {
     // Check if the directory exists
@@ -152,10 +158,10 @@ pub async fn kill_process(pid: u32) -> BenchmarkResult<()> {
 pub async fn get_command_pid(cmd: impl AsRef<str>) -> BenchmarkResult<u32> {
     let cmd = cmd.as_ref();
     let output = Command::new("ps")
-        .args(&["-eo", "pid,command,stat"])
+        .args(["-eo", "pid,command,stat"])
         .output()
         .await
-        .map_err(|e| BenchmarkError::IoError(e))?;
+        .map_err(BenchmarkError::IoError)?;
 
     if output.status.success() {
         let stdout = str::from_utf8(&output.stdout)
@@ -255,6 +261,17 @@ pub async fn redis_save() -> BenchmarkResult<()> {
         )))
     }
 }
+
+pub async fn redis_shutdown() -> BenchmarkResult<()> {
+    if let Ok(client) = redis::Client::open("redis://127.0.0.1:6379/") {
+        if let Ok(mut con) = client.get_multiplexed_async_connection().await {
+            let _ = redis::cmd("SHUTDOWN").query_async::<String>(&mut con).await;
+            info!("Redis shutdown command sent");
+        }
+    }
+    Ok(())
+}
+
 pub async fn write_to_file(
     file_path: &str,
     content: &str,

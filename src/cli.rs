@@ -94,13 +94,14 @@ pub enum Commands {
             help = "parallelism level"
         )]
         parallel: usize,
-    },
-
-    Compare {
-        #[arg(required = true)]
-        file1: ExistingJsonFile,
-        #[arg(required = true)]
-        file2: ExistingJsonFile,
+        #[arg(
+            long,
+            required = false,
+            default_value_t = false,
+            default_missing_value = "false",
+            help = "run with SAN=address"
+        )]
+        san: bool,
     },
 }
 
@@ -122,7 +123,7 @@ impl FromStr for ExistingJsonFile {
             return Err(format!("File does not exist: {}", s));
         }
 
-        if !(path.extension().and_then(|ext| ext.to_str()) == Some("json")) {
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
             return Err(format!("File must have a .json extension: {}", s));
         }
 

@@ -1,3 +1,4 @@
+use crate::queries_repository::PreparedQuery;
 use falkordb::FalkorDBError;
 
 pub type BenchmarkResult<T> = Result<T, BenchmarkError>;
@@ -25,6 +26,8 @@ pub enum BenchmarkError {
     SerdeError(#[from] serde_json::Error),
     #[error("Process with name {0} not found")]
     ProcessNofFoundError(String),
+    #[error("Tokio send error: {0}")]
+    TokioSendError(#[from] tokio::sync::mpsc::error::SendError<PreparedQuery>),
     #[error("Other error: {0}")]
     OtherError(String),
 }

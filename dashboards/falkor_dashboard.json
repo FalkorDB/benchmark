@@ -631,13 +631,78 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "max_over_time(falkordb_waiting_requests[2m])",
+          "expr": "falkordb_waiting_requests",
           "legendFormat": "__auto",
           "range": true,
           "refId": "A"
         }
       ],
       "title": "waiting requests",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 15,
+        "y": 12
+      },
+      "id": 18,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.3.1",
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "redis_last_slow_execution_duration_seconds",
+          "legendFormat": "__auto",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "redis_last_slow_execution_duration_seconds",
       "type": "stat"
     },
     {
@@ -695,7 +760,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "max_over_time(falkordb_running_requests[2m])",
+          "expr": "falkordb_running_requests",
           "legendFormat": "__auto",
           "range": true,
           "refId": "A"
@@ -801,7 +866,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "sum by (vendor)  (rate(operations_total{vendor=\"falkor\"}[5m]))",
+          "expr": "sum by (vendor)  (rate(operations_total{vendor=\"falkor\"}[1m]))",
           "legendFormat": "executor {{spawn_id}}",
           "range": true,
           "refId": "A"
@@ -894,7 +959,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "sum by (vendor, spawn_id)  (rate(operations_total{vendor=\"falkor\"}[5m]))",
+          "expr": "sum by (vendor, spawn_id)  (rate(operations_total{vendor=\"falkor\"}[1m]))",
           "legendFormat": "executor {{spawn_id}}",
           "range": true,
           "refId": "A"
@@ -1300,6 +1365,6 @@
   "timezone": "browser",
   "title": "Falkor DB",
   "uid": "be57mvv016874b",
-  "version": 14,
+  "version": 18,
   "weekStart": ""
 }
