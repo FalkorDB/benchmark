@@ -14,6 +14,7 @@ use std::env;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::fs;
+use tokio::time::error::Elapsed;
 use tracing::{error, info};
 
 const REDIS_DUMP_FILE: &str = "./redis-data/dump.rdb";
@@ -222,7 +223,9 @@ impl FalkorBenchmarkClient {
         let worker_id = worker_id.as_ref();
         let q_name = q_name.as_str();
         let query = cypher.as_str();
-        let falkor_result = self.graph.query(query).with_timeout(5000).execute().await;
+        let falkor_result = self.graph.query(query).with_timeout(5000).execute();
+        let timeout = Duration::from_secs(5);
+        let falkor_result = tokio::time::timeout(timeout, falkor_result).await;
         OPERATION_COUNTER
             .with_label_values(&["falkor", worker_id, "", q_name, "", ""])
             .inc();
@@ -240,7 +243,10 @@ impl FalkorBenchmarkClient {
         OPERATION_COUNTER
             .with_label_values(&["falkor", spawn_id, "", query_name, "", ""])
             .inc();
-        let falkor_result = self.graph.query(query).with_timeout(5000).execute().await;
+
+        let falkor_result = self.graph.query(query).with_timeout(5000).execute();
+        let timeout = Duration::from_secs(5);
+        let falkor_result = tokio::time::timeout(timeout, falkor_result).await;
         Self::read_reply(spawn_id, query_name, query, falkor_result)
     }
 
@@ -249,20 +255,36 @@ impl FalkorBenchmarkClient {
         spawn_id: &'a str,
         query_name: &'a str,
         query: &'a str,
-        reply: FalkorResult<QueryResult<LazyResultSet<'a>>>,
+        reply: Result<FalkorResult<QueryResult<LazyResultSet<'a>>>, Elapsed>,
     ) -> BenchmarkResult<()> {
         match reply {
-            Ok(_) => {
-                tracing::Span::current().record("result", "success");
-                Ok(())
+            Ok(falkor_result) => {
+                match falkor_result {
+                    Ok(_) => {
+                        tracing::Span::current().record("result", "success");
+                        Ok(())
+                    }
+                    Err(e) => {
+                        OPERATION_ERROR_COUNTER
+                            .with_label_values(&["falkor", spawn_id, "", query_name, "", ""])
+                            .inc();
+                        let error_type = std::any::type_name_of_val(&e);
+                        // tracing::Span::current().record("result", &"failure");
+                        // tracing::Span::current().record("error_type", &error_type);
+                        error!("Error executing query: {}, the error is: {:?}", query, e);
+                        Err(OtherError(format!(
+                            "Error (type {}) executing query: {}, the error is: {:?}",
+                            error_type, query, e
+                        )))
+                    }
+                }
             }
+
             Err(e) => {
                 OPERATION_ERROR_COUNTER
                     .with_label_values(&["falkor", spawn_id, "", query_name, "", ""])
                     .inc();
                 let error_type = std::any::type_name_of_val(&e);
-                // tracing::Span::current().record("result", &"failure");
-                // tracing::Span::current().record("error_type", &error_type);
                 error!("Error executing query: {}, the error is: {:?}", query, e);
                 Err(OtherError(format!(
                     "Error (type {}) executing query: {}, the error is: {:?}",

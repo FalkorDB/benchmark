@@ -299,11 +299,11 @@ async fn spawn_worker(
                                 }
                                 // in case of error sleep for 3 seconds, that will give the benchmark some time to
                                 // accumulate more queries for the time that the system recovers.
-                                Err(_) => {
+                                Err(e) => {
                                     let seconds_wait = 3u64;
                                     info!(
-                                    "worker {} failed to process query, sleeping for {} seconds",
-                                    worker_id, seconds_wait
+                                    "worker {} failed to process query, sleeping for {} seconds {:?}",
+                                    worker_id, seconds_wait, e
                                 );
                                     tokio::time::sleep(Duration::from_secs(seconds_wait)).await;
                                 }

@@ -28,6 +28,8 @@ pub enum BenchmarkError {
     ProcessNofFoundError(String),
     #[error("Tokio send error: {0}")]
     TokioSendError(#[from] tokio::sync::mpsc::error::SendError<PreparedQuery>),
+    #[error("Tokio elapsed error: {0}")]
+    TokioElapsed(#[from] tokio::time::error::Elapsed),
     #[error("Other error: {0}")]
     OtherError(String),
 }

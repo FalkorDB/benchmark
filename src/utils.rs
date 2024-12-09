@@ -203,16 +203,25 @@ pub async fn ping_redis() -> BenchmarkResult<()> {
     let client = redis::Client::open("redis://127.0.0.1:6379/")?;
     let mut con = client.get_multiplexed_async_connection().await?;
 
-    let pong: String = redis::cmd("PING").query_async(&mut con).await?;
-    trace!("Redis ping response: {}", pong);
-    if pong == "PONG" {
-        Ok(())
-    } else {
-        Err(OtherError(format!(
-            "Unexpected response from Redis: {}",
-            pong
-        )))
-    }
+    // Set a timeout of 5 seconds
+    let timeout_duration = Duration::from_secs(10);
+
+    // Use tokio's timeout function
+    let result = tokio::time::timeout(timeout_duration, async {
+        let pong: String = redis::cmd("PING").query_async(&mut con).await?;
+        trace!("Redis ping response: {}", pong);
+        if pong == "PONG" {
+            Ok(())
+        } else {
+            Err(OtherError(format!(
+                "Unexpected response from Redis: {}",
+                pong
+            )))
+        }
+    })
+    .await;
+
+    result.unwrap_or_else(|_| Err(OtherError("Ping operation timed out".to_string())))
 }
 
 pub async fn wait_for_redis_ready(
@@ -250,28 +259,65 @@ pub async fn redis_save() -> BenchmarkResult<()> {
     let client = redis::Client::open("redis://127.0.0.1:6379/")?;
     let mut con = client.get_multiplexed_async_connection().await?;
 
-    let pong: String = redis::cmd("SAVE").query_async(&mut con).await?;
-    trace!("Redis SAVE response: {}", pong);
-    if pong == "OK" {
-        Ok(())
-    } else {
-        Err(OtherError(format!(
-            "Unexpected response from Redis: {}",
-            pong
-        )))
-    }
+    // Set a timeout of 30 seconds
+    let timeout_duration = Duration::from_secs(30);
+
+    // Use tokio's timeout function
+    let result = tokio::time::timeout(timeout_duration, async {
+        let pong: String = redis::cmd("SAVE").query_async(&mut con).await?;
+        trace!("Redis SAVE response: {}", pong);
+        if pong == "OK" {
+            Ok(())
+        } else {
+            Err(OtherError(format!(
+                "Unexpected response from Redis: {}",
+                pong
+            )))
+        }
+    })
+    .await;
+
+    result.unwrap_or_else(|_| Err(OtherError("SAVE operation timed out".to_string())))
 }
 
 pub async fn redis_shutdown() -> BenchmarkResult<()> {
-    if let Ok(client) = redis::Client::open("redis://127.0.0.1:6379/") {
-        if let Ok(mut con) = client.get_multiplexed_async_connection().await {
-            let _ = redis::cmd("SHUTDOWN").query_async::<String>(&mut con).await;
-            info!("Redis shutdown command sent");
+    info!("Shutting down Redis");
+
+    // Set a timeout of 20 seconds
+    let timeout_duration = Duration::from_secs(20);
+
+    // Attempt to open the Redis client and connection with a timeout
+    let result = tokio::time::timeout(timeout_duration, async {
+        let client = redis::Client::open("redis://127.0.0.1:6379/")?;
+        let mut con = client.get_multiplexed_async_connection().await?;
+
+        // Send the SHUTDOWN command
+        let response: String = redis::cmd("SHUTDOWN").query_async(&mut con).await?;
+        info!("Redis shutdown command response: {}", response);
+
+        Ok::<(), BenchmarkError>(())
+    })
+    .await;
+
+    match result {
+        Ok(Ok(())) => {
+            info!("Redis shutdown command executed successfully.");
+            Ok(())
+        }
+        Ok(Err(_)) => Ok(()),
+        Err(e) => {
+            error!(
+                "Failed to shutdown Redis within {} seconds: {}. Attempting to forcefully kill the process.",
+                timeout_duration.as_secs(),
+                e
+            );
+            let redis_pid = get_command_pid("redis-server").await?;
+            info!("Killing Redis process with PID: {}", redis_pid);
+            kill_process(redis_pid).await?;
+            Ok::<(), BenchmarkError>(())
         }
     }
-    Ok(())
 }
-
 pub async fn write_to_file(
     file_path: &str,
     content: &str,
