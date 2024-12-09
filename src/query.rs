@@ -51,9 +51,9 @@ pub enum QueryParam {
     Boolean(bool),
 }
 
-impl Into<BoltType> for QueryParam {
-    fn into(self) -> BoltType {
-        match self {
+impl From<QueryParam> for BoltType {
+    fn from(param: QueryParam) -> BoltType {
+        match param {
             QueryParam::String(s) => s.into(),
             QueryParam::Integer(i) => i.into(),
             QueryParam::Float(f) => f.into(),
@@ -61,6 +61,7 @@ impl Into<BoltType> for QueryParam {
         }
     }
 }
+
 impl QueryParam {
     pub fn to_cypher_string(&self) -> String {
         match self {

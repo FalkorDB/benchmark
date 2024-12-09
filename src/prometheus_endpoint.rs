@@ -5,15 +5,21 @@ use std::net::SocketAddr;
 use tokio::sync::oneshot::Sender;
 use tokio::task;
 use tokio::task::JoinHandle;
-use tracing::{error, info};
+use tracing::{error, info, trace};
 
 pub struct PrometheusEndpoint {
     shutdown_tx: Option<Sender<()>>,
     server_thread: Option<JoinHandle<()>>,
 }
 
+impl Default for PrometheusEndpoint {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PrometheusEndpoint {
-    pub fn new() -> Self {
+    fn new() -> Self {
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
         let server_thread = task::spawn(async {
@@ -58,7 +64,7 @@ async fn metrics_handler(_req: Request<Body>) -> Result<Response<Body>, hyper::E
     let metric_families = prometheus::gather();
     let mut buffer = Vec::new();
     encoder.encode(&metric_families, &mut buffer).unwrap();
-    info!("Metrics request received");
+    trace!("Metrics request received");
     Ok(Response::builder()
         .header(hyper::header::CONTENT_TYPE, encoder.format_type())
         .body(Body::from(buffer))
