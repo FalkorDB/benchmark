@@ -12,36 +12,38 @@ license = "MIT"
 categories = ["database"]
 keywords = ["database", "graph-database", "database-driver", "falkordb", "benchmark"]
 
+[lints.clippy]
+result_large_err = "allow"
+
 
 [dependencies]
 neo4rs = "0.8.0"
-thiserror = "1.0.64"
-tokio = { version = "1.41.0", features = ["full"] }
+thiserror = "2.0.4"
+tokio = { version = "1.42.0", features = ["full", "tracing"] }
 futures = "0.3.31"
 rand = "0.8.5"
 histogram = { version = "0.11", features = ["serde"] }
 reqwest = { version = "0.12.9", features = ["gzip"] }
 strum = { version = "0.26.3", features = ["derive"] }
 strum_macros = "0.26.4"
-tokio-stream = { version = "0.1.16", features = ["io-util"] }
-clap = { version = "4.5.20", features = ["cargo", "derive", "env"] }
+tokio-stream = { version = "0.1.17", features = ["io-util"] }
+clap = { version = "4.5.23", features = ["cargo", "derive", "env"] }
 clap_complete = "4.5.36"
 nix = { version = "0.29.0", features = ["process", "signal"] }
 falkordb = { version = "0.1.9", features = ["tokio"] }
 #falkordb = { path = "/Users/barak/dev/falkordb-rs", features = ["tokio", "tracing"] }
-redis = { version = "0.27.5", features = ["tokio-comp"] }
+redis = { version = "0.27.6", features = ["tokio-comp"] }
 serde = { version = "1.0.214", features = ["derive"] }
 serde_json = "1.0.132"
-askama = "0.12.1"
-sysinfo = "0.32.0"
 
 
-tracing = "0.1.40"
+tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
 prometheus = { version = "0.13.4", features = ["gen"] }
 lazy_static = "1.5"
 hyper = { version = "0.14.31", features = ["server", "runtime", "http1", "tcp"] }
 nonzero = "0.2.0"
+console-subscriber = { version = "0.4.1", features = ["parking_lot"] }
 
 
 [[bin]]
@@ -61,13 +63,17 @@ name = "benchmark"
 path = "src/main.rs"
 
 
+
+
+
 [dev-dependencies]
 
 [profile.release]
 opt-level = 3  # This is the default
 lto = true     # Enable Link Time Optimization
 codegen-units = 1  # Reduce parallel code generation units for better optimization
-
+# debug = true # for samply https://www.youtube.com/watch?v=M_EniM_IfnQ&ab_channel=FedericoTerzi
+# cargo build  --release && samply record -- ./target/release/benchmark  run -vfalkor -ssmall -q1000000 -p200
 
 
 

@@ -18,8 +18,14 @@ pub struct Neo4j {
     neo4j_home: String,
 }
 
+impl Default for Neo4j {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Neo4j {
-    pub fn new() -> Neo4j {
+    fn new() -> Neo4j {
         let neo4j_home =
             env::var("NEO4J_HOME").unwrap_or_else(|_| String::from("./downloads/neo4j_local"));
         let uri = env::var("NEO4J_URI").unwrap_or_else(|_| String::from("127.0.0.1:7687"));

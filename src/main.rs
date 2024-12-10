@@ -1,17 +1,15 @@
-// mod cli;
-
-use askama::Template;
 use benchmark::cli::Cli;
 use benchmark::cli::Commands;
 use benchmark::cli::Commands::GenerateAutoComplete;
-use benchmark::compare_template::{CompareRuns, CompareTemplate};
 use benchmark::error::BenchmarkError::OtherError;
 use benchmark::error::BenchmarkResult;
 use benchmark::falkor::{Falkor, Started, Stopped};
-use benchmark::metrics_collector::{MachineMetadata, MetricsCollector};
 use benchmark::queries_repository::PreparedQuery;
 use benchmark::scenario::{Size, Spec, Vendor};
-use benchmark::utils::{delete_file, file_exists, format_number, write_to_file};
+use benchmark::utils::{delete_file, file_exists, format_number};
+use benchmark::{
+    FALKOR_ERROR_REQUESTS_DURATION_HISTOGRAM, FALKOR_SUCCESS_REQUESTS_DURATION_HISTOGRAM,
+};
 use clap::{Command, CommandFactory, Parser};
 use clap_complete::{generate, Generator};
 use futures::StreamExt;
@@ -19,23 +17,46 @@ use histogram::Histogram;
 use std::io;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::sync::Mutex;
+use tokio::task;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
-use tracing::{error, info, instrument, Instrument};
+use tracing::{error, info, instrument};
+use tracing_subscriber::filter::LevelFilter;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{fmt, Layer};
 
 #[tokio::main]
 async fn main() -> BenchmarkResult<()> {
     let mut cmd = Cli::command();
     let cli = Cli::parse();
 
-    tracing_subscriber::fmt()
+    let console_layer = console_subscriber::spawn();
+
+    // Create a formatting layer for logging
+    let fmt_layer = fmt::layer()
         .pretty()
         .with_file(true)
         .with_line_number(true)
         .with_thread_ids(true)
-        .init();
+        // .with_filter(filter_fn(|metadata| {
+        //     Exclude events from Tokio
+        // println!("metadata.target() {}", metadata.target());
+        // !metadata.target().starts_with("tokio") && !metadata.target().starts_with("runtime")
+        // }))
+        .with_filter(LevelFilter::INFO);
 
-    let prometheus_endpoint = benchmark::prometheus_endpoint::PrometheusEndpoint::new();
+    // Combine the layers into a single subscriber
+    let subscriber = tracing_subscriber::registry()
+        .with(console_layer) // Add the console layer
+        .with(fmt_layer); // Add the formatting layer
+
+    // Set the combined subscriber as the global default
+    subscriber.init();
+
+    let prometheus_endpoint = benchmark::prometheus_endpoint::PrometheusEndpoint::default();
 
     match cli.command {
         GenerateAutoComplete { shell } => {
@@ -73,22 +94,14 @@ async fn main() -> BenchmarkResult<()> {
             size,
             queries,
             parallel,
-        } => {
-            let machine_metadata = MachineMetadata::new();
-            info!(
-                "Run benchmark vendor: {}, graph-size:{}, queries: {}, machine_metadata: {:?}",
-                vendor, size, queries, machine_metadata
-            );
-
-            match vendor {
-                Vendor::Neo4j => {
-                    run_neo4j(size, queries).await?;
-                }
-                Vendor::Falkor => {
-                    run_falkor(size, queries, parallel).await?;
-                }
+        } => match vendor {
+            Vendor::Neo4j => {
+                run_neo4j(size, queries).await?;
             }
-        }
+            Vendor::Falkor => {
+                run_falkor(size, queries, parallel).await?;
+            }
+        },
 
         Commands::Clear {
             vendor,
@@ -97,27 +110,7 @@ async fn main() -> BenchmarkResult<()> {
         } => {
             info!("Clear benchmark {} {} {}", vendor, size, force);
         }
-        Commands::Compare { file1, file2 } => {
-            info!(
-                "Compare benchmark {} {}",
-                file1.path().display(),
-                file2.path().display()
-            );
-            let collector_1 = MetricsCollector::from_file(file1.path()).await?;
-            let collector_2 = MetricsCollector::from_file(file2.path()).await?;
-            info!("got both collectors");
-            let compare_runs = CompareRuns {
-                run_1: collector_1.to_percentile(),
-                run_2: collector_2.to_percentile(),
-            };
-            // let json = serde_json::to_string_pretty(&compare_runs)?;
-            // info!("{}", json);
-            let compare_template = CompareTemplate { data: compare_runs };
-            let compare_report = compare_template.render().unwrap();
-            write_to_file("html/compare.html", compare_report.as_str()).await?;
-            info!("report was written to html/compare.html");
-            // println!("{}", compare_report);
-        }
+
         Commands::PrepareQueries {
             dataset_size,
             number_of_queries,
@@ -138,7 +131,7 @@ async fn run_neo4j(
     size: Size,
     number_of_queries: u64,
 ) -> BenchmarkResult<()> {
-    let neo4j = benchmark::neo4j::Neo4j::new();
+    let neo4j = benchmark::neo4j::Neo4j::default();
     // stop neo4j if it is running
     neo4j.stop(false).await?;
     // restore the dump
@@ -188,7 +181,7 @@ async fn run_falkor(
             "Parallelism level must be greater than zero.".to_string(),
         ));
     }
-    let falkor: Falkor<Stopped> = benchmark::falkor::Falkor::new();
+    let falkor: Falkor<Stopped> = benchmark::falkor::Falkor::default();
 
     // if dump not present return error
     falkor.dump_exists_or_error(size).await?;
@@ -207,20 +200,34 @@ async fn run_falkor(
     );
     info!("running {} queries", format_number(number_of_queries));
 
-    let mut handles = Vec::with_capacity(parallel);
+    // prepare the mpsc channel
+    let (tx, rx) = tokio::sync::mpsc::channel::<PreparedQuery>(20 * parallel);
+    let rx: Arc<Mutex<Receiver<PreparedQuery>>> = Arc::new(Mutex::new(rx));
+
+    // iterate over queries and send them to the workers
+
+    let filler_handles = vec![
+        // fill_queries(number_of_queries, tx.clone())?,
+        fill_queries(number_of_queries, tx.clone())?,
+    ];
+
+    let mut workers_handles = Vec::with_capacity(parallel);
+    // start workers
     let start = Instant::now();
     for spawn_id in 0..parallel {
-        let handle = spawn_worker(&falkor, number_of_queries, spawn_id).await?;
-        handles.push(handle);
+        let handle = spawn_worker(&falkor, spawn_id, &rx).await?;
+        workers_handles.push(handle);
     }
 
-    let mut results = Vec::with_capacity(handles.len());
-    for handle in handles {
-        // Await each handle to get the result of the task
-        match handle.await {
-            Ok(result) => results.push(result),
-            Err(e) => eprintln!("Task failed: {:?}", e),
-        }
+    // wait for the filler to finish drop the transmission side
+    // to let the workers know that they should stop
+    for handle in filler_handles {
+        let _ = handle.await;
+    }
+    drop(tx);
+
+    for handle in workers_handles {
+        let _ = handle.await;
     }
 
     let elapsed = start.elapsed();
@@ -229,31 +236,94 @@ async fn run_falkor(
         format_number(number_of_queries),
         elapsed
     );
+
     // stop falkor
     let _stopped = falkor.stop().await?;
     Ok(())
 }
 
-#[instrument(skip(falkor), fields(vendor = "falkor"))]
+fn fill_queries(
+    number_of_queries: u64,
+    tx: Sender<PreparedQuery>,
+) -> BenchmarkResult<JoinHandle<()>> {
+    let handle = task::Builder::new().name("queries_filler").spawn({
+        async move {
+            let queries_repository =
+                benchmark::queries_repository::UsersQueriesRepository::new(9998, 121716);
+            let queries: Box<dyn Iterator<Item = PreparedQuery> + Send + Sync> =
+                queries_repository.random_queries(number_of_queries);
+
+            for query in queries {
+                if let Err(e) = tx.send(query).await {
+                    error!("error filling query: {}, exiting", e);
+                    break;
+                }
+            }
+            info!("fill_queries finished");
+        }
+    })?;
+    Ok(handle)
+}
+
+#[instrument(skip(falkor, receiver), fields(vendor = "falkor"))]
 async fn spawn_worker(
     falkor: &Falkor<Started>,
-    number_of_queries: u64,
-    spawn_id: usize,
+    worker_id: usize,
+    receiver: &Arc<Mutex<Receiver<PreparedQuery>>>,
 ) -> BenchmarkResult<JoinHandle<()>> {
     info!("spawning worker");
-    let mut graph = falkor.client().await?;
-    let queries_repository =
-        benchmark::queries_repository::UsersQueriesRepository::new(9998, 121716);
-    let queries: Box<dyn Iterator<Item = PreparedQuery> + Send + Sync> =
-        queries_repository.random_queries(number_of_queries);
+    let mut client = falkor.client().await?;
+    let receiver = Arc::clone(receiver);
+    let handle = task::Builder::new()
+        .name(format!("graph_client_sender_{}", worker_id).as_str())
+        .spawn({
+            async move {
+                let worker_id = worker_id.to_string();
+                let worker_id_str = worker_id.as_str();
+                let mut counter = 0u32;
+                loop {
+                    // get next value and release the mutex
+                    let received = receiver.lock().await.recv().await;
 
-    let handle = tokio::spawn({
-        let queries_arc = Arc::new(queries);
-        async move {
-            graph.execute_queries(spawn_id, queries_arc).await;
-        }
-        .instrument(tracing::Span::current())
-    });
+                    match received {
+                        Some(prepared_query) => {
+                            let start_time = Instant::now();
+
+                            let r = client
+                                .execute_prepared_query(worker_id_str, &prepared_query)
+                                .await;
+                            let duration = start_time.elapsed();
+                            match r {
+                                Ok(_) => {
+                                    FALKOR_SUCCESS_REQUESTS_DURATION_HISTOGRAM.observe(duration.as_secs_f64());
+                                    counter += 1;
+                                    // info!("worker {} processed query {}", worker_id, counter);
+                                    if counter % 1000 == 0 {
+                                        info!("worker {} processed {} queries", worker_id, counter);
+                                    }
+                                }
+                                // in case of error sleep for 3 seconds, that will give the benchmark some time to
+                                // accumulate more queries for the time that the system recovers.
+                                Err(e) => {
+                                    FALKOR_ERROR_REQUESTS_DURATION_HISTOGRAM.observe(duration.as_secs_f64());
+                                    let seconds_wait = 3u64;
+                                    info!(
+                                    "worker {} failed to process query, not sleeping for {} seconds {:?}",
+                                    worker_id, seconds_wait, e
+                                );
+                                    // tokio::time::sleep(Duration::from_secs(seconds_wait)).await;
+                                }
+                            }
+                        }
+                        None => {
+                            info!("worker {} received None, exiting", worker_id);
+                            break;
+                        }
+                    }
+                }
+                info!("worker {} finished", worker_id);
+            }
+        })?;
 
     Ok(handle)
 }
@@ -263,7 +333,7 @@ async fn init_falkor(
     _force: bool,
 ) -> BenchmarkResult<()> {
     let spec = Spec::new(benchmark::scenario::Name::Users, size, Vendor::Neo4j);
-    let falkor = benchmark::falkor::Falkor::new();
+    let falkor = benchmark::falkor::Falkor::default();
     falkor.clean_db().await?;
 
     let falkor = falkor.start().await?;
@@ -273,7 +343,7 @@ async fn init_falkor(
 
     let mut falkor_client = falkor.client().await?;
     falkor_client
-        .execute_query(
+        ._execute_query(
             "main",
             "create_index",
             "CREATE INDEX FOR (u:User) ON (u.id)",
@@ -286,7 +356,7 @@ async fn init_falkor(
         match result {
             Ok(query) => {
                 falkor_client
-                    .execute_query("loader", "", query.as_str())
+                    ._execute_query("loader", "", query.as_str())
                     .await?;
             }
             Err(e) => {
@@ -350,7 +420,7 @@ async fn init_neo4j(
     force: bool,
 ) -> BenchmarkResult<()> {
     let spec = Spec::new(benchmark::scenario::Name::Users, size, Vendor::Neo4j);
-    let neo4j = benchmark::neo4j::Neo4j::new();
+    let neo4j = benchmark::neo4j::Neo4j::default();
     let _ = neo4j.stop(false).await?;
     let backup_path = format!("{}/neo4j.dump", spec.backup_path());
     if !force {
