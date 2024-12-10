@@ -27,27 +27,30 @@ pub struct Falkor<U> {
     path: String,
     #[allow(dead_code)]
     state: U,
-    san: bool,
+}
+
+impl Default for Falkor<Stopped> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Falkor<Stopped> {
-    pub fn new(san: bool) -> Falkor<Stopped> {
+    fn new() -> Falkor<Stopped> {
         let default = falkor_shared_lib_path().unwrap();
         let path = env::var("FALKOR_PATH").unwrap_or(default);
         info!("falkor shared lib path: {}", path);
         Falkor {
             path,
             state: Stopped,
-            san,
         }
     }
     pub async fn start(self) -> BenchmarkResult<Falkor<Started>> {
-        let falkor_process: FalkorProcess = FalkorProcess::new(self.san).await?;
+        let falkor_process: FalkorProcess = FalkorProcess::new().await?;
         Self::wait_for_ready().await?;
         Ok(Falkor {
             path: self.path.clone(),
             state: Started(falkor_process),
-            san: self.san,
         })
     }
     pub async fn clean_db(&self) -> BenchmarkResult<()> {
@@ -85,7 +88,6 @@ impl Falkor<Started> {
         Ok(Falkor {
             path: self.path.clone(),
             state: Stopped,
-            san: self.san,
         })
     }
     pub async fn graph_size(&self) -> BenchmarkResult<(u64, u64)> {
@@ -223,8 +225,8 @@ impl FalkorBenchmarkClient {
         let worker_id = worker_id.as_ref();
         let q_name = q_name.as_str();
         let query = cypher.as_str();
-        let falkor_result = self.graph.query(query).with_timeout(5000).execute();
-        let timeout = Duration::from_secs(5);
+        let falkor_result = self.graph.query(query).execute();
+        let timeout = Duration::from_secs(60);
         let falkor_result = tokio::time::timeout(timeout, falkor_result).await;
         OPERATION_COUNTER
             .with_label_values(&["falkor", worker_id, "", q_name, "", ""])

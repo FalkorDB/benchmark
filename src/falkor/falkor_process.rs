@@ -3,7 +3,7 @@ use crate::error::BenchmarkResult;
 use crate::process_monitor::ProcessMonitor;
 use crate::utils::{
     create_directory_if_not_exists, delete_file, falkor_shared_lib_path, get_falkor_log_path,
-    redis_shutdown,
+    ping_redis, redis_shutdown,
 };
 use crate::{
     FALKOR_NODES_GAUGE, FALKOR_RELATIONSHIPS_GAUGE, FALKOR_RESTART_COUNTER,
@@ -23,11 +23,13 @@ pub struct FalkorProcess {
     process_handle: Option<JoinHandle<()>>,
     prom_shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
     prom_process_handle: Option<JoinHandle<()>>,
+    ping_server_shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    ping_server_handle: Option<JoinHandle<()>>,
     dropped: bool,
 }
 
 impl FalkorProcess {
-    pub async fn new(san: bool) -> BenchmarkResult<Self> {
+    pub async fn new() -> BenchmarkResult<Self> {
         redis_shutdown().await?; // if redis run on this machine use redis-cli to shut it down
 
         create_directory_if_not_exists(REDIS_DATA_DIR).await?;
@@ -37,12 +39,7 @@ impl FalkorProcess {
         let default_so_path = falkor_shared_lib_path()?;
         let default_so_path = env::var("FALKOR_PATH").unwrap_or_else(|_| default_so_path.clone());
         let falkor_log_path = get_falkor_log_path()?;
-        let command = if san {
-            "redis-server-asan-7.2"
-        } else {
-            "redis-server"
-        }
-        .to_string();
+        let command = "redis-server".to_string();
 
         let args: Vec<String> = vec![
             "--dir",
@@ -56,7 +53,7 @@ impl FalkorProcess {
             "CACHE_SIZE",
             "40",
             "MAX_QUEUED_QUERIES",
-            "100",
+            "400",
         ]
         .into_iter()
         .map(|s| s.to_string())
@@ -79,15 +76,25 @@ impl FalkorProcess {
 
         let (prom_process_handle, prom_shutdown_tx) = prometheus_metrics_reporter();
 
+        let (ping_server_handle, ping_server_shutdown_tx) = ping_server();
+
         Ok(Self {
             shutdown_tx: Some(shutdown_tx),
             process_handle,
             prom_shutdown_tx: Some(prom_shutdown_tx),
             prom_process_handle: Some(prom_process_handle),
+            ping_server_shutdown_tx: Some(ping_server_shutdown_tx),
+            ping_server_handle: Some(ping_server_handle),
             dropped: false,
         })
     }
     async fn terminate(&mut self) {
+        if let Some(ping_server_shutdown_tx) = self.ping_server_shutdown_tx.take() {
+            drop(ping_server_shutdown_tx);
+        }
+        if let Some(ping_server_handle) = self.ping_server_handle.take() {
+            let _ = ping_server_handle.await;
+        }
         if let Some(prom_shutdown_tx) = self.prom_shutdown_tx.take() {
             drop(prom_shutdown_tx);
         }
@@ -160,6 +167,36 @@ fn prometheus_metrics_reporter() -> (JoinHandle<()>, tokio::sync::oneshot::Sende
         Err(e) => {
             info!("Error starting prometheus_metrics_reporter: {:?}", e);
             panic!("Error starting prometheus_metrics_reporter: {:?}", e);
+        }
+    }
+}
+
+fn ping_server() -> (JoinHandle<()>, tokio::sync::oneshot::Sender<()>) {
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+    let handle = task::Builder::new().name("ping_server").spawn(async move {
+        loop {
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
+                    let res = ping_redis().await;
+                    match res {
+                        Ok(_) => {}
+                        Err(e) => {
+                            error!("Error pinging server: {:?}", e);
+                        }
+                    }
+                }
+                _ = &mut shutdown_rx => {
+                    info!("Shutting down ping_server");
+                    return;
+                }
+            }
+        }
+    });
+    match handle {
+        Ok(handle) => (handle, shutdown_tx),
+        Err(e) => {
+            info!("Error starting ping_server: {:?}", e);
+            panic!("Error starting ping_server: {:?}", e);
         }
     }
 }

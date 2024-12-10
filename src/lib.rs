@@ -1,8 +1,12 @@
 use lazy_static::lazy_static;
-use prometheus::{
-    register_counter_vec, register_int_counter, register_int_gauge, CounterVec, IntCounter,
-    IntGauge,
-};
+use prometheus::register_counter_vec;
+use prometheus::register_histogram;
+use prometheus::register_int_counter;
+use prometheus::register_int_gauge;
+use prometheus::CounterVec;
+use prometheus::Histogram;
+use prometheus::IntCounter;
+use prometheus::IntGauge;
 
 pub mod cli;
 pub mod error;
@@ -68,6 +72,18 @@ lazy_static! {
     pub static ref FALKOR_RELATIONSHIPS_GAUGE: IntGauge = register_int_gauge!(
         "falkordb_relationships_total",
         "Total number of relationships in falkordb graph",
+    )
+    .unwrap();
+    pub static ref FALKOR_SUCCESS_REQUESTS_DURATION_HISTOGRAM: Histogram = register_histogram!(
+        "falkordb_response_time_success_histogram",
+        "Response time histogram of the successful requests",
+        vec![0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,]
+    )
+    .unwrap();
+    pub static ref FALKOR_ERROR_REQUESTS_DURATION_HISTOGRAM: Histogram = register_histogram!(
+        "falkordb_response_time_error_histogram",
+        "Response time histogram of the error requests",
+        vec![0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,]
     )
     .unwrap();
 }

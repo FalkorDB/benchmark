@@ -7,6 +7,9 @@ use benchmark::falkor::{Falkor, Started, Stopped};
 use benchmark::queries_repository::PreparedQuery;
 use benchmark::scenario::{Size, Spec, Vendor};
 use benchmark::utils::{delete_file, file_exists, format_number};
+use benchmark::{
+    FALKOR_ERROR_REQUESTS_DURATION_HISTOGRAM, FALKOR_SUCCESS_REQUESTS_DURATION_HISTOGRAM,
+};
 use clap::{Command, CommandFactory, Parser};
 use clap_complete::{generate, Generator};
 use futures::StreamExt;
@@ -91,13 +94,12 @@ async fn main() -> BenchmarkResult<()> {
             size,
             queries,
             parallel,
-            san,
         } => match vendor {
             Vendor::Neo4j => {
                 run_neo4j(size, queries).await?;
             }
             Vendor::Falkor => {
-                run_falkor(size, queries, parallel, san).await?;
+                run_falkor(size, queries, parallel).await?;
             }
         },
 
@@ -173,14 +175,13 @@ async fn run_falkor(
     size: Size,
     number_of_queries: u64,
     parallel: usize,
-    san: bool,
 ) -> BenchmarkResult<()> {
     if parallel == 0 {
         return Err(OtherError(
             "Parallelism level must be greater than zero.".to_string(),
         ));
     }
-    let falkor: Falkor<Stopped> = benchmark::falkor::Falkor::new(san);
+    let falkor: Falkor<Stopped> = benchmark::falkor::Falkor::default();
 
     // if dump not present return error
     falkor.dump_exists_or_error(size).await?;
@@ -286,11 +287,15 @@ async fn spawn_worker(
 
                     match received {
                         Some(prepared_query) => {
+                            let start_time = Instant::now();
+
                             let r = client
                                 .execute_prepared_query(worker_id_str, &prepared_query)
                                 .await;
+                            let duration = start_time.elapsed();
                             match r {
                                 Ok(_) => {
+                                    FALKOR_SUCCESS_REQUESTS_DURATION_HISTOGRAM.observe(duration.as_secs_f64());
                                     counter += 1;
                                     // info!("worker {} processed query {}", worker_id, counter);
                                     if counter % 1000 == 0 {
@@ -300,12 +305,13 @@ async fn spawn_worker(
                                 // in case of error sleep for 3 seconds, that will give the benchmark some time to
                                 // accumulate more queries for the time that the system recovers.
                                 Err(e) => {
+                                    FALKOR_ERROR_REQUESTS_DURATION_HISTOGRAM.observe(duration.as_secs_f64());
                                     let seconds_wait = 3u64;
                                     info!(
-                                    "worker {} failed to process query, sleeping for {} seconds {:?}",
+                                    "worker {} failed to process query, not sleeping for {} seconds {:?}",
                                     worker_id, seconds_wait, e
                                 );
-                                    tokio::time::sleep(Duration::from_secs(seconds_wait)).await;
+                                    // tokio::time::sleep(Duration::from_secs(seconds_wait)).await;
                                 }
                             }
                         }
@@ -327,7 +333,7 @@ async fn init_falkor(
     _force: bool,
 ) -> BenchmarkResult<()> {
     let spec = Spec::new(benchmark::scenario::Name::Users, size, Vendor::Neo4j);
-    let falkor = benchmark::falkor::Falkor::new(false);
+    let falkor = benchmark::falkor::Falkor::default();
     falkor.clean_db().await?;
 
     let falkor = falkor.start().await?;

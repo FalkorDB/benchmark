@@ -72,7 +72,8 @@ path = "src/main.rs"
 opt-level = 3  # This is the default
 lto = true     # Enable Link Time Optimization
 codegen-units = 1  # Reduce parallel code generation units for better optimization
-
+# debug = true # for samply https://www.youtube.com/watch?v=M_EniM_IfnQ&ab_channel=FedericoTerzi
+# cargo build  --release && samply record -- ./target/release/benchmark  run -vfalkor -ssmall -q1000000 -p200
 
 
 

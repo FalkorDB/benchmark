@@ -1,2 +1,5 @@
-- [x] return meaningful errors falkordb-rs when redis return error.
-- [ ] generate a pool of query to be execute as the benchmark.
+- [] crash when timeout used
+- [] crash when read write
+- [] performance read/write vs read
+    - [] read/write without increase the graph size
+    - [] set read/write cli

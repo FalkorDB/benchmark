@@ -312,7 +312,7 @@ pub async fn redis_shutdown() -> BenchmarkResult<()> {
                 e
             );
             let redis_pid = get_command_pid("redis-server").await?;
-            info!("Killing Redis process with PID: {}", redis_pid);
+            error!("Killing Redis process with PID: {}", redis_pid);
             kill_process(redis_pid).await?;
             Ok::<(), BenchmarkError>(())
         }

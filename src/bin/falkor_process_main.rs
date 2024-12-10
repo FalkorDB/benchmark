@@ -11,7 +11,7 @@ async fn main() -> BenchmarkResult<()> {
         .with_line_number(true)
         .init();
 
-    let _falkor_process = FalkorProcess::new(false).await?;
+    let _falkor_process = FalkorProcess::new().await?;
 
     info!("waiting 30 seconds before dropping the falkor process");
     // Run the monitor in a separate task
