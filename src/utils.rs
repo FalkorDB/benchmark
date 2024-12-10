@@ -203,10 +203,8 @@ pub async fn ping_redis() -> BenchmarkResult<()> {
     let client = redis::Client::open("redis://127.0.0.1:6379/")?;
     let mut con = client.get_multiplexed_async_connection().await?;
 
-    // Set a timeout of 5 seconds
     let timeout_duration = Duration::from_secs(10);
 
-    // Use tokio's timeout function
     let result = tokio::time::timeout(timeout_duration, async {
         let pong: String = redis::cmd("PING").query_async(&mut con).await?;
         trace!("Redis ping response: {}", pong);

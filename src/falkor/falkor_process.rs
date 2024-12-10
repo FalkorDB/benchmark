@@ -13,7 +13,6 @@ use falkordb::FalkorValue::I64;
 use falkordb::{AsyncGraph, FalkorClientBuilder, FalkorConnectionInfo};
 use prometheus::core::{AtomicU64, GenericCounter};
 use std::env;
-use tokio::task;
 use tokio::task::JoinHandle;
 use tracing::{error, info};
 
@@ -66,12 +65,9 @@ impl FalkorProcess {
             std::time::Duration::from_secs(5),
         );
         let counter: GenericCounter<AtomicU64> = FALKOR_RESTART_COUNTER.clone();
-        let falkor_process_monitor =
-            task::Builder::new()
-                .name("falkor_process_monitor")
-                .spawn(async move {
-                    let _ = process_monitor.run(counter).await;
-                })?;
+        let falkor_process_monitor = tokio::spawn(async move {
+            let _ = process_monitor.run(counter).await;
+        });
         let process_handle = Some(falkor_process_monitor);
 
         let (prom_process_handle, prom_shutdown_tx) = prometheus_metrics_reporter();
@@ -124,7 +120,7 @@ impl Drop for FalkorProcess {
                 }
                 Err(e) => {
                     info!(
-                        "Error dropping FalkorProcess: {:?}, cleanup task finish with errro",
+                        "Error dropping FalkorProcess: {:?}, cleanup task finish with error",
                         e
                     );
                 }
@@ -135,54 +131,36 @@ impl Drop for FalkorProcess {
 
 fn prometheus_metrics_reporter() -> (JoinHandle<()>, tokio::sync::oneshot::Sender<()>) {
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
-    let handle = task::Builder::new()
-        .name("prometheus_metrics_reporter")
-        .spawn(async move {
-            match report_metrics().await {
-                Ok(_) => {}
-                Err(e) => {
-                    info!("Error reporting metrics: {:?}", e);
-                }
-            }
-            loop {
-                tokio::select! {
-
-                    _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
-                       match report_metrics().await{
-                              Ok(_) => {}
-                              Err(e) => {
-                                info!("Error reporting metrics: {:?}", e);
-                              }
-                        }
-                    }
-                    _ = &mut shutdown_rx => {
-                        info!("Shutting down prometheus_metrics_reporter");
-                        return;
-                    }
-                }
-            }
-        });
-    match handle {
-        Ok(handle) => (handle, shutdown_tx),
-        Err(e) => {
-            info!("Error starting prometheus_metrics_reporter: {:?}", e);
-            panic!("Error starting prometheus_metrics_reporter: {:?}", e);
+    let handle = tokio::spawn(async move {
+        if let Err(e) = report_metrics().await {
+            info!("Error reporting metrics: {:?}", e);
         }
-    }
+        loop {
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
+                    if let Err(e) = report_metrics().await {
+                        info!("Error reporting metrics: {:?}", e);
+                    }
+                }
+                _ = &mut shutdown_rx => {
+                    info!("Shutting down prometheus_metrics_reporter");
+                    return;
+                }
+            }
+        }
+    });
+
+    (handle, shutdown_tx)
 }
 
 fn ping_server() -> (JoinHandle<()>, tokio::sync::oneshot::Sender<()>) {
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
-    let handle = task::Builder::new().name("ping_server").spawn(async move {
+    let handle = tokio::spawn(async move {
         loop {
             tokio::select! {
                 _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
-                    let res = ping_redis().await;
-                    match res {
-                        Ok(_) => {}
-                        Err(e) => {
-                            error!("Error pinging server: {:?}", e);
-                        }
+                    if let Err(e) = ping_redis().await {
+                        error!("Error pinging server: {:?}", e);
                     }
                 }
                 _ = &mut shutdown_rx => {
@@ -192,19 +170,12 @@ fn ping_server() -> (JoinHandle<()>, tokio::sync::oneshot::Sender<()>) {
             }
         }
     });
-    match handle {
-        Ok(handle) => (handle, shutdown_tx),
-        Err(e) => {
-            info!("Error starting ping_server: {:?}", e);
-            panic!("Error starting ping_server: {:?}", e);
-        }
-    }
-}
 
+    (handle, shutdown_tx)
+}
 async fn report_metrics() -> BenchmarkResult<()> {
     let client = redis::Client::open("redis://127.0.0.1:6379/")?;
     let mut con = client.get_multiplexed_async_connection().await?;
-    // let graph_info = redis::cmd("GRAPH.INFO").query_async(&mut con).await?;
 
     let command = redis::cmd("GRAPH.INFO");
     let redis_value = con.send_packed_command(&command).await?;

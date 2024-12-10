@@ -1,8 +1,6 @@
 use crate::scenario::Vendor;
 use clap::{Parser, Subcommand};
 use clap_complete::Shell;
-use std::path::PathBuf;
-use std::str::FromStr;
 
 #[derive(Parser, Debug)]
 #[command(name = "benchmark", version, about="falkor benchmark tool", long_about = None, arg_required_else_help(true), propagate_version(true))]
@@ -95,30 +93,4 @@ pub enum Commands {
         )]
         parallel: usize,
     },
-}
-
-#[derive(Clone, Debug)]
-pub struct ExistingJsonFile(PathBuf);
-
-impl ExistingJsonFile {
-    pub fn path(&self) -> &PathBuf {
-        &self.0
-    }
-}
-impl FromStr for ExistingJsonFile {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let path = PathBuf::from(s);
-
-        if !path.exists() {
-            return Err(format!("File does not exist: {}", s));
-        }
-
-        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
-            return Err(format!("File must have a .json extension: {}", s));
-        }
-
-        Ok(ExistingJsonFile(path))
-    }
 }

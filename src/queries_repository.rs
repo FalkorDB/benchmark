@@ -149,18 +149,6 @@ impl QueriesRepository {
     }
 }
 
-// impl Queries for QueriesRepository {
-//     fn random_query(&self) -> Option<PreparedQuery> {
-//         let mut keys: Vec<&String> = self.queries.keys().collect();
-//         keys.sort();
-//         let mut rng = rand::thread_rng();
-//         keys.choose(&mut rng).map(|&key| {
-//             let generator = self.queries.get(key).unwrap();
-//             PreparedQuery::new(key.clone(), generator.query_type, generator.generate())
-//         })
-//     }
-// }
-
 struct RandomUtil {
     vertices: i32,
     _edges: i32,

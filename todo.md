@@ -1,5 +1,8 @@
-- [] crash when timeout used
-- [] crash when read write
-- [] performance read/write vs read
-    - [] read/write without increase the graph size
-    - [] set read/write cli
+- [ ] crash when timeout used
+- [ ] crash when read write
+- [ ] performance read/write vs read
+    - [ ] read/write without increase the graph size
+    - [ ] set read/write cli
+    - [x] read using GRAPH.RO_QUERY
+    - [ ] delete data when update
+- [ ] set up the rate per second

@@ -19,41 +19,24 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::Mutex;
-use tokio::task;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tracing::{error, info, instrument};
 use tracing_subscriber::filter::LevelFilter;
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::{fmt, Layer};
+use tracing_subscriber::{fmt, EnvFilter};
 
 #[tokio::main]
 async fn main() -> BenchmarkResult<()> {
     let mut cmd = Cli::command();
     let cli = Cli::parse();
 
-    let console_layer = console_subscriber::spawn();
-
-    // Create a formatting layer for logging
-    let fmt_layer = fmt::layer()
+    let filter = EnvFilter::from_default_env().add_directive(LevelFilter::INFO.into());
+    let subscriber = fmt()
         .pretty()
         .with_file(true)
         .with_line_number(true)
-        .with_thread_ids(true)
-        // .with_filter(filter_fn(|metadata| {
-        //     Exclude events from Tokio
-        // println!("metadata.target() {}", metadata.target());
-        // !metadata.target().starts_with("tokio") && !metadata.target().starts_with("runtime")
-        // }))
-        .with_filter(LevelFilter::INFO);
+        .with_env_filter(filter);
 
-    // Combine the layers into a single subscriber
-    let subscriber = tracing_subscriber::registry()
-        .with(console_layer) // Add the console layer
-        .with(fmt_layer); // Add the formatting layer
-
-    // Set the combined subscriber as the global default
     subscriber.init();
 
     let prometheus_endpoint = benchmark::prometheus_endpoint::PrometheusEndpoint::default();
@@ -246,22 +229,21 @@ fn fill_queries(
     number_of_queries: u64,
     tx: Sender<PreparedQuery>,
 ) -> BenchmarkResult<JoinHandle<()>> {
-    let handle = task::Builder::new().name("queries_filler").spawn({
-        async move {
-            let queries_repository =
-                benchmark::queries_repository::UsersQueriesRepository::new(9998, 121716);
-            let queries: Box<dyn Iterator<Item = PreparedQuery> + Send + Sync> =
-                queries_repository.random_queries(number_of_queries);
+    let handle = tokio::spawn(async move {
+        let queries_repository =
+            benchmark::queries_repository::UsersQueriesRepository::new(9998, 121716);
+        let queries: Box<dyn Iterator<Item = PreparedQuery> + Send + Sync> =
+            queries_repository.random_queries(number_of_queries);
 
-            for query in queries {
-                if let Err(e) = tx.send(query).await {
-                    error!("error filling query: {}, exiting", e);
-                    break;
-                }
+        for query in queries {
+            if let Err(e) = tx.send(query).await {
+                error!("error filling query: {}, exiting", e);
+                break;
             }
-            info!("fill_queries finished");
         }
-    })?;
+        info!("fill_queries finished");
+    });
+
     Ok(handle)
 }
 
@@ -274,60 +256,53 @@ async fn spawn_worker(
     info!("spawning worker");
     let mut client = falkor.client().await?;
     let receiver = Arc::clone(receiver);
-    let handle = task::Builder::new()
-        .name(format!("graph_client_sender_{}", worker_id).as_str())
-        .spawn({
-            async move {
-                let worker_id = worker_id.to_string();
-                let worker_id_str = worker_id.as_str();
-                let mut counter = 0u32;
-                loop {
-                    // get next value and release the mutex
-                    let received = receiver.lock().await.recv().await;
+    let handle = tokio::spawn(async move {
+        let worker_id = worker_id.to_string();
+        let worker_id_str = worker_id.as_str();
+        let mut counter = 0u32;
+        loop {
+            // get next value and release the mutex
+            let received = receiver.lock().await.recv().await;
 
-                    match received {
-                        Some(prepared_query) => {
-                            let start_time = Instant::now();
+            match received {
+                Some(prepared_query) => {
+                    let start_time = Instant::now();
 
-                            let r = client
-                                .execute_prepared_query(worker_id_str, &prepared_query)
-                                .await;
-                            let duration = start_time.elapsed();
-                            match r {
-                                Ok(_) => {
-                                    FALKOR_SUCCESS_REQUESTS_DURATION_HISTOGRAM.observe(duration.as_secs_f64());
-                                    counter += 1;
-                                    // info!("worker {} processed query {}", worker_id, counter);
-                                    if counter % 1000 == 0 {
-                                        info!("worker {} processed {} queries", worker_id, counter);
-                                    }
-                                }
-                                // in case of error sleep for 3 seconds, that will give the benchmark some time to
-                                // accumulate more queries for the time that the system recovers.
-                                Err(e) => {
-                                    FALKOR_ERROR_REQUESTS_DURATION_HISTOGRAM.observe(duration.as_secs_f64());
-                                    let seconds_wait = 3u64;
-                                    info!(
-                                    "worker {} failed to process query, not sleeping for {} seconds {:?}",
-                                    worker_id, seconds_wait, e
-                                );
-                                    // tokio::time::sleep(Duration::from_secs(seconds_wait)).await;
-                                }
+                    let r = client
+                        .execute_prepared_query(worker_id_str, &prepared_query)
+                        .await;
+                    let duration = start_time.elapsed();
+                    match r {
+                        Ok(_) => {
+                            FALKOR_SUCCESS_REQUESTS_DURATION_HISTOGRAM
+                                .observe(duration.as_secs_f64());
+                            counter += 1;
+                            if counter % 1000 == 0 {
+                                info!("worker {} processed {} queries", worker_id, counter);
                             }
                         }
-                        None => {
-                            info!("worker {} received None, exiting", worker_id);
-                            break;
+                        Err(e) => {
+                            FALKOR_ERROR_REQUESTS_DURATION_HISTOGRAM
+                                .observe(duration.as_secs_f64());
+                            let seconds_wait = 3u64;
+                            info!(
+                                "worker {} failed to process query, not sleeping for {} seconds {:?}",
+                                worker_id, seconds_wait, e
+                            );
                         }
                     }
                 }
-                info!("worker {} finished", worker_id);
+                None => {
+                    info!("worker {} received None, exiting", worker_id);
+                    break;
+                }
             }
-        })?;
+        }
+        info!("worker {} finished", worker_id);
+    });
 
     Ok(handle)
 }
-
 async fn init_falkor(
     size: Size,
     _force: bool,

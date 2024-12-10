@@ -42,8 +42,6 @@ impl ProcessMonitor {
         loop {
             let mut child = self.spawn_process().await?;
             info!("Process spawned with PID: {:?}", child.id());
-            // wait 10 seconds for the process to start
-            // sleep(Duration::from_secs(10)).await;
 
             tokio::select! {
                 status = child.wait() => {
