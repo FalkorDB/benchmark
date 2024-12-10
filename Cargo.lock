@@ -555,7 +555,9 @@ dependencies = [
 
 [[package]]
 name = "falkordb"
-version = "0.1.9"
+version = "0.1.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d69c1b252204e6d122e1295eb66aff9f102fcea0c67b6054418707b9561fc935"
 dependencies = [
  "parking_lot",
  "redis",
