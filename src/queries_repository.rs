@@ -159,6 +159,7 @@ impl RandomUtil {
         let mut rng = rand::thread_rng();
         rng.gen_range(1..=self.vertices)
     }
+    #[allow(dead_code)]
     fn random_path(&self) -> (i32, i32) {
         let start = self.random_vertex();
         let mut end = self.random_vertex();
@@ -196,20 +197,32 @@ impl UsersQueriesRepository {
                     .param("id", random.random_vertex())
                     .build()
             })
-            .add_query("single_vertex_write", QueryType::Write, |random, _flavour| {
+            // .add_query("single_vertex_write", QueryType::Write, |random, _flavour| {
+            //     QueryBuilder::new()
+            //         .text("CREATE (n:UserTemp {id : $id}) RETURN n")
+            //         .param("id", random.random_vertex())
+            //         .build()
+            .add_query("single_vertex_update", QueryType::Write, |random, _flavour| {
                 QueryBuilder::new()
-                    .text("CREATE (n:UserTemp {id : $id}) RETURN n")
+                    .text("MATCH (n:User {id: $id}) SET n.rpc_social_credit = $rpc_social_credit RETURN n")
                     .param("id", random.random_vertex())
+                    .param("rpc_social_credit", random.random_vertex())
                     .build()
             })
-            .add_query("single_edge_write", QueryType::Write, |random, _flavour| {
-                let (from, to) = random.random_path();
+            .add_query("single_edge_update", QueryType::Write, |random, _flavour| {
                 QueryBuilder::new()
-                    .text("MATCH (n:User {id: $from}), (m:User {id: $to}) WITH n, m CREATE (n)-[e:Temp]->(m) RETURN e")
-                    .param("from", from)
-                    .param("to", to)
+                    .text("MATCH (n:User)-[e:Temp]->(m:User) WITH e ORDER BY rand() LIMIT 1 SET e.color = $color RETURN e")
+                    .param("color", random.random_vertex())
                     .build()
             })
+            // .add_query("single_edge_write", QueryType::Write, |random, _flavour| {
+            //     let (from, to) = random.random_path();
+            //     QueryBuilder::new()
+            //         .text("MATCH (n:User {id: $from}), (m:User {id: $to}) WITH n, m CREATE (n)-[e:Temp]->(m) RETURN e")
+            //         .param("from", from)
+            //         .param("to", to)
+            //         .build()
+            // })
             .add_query("aggregate_expansion_1", QueryType::Read, |random, _flavour| {
                 QueryBuilder::new()
                     .text("MATCH (s:User {id: $id})-->(n:User) RETURN n.id")
