@@ -61,8 +61,7 @@ pub enum Commands {
         #[arg(
             short = 'w',
             long,
-            alias = "workers",
-            alias = "parallel",
+            aliases = ["workers", "parallel"],
             default_value_t = 1
         )]
         number_of_workers: usize,

@@ -31,7 +31,7 @@ async fn main() {
     // Create a channel for sending messages
     let (tx, rx) = tokio::sync::mpsc::channel::<Msg>(3);
 
-    let handle = spawn_scheduler(50000, tx, 100000);
+    let handle = spawn_scheduler(5000, tx, 50);
 
     let receiver: Arc<Mutex<Receiver<Msg>>> = Arc::new(Mutex::new(rx));
     let n_processors = 4;
@@ -55,6 +55,7 @@ fn spawn_processor(receiver: &Arc<Mutex<Receiver<Msg>>>) -> JoinHandle<()> {
                     return;
                 }
                 Some(received_msg) => {
+                    info!("Received message: {:?}", received_msg);
                     offset = compute_offset_ms(&received_msg);
                     if offset > 0 {
                         // sleep offset millis
@@ -80,11 +81,11 @@ fn spawn_scheduler(
     number_of_messages: u32,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let interval = 1000 / msg_per_sec as u64;
+        let interval_in_nanos = (1_000_000_000.0 / msg_per_sec as f64) as u64;
         // anchor the start time to 200 ms from now
         let start_time = Instant::now().add(Duration::from_millis(200));
         for count in 0..number_of_messages {
-            let offset = count as u64 * interval;
+            let offset = (count as u64 * interval_in_nanos) / 1_000_000;
             match sender.send(Msg { start_time, offset }).await {
                 Ok(_) => {}
                 Err(e) => {
