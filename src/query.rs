@@ -198,7 +198,7 @@ mod tests {
             "\"test\""
         );
         assert_eq!(QueryParam::Integer(42).to_cypher_string(), "42");
-        assert_eq!(QueryParam::Float(3.14).to_cypher_string(), "3.14");
+        assert_eq!(QueryParam::Float(3.16).to_cypher_string(), "3.16");
         assert_eq!(QueryParam::Boolean(true).to_cypher_string(), "true");
     }
 
@@ -209,7 +209,7 @@ mod tests {
             matches!(QueryParam::from("test".to_string()), QueryParam::String(s) if s == "test")
         );
         assert!(matches!(QueryParam::from(42), QueryParam::Integer(i) if i == 42));
-        assert!(matches!(QueryParam::from(3.14), QueryParam::Float(f) if f == 3.14));
+        assert!(matches!(QueryParam::from(3.16), QueryParam::Float(f) if f == 3.16));
         assert!(matches!(QueryParam::from(true), QueryParam::Boolean(b) if b));
     }
 }
