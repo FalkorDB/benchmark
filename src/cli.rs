@@ -87,5 +87,12 @@ pub enum Commands {
             help = "the rate of messages that sent to the server (messages per second)"
         )]
         mps: usize,
+        #[arg(
+            short,
+            long,
+            required = false,
+            help = "simulate the benchmark without sending the messages to the server, the value the process time in milliseconds"
+        )]
+        simulate: Option<usize>,
     },
 }

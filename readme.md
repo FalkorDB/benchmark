@@ -118,6 +118,12 @@ Options:
 
 - `cargo run --release --bin benchmark run --vendor falkor --name small -p40 --mps 2500`
 
+##### run simulation to see that the benchmark itself can sustain spesific mps given a fix latency on that hardware
+
+For example, simulate 40 clients that send at 5000 messages per seconds with latency of one millisecond per call.
+
+- `cargo run --release --bin benchmark run --vendor falkor --name small -p40 --mps 5000 --simulate 1'
+
 ### Data
 
 The data is based on https://www.kaggle.com/datasets/wolfram77/graphs-snap-soc-pokec

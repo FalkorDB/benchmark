@@ -219,6 +219,7 @@ impl FalkorBenchmarkClient {
         &mut self,
         worker_id: S,
         msg: &Msg<PreparedQuery>,
+        simulate: &Option<usize>,
     ) -> BenchmarkResult<()> {
         let Msg {
             payload:
@@ -237,6 +238,7 @@ impl FalkorBenchmarkClient {
             QueryType::Read => self.graph.ro_query(query).execute(),
             QueryType::Write => self.graph.query(query).execute(),
         };
+
         let timeout = Duration::from_secs(60);
         let offset = msg.compute_offset_ms();
 
@@ -244,6 +246,14 @@ impl FalkorBenchmarkClient {
         if offset > 0 {
             // sleep offset millis
             tokio::time::sleep(Duration::from_millis(offset as u64)).await;
+        }
+
+        if let Some(delay) = simulate {
+            if *delay > 0 {
+                let delay: u64 = *delay as u64;
+                tokio::time::sleep(Duration::from_millis(delay)).await;
+            }
+            return Ok(());
         }
 
         let falkor_result = tokio::time::timeout(timeout, falkor_result).await;

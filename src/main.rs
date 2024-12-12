@@ -81,13 +81,14 @@ async fn main() -> BenchmarkResult<()> {
             parallel,
             name,
             mps,
+            simulate,
         } => match vendor {
             Vendor::Neo4j => {
                 // run_neo4j(size, queries).await?;
                 error!("Neo4j is not supported");
             }
             Vendor::Falkor => {
-                run_falkor(parallel, name, mps).await?;
+                run_falkor(parallel, name, mps, simulate).await?;
             }
         },
 
@@ -155,6 +156,7 @@ async fn run_falkor(
     parallel: usize,
     file_name: String,
     mps: usize,
+    simulate: Option<usize>,
 ) -> BenchmarkResult<()> {
     if parallel == 0 {
         return Err(OtherError(
@@ -200,7 +202,7 @@ async fn run_falkor(
     // start workers
     let start = Instant::now();
     for spawn_id in 0..parallel {
-        let handle = spawn_worker(&falkor, spawn_id, &rx).await?;
+        let handle = spawn_worker(&falkor, spawn_id, &rx, simulate).await?;
         workers_handles.push(handle);
     }
 
@@ -230,6 +232,7 @@ async fn spawn_worker(
     falkor: &Falkor<Started>,
     worker_id: usize,
     receiver: &Arc<Mutex<Receiver<Msg<PreparedQuery>>>>,
+    simulate: Option<usize>,
 ) -> BenchmarkResult<JoinHandle<()>> {
     info!("spawning worker");
     let mut client = falkor.client().await?;
@@ -247,7 +250,7 @@ async fn spawn_worker(
                     let start_time = Instant::now();
 
                     let r = client
-                        .execute_prepared_query(worker_id_str, &prepared_query)
+                        .execute_prepared_query(worker_id_str, &prepared_query, &simulate)
                         .await;
                     let duration = start_time.elapsed();
                     match r {
