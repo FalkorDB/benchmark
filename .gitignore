@@ -18,3 +18,4 @@ falkordb.log
 .DS_Store
 dump.rdb
 index.html
+queries.json

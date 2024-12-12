@@ -18,6 +18,7 @@ pub mod prometheus_endpoint;
 pub mod queries_repository;
 pub mod query;
 pub mod scenario;
+pub mod scheduler;
 pub mod utils;
 
 pub(crate) const REDIS_DATA_DIR: &str = "./redis-data";
@@ -84,6 +85,11 @@ lazy_static! {
         "falkordb_response_time_error_histogram",
         "Response time histogram of the error requests",
         vec![0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,]
+    )
+    .unwrap();
+    pub static ref FALKOR_MSG_DEADLINE_OFFSET_GAUGE: IntGauge = register_int_gauge!(
+        "falkordb_msg_deadline_offset",
+        "offset of the message from the deadline",
     )
     .unwrap();
 }

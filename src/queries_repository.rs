@@ -178,7 +178,7 @@ pub struct UsersQueriesRepository {
 impl UsersQueriesRepository {
     pub fn random_queries(
         self,
-        count: u64,
+        count: usize,
     ) -> Box<dyn Iterator<Item = PreparedQuery> + Send + Sync> {
         Box::new((0..count).filter_map(move |_| self.random_query()))
     }

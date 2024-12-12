@@ -4,13 +4,16 @@ use crate::error::BenchmarkResult;
 use crate::utils::{create_directory_if_not_exists, download_file, read_lines, url_file_name};
 use clap::ValueEnum;
 use futures::Stream;
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
 use std::pin::Pin;
 use strum_macros::Display;
 use tracing::info;
 
-#[derive(Debug, Clone, Display, Copy, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
+#[derive(
+    Debug, Clone, Display, Copy, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Serialize, Deserialize,
+)]
 #[strum(serialize_all = "lowercase")]
 pub enum Size {
     Small,

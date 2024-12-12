@@ -48,9 +48,6 @@ nonzero = "0.2.0"
 name = "benchmark"
 path = "src/main.rs"
 
-[[bin]]
-name = "scheduler"
-path = "src/bin/scheduler.rs"
 
 
 

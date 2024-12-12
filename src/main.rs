@@ -6,18 +6,22 @@ use benchmark::error::BenchmarkResult;
 use benchmark::falkor::{Falkor, Started, Stopped};
 use benchmark::queries_repository::PreparedQuery;
 use benchmark::scenario::{Size, Spec, Vendor};
+use benchmark::scheduler::Msg;
 use benchmark::utils::{delete_file, file_exists, format_number};
 use benchmark::{
-    FALKOR_ERROR_REQUESTS_DURATION_HISTOGRAM, FALKOR_SUCCESS_REQUESTS_DURATION_HISTOGRAM,
+    scheduler, FALKOR_ERROR_REQUESTS_DURATION_HISTOGRAM, FALKOR_SUCCESS_REQUESTS_DURATION_HISTOGRAM,
 };
 use clap::{Command, CommandFactory, Parser};
 use clap_complete::{generate, Generator};
 use futures::StreamExt;
 use histogram::Histogram;
+use serde::{Deserialize, Serialize};
 use std::io;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::fs::File;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
+use tokio::sync::mpsc::Receiver;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
@@ -47,7 +51,7 @@ async fn main() -> BenchmarkResult<()> {
             print_completions(shell, &mut cmd);
         }
 
-        Commands::Init {
+        Commands::Load {
             vendor,
             size,
             force,
@@ -74,45 +78,35 @@ async fn main() -> BenchmarkResult<()> {
         }
         Commands::Run {
             vendor,
-            size,
-            queries,
             parallel,
+            name,
+            mps,
         } => match vendor {
             Vendor::Neo4j => {
-                run_neo4j(size, queries).await?;
+                // run_neo4j(size, queries).await?;
+                error!("Neo4j is not supported");
             }
             Vendor::Falkor => {
-                run_falkor(size, queries, parallel).await?;
+                run_falkor(parallel, name, mps).await?;
             }
         },
 
-        Commands::Clear {
-            vendor,
+        Commands::GenerateQueries {
             size,
-            force,
-        } => {
-            info!("Clear benchmark {} {} {}", vendor, size, force);
-        }
-
-        Commands::PrepareQueries {
-            dataset_size,
-            number_of_queries,
-            number_of_workers,
+            dataset,
             name,
         } => {
-            info!(
-                "Prepare queries dataset_size: {}, number_of_queries: {}, number_of_workers: {}, name: {}",
-                dataset_size, number_of_queries, number_of_workers, name
-            );
+            prepare_queries(dataset, size, name).await?;
         }
     }
     drop(prometheus_endpoint);
     Ok(())
 }
 
+#[allow(dead_code)]
 async fn run_neo4j(
     size: Size,
-    number_of_queries: u64,
+    number_of_queries: usize,
 ) -> BenchmarkResult<()> {
     let neo4j = benchmark::neo4j::Neo4j::default();
     // stop neo4j if it is running
@@ -136,7 +130,10 @@ async fn run_neo4j(
         format_number(node_count),
         format_number(relation_count)
     );
-    info!("running {} queries", format_number(number_of_queries));
+    info!(
+        "running {} queries",
+        format_number(number_of_queries as u64)
+    );
     let start = Instant::now();
     client.clone().execute_query_iterator(queries).await?;
     let elapsed = start.elapsed();
@@ -145,7 +142,7 @@ async fn run_neo4j(
 
     info!(
         "running {} queries took {:?}",
-        format_number(number_of_queries),
+        format_number(number_of_queries as u64),
         elapsed
     );
     neo4j.stop(true).await?;
@@ -155,9 +152,9 @@ async fn run_neo4j(
 }
 #[instrument]
 async fn run_falkor(
-    size: Size,
-    number_of_queries: u64,
     parallel: usize,
+    file_name: String,
+    mps: usize,
 ) -> BenchmarkResult<()> {
     if parallel == 0 {
         return Err(OtherError(
@@ -166,10 +163,14 @@ async fn run_falkor(
     }
     let falkor: Falkor<Stopped> = benchmark::falkor::Falkor::default();
 
+    let (queries_metadata, queries) = read_queries(file_name).await?;
+
     // if dump not present return error
-    falkor.dump_exists_or_error(size).await?;
+    falkor
+        .dump_exists_or_error(queries_metadata.dataset)
+        .await?;
     // restore the dump
-    falkor.restore_db(size).await?;
+    falkor.restore_db(queries_metadata.dataset).await?;
     // start falkor
     let falkor = falkor.start().await?;
 
@@ -181,19 +182,20 @@ async fn run_falkor(
         format_number(node_count),
         format_number(relation_count)
     );
-    info!("running {} queries", format_number(number_of_queries));
 
     // prepare the mpsc channel
-    let (tx, rx) = tokio::sync::mpsc::channel::<PreparedQuery>(20 * parallel);
-    let rx: Arc<Mutex<Receiver<PreparedQuery>>> = Arc::new(Mutex::new(rx));
+    let (tx, rx) = tokio::sync::mpsc::channel::<Msg<PreparedQuery>>(20 * parallel);
+    let rx: Arc<Mutex<Receiver<Msg<PreparedQuery>>>> = Arc::new(Mutex::new(rx));
 
     // iterate over queries and send them to the workers
 
-    let filler_handles = vec![
-        // fill_queries(number_of_queries, tx.clone())?,
-        fill_queries(number_of_queries, tx.clone())?,
-    ];
+    let number_of_queries = queries_metadata.size;
+    info!(
+        "running {} queries",
+        format_number(number_of_queries as u64)
+    );
 
+    let scheduler_handle = scheduler::spawn_scheduler::<PreparedQuery>(mps, tx.clone(), queries);
     let mut workers_handles = Vec::with_capacity(parallel);
     // start workers
     let start = Instant::now();
@@ -204,9 +206,7 @@ async fn run_falkor(
 
     // wait for the filler to finish drop the transmission side
     // to let the workers know that they should stop
-    for handle in filler_handles {
-        let _ = handle.await;
-    }
+    let _ = scheduler_handle.await;
     drop(tx);
 
     for handle in workers_handles {
@@ -216,7 +216,7 @@ async fn run_falkor(
     let elapsed = start.elapsed();
     info!(
         "running {} queries took {:?}",
-        format_number(number_of_queries),
+        format_number(number_of_queries as u64),
         elapsed
     );
 
@@ -225,33 +225,11 @@ async fn run_falkor(
     Ok(())
 }
 
-fn fill_queries(
-    number_of_queries: u64,
-    tx: Sender<PreparedQuery>,
-) -> BenchmarkResult<JoinHandle<()>> {
-    let handle = tokio::spawn(async move {
-        let queries_repository =
-            benchmark::queries_repository::UsersQueriesRepository::new(9998, 121716);
-        let queries: Box<dyn Iterator<Item = PreparedQuery> + Send + Sync> =
-            queries_repository.random_queries(number_of_queries);
-
-        for query in queries {
-            if let Err(e) = tx.send(query).await {
-                error!("error filling query: {}, exiting", e);
-                break;
-            }
-        }
-        info!("fill_queries finished");
-    });
-
-    Ok(handle)
-}
-
 #[instrument(skip(falkor, receiver), fields(vendor = "falkor"))]
 async fn spawn_worker(
     falkor: &Falkor<Started>,
     worker_id: usize,
-    receiver: &Arc<Mutex<Receiver<PreparedQuery>>>,
+    receiver: &Arc<Mutex<Receiver<Msg<PreparedQuery>>>>,
 ) -> BenchmarkResult<JoinHandle<()>> {
     info!("spawning worker");
     let mut client = falkor.client().await?;
@@ -261,7 +239,7 @@ async fn spawn_worker(
         let worker_id_str = worker_id.as_str();
         let mut counter = 0u32;
         loop {
-            // get next value and release the mutex
+            // get the next value and release the mutex
             let received = receiver.lock().await.recv().await;
 
             match received {
@@ -472,4 +450,67 @@ fn print_completions<G: Generator>(
     cmd: &mut Command,
 ) {
     generate(gen, cmd, cmd.get_name().to_string(), &mut io::stdout());
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PrepareQueriesMetadata {
+    size: usize,
+    dataset: Size,
+}
+async fn prepare_queries(
+    dataset: Size,
+    size: usize,
+    file_name: String,
+) -> BenchmarkResult<()> {
+    let metadata = PrepareQueriesMetadata { size, dataset };
+    let start = Instant::now();
+    let queries_repository =
+        benchmark::queries_repository::UsersQueriesRepository::new(9998, 121716);
+    let queries = Box::new(queries_repository.random_queries(size));
+
+    let file = File::create(file_name).await?;
+    let mut writer = BufWriter::new(file);
+    let metadata_line = serde_json::to_string(&metadata)?;
+    writer.write_all(metadata_line.as_bytes()).await?;
+    writer.write_all(b"\n").await?;
+
+    for query in queries {
+        let json_string = serde_json::to_string(&query)?;
+        writer.write_all(json_string.as_bytes()).await?;
+        writer.write_all(b"\n").await?;
+    }
+    writer.flush().await?;
+
+    let duration = start.elapsed();
+    info!("Time taken to prepare queries: {:?}", duration);
+    Ok(())
+}
+
+async fn read_queries(
+    file_name: String
+) -> BenchmarkResult<(PrepareQueriesMetadata, Vec<PreparedQuery>)> {
+    let start = Instant::now();
+    let file = File::open(file_name).await?;
+    let mut reader = BufReader::new(file);
+
+    // the first line is PrepareQueriesMetadata read it
+    let mut metadata_line = String::new();
+    reader.read_line(&mut metadata_line).await?;
+
+    match serde_json::from_str::<PrepareQueriesMetadata>(&metadata_line) {
+        Ok(metadata) => {
+            let size = metadata.size;
+            let mut queries = Vec::with_capacity(size);
+            let mut lines = reader.lines();
+
+            while let Some(line) = lines.next_line().await? {
+                let query: PreparedQuery = serde_json::from_str(&line)?;
+                queries.push(query);
+            }
+            let duration = start.elapsed();
+            info!("Reading {} queries took {:?}", size, duration);
+            Ok((metadata, queries))
+        }
+        Err(e) => Err(OtherError(format!("Error parsing metadata: {}", e))),
+    }
 }

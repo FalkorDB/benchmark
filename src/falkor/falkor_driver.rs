@@ -3,11 +3,14 @@ use crate::error::BenchmarkResult;
 use crate::falkor::falkor_process::FalkorProcess;
 use crate::queries_repository::{PreparedQuery, QueryType};
 use crate::scenario::Size;
+use crate::scheduler::Msg;
 use crate::utils::{
     delete_file, falkor_shared_lib_path, file_exists, get_command_pid, redis_save, redis_shutdown,
     wait_for_redis_ready,
 };
-use crate::{OPERATION_COUNTER, OPERATION_ERROR_COUNTER, REDIS_DATA_DIR};
+use crate::{
+    FALKOR_MSG_DEADLINE_OFFSET_GAUGE, OPERATION_COUNTER, OPERATION_ERROR_COUNTER, REDIS_DATA_DIR,
+};
 use falkordb::FalkorValue::I64;
 use falkordb::{AsyncGraph, FalkorClientBuilder, FalkorResult, LazyResultSet, QueryResult};
 use std::env;
@@ -215,17 +218,34 @@ impl FalkorBenchmarkClient {
     pub async fn execute_prepared_query<S: AsRef<str>>(
         &mut self,
         worker_id: S,
-        prepared_query: &PreparedQuery,
+        msg: &Msg<PreparedQuery>,
     ) -> BenchmarkResult<()> {
-        let PreparedQuery { q_name, cypher, .. } = prepared_query;
+        let Msg {
+            payload:
+                PreparedQuery {
+                    q_name,
+                    cypher,
+                    q_type,
+                    ..
+                },
+            ..
+        } = msg;
+
         let worker_id = worker_id.as_ref();
-        let q_name = q_name.as_str();
         let query = cypher.as_str();
-        let falkor_result = match prepared_query.q_type {
+        let falkor_result = match q_type {
             QueryType::Read => self.graph.ro_query(query).execute(),
             QueryType::Write => self.graph.query(query).execute(),
         };
         let timeout = Duration::from_secs(60);
+        let offset = msg.compute_offset_ms();
+
+        FALKOR_MSG_DEADLINE_OFFSET_GAUGE.set(offset);
+        if offset > 0 {
+            // sleep offset millis
+            tokio::time::sleep(Duration::from_millis(offset as u64)).await;
+        }
+
         let falkor_result = tokio::time::timeout(timeout, falkor_result).await;
         OPERATION_COUNTER
             .with_label_values(&["falkor", worker_id, "", q_name, "", ""])
