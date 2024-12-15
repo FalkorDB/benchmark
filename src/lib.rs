@@ -92,4 +92,21 @@ lazy_static! {
         "offset of the message from the deadline",
     )
     .unwrap();
+    pub static ref NEO4J_SUCCESS_REQUESTS_DURATION_HISTOGRAM: Histogram = register_histogram!(
+        "neo4j_response_time_success_histogram",
+        "Response time histogram of the successful requests",
+        vec![0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,]
+    )
+    .unwrap();
+    pub static ref NEO4J_ERROR_REQUESTS_DURATION_HISTOGRAM: Histogram = register_histogram!(
+        "neo4j_response_time_error_histogram",
+        "Response time histogram of the error requests",
+        vec![0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,]
+    )
+    .unwrap();
+    pub static ref NEO4J_MSG_DEADLINE_OFFSET_GAUGE: IntGauge = register_int_gauge!(
+        "neo4j_msg_deadline_offset",
+        "offset of the message from the deadline",
+    )
+    .unwrap();
 }

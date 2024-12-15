@@ -4,12 +4,16 @@ use benchmark::cli::Commands::GenerateAutoComplete;
 use benchmark::error::BenchmarkError::OtherError;
 use benchmark::error::BenchmarkResult;
 use benchmark::falkor::{Falkor, Started, Stopped};
+use benchmark::neo4j_client::Neo4jClient;
 use benchmark::queries_repository::PreparedQuery;
+use benchmark::scenario::Name::Users;
 use benchmark::scenario::{Size, Spec, Vendor};
 use benchmark::scheduler::Msg;
 use benchmark::utils::{delete_file, file_exists, format_number};
 use benchmark::{
-    scheduler, FALKOR_ERROR_REQUESTS_DURATION_HISTOGRAM, FALKOR_SUCCESS_REQUESTS_DURATION_HISTOGRAM,
+    scheduler, FALKOR_ERROR_REQUESTS_DURATION_HISTOGRAM,
+    FALKOR_SUCCESS_REQUESTS_DURATION_HISTOGRAM, NEO4J_ERROR_REQUESTS_DURATION_HISTOGRAM,
+    NEO4J_SUCCESS_REQUESTS_DURATION_HISTOGRAM,
 };
 use clap::{Command, CommandFactory, Parser};
 use clap_complete::{generate, Generator};
@@ -84,8 +88,7 @@ async fn main() -> BenchmarkResult<()> {
             simulate,
         } => match vendor {
             Vendor::Neo4j => {
-                // run_neo4j(size, queries).await?;
-                error!("Neo4j is not supported");
+                run_neo4j(parallel, name, mps, simulate).await?;
             }
             Vendor::Falkor => {
                 run_falkor(parallel, name, mps, simulate).await?;
@@ -96,24 +99,27 @@ async fn main() -> BenchmarkResult<()> {
             size,
             dataset,
             name,
+            write_ratio,
         } => {
-            prepare_queries(dataset, size, name).await?;
+            prepare_queries(dataset, size, name, write_ratio).await?;
         }
     }
     drop(prometheus_endpoint);
     Ok(())
 }
 
-#[allow(dead_code)]
 async fn run_neo4j(
-    size: Size,
-    number_of_queries: usize,
+    parallel: usize,
+    file_name: String,
+    mps: usize,
+    simulate: Option<usize>,
 ) -> BenchmarkResult<()> {
     let neo4j = benchmark::neo4j::Neo4j::default();
     // stop neo4j if it is running
     neo4j.stop(false).await?;
-    // restore the dump
-    let spec = Spec::new(benchmark::scenario::Name::Users, size, Vendor::Neo4j);
+    let (queries_metadata, queries) = read_queries(file_name).await?;
+    let number_of_queries = queries_metadata.size;
+    let spec = Spec::new(Users, queries_metadata.dataset, Vendor::Neo4j);
     neo4j.restore_db(spec).await?;
     // start neo4j
     neo4j.start().await?;
@@ -122,10 +128,6 @@ async fn run_neo4j(
     // get the graph size
     let (node_count, relation_count) = client.graph_size().await?;
 
-    // generate queries
-    let queries_repository =
-        benchmark::queries_repository::UsersQueriesRepository::new(9998, 121716);
-    let queries = Box::new(queries_repository.random_queries(number_of_queries));
     info!(
         "graph has {} nodes and {} relations",
         format_number(node_count),
@@ -135,11 +137,25 @@ async fn run_neo4j(
         "running {} queries",
         format_number(number_of_queries as u64)
     );
+    // prepare the mpsc channel
+    let (tx, rx) = tokio::sync::mpsc::channel::<Msg<PreparedQuery>>(20 * parallel);
+    let rx: Arc<Mutex<Receiver<Msg<PreparedQuery>>>> = Arc::new(Mutex::new(rx));
+    let scheduler_handle = scheduler::spawn_scheduler::<PreparedQuery>(mps, tx.clone(), queries);
+    let mut workers_handles = Vec::with_capacity(parallel);
+
     let start = Instant::now();
-    client.clone().execute_query_iterator(queries).await?;
+    for spawn_id in 0..parallel {
+        let handle = spawn_neo4j_worker(client.clone(), spawn_id, &rx, simulate).await?;
+        workers_handles.push(handle);
+    }
+    let _ = scheduler_handle.await;
+    drop(tx);
+
+    for handle in workers_handles {
+        let _ = handle.await;
+    }
+
     let elapsed = start.elapsed();
-    let report_file = "neo4j-results.md";
-    info!("report was written to {}", report_file);
 
     info!(
         "running {} queries took {:?}",
@@ -150,6 +166,62 @@ async fn run_neo4j(
     // stop neo4j
     // write the report
     Ok(())
+}
+
+async fn spawn_neo4j_worker(
+    client: Neo4jClient,
+    worker_id: usize,
+    receiver: &Arc<Mutex<Receiver<Msg<PreparedQuery>>>>,
+    simulate: Option<usize>,
+) -> BenchmarkResult<JoinHandle<()>> {
+    info!("spawning worker");
+    let receiver = Arc::clone(receiver);
+    let handle = tokio::spawn(async move {
+        let worker_id = worker_id.to_string();
+        let worker_id_str = worker_id.as_str();
+        let mut counter = 0u32;
+        let mut client = client.clone();
+        loop {
+            // get the next value and release the mutex
+            let received = receiver.lock().await.recv().await;
+
+            match received {
+                Some(prepared_query) => {
+                    let start_time = Instant::now();
+
+                    let r = client
+                        .execute_prepared_query(worker_id_str, &prepared_query, &simulate)
+                        .await;
+                    let duration = start_time.elapsed();
+                    match r {
+                        Ok(_) => {
+                            NEO4J_SUCCESS_REQUESTS_DURATION_HISTOGRAM
+                                .observe(duration.as_secs_f64());
+                            counter += 1;
+                            if counter % 1000 == 0 {
+                                info!("worker {} processed {} queries", worker_id, counter);
+                            }
+                        }
+                        Err(e) => {
+                            NEO4J_ERROR_REQUESTS_DURATION_HISTOGRAM.observe(duration.as_secs_f64());
+                            let seconds_wait = 3u64;
+                            info!(
+                                "worker {} failed to process query, not sleeping for {} seconds {:?}",
+                                worker_id, seconds_wait, e
+                            );
+                        }
+                    }
+                }
+                None => {
+                    info!("worker {} received None, exiting", worker_id);
+                    break;
+                }
+            }
+        }
+        info!("worker {} finished", worker_id);
+    });
+
+    Ok(handle)
 }
 #[instrument]
 async fn run_falkor(
@@ -202,12 +274,10 @@ async fn run_falkor(
     // start workers
     let start = Instant::now();
     for spawn_id in 0..parallel {
-        let handle = spawn_worker(&falkor, spawn_id, &rx, simulate).await?;
+        let handle = spawn_falkor_worker(&falkor, spawn_id, &rx, simulate).await?;
         workers_handles.push(handle);
     }
 
-    // wait for the filler to finish drop the transmission side
-    // to let the workers know that they should stop
     let _ = scheduler_handle.await;
     drop(tx);
 
@@ -227,8 +297,7 @@ async fn run_falkor(
     Ok(())
 }
 
-#[instrument(skip(falkor, receiver), fields(vendor = "falkor"))]
-async fn spawn_worker(
+async fn spawn_falkor_worker(
     falkor: &Falkor<Started>,
     worker_id: usize,
     receiver: &Arc<Mutex<Receiver<Msg<PreparedQuery>>>>,
@@ -416,7 +485,10 @@ async fn init_neo4j(
             "graph is not empty, node count: {}, relation count: {}",
             node_count, relation_count
         );
-        return Err(OtherError("graph is not empty".to_string()));
+        info!("stopping neo4j and deleting database neo4j");
+        neo4j.stop(false).await?;
+        neo4j.clean_db().await?;
+        neo4j.stop(true).await?;
     }
     let mut histogram = Histogram::new(7, 64)?;
 
@@ -464,12 +536,13 @@ async fn prepare_queries(
     dataset: Size,
     size: usize,
     file_name: String,
+    write_ratio: f32,
 ) -> BenchmarkResult<()> {
     let metadata = PrepareQueriesMetadata { size, dataset };
     let start = Instant::now();
     let queries_repository =
         benchmark::queries_repository::UsersQueriesRepository::new(9998, 121716);
-    let queries = Box::new(queries_repository.random_queries(size));
+    let queries = Box::new(queries_repository.random_queries(size, write_ratio));
 
     let file = File::create(file_name).await?;
     let mut writer = BufWriter::new(file);

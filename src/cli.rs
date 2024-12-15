@@ -55,6 +55,14 @@ pub enum Commands {
             help = "name of json file to save the queries"
         )]
         name: String,
+        #[arg(
+            short,
+            long,
+            value_parser = parse_write_ratio,
+            required = true,
+            help = "the write ratio of the queries (0.0 - 1.0)"
+        )]
+        write_ratio: f32,
     },
 
     #[command(
@@ -95,4 +103,12 @@ pub enum Commands {
         )]
         simulate: Option<usize>,
     },
+}
+
+fn parse_write_ratio(val: &str) -> Result<f32, String> {
+    match val.parse::<f32>() {
+        Ok(value) if (0.0..=1.0).contains(&value) => Ok(value),
+        Ok(_) => Err(String::from("Value must be between 0.0 and 1.0")),
+        Err(_) => Err(String::from("Invalid float value")),
+    }
 }

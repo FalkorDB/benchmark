@@ -12,3 +12,4 @@ scrape_configs:
     static_configs:
       - targets: [ 'redis-exporter:9121' ]
 
+

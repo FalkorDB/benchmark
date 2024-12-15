@@ -1,6 +1,6 @@
 use crate::query::{Bolt, Query, QueryBuilder};
 use rand::seq::SliceRandom;
-use rand::Rng;
+use rand::{random, Rng};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -116,13 +116,15 @@ impl QueriesRepositoryBuilder<Flavour> {
 }
 
 pub struct QueriesRepository {
-    queries: HashMap<String, QueryGenerator>,
+    read_queries: HashMap<String, QueryGenerator>,
+    write_queries: HashMap<String, QueryGenerator>,
 }
 
 impl QueriesRepository {
     fn new() -> Self {
         QueriesRepository {
-            queries: HashMap::new(),
+            read_queries: HashMap::new(),
+            write_queries: HashMap::new(),
         }
     }
 
@@ -134,16 +136,30 @@ impl QueriesRepository {
     ) where
         F: Fn() -> Query + Send + Sync + 'static,
     {
-        self.queries
-            .insert(name.into(), QueryGenerator::new(query_type, generator));
+        match query_type {
+            QueryType::Read => {
+                self.read_queries
+                    .insert(name.into(), QueryGenerator::new(query_type, generator));
+            }
+            QueryType::Write => {
+                self.write_queries
+                    .insert(name.into(), QueryGenerator::new(query_type, generator));
+            }
+        }
     }
 
-    pub fn random_query(&self) -> Option<PreparedQuery> {
-        let mut keys: Vec<&String> = self.queries.keys().collect();
-        keys.sort();
+    pub fn random_query(
+        &self,
+        query_type: QueryType,
+    ) -> Option<PreparedQuery> {
+        let queries = match query_type {
+            QueryType::Read => &self.read_queries,
+            QueryType::Write => &self.write_queries,
+        };
+        let keys: Vec<&String> = queries.keys().collect();
         let mut rng = rand::thread_rng();
         keys.choose(&mut rng).map(|&key| {
-            let generator = self.queries.get(key).unwrap();
+            let generator = queries.get(key).unwrap();
             PreparedQuery::new(key.clone(), generator.query_type, generator.generate())
         })
     }
@@ -179,11 +195,20 @@ impl UsersQueriesRepository {
     pub fn random_queries(
         self,
         count: usize,
+        write_ratio: f32,
     ) -> Box<dyn Iterator<Item = PreparedQuery> + Send + Sync> {
-        Box::new((0..count).filter_map(move |_| self.random_query()))
+        Box::new((0..count).filter_map(move |_| self.random_query(write_ratio)))
     }
-    pub fn random_query(&self) -> Option<PreparedQuery> {
-        self.queries_repository.random_query()
+    pub fn random_query(
+        &self,
+        write_ratio: f32,
+    ) -> Option<PreparedQuery> {
+        let query_type = if random::<f32>() < write_ratio {
+            QueryType::Write
+        } else {
+            QueryType::Read
+        };
+        self.queries_repository.random_query(query_type)
     }
     pub fn new(
         vertices: i32,

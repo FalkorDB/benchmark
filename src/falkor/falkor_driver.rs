@@ -14,6 +14,7 @@ use crate::{
 use falkordb::FalkorValue::I64;
 use falkordb::{AsyncGraph, FalkorClientBuilder, FalkorResult, LazyResultSet, QueryResult};
 use std::env;
+use std::hint::black_box;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::fs;
@@ -289,11 +290,13 @@ impl FalkorBenchmarkClient {
     ) -> BenchmarkResult<()> {
         match reply {
             Ok(falkor_result) => match falkor_result {
-                Ok(_) => Ok(()),
+                Ok(query_result) => {
+                    for row in query_result.data {
+                        black_box(row);
+                    }
+                    Ok(())
+                }
                 Err(e) => {
-                    OPERATION_ERROR_COUNTER
-                        .with_label_values(&["falkor", spawn_id, "", query_name, "", ""])
-                        .inc();
                     let error_type = std::any::type_name_of_val(&e);
                     error!("Error executing query: {}, the error is: {:?}", query, e);
                     Err(OtherError(format!(
