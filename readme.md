@@ -86,6 +86,18 @@ from `~/`
 
 #### run the benchmark
 
+##### Generate the docker compose for prometheus and grafana
+
+```bash
+./generate_docker_compose.sh
+```
+
+##### Run the docker compose
+
+```bash
+docker-compose up
+```
+
 The benchmark is a cli tool that can be used to run the benchmarks
 
 ```bash
@@ -113,6 +125,7 @@ Options:
 ##### create a set of queries to be used with the run command
 
 -
+
 `cargo run --release --bin benchmark -- generate-queries  -s10000000 --dataset small --name=small-readonly --write-ratio 0.0`
 
 ##### run the benchmarks
