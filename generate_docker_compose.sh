@@ -111,6 +111,11 @@ services:
       - ./dashboards:/var/lib/grafana/dashboards
       - ./provisioning:/etc/grafana/provisioning
 
+  node-exporter:
+      image: prom/node-exporter:latest
+      ports:
+        - 9100:9100
+
 volumes:
   prometheus_data:
 EOF
@@ -129,6 +134,11 @@ scrape_configs:
   - job_name: 'redis'
     static_configs:
       - targets: [ 'redis-exporter:9121' ]
+
+  - job_name: 'node-exporter'
+    static_configs:
+      - targets: [ 'node-exporter:9100' ]
+
 EOF
 
 cat <<EOF > grafana-datasources.yml
