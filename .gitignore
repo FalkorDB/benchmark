@@ -19,3 +19,7 @@ falkordb.log
 dump.rdb
 index.html
 queries.json
+docker-compose.yml
+grafana-datasources.yml
+prometheus.yml
+
