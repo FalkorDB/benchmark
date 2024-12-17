@@ -23,7 +23,7 @@ impl PrometheusEndpoint {
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
         let server_thread = task::spawn(async {
-            let addr = SocketAddr::from(([127, 0, 0, 1], 8080));
+            let addr = SocketAddr::from(([0, 0, 0, 0], 8080));
 
             let make_svc = make_service_fn(|_conn| async {
                 Ok::<_, hyper::Error>(service_fn(metrics_handler))
