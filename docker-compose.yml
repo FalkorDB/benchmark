@@ -1,8 +1,9 @@
 services:
   prometheus:
     image: prom/prometheus:latest
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+  #  extra_hosts:
+  #    - "host.docker.internal:host-gateway"
+    network_mode: host
     ports:
       - 9090:9090
     volumes:
@@ -13,12 +14,13 @@ services:
   redis-exporter:
     image: oliver006/redis_exporter:latest
     command:
-      - '--redis.addr=host.docker.internal:6379'
+  #    - '--redis.addr=host.docker.internal:6379'
+      - '--redis.addr=127.0.0.1:6379'      
     ports:
       - 9121:9121
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-
+    #extra_hosts:
+    #  - "host.docker.internal:host-gateway"
+    network_mode: host
 
   grafana:
     image: grafana/grafana:latest
@@ -33,6 +35,7 @@ services:
       - ./grafana-datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml
       - ./dashboards:/var/lib/grafana/dashboards
       - ./provisioning:/etc/grafana/provisioning
+    network_mode: host
 
 volumes:
   prometheus_data:
