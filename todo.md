@@ -1,8 +1,15 @@
 - [ ] crash when timeout used
-- [ ] crash when read write
-- [ ] performance read/write vs read
-    - [ ] read/write without increase the graph size
-    - [ ] set read/write cli
+- [ ] crash when read-write
+- [ ] performance read/write vs. read
+    - [x] read/write without increasing the graph size
+    - [x] set read/write cli
     - [x] read using GRAPH.RO_QUERY
-    - [ ] delete data when update
-- [ ] set up the rate per second
+    - [x] delete data when update
+- [x] set up the rate per second
+- [x] queries saved in file (reproducible)
+- [x] metrics for neo4j
+- [ ] run on ubuntu
+- [ ] run on the cloud
+- [ ] add more queries?
+- [ ] vendors
+- [ ] benchmark hardware settings ?
