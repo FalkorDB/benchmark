@@ -248,10 +248,7 @@ fn get_falkor_server_pid() -> Option<u32> {
             false
         }
     });
-    match res {
-        None => None,
-        Some((pid, _)) => Some(pid.as_u32()),
-    }
+    res.map(|(pid, _)| pid.as_u32())
 }
 
 // return a tuple the of (running_queries, waiting_queries)
