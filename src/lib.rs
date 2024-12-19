@@ -109,4 +109,18 @@ lazy_static! {
         "offset of the message from the deadline",
     )
     .unwrap();
+    pub static ref CPU_USAGE_GAUGE: IntGauge =
+        register_int_gauge!("cpu_usage", "CPU usage percentage").unwrap();
+    pub static ref MEM_USAGE_GAUGE: IntGauge =
+        register_int_gauge!("memory_usage", "Memory usage in bytes").unwrap();
+    pub static ref FALKOR_CPU_USAGE_GAUGE: IntGauge = register_int_gauge!(
+        "falkor_cpu_usage",
+        "CPU usage percentage for the falkordb process"
+    )
+    .unwrap();
+    pub static ref FALKOR_MEM_USAGE_GAUGE: IntGauge = register_int_gauge!(
+        "falkor_memory_usage",
+        "Memory usage in bytes for the falkordb process"
+    )
+    .unwrap();
 }

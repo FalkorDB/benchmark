@@ -43,6 +43,7 @@ prometheus = { version = "0.13.4", features = ["gen"] }
 lazy_static = "1.5"
 hyper = { version = "0.14.31", features = ["server", "runtime", "http1", "tcp"] }
 nonzero = "0.2.0"
+sysinfo = "0.33.0"
 
 [[bin]]
 name = "benchmark"

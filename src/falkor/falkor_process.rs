@@ -6,13 +6,15 @@ use crate::utils::{
     ping_redis, redis_shutdown,
 };
 use crate::{
-    FALKOR_NODES_GAUGE, FALKOR_RELATIONSHIPS_GAUGE, FALKOR_RESTART_COUNTER,
-    FALKOR_RUNNING_REQUESTS_GAUGE, FALKOR_WAITING_REQUESTS_GAUGE, REDIS_DATA_DIR,
+    CPU_USAGE_GAUGE, FALKOR_CPU_USAGE_GAUGE, FALKOR_MEM_USAGE_GAUGE, FALKOR_NODES_GAUGE,
+    FALKOR_RELATIONSHIPS_GAUGE, FALKOR_RESTART_COUNTER, FALKOR_RUNNING_REQUESTS_GAUGE,
+    FALKOR_WAITING_REQUESTS_GAUGE, MEM_USAGE_GAUGE, REDIS_DATA_DIR,
 };
 use falkordb::FalkorValue::I64;
 use falkordb::{AsyncGraph, FalkorClientBuilder, FalkorConnectionInfo};
 use prometheus::core::{AtomicU64, GenericCounter};
 use std::env;
+use sysinfo::{Pid, System};
 use tokio::task::JoinHandle;
 use tracing::{error, info};
 
@@ -29,7 +31,7 @@ pub struct FalkorProcess {
 
 impl FalkorProcess {
     pub async fn new() -> BenchmarkResult<Self> {
-        redis_shutdown().await?; // if redis run on this machine use redis-cli to shut it down
+        redis_shutdown().await?; // if redis run on this machine, use redis-cli to shut it down
 
         create_directory_if_not_exists(REDIS_DATA_DIR).await?;
         let falkor_log_path = get_falkor_log_path()?;
@@ -131,14 +133,16 @@ impl Drop for FalkorProcess {
 
 fn prometheus_metrics_reporter() -> (JoinHandle<()>, tokio::sync::oneshot::Sender<()>) {
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+    let mut system = System::new_all();
     let handle = tokio::spawn(async move {
-        if let Err(e) = report_metrics().await {
+        if let Err(e) = report_metrics(&mut system).await {
             info!("Error reporting metrics: {:?}", e);
         }
+
         loop {
             tokio::select! {
                 _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
-                    if let Err(e) = report_metrics().await {
+                    if let Err(e) = report_metrics(&mut system).await {
                         info!("Error reporting metrics: {:?}", e);
                     }
                 }
@@ -173,7 +177,7 @@ fn ping_server() -> (JoinHandle<()>, tokio::sync::oneshot::Sender<()>) {
 
     (handle, shutdown_tx)
 }
-async fn report_metrics() -> BenchmarkResult<()> {
+async fn report_metrics(system: &mut System) -> BenchmarkResult<()> {
     let client = redis::Client::open("redis://127.0.0.1:6379/")?;
     let mut con = client.get_multiplexed_async_connection().await?;
 
@@ -202,11 +206,56 @@ async fn report_metrics() -> BenchmarkResult<()> {
         FALKOR_NODES_GAUGE.set(nodes_number);
     }
 
+    fill_memory_and_cpu_metrics(system).await?;
+
     Ok(())
 }
 
-// return a tuple of (running_queries, waiting_queries)
-// first element of the tuple is a vector of running queries
+async fn fill_memory_and_cpu_metrics(system: &mut System) -> BenchmarkResult<()> {
+    // Refresh CPU usage
+    system.refresh_all();
+    let logical_cpus = system.cpus().len();
+    let cpu_usage = system.global_cpu_usage() as i64 / logical_cpus as i64;
+    CPU_USAGE_GAUGE.set(cpu_usage);
+
+    // Refresh memory usage
+    let mem_used = system.used_memory();
+    MEM_USAGE_GAUGE.set(mem_used as i64);
+
+    // Find the specific process
+    if let Some(pid) = get_falkor_server_pid() {
+        if let Some(process) = system.process(Pid::from(pid as usize)) {
+            info!(
+                "--> got falkor process update cpu usage cpus {}",
+                logical_cpus
+            );
+            let cpu_usage = process.cpu_usage() as i64 / logical_cpus as i64;
+            FALKOR_CPU_USAGE_GAUGE.set(cpu_usage);
+            let mem_used = process.memory() as i64;
+            FALKOR_MEM_USAGE_GAUGE.set(mem_used);
+        }
+    }
+
+    Ok(())
+}
+
+fn get_falkor_server_pid() -> Option<u32> {
+    let system = System::new_all();
+    let res = system.processes().iter().find(|(_, process)| {
+        if let Some(name_str) = process.name().to_str() {
+            name_str == "redis-server"
+        } else {
+            false
+        }
+    });
+    match res {
+        None => None,
+        Some((pid, _)) => Some(pid.as_u32()),
+    }
+}
+
+// return a tuple the of (running_queries, waiting_queries)
+// first element of the tuple is a vector of the running queries
 // second element of the tuple is a vector of waiting
 // use redis_vec_as_query_info to parse each query info
 fn redis_to_query_info(value: redis::Value) -> BenchmarkResult<(usize, usize)> {
