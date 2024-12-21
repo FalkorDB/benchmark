@@ -15,6 +15,7 @@ pub mod neo4j;
 pub mod neo4j_client;
 pub mod process_monitor;
 pub mod prometheus_endpoint;
+pub mod prometheus_metrics;
 pub mod queries_repository;
 pub mod query;
 pub mod scenario;
@@ -121,6 +122,16 @@ lazy_static! {
     pub static ref FALKOR_MEM_USAGE_GAUGE: IntGauge = register_int_gauge!(
         "falkor_memory_usage",
         "Memory usage in bytes for the falkordb process"
+    )
+    .unwrap();
+    pub static ref NEO4J_CPU_USAGE_GAUGE: IntGauge = register_int_gauge!(
+        "neo4j_cpu_usage",
+        "CPU usage percentage for the neo4j process"
+    )
+    .unwrap();
+    pub static ref NEO4J_MEM_USAGE_GAUGE: IntGauge = register_int_gauge!(
+        "neo4j_memory_usage",
+        "Memory usage in bytes for the neo4j process"
     )
     .unwrap();
 }

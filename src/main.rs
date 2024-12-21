@@ -114,7 +114,7 @@ async fn run_neo4j(
     mps: usize,
     simulate: Option<usize>,
 ) -> BenchmarkResult<()> {
-    let neo4j = benchmark::neo4j::Neo4j::default();
+    let mut neo4j = benchmark::neo4j::Neo4j::default();
     // stop neo4j if it is running
     neo4j.stop(false).await?;
     let (queries_metadata, queries) = read_queries(file_name).await?;
@@ -445,7 +445,7 @@ async fn init_neo4j(
     force: bool,
 ) -> BenchmarkResult<()> {
     let spec = Spec::new(benchmark::scenario::Name::Users, size, Vendor::Neo4j);
-    let neo4j = benchmark::neo4j::Neo4j::default();
+    let mut neo4j = benchmark::neo4j::Neo4j::default();
     let _ = neo4j.stop(false).await?;
     let backup_path = format!("{}/neo4j.dump", spec.backup_path());
     if !force {
@@ -510,7 +510,7 @@ async fn init_neo4j(
         format_number(relation_count),
         start.elapsed()
     );
-    neo4j.clone().stop(true).await?;
+    neo4j.stop(true).await?;
     neo4j.dump(spec.clone()).await?;
     info!("---> histogram");
 

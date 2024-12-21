@@ -6,14 +6,15 @@ use crate::utils::{
     ping_redis, redis_shutdown,
 };
 use crate::{
-    CPU_USAGE_GAUGE, FALKOR_CPU_USAGE_GAUGE, FALKOR_MEM_USAGE_GAUGE, FALKOR_NODES_GAUGE,
-    FALKOR_RELATIONSHIPS_GAUGE, FALKOR_RESTART_COUNTER, FALKOR_RUNNING_REQUESTS_GAUGE,
-    FALKOR_WAITING_REQUESTS_GAUGE, MEM_USAGE_GAUGE, REDIS_DATA_DIR,
+    prometheus_metrics, CPU_USAGE_GAUGE, FALKOR_CPU_USAGE_GAUGE, FALKOR_MEM_USAGE_GAUGE,
+    FALKOR_NODES_GAUGE, FALKOR_RELATIONSHIPS_GAUGE, FALKOR_RESTART_COUNTER,
+    FALKOR_RUNNING_REQUESTS_GAUGE, FALKOR_WAITING_REQUESTS_GAUGE, MEM_USAGE_GAUGE, REDIS_DATA_DIR,
 };
 use falkordb::FalkorValue::I64;
 use falkordb::{AsyncGraph, FalkorClientBuilder, FalkorConnectionInfo};
 use prometheus::core::{AtomicU64, GenericCounter};
 use std::env;
+use std::sync::{Arc, Mutex};
 use sysinfo::{Pid, System};
 use tokio::task::JoinHandle;
 use tracing::{error, info};
@@ -72,7 +73,8 @@ impl FalkorProcess {
         });
         let process_handle = Some(falkor_process_monitor);
 
-        let (prom_process_handle, prom_shutdown_tx) = prometheus_metrics_reporter();
+        let (prom_process_handle, prom_shutdown_tx) =
+            prometheus_metrics::run_metrics_reporter(report_metrics);
 
         let (ping_server_handle, ping_server_shutdown_tx) = ping_server();
 
@@ -131,32 +133,6 @@ impl Drop for FalkorProcess {
     }
 }
 
-fn prometheus_metrics_reporter() -> (JoinHandle<()>, tokio::sync::oneshot::Sender<()>) {
-    let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
-    let mut system = System::new_all();
-    let handle = tokio::spawn(async move {
-        if let Err(e) = report_metrics(&mut system).await {
-            info!("Error reporting metrics: {:?}", e);
-        }
-
-        loop {
-            tokio::select! {
-                _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
-                    if let Err(e) = report_metrics(&mut system).await {
-                        info!("Error reporting metrics: {:?}", e);
-                    }
-                }
-                _ = &mut shutdown_rx => {
-                    info!("Shutting down prometheus_metrics_reporter");
-                    return;
-                }
-            }
-        }
-    });
-
-    (handle, shutdown_tx)
-}
-
 fn ping_server() -> (JoinHandle<()>, tokio::sync::oneshot::Sender<()>) {
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
     let handle = tokio::spawn(async move {
@@ -177,7 +153,8 @@ fn ping_server() -> (JoinHandle<()>, tokio::sync::oneshot::Sender<()>) {
 
     (handle, shutdown_tx)
 }
-async fn report_metrics(system: &mut System) -> BenchmarkResult<()> {
+
+async fn report_metrics(system: Arc<Mutex<System>>) -> BenchmarkResult<()> {
     let client = redis::Client::open("redis://127.0.0.1:6379/")?;
     let mut con = client.get_multiplexed_async_connection().await?;
 
@@ -211,7 +188,8 @@ async fn report_metrics(system: &mut System) -> BenchmarkResult<()> {
     Ok(())
 }
 
-async fn fill_memory_and_cpu_metrics(system: &mut System) -> BenchmarkResult<()> {
+async fn fill_memory_and_cpu_metrics(sys: Arc<Mutex<System>>) -> BenchmarkResult<()> {
+    let mut system = sys.lock().unwrap();
     // Refresh CPU usage
     system.refresh_all();
     let logical_cpus = system.cpus().len();
@@ -225,10 +203,6 @@ async fn fill_memory_and_cpu_metrics(system: &mut System) -> BenchmarkResult<()>
     // Find the specific process
     if let Some(pid) = get_falkor_server_pid() {
         if let Some(process) = system.process(Pid::from(pid as usize)) {
-            info!(
-                "--> got falkor process update cpu usage cpus {}",
-                logical_cpus
-            );
             let cpu_usage = process.cpu_usage() as i64 / logical_cpus as i64;
             FALKOR_CPU_USAGE_GAUGE.set(cpu_usage);
             let mem_used = process.memory() as i64;

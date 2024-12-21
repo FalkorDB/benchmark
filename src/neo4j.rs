@@ -3,19 +3,27 @@ use crate::error::BenchmarkResult;
 use crate::neo4j_client::Neo4jClient;
 use crate::scenario::Spec;
 use crate::utils::{create_directory_if_not_exists, spawn_command};
+use crate::{
+    prometheus_metrics, CPU_USAGE_GAUGE, MEM_USAGE_GAUGE, NEO4J_CPU_USAGE_GAUGE,
+    NEO4J_MEM_USAGE_GAUGE,
+};
 use std::env;
+use std::ffi::OsString;
 use std::process::Output;
 use std::process::{Child, Command};
 use std::time::Duration;
+use sysinfo::{Pid, System};
+use tokio::task::JoinHandle;
 use tokio::{fs, time::sleep};
 use tracing::{info, trace};
 
-#[derive(Clone)]
 pub struct Neo4j {
     uri: String,
     user: String,
     password: String,
     neo4j_home: String,
+    prom_shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    prom_process_handle: Option<JoinHandle<()>>,
 }
 
 impl Default for Neo4j {
@@ -36,6 +44,8 @@ impl Neo4j {
             user,
             password,
             neo4j_home,
+            prom_shutdown_tx: None,
+            prom_process_handle: None,
         }
     }
 
@@ -117,7 +127,7 @@ impl Neo4j {
         spawn_command(command.as_str(), &args).await
     }
 
-    pub async fn clean_db(&self) -> BenchmarkResult<Output> {
+    pub async fn clean_db(&mut self) -> BenchmarkResult<Output> {
         info!("cleaning DB");
         loop {
             if fs::metadata(&self.neo4j_pid()).await.is_ok() {
@@ -148,7 +158,7 @@ impl Neo4j {
         }
     }
 
-    pub async fn start(&self) -> BenchmarkResult<Child> {
+    pub async fn start(&mut self) -> BenchmarkResult<Child> {
         trace!("starting Neo4j process: {} console", self.neo4j_binary());
         if fs::metadata(&self.neo4j_pid()).await.is_ok() {
             self.stop(false).await?;
@@ -177,15 +187,27 @@ impl Neo4j {
         let pid: u32 = child.id();
 
         info!("Neo4j is running: {}", pid);
+
+        let (prom_process_handle, prom_shutdown_tx) =
+            prometheus_metrics::run_metrics_reporter(report_metrics);
+        self.prom_process_handle = Some(prom_process_handle);
+        self.prom_shutdown_tx = Some(prom_shutdown_tx);
         Ok(child)
     }
 
     pub async fn stop(
-        &self,
+        &mut self,
         verbose: bool,
     ) -> BenchmarkResult<Output> {
         if verbose {
             info!("Stopping Neo4j process");
+        }
+
+        if let Some(prom_shutdown_tx) = self.prom_shutdown_tx.take() {
+            drop(prom_shutdown_tx);
+        }
+        if let Some(prom_process_handle) = self.prom_process_handle.take() {
+            let _ = prom_process_handle.await;
         }
 
         let command = self.neo4j_binary();
@@ -197,6 +219,7 @@ impl Neo4j {
 
     pub async fn is_running(&self) -> BenchmarkResult<bool> {
         trace!("Starting Neo4j process: {} status", self.neo4j_binary());
+
         let command = self.neo4j_binary();
 
         let args = ["status"];
@@ -213,4 +236,50 @@ impl Neo4j {
             Err(_) => Ok(false),
         }
     }
+}
+
+async fn report_metrics(
+    sys: std::sync::Arc<std::sync::Mutex<sysinfo::System>>
+) -> BenchmarkResult<()> {
+    let mut system = sys.lock().unwrap();
+    // Refresh CPU usage
+    system.refresh_all();
+    let logical_cpus = system.cpus().len();
+    let cpu_usage = system.global_cpu_usage() as i64 / logical_cpus as i64;
+    CPU_USAGE_GAUGE.set(cpu_usage);
+
+    // Refresh memory usage
+    let mem_used = system.used_memory();
+    MEM_USAGE_GAUGE.set(mem_used as i64);
+
+    // Find the specific process
+    if let Some(pid) = get_neo4j_server_pid() {
+        if let Some(process) = system.process(Pid::from(pid as usize)) {
+            let cpu_usage = process.cpu_usage() as i64 / logical_cpus as i64;
+            NEO4J_CPU_USAGE_GAUGE.set(cpu_usage);
+            let mem_used = process.memory() as i64;
+            NEO4J_MEM_USAGE_GAUGE.set(mem_used);
+        }
+    }
+    Ok(())
+}
+
+fn get_neo4j_server_pid() -> Option<u32> {
+    let system = System::new_all();
+    let res = system.processes().iter().find(|(_, process)| {
+        search_in_os_strings(process.cmd(), "org.neo4j.server.CommunityEntryPoint")
+    });
+    res.map(|(pid, _)| pid.as_u32())
+}
+
+fn search_in_os_strings(
+    os_strings: &[OsString],
+    target: &str,
+) -> bool {
+    os_strings.iter().any(|os_string| {
+        os_string
+            .as_os_str()
+            .to_str()
+            .map_or(false, |s| s == target)
+    })
 }
