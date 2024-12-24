@@ -1,0 +1,56 @@
+{
+  "runs": [
+    {
+      "vendor": "FalkorDB",
+      "read-write-ratio": 0.5,
+      "clients:": 40,
+      "platform": "macbook-pro-2019",
+      "target-messages-per-second": 2500,
+      "edges": 100000,
+      "relationships": 1000000,
+      "result": {
+        "deadline-offset": "0ms",
+        "actual-messages-per-second": 2500,
+        "latency": {
+          "p50": "10ms",
+          "p95": "20ms",
+          "p99": "30ms"
+        },
+        "cpu-usage": 80,
+        "ram-usage": 20,
+        "errors": 0,
+        "successful-requests": 100000
+      }
+    },
+    {
+      "vendor": "Neo4j",
+      "read-write-ratio": 0.5,
+      "clients:": 40,
+      "platform": "macbook-pro-2019",
+      "target-messages-per-second": 2500,
+      "edges": 100000,
+      "relationships": 1000000,
+      "result": {
+        "deadline-offset": "10min",
+        "actual-messages-per-second": 200,
+        "latency": {
+          "p50": "10s",
+          "p95": "20s",
+          "p99": "30s"
+        },
+        "cpu-usage": 80,
+        "ram-usage": 20,
+        "errors": 0,
+        "successful-requests": 100000
+      }
+    }
+  ],
+  "platforms": {
+    "macbook-pro-2019": {
+      "cpu": "Intel Core i9, 10 cors",
+      "ram": "32GB",
+      "storage": "1TB SSD"
+    }
+  }
+}
+
