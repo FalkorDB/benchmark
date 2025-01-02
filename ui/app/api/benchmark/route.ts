@@ -1,9 +1,7 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 
-export async function GET(request: NextRequest) {
+export async function GET() {
   try {
-    const msg = request.nextUrl.searchParams.get("msg") || "Default Message";
-
     const url = "https://benchmark.falkordb.com/results-dummy.json";
 
     const result = await fetch(url, {
@@ -21,7 +19,6 @@ export async function GET(request: NextRequest) {
     const json = await result.json();
 
     const response = {
-      message: msg,
       data: json,
     };
 

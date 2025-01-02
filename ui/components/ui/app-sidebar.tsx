@@ -9,7 +9,6 @@ import {
   SidebarContent,
   SidebarFooter,
   SidebarHeader,
-  SidebarRail,
   SidebarTrigger,
 } from "@/components/ui/sidebar";
 import {
@@ -98,7 +97,7 @@ export function AppSidebar({
   handleSelection: (groupTitle: string, optionId: string) => void;
 }) {
   return (
-    <Sidebar collapsible="icon" {...props} className="pt-dynamic">
+    <Sidebar collapsible="icon" {...props} className="mt-dynamic">
       <SidebarHeader>
         <TeamSwitcher teams={data.teams} />
         <SidebarTrigger className="ml-auto" />
@@ -113,7 +112,6 @@ export function AppSidebar({
       <SidebarFooter>
         <NavUser user={data.user} />
       </SidebarFooter>
-      <SidebarRail />
     </Sidebar>
   );
 }

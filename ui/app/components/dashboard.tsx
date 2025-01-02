@@ -1,19 +1,21 @@
 "use client";
 
 import { AppSidebar } from "@/components/ui/app-sidebar";
-import {
-  SidebarInset,
-  SidebarProvider,
-} from "@/components/ui/sidebar";
-import MetricsComponent from "../components/metricsComponet";
-import FooterComponent from "../components/footer";
+import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
+import MetricsComponent from "./metricsComponet";
+import FooterComponent from "./footer";
 import React, { useEffect, useState } from "react";
-import ResultsComponent from "../components/ResultComponent";
+import ResultsComponent from "./ResultComponent";
+import { BenchmarkData } from "../types/benchmark";
+import { useToast } from "@/hooks/use-toast"
 
-export default function SideBar() {
-    const [data, setData] = useState<any>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [selectedOptions, setSelectedOptions] = React.useState<Record<string, string[]>>({
+
+export default function DashBoard() {
+  const [data, setData] = useState<BenchmarkData | null>(null);
+  const { toast } = useToast();
+  const [selectedOptions, setSelectedOptions] = React.useState<
+    Record<string, string[]>
+  >({
     Vendors: ["falkordb"],
     Clients: ["10"],
     Throughput: ["400"],
@@ -23,7 +25,6 @@ export default function SideBar() {
   useEffect(() => {
     const fetchData = async () => {
       try {
-        
         const result = await fetch(`/api/benchmark`, {
           method: "GET",
         });
@@ -34,17 +35,21 @@ export default function SideBar() {
 
         const json = await result.json();
         console.log(json);
-        
+
         setData(json.result.data);
-      } catch (err: any) {
-        setError(err.message || "An unknown error occurred");
+      } catch (err: unknown) {
+        const errorMessage = err instanceof Error ? err.message : "An unknown error occurred";
+        toast({
+            title: "Error fetching data",
+            description: errorMessage || "An unknown error occurred",
+            variant: "destructive",
+          });
       }
     };
 
     fetchData();
     console.log(data);
-    
-  }, []);
+  });
 
   const handleSelection = (groupTitle: string, optionId: string) => {
     setSelectedOptions((prev) => {
@@ -82,7 +87,9 @@ export default function SideBar() {
               <MetricsComponent />
             </div>
             <div className="w-3/4 md:w-2/3 lg:w-3/4 min-w-[200px] rounded-xl bg-muted/50">
-              <div className="h-full p-4"><ResultsComponent/></div>
+              <div className="h-full p-4">
+                <ResultsComponent />
+              </div>
             </div>
           </div>
           <div className="h-14 w-full rounded-xl bg-muted/50 p-0 flex-shrink-0">
