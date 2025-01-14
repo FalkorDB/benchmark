@@ -6,11 +6,26 @@ import {
   SidebarMenuItem,
   useSidebar,
 } from "@/components/ui/sidebar";
+import {
+  HoverCard,
+  HoverCardContent,
+  HoverCardTrigger,
+} from "@/components/ui/hover-card";
+
+type Platforms = Record<
+  string,
+  {
+    cpu: string;
+    ram: string;
+    storage: string;
+  }
+>;
 
 export function NavMain({
   items,
   selectedOptions,
   handleSelection,
+  platform,
 }: {
   items: {
     title: string;
@@ -21,15 +36,16 @@ export function NavMain({
   }[];
   selectedOptions: Record<string, string[]>;
   handleSelection: (groupTitle: string, optionId: string) => void;
+  platform?: Platforms;
 }) {
-  const { state } = useSidebar(); // Get the sidebar state (collapsed/expanded)
+  const { state } = useSidebar();
 
   return (
     <SidebarMenu>
       {items.map((group) => (
         <SidebarMenuItem
           key={group.title}
-          className={`mt-6 ${
+          className={`font-space mt-2 ${
             state === "collapsed" ? "flex justify-center" : ""
           }`}
         >
@@ -38,11 +54,9 @@ export function NavMain({
               state === "collapsed" ? "justify-center" : ""
             }`}
           >
-            {/* Icon always visible */}
             <group.icon
               className={`w-6 h-6 ${state === "collapsed" ? "mx-auto" : ""}`}
             />
-            {/* Title only visible when sidebar is expanded */}
             {state !== "collapsed" && (
               <h2 className="text-lg font-semibold">{group.title}</h2>
             )}
@@ -50,7 +64,6 @@ export function NavMain({
 
           {state !== "collapsed" && (
             <div className="pl-8 pr-4 mt-2">
-              {/* Added pr-4 for padding-right */}
               {group.description && (
                 <p className="text-sm text-gray-500 mb-3">
                   {group.description}
@@ -61,18 +74,51 @@ export function NavMain({
                   group.layout === "row" ? "flex-row" : "flex-col"
                 }`}
               >
-                {group.options.map((option) => (
-                  <button
+                {group.options.map((option, index) => (
+                  <div
                     key={option.id}
-                    onClick={() => handleSelection(group.title, option.id)}
-                    className={`px-4 py-2 text-left rounded-md border text-center ${
-                      selectedOptions[group.title]?.includes(option.id)
-                        ? "bg-[#F5F4FF] text-[#7466FF] border-[#7466FF]"
-                        : "bg-gray-100 text-gray-800 border-transparent"
-                    }`}
+                    className="flex items-center gap-2 w-full"
                   >
-                    {option.label}
-                  </button>
+                    <button
+                      onClick={() => handleSelection(group.title, option.id)}
+                      className={`font-fira px-4 py-2 rounded-md border text-center w-full ${
+                        selectedOptions[group.title]?.includes(option.id)
+                          ? option.id === "falkordb"
+                            ? "bg-[#F5F4FF] text-[#FF66B3] border-[#FF66B3]"
+                            : option.id === "neo4j"
+                            ? "bg-[#F5F4FF] text-[#0B6190] border-[#0B6190]"
+                            : "bg-[#F5F4FF] text-[#7466FF] border-[#7466FF]"
+                          : "bg-gray-100 text-gray-800 border-transparent"
+                      }`}
+                    >
+                      {option.label}
+                    </button>
+                    {group.title === "Hardware" &&
+                      platform &&
+                      platform[index] && (
+                        <HoverCard>
+                          <HoverCardTrigger>
+                            <span className="inline-block w-4 h-4 bg-blue-200 text-blue-600 rounded-full text-center text-xs font-bold cursor-pointer">
+                              i
+                            </span>
+                          </HoverCardTrigger>
+                          <HoverCardContent>
+                            <div>
+                              <p>
+                                <strong>CPU:</strong> {platform[index].cpu}
+                              </p>
+                              <p>
+                                <strong>RAM:</strong> {platform[index].ram}
+                              </p>
+                              <p>
+                                <strong>Storage:</strong>{" "}
+                                {platform[index].storage}
+                              </p>
+                            </div>
+                          </HoverCardContent>
+                        </HoverCard>
+                      )}
+                  </div>
                 ))}
               </div>
             </div>

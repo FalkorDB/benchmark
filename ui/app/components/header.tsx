@@ -14,7 +14,7 @@ export function Header() {
           </Link>
           <div className="h-10 w-[2px] border-l border-black"></div>
 
-          <h1 className="font-bold text-[20px]">
+          <h1 className="font-space font-bold text-[20px]">
             Graph Database Performance Benchmarks
           </h1>
         </div>

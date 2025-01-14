@@ -12,6 +12,10 @@ module.exports = {
   			md: 'calc(var(--radius) - 2px)',
   			sm: 'calc(var(--radius) - 4px)'
   		},
+		fontFamily: {
+			space: ['"Space Grotesk"', 'sans-serif'],
+			fira: ['"Fira Code"', 'monospace'],
+		},
   		colors: {
   			background: 'hsl(var(--background))',
   			foreground: 'hsl(var(--foreground))',

@@ -12,6 +12,10 @@ export default {
         background: "var(--background)",
         foreground: "var(--foreground)",
       },
+      fontFamily: {
+        space: ['"Space Grotesk"', 'sans-serif'], // Custom font for Space Grotesk
+        fira: ['"Fira Code"', 'monospace'],
+      },
     },
   },
   plugins: [],
