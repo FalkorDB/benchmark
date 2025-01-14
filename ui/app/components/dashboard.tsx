@@ -45,6 +45,7 @@ export default function DashBoard() {
     };
 
     fetchData();
+    // eslint-disable-next-line
   }, []);
 
   const handleSelection = (groupTitle: string, optionId: string) => {
