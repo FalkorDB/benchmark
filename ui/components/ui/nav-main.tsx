@@ -102,16 +102,24 @@ export function NavMain({
                               i
                             </span>
                           </HoverCardTrigger>
-                          <HoverCardContent>
-                            <div>
-                              <p>
-                                <strong>CPU:</strong> {platform[index].cpu}
+                          <HoverCardContent className="bg-gray-50 text-gray-900 p-4 rounded-lg shadow-md max-w-sm border border-gray-200">
+                            <div className="space-y-2">
+                              <p className="text-sm">
+                                <strong className="font-semibold text-gray-700">
+                                  CPU:
+                                </strong>{" "}
+                                {platform[index].cpu}
                               </p>
-                              <p>
-                                <strong>RAM:</strong> {platform[index].ram}
+                              <p className="text-sm">
+                                <strong className="font-semibold text-gray-700">
+                                  RAM:
+                                </strong>{" "}
+                                {platform[index].ram}
                               </p>
-                              <p>
-                                <strong>Storage:</strong>{" "}
+                              <p className="text-sm">
+                                <strong className="font-semibold text-gray-700">
+                                  Storage:
+                                </strong>{" "}
                                 {platform[index].storage}
                               </p>
                             </div>

@@ -8,6 +8,11 @@ import { BenchmarkData } from "../types/benchmark";
 import { useToast } from "@/hooks/use-toast";
 import HorizontalBarChart from "./HorizontalBarChart";
 import VerticalBarChart from "./VerticalBarChart";
+import {
+  HoverCard,
+  HoverCardContent,
+  HoverCardTrigger,
+} from "@/components/ui/hover-card";
 
 export default function DashBoard() {
   const [data, setData] = useState<BenchmarkData | null>(null);
@@ -136,10 +141,10 @@ export default function DashBoard() {
     if (match) {
       const value = parseFloat(match[1]);
       const unit = match[2].toLowerCase();
-      const deadlineInMs = unit === "min" ? value * 60 * 1000 : value;
+      const deadlineInMin = unit === "ms" ? value / (60 * 1000) : value;
       return {
         vendor: item.vendor,
-        deadline: deadlineInMs,
+        deadline: deadlineInMin.toFixed(2),
       };
     }
 
@@ -170,7 +175,7 @@ export default function DashBoard() {
 
   const cpuData = filteredResults.map((item) => ({
     vendor: item.vendor,
-    cpu: item.result["cpu-usage"],
+    cpu: (item.result["cpu-usage"] * 100).toFixed(2),
   }));
 
   return (
@@ -200,9 +205,28 @@ export default function DashBoard() {
                   title="Throughput"
                   subtitle="Performance Metrics (more is better)"
                   yAxisTitle="Vendors"
+                  unit=""
                 />
               </div>
-              <div className="flex-1 bg-muted/50 rounded-xl p-4">
+              <div className="flex-1 bg-muted/50 rounded-xl p-4 relative">
+                <HoverCard>
+                  <HoverCardTrigger>
+                    <span
+                      className="absolute top-4 left-4 w-5 h-5 flex items-center justify-center bg-gray-400 text-white rounded-full text-xs font-bold cursor-pointer shadow-md z-10"
+                      title="More info"
+                    >
+                      i
+                    </span>
+                  </HoverCardTrigger>
+                  <HoverCardContent className="bg-gray-100 text-gray-800 p-4 rounded-md shadow-lg max-w-sm">
+                    <p className="text-sm font-medium">
+                      <strong>Deadline Offset Analysis</strong> Comparison of
+                      the time delays (deadlines) between different vendors to
+                      evaluate their performance and responsiveness.
+                    </p>
+                  </HoverCardContent>
+                </HoverCard>
+
                 <HorizontalBarChart
                   data={deadlineData}
                   dataKey="deadline"
@@ -210,6 +234,7 @@ export default function DashBoard() {
                   title="Deadline Offset Analysis"
                   subtitle="Offset Comparison (less is better)"
                   yAxisTitle="Vendors"
+                  unit="min"
                 />
               </div>
             </div>
@@ -223,6 +248,7 @@ export default function DashBoard() {
                   title="Memory Usage"
                   subtitle="Memory Allocation (less is better)"
                   yAxisTitle="Memory Slots"
+                  unit="mb"
                 />
               </div>
               <div className="flex-1 bg-muted/50 rounded-xl p-4">
@@ -233,6 +259,7 @@ export default function DashBoard() {
                   title="CPU Usage"
                   subtitle="Core Utilization (less is better)"
                   yAxisTitle="Cores"
+                  unit="%"
                 />
               </div>
             </div>

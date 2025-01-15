@@ -33,6 +33,7 @@ interface HorizontalBarChartProps {
   title: string;
   subtitle: string;
   yAxisTitle: string;
+  unit?: string;
 }
 
 const HorizontalBarChart: React.FC<HorizontalBarChartProps> = ({
@@ -42,6 +43,7 @@ const HorizontalBarChart: React.FC<HorizontalBarChartProps> = ({
   title,
   subtitle,
   yAxisTitle,
+  unit
 }) => {
   const containerRef = useRef<null | HTMLDivElement>(null);
   const chartRef = useRef<Chart | null>(null);
@@ -105,9 +107,10 @@ const HorizontalBarChart: React.FC<HorizontalBarChartProps> = ({
           font: {
             size: 14,
           },
+          stepSize: 300,
           // eslint-disable-next-line
           callback: function (value: any) {
-            return Number(value).toLocaleString();
+            return `${Math.round(Number(value)).toLocaleString()}${unit}`;
           },
         },
       },

@@ -90,6 +90,14 @@ const VerticalBarChart: React.FC<VerticalBarChartProps> = ({
         display: true,
         position: "top" as const,
       },
+      tooltip: {
+        callbacks: {
+          label: function (context: any) {
+            const value = context.raw;
+            return `${context.dataset.label}: ${value} ms`;
+          },
+        },
+      },
     },
     scales: {
       x: {
@@ -104,6 +112,10 @@ const VerticalBarChart: React.FC<VerticalBarChartProps> = ({
       y: {
         beginAtZero: true,
         grid: { display: true },
+        ticks: {
+          // eslint-disable-next-line
+          callback: (value: any) => `${value} ms`,
+        },
       },
     },
   };
