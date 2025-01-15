@@ -92,6 +92,7 @@ const VerticalBarChart: React.FC<VerticalBarChartProps> = ({
       },
       tooltip: {
         callbacks: {
+          // eslint-disable-next-line
           label: function (context: any) {
             const value = context.raw;
             return `${context.dataset.label}: ${value} ms`;
