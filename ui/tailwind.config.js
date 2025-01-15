@@ -16,6 +16,9 @@ module.exports = {
 			space: ['"Space Grotesk"', 'sans-serif'],
 			fira: ['"Fira Code"', 'monospace'],
 		},
+		height: {
+			'screen-dynamic': 'calc(100vh - var(--dynamic-padding))',
+		  },
   		colors: {
   			background: 'hsl(var(--background))',
   			foreground: 'hsl(var(--foreground))',

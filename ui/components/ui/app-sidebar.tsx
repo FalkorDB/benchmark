@@ -11,11 +11,14 @@ import {
 } from "@/components/ui/sidebar";
 import { sidebarConfig, userBrandInfo } from "@/app/data/sideBarData";
 
-type Platforms = Record<string, {
-  cpu: string; 
-  ram: string; 
-  storage: string; 
-}>;
+type Platforms = Record<
+  string,
+  {
+    cpu: string;
+    ram: string;
+    storage: string;
+  }
+>;
 
 export function AppSidebar({
   selectedOptions,
@@ -28,12 +31,16 @@ export function AppSidebar({
   platform?: Platforms;
 }) {
   return (
-    <Sidebar collapsible="icon" {...props} className="mt-dynamic">
+    <Sidebar
+      collapsible="icon"
+      {...props}
+      className="mt-dynamic flex flex-col h-screen-dynamic"
+    >
       <SidebarHeader>
         <SidebarBrand teams={userBrandInfo.brand} />
         <SidebarTrigger className="ml-auto" />
       </SidebarHeader>
-      <SidebarContent>
+      <SidebarContent className="pb-20">
         <NavMain
           items={sidebarConfig.sidebarData}
           selectedOptions={selectedOptions}
