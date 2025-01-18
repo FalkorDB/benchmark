@@ -34,9 +34,9 @@ export function AppSidebar({
     <Sidebar
       collapsible="icon"
       {...props}
-      className="mt-dynamic flex flex-col h-screen-dynamic"
+      className="flex flex-col h-screen-dynamic"
     >
-      <SidebarHeader>
+      <SidebarHeader className="mt-20">
         <SidebarBrand teams={userBrandInfo.brand} />
         <SidebarTrigger className="ml-auto" />
       </SidebarHeader>
