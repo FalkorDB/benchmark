@@ -6,7 +6,7 @@ import { AiOutlineDiscord } from "react-icons/ai";
 
 export function Header() {
   return (
-    <header className="flex flex-col text-xl bg-[#F7F3EF] h-25">
+    <header className="flex flex-col text-xl bg-[#F7F3EF] h-20 z-20">
       <div className="flex items-center justify-between py-4 px-8">
         <div className="flex gap-4 items-center">
           <Link href="https://www.falkordb.com" target="_blank">
@@ -18,7 +18,7 @@ export function Header() {
             Graph Database Performance Benchmarks
           </h1>
         </div>
-        <ul className="flex gap-4 items-center font-medium bg-white rounded-lg shadow p-4">
+        <ul className="flex gap-4 items-center font-medium bg-white rounded-lg shadow p-4 h-14">
           <Link
             title="Home"
             className="flex gap-2 items-center pl-1"
@@ -46,13 +46,13 @@ export function Header() {
           <div className="h-7 w-[2px] border-l bg-gradient-to-r from-[#EC806C] via-[#B66EBD] to-[#7568F2]"></div>
           <button
             type="button"
-            className="text-black font-medium text-base hover:underline"
+            className="h-8 text-black font-medium text-base hover:underline"
           >
             Sign up
           </button>
           <button
             type="button"
-            className="bg-gradient-to-r from-[#EC806C] via-[#B66EBD] to-[#7568F2] text-white font-medium text-base px-4 py-2 rounded-lg shadow-md hover:opacity-90 transition-all duration-200"
+            className="h-10 bg-gradient-to-r from-[#EC806C] via-[#B66EBD] to-[#7568F2] text-white font-medium text-base px-4 py-2 rounded-lg shadow-md hover:opacity-90 transition-all duration-200"
           >
             Start Free
           </button>

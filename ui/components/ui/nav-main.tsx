@@ -98,7 +98,7 @@ export function NavMain({
                       platform[index] && (
                         <HoverCard>
                           <HoverCardTrigger>
-                            <span className="inline-block w-4 h-4 bg-blue-200 text-blue-600 rounded-full text-center text-xs font-bold cursor-pointer">
+                            <span className="inline-block w-4 h-4 bg-gray-400 text-white rounded-full text-center text-xs font-bold cursor-pointer">
                               i
                             </span>
                           </HoverCardTrigger>
