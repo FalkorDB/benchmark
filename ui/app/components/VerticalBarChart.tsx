@@ -122,7 +122,7 @@ const VerticalBarChart: React.FC<VerticalBarChartProps> = ({
   };
 
   return (
-    <div className="w-full h-full">
+    <div className="w-full h-full relative">
       <Bar data={chartData} options={options} />
     </div>
   );

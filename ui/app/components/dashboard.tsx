@@ -179,16 +179,16 @@ export default function DashBoard() {
   }));
 
   return (
-    <SidebarProvider className="h-full">
-      <AppSidebar
-        selectedOptions={selectedOptions}
-        handleSelection={handleSelection}
-        platform={data?.platforms}
-      />
-      <SidebarInset className="pt-2 flex flex-col h-full">
-        <div className="flex flex-1 flex-col gap-2 overflow-hidden">
-          <div className="flex flex-col h-full w-full gap-2 px-2">
-            <div className="flex-1 w-full bg-muted/50 rounded-xl p-4">
+    <SidebarProvider className="h-screen w-screen overflow-hidden">
+      <div className="flex h-full w-full">
+        <AppSidebar
+          selectedOptions={selectedOptions}
+          handleSelection={handleSelection}
+          platform={data?.platforms}
+        />
+        <SidebarInset className="flex-grow h-full min-h-0">
+          <div className="grid h-full grid-cols-2 grid-rows-[2fr,1fr,1fr,50px] gap-2 p-1">
+            <div className="col-span-2 bg-muted/50 rounded-xl p-4 min-h-0">
               <VerticalBarChart
                 data={latencyData}
                 title="Vendor Latency Metrics"
@@ -196,81 +196,73 @@ export default function DashBoard() {
                 xAxisTitle="Vendors"
               />
             </div>
-            <div className="flex w-full h-1/4 gap-2">
-              <div className="flex-1 bg-muted/50 rounded-xl p-4">
-                <HorizontalBarChart
-                  data={throughputData}
-                  dataKey="actualMessagesPerSecond"
-                  chartLabel="Messages Per Second"
-                  title="Throughput"
-                  subtitle="Performance Metrics (more is better)"
-                  yAxisTitle="Vendors"
-                  unit=""
-                />
-              </div>
-              <div className="flex-1 bg-muted/50 rounded-xl p-4 relative">
-                <HoverCard>
-                  <HoverCardTrigger>
-                    <span
-                      className="absolute top-4 left-4 w-5 h-5 flex items-center justify-center bg-gray-400 text-white rounded-full text-xs font-bold cursor-pointer shadow-md z-10"
-                      title="More info"
-                    >
-                      i
-                    </span>
-                  </HoverCardTrigger>
-                  <HoverCardContent className="bg-gray-100 text-gray-800 p-4 rounded-md shadow-lg max-w-sm">
-                    <p className="text-sm font-medium">
-                      <strong>Deadline Offset Analysis</strong> Comparison of
-                      the time delays (deadlines) between different vendors to
-                      evaluate their performance and responsiveness.
-                    </p>
-                  </HoverCardContent>
-                </HoverCard>
-
-                <HorizontalBarChart
-                  data={deadlineData}
-                  dataKey="deadline"
-                  chartLabel="Deadline Offset (ms)"
-                  title="Deadline Offset Analysis"
-                  subtitle="Offset Comparison (less is better)"
-                  yAxisTitle="Vendors"
-                  unit="min"
-                />
-              </div>
+            <div className="bg-muted/50 rounded-xl p-4 min-h-0">
+              <HorizontalBarChart
+                data={throughputData}
+                dataKey="actualMessagesPerSecond"
+                chartLabel="Messages Per Second"
+                title="Throughput"
+                subtitle="Performance Metrics (more is better)"
+                yAxisTitle="Vendors"
+                unit=""
+              />
             </div>
-
-            <div className="flex w-full h-1/4 gap-2">
-              <div className="flex-1 bg-muted/50 rounded-xl p-4">
-                <HorizontalBarChart
-                  data={memoryData}
-                  dataKey="memory"
-                  chartLabel="Memory Utilization (MB)"
-                  title="Memory Usage"
-                  subtitle="Memory Allocation (less is better)"
-                  yAxisTitle="Memory Slots"
-                  unit="mb"
-                />
-              </div>
-              <div className="flex-1 bg-muted/50 rounded-xl p-4">
-                <HorizontalBarChart
-                  data={cpuData}
-                  dataKey="cpu"
-                  chartLabel="CPU Utilization (%)"
-                  title="CPU Usage"
-                  subtitle="Core Utilization (less is better)"
-                  yAxisTitle="Cores"
-                  unit="%"
-                />
-              </div>
+            <div className="bg-muted/50 rounded-xl p-4 min-h-0 relative">
+              <HoverCard>
+                <HoverCardTrigger>
+                  <span
+                    className="absolute top-4 left-4 w-5 h-5 flex items-center justify-center bg-gray-400 text-white rounded-full text-xs font-bold cursor-pointer shadow-md z-10"
+                    title="More info"
+                  >
+                    i
+                  </span>
+                </HoverCardTrigger>
+                <HoverCardContent className="bg-gray-100 text-gray-800 p-4 rounded-md shadow-lg max-w-sm">
+                  <p className="text-sm font-medium">
+                    <strong>Deadline Offset Analysis</strong> Comparison of the
+                    time delays (deadlines) between different vendors to
+                    evaluate their performance and responsiveness.
+                  </p>
+                </HoverCardContent>
+              </HoverCard>
+              <HorizontalBarChart
+                data={deadlineData}
+                dataKey="deadline"
+                chartLabel="Deadline Offset (min)"
+                title="Deadline Offset Analysis"
+                subtitle="Offset Comparison (less is better)"
+                yAxisTitle="Vendors"
+                unit="min"
+              />
             </div>
-          </div>
-          <div className="h-14 w-full rounded-xl bg-muted/50 p-0 flex-shrink-0">
-            <div className="h-full flex items-center justify-center">
+            <div className="bg-muted/50 rounded-xl p-4 min-h-0">
+              <HorizontalBarChart
+                data={memoryData}
+                dataKey="memory"
+                chartLabel="Memory Utilization (MB)"
+                title="Memory Usage"
+                subtitle="Memory Allocation (less is better)"
+                yAxisTitle="Memory Slots"
+                unit="mb"
+              />
+            </div>
+            <div className="bg-muted/50 rounded-xl p-4 min-h-0">
+              <HorizontalBarChart
+                data={cpuData}
+                dataKey="cpu"
+                chartLabel="CPU Utilization (%)"
+                title="CPU Usage"
+                subtitle="Core Utilization (less is better)"
+                yAxisTitle="Cores"
+                unit="%"
+              />
+            </div>
+            <div className="col-span-2 bg-muted/50 rounded-xl flex items-center justify-center h-[50px]">
               <FooterComponent />
             </div>
           </div>
-        </div>
-      </SidebarInset>
+        </SidebarInset>
+      </div>
     </SidebarProvider>
   );
 }
