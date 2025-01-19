@@ -306,7 +306,7 @@
           "p99": "1.66s"
         },
         "cpu-usage": 0.4,
-        "ram-usage": "15MB",
+        "ram-usage": "15GB",
         "errors": 0,
         "successful-requests": 1000000
       }
@@ -328,7 +328,7 @@
           "p99": "1.4s"
         },
         "cpu-usage": 0.3,
-        "ram-usage": "17MB",
+        "ram-usage": "17GB",
         "errors": 0,
         "successful-requests": 1000000
       }
@@ -350,7 +350,7 @@
           "p99": "1.7s"
         },
         "cpu-usage": 0.3,
-        "ram-usage": "15.4MB",
+        "ram-usage": "15.4GB",
         "errors": 0,
         "successful-requests": 1000000
       }
@@ -416,7 +416,7 @@
           "p99": "1.40s"
         },
         "cpu-usage": 0.4,
-        "ram-usage": "16.2MB",
+        "ram-usage": "16.2GB",
         "errors": 0,
         "successful-requests": 1000000
       }

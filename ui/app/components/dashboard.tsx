@@ -242,7 +242,7 @@ export default function DashBoard() {
                 chartLabel="Memory Utilization (MB)"
                 title="Memory Usage"
                 subtitle="Memory Allocation (less is better)"
-                yAxisTitle="Memory Slots"
+                yAxisTitle="Vendors"
                 unit="mb"
               />
             </div>
@@ -253,7 +253,7 @@ export default function DashBoard() {
                 chartLabel="CPU Utilization (%)"
                 title="CPU Usage"
                 subtitle="Core Utilization (less is better)"
-                yAxisTitle="Cores"
+                yAxisTitle="Vendors"
                 unit="%"
               />
             </div>

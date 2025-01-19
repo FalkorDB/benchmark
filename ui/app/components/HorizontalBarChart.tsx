@@ -107,7 +107,7 @@ const HorizontalBarChart: React.FC<HorizontalBarChartProps> = ({
           font: {
             size: 14,
           },
-          stepSize: 300,
+          stepSize: dataKey === "memory" ? 5000 : 300,
           // eslint-disable-next-line
           callback: function (value: any) {
             return `${Math.round(Number(value)).toLocaleString()}${unit}`;
