@@ -9,14 +9,14 @@ import Image from "next/image";
 import icon from "../../public/favicon.svg";
 
 export function SidebarBrand({
-  teams,
+  Brand,
 }: {
-  teams: {
+  Brand: {
     name: string;
     plan: string;
   }[];
 }) {
-  const [activeTeam] = React.useState(teams[0]);
+  const [activeTeam] = React.useState(Brand[0]);
 
   return (
     <SidebarMenu>

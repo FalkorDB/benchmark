@@ -24,7 +24,7 @@ ChartJS.register(
 interface VerticalBarChartProps {
   data: { vendor: string; p50: number; p95: number; p99: number }[];
   title: string;
-  subtitle: string;
+  subTitle: string;
   xAxisTitle: string;
 }
 
@@ -42,7 +42,7 @@ const getBarColor = (vendor: string, defaultColor: string) => {
 const VerticalBarChart: React.FC<VerticalBarChartProps> = ({
   data,
   title,
-  subtitle,
+  subTitle,
   xAxisTitle,
 }) => {
   const chartData = {
@@ -83,7 +83,7 @@ const VerticalBarChart: React.FC<VerticalBarChartProps> = ({
       },
       subtitle: {
         display: true,
-        text: subtitle,
+        text: subTitle,
         font: { size: 12 },
       },
       legend: {

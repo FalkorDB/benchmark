@@ -31,7 +31,7 @@ export default function DashBoard() {
   useEffect(() => {
     const fetchData = async () => {
       try {
-        const response = await fetch("/resutData.json");
+        const response = await fetch("/resultData.json");
 
         if (!response.ok) {
           throw new Error(`HTTP error! status: ${response.status}`);
@@ -175,7 +175,9 @@ export default function DashBoard() {
 
   const cpuData = filteredResults.map((item) => ({
     vendor: item.vendor,
-    cpu: (item.result["cpu-usage"] * 100).toFixed(2),
+    cpu: item.result["cpu-usage"]
+      ? (item.result["cpu-usage"] * 100).toFixed(2)
+      : "0.00",
   }));
 
   return (
@@ -192,7 +194,7 @@ export default function DashBoard() {
               <VerticalBarChart
                 data={latencyData}
                 title="Vendor Latency Metrics"
-                subtitle="P50, P95, and P99 Latency Comparison (less is better)"
+                subTitle="P50, P95, and P99 Latency Comparison (less is better)"
                 xAxisTitle="Vendors"
               />
             </div>
@@ -202,7 +204,7 @@ export default function DashBoard() {
                 dataKey="actualMessagesPerSecond"
                 chartLabel="Messages Per Second"
                 title="Throughput"
-                subtitle="Performance Metrics (more is better)"
+                subTitle="Performance Metrics (more is better)"
                 yAxisTitle="Vendors"
                 unit=""
               />
@@ -230,7 +232,7 @@ export default function DashBoard() {
                 dataKey="deadline"
                 chartLabel="Deadline Offset (min)"
                 title="Deadline Offset Analysis"
-                subtitle="Offset Comparison (less is better)"
+                subTitle="Offset Comparison (less is better)"
                 yAxisTitle="Vendors"
                 unit="min"
               />
@@ -241,7 +243,7 @@ export default function DashBoard() {
                 dataKey="memory"
                 chartLabel="Memory Utilization (MB)"
                 title="Memory Usage"
-                subtitle="Memory Allocation (less is better)"
+                subTitle="Memory Allocation (less is better)"
                 yAxisTitle="Vendors"
                 unit="mb"
               />
@@ -252,7 +254,7 @@ export default function DashBoard() {
                 dataKey="cpu"
                 chartLabel="CPU Utilization (%)"
                 title="CPU Usage"
-                subtitle="Core Utilization (less is better)"
+                subTitle="Core Utilization (less is better)"
                 yAxisTitle="Vendors"
                 unit="%"
               />

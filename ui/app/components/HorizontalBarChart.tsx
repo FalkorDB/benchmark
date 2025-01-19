@@ -31,7 +31,7 @@ interface HorizontalBarChartProps {
   dataKey: string;
   chartLabel: string;
   title: string;
-  subtitle: string;
+  subTitle: string;
   yAxisTitle: string;
   unit?: string;
 }
@@ -41,7 +41,7 @@ const HorizontalBarChart: React.FC<HorizontalBarChartProps> = ({
   dataKey,
   chartLabel,
   title,
-  subtitle,
+  subTitle,
   yAxisTitle,
   unit
 }) => {
@@ -83,7 +83,7 @@ const HorizontalBarChart: React.FC<HorizontalBarChartProps> = ({
       },
       subtitle: {
         display: true,
-        text: subtitle,
+        text: subTitle,
         font: {
           size: 12,
           weight: "normal" as const,

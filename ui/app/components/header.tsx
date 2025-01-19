@@ -44,21 +44,17 @@ export function Header() {
             <AiOutlineDiscord size={30} />
           </Link>
           <div className="h-7 w-[2px] border-l bg-gradient-to-r from-[#EC806C] via-[#B66EBD] to-[#7568F2]"></div>
-          <a href="https://app.falkordb.cloud/signup" className="block">
-            <button
-              type="button"
-              className="h-8 text-black font-medium text-base hover:underline"
-            >
-              Sign up
-            </button>
+          <a
+            href="https://app.falkordb.cloud/signup"
+            className="h-8 text-black font-medium text-base hover:underline flex text-center justify-center"
+          >
+            Sign up
           </a>
-          <a href="https://falkordb.com/try-free/" className="block">
-            <button
-              type="button"
-              className="h-10 bg-gradient-to-r from-[#EC806C] via-[#B66EBD] to-[#7568F2] text-white font-medium text-base px-4 py-2 rounded-lg shadow-md hover:opacity-90 transition-all duration-200"
-            >
-              Start Free
-            </button>
+          <a
+            href="https://falkordb.com/try-free/"
+            className="h-10 bg-gradient-to-r from-[#EC806C] via-[#B66EBD] to-[#7568F2] text-white font-medium text-base px-4 py-2 rounded-lg shadow-md hover:opacity-90 transition-all duration-200 flex text-center justify-center"
+          >
+            Start Free
           </a>
         </ul>
       </div>

@@ -37,12 +37,12 @@ export function AppSidebar({
       className="flex flex-col h-screen-dynamic"
     >
       <SidebarHeader className="mt-20">
-        <SidebarBrand teams={userBrandInfo.brand} />
+        <SidebarBrand Brand={userBrandInfo?.brand} />
         <SidebarTrigger className="ml-auto" />
       </SidebarHeader>
       <SidebarContent className="pb-20">
         <NavMain
-          items={sidebarConfig.sidebarData}
+          items={sidebarConfig?.sidebarData}
           selectedOptions={selectedOptions}
           handleSelection={handleSelection}
           platform={platform}
