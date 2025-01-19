@@ -453,7 +453,7 @@
       "platform": "macbook-air-2024",
       "target-messages-per-second": 500,
       "edges": 10000,
-      "relationships": 121000,
+      "relationships": 121716,
       "result": {
         "deadline-offset": "0ms",
         "actual-messages-per-second": 500,
@@ -673,7 +673,7 @@
       "clients": 20,
       "platform": "macbook-air-2024",
       "target-messages-per-second": 500,
-      "edges": 100000,
+      "edges": 10000,
       "relationships": 121716,
       "result": {
         "deadline-offset": "53min",
@@ -686,7 +686,7 @@
         "cpu-usage": 0.93,
         "ram-usage": "1.1GB",
         "errors": 0,
-        "successful-requests": 100000
+        "successful-requests": 1000000
       }
     },
 
@@ -696,7 +696,7 @@
       "clients": 40,
       "platform": "macbook-air-2024",
       "target-messages-per-second": 500,
-      "edges": 100000,
+      "edges": 10000,
       "relationships": 121716,
       "result": {
         "deadline-offset": "51min",
@@ -709,7 +709,7 @@
         "cpu-usage": 0.93,
         "ram-usage": "1.1GB",
         "errors": 0,
-        "successful-requests": 100000
+        "successful-requests": 1000000
       }
     },
     {
@@ -718,7 +718,7 @@
       "clients": 20,
       "platform": "macbook-air-2024",
       "target-messages-per-second": 1000,
-      "edges": 100000,
+      "edges": 10000,
       "relationships": 121716,
       "result": {
         "deadline-offset": "86min",
@@ -731,7 +731,7 @@
         "cpu-usage": 0.93,
         "ram-usage": "1.15GB",
         "errors": 0,
-        "successful-requests": 100000
+        "successful-requests": 1000000
       }
     },
     {
@@ -740,7 +740,7 @@
       "clients": 40,
       "platform": "macbook-air-2024",
       "target-messages-per-second": 1000,
-      "edges": 100000,
+      "edges": 10000,
       "relationships": 121716,
       "result": {
         "deadline-offset": "65min",
@@ -753,7 +753,7 @@
         "cpu-usage": 0.93,
         "ram-usage": "1.26GB",
         "errors": 0,
-        "successful-requests": 100000
+        "successful-requests": 1000000
       }
     },
     {
@@ -762,7 +762,7 @@
       "clients": 20,
       "platform": "macbook-air-2024",
       "target-messages-per-second": 1500,
-      "edges": 100000,
+      "edges": 10000,
       "relationships": 121716,
       "result": {
         "deadline-offset": "84min",
@@ -775,7 +775,7 @@
         "cpu-usage": 0.94,
         "ram-usage": "1.3GB",
         "errors": 0,
-        "successful-requests": 100000
+        "successful-requests": 1000000
       }
     },
     {
@@ -784,7 +784,7 @@
       "clients": 40,
       "platform": "macbook-air-2024",
       "target-messages-per-second": 1500,
-      "edges": 100000,
+      "edges": 10000,
       "relationships": 121716,
       "result": {
         "deadline-offset": "106min",
@@ -797,7 +797,7 @@
         "cpu-usage": 0.93,
         "ram-usage": "1.39GB",
         "errors": 0,
-        "successful-requests": 100000
+        "successful-requests": 1000000
       }
     },
     {
@@ -806,7 +806,7 @@
       "clients": 20,
       "platform": "macbook-air-2024",
       "target-messages-per-second": 2000,
-      "edges": 100000,
+      "edges": 10000,
       "relationships": 121716,
       "result": {
         "deadline-offset": "99min",
@@ -819,7 +819,7 @@
         "cpu-usage": 0.93,
         "ram-usage": "1.07GB",
         "errors": 0,
-        "successful-requests": 100000
+        "successful-requests": 1000000
       }
     },
     {
@@ -828,7 +828,7 @@
       "clients": 40,
       "platform": "macbook-air-2024",
       "target-messages-per-second": 2000,
-      "edges": 100000,
+      "edges": 10000,
       "relationships": 121716,
       "result": {
         "deadline-offset": "79min",
@@ -841,7 +841,7 @@
         "cpu-usage": 0.88,
         "ram-usage": "1.21GB",
         "errors": 0,
-        "successful-requests": 100000
+        "successful-requests": 1000000
       }
     },
     {
@@ -850,7 +850,7 @@
       "clients": 20,
       "platform": "macbook-air-2024",
       "target-messages-per-second": 2500,
-      "edges": 100000,
+      "edges": 10000,
       "relationships": 121716,
       "result": {
         "deadline-offset": "79min",
@@ -863,7 +863,7 @@
         "cpu-usage": 0.93,
         "ram-usage": "1.42GB",
         "errors": 0,
-        "successful-requests": 100000
+        "successful-requests": 1000000
       }
     },
     {
@@ -872,7 +872,7 @@
       "clients": 40,
       "platform": "macbook-air-2024",
       "target-messages-per-second": 2500,
-      "edges": 100000,
+      "edges": 10000,
       "relationships": 121716,
       "result": {
         "deadline-offset": "79min",
@@ -885,7 +885,7 @@
         "cpu-usage": 0.93,
         "ram-usage": "1.35GB",
         "errors": 0,
-        "successful-requests": 100000
+        "successful-requests": 1000000
       }
     }
   ],
