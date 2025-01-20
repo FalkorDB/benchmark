@@ -47,12 +47,14 @@ export function Header() {
           <a
             href="https://app.falkordb.cloud/signup"
             className="h-8 text-black font-medium text-base hover:underline flex text-center justify-center"
+            target="_blank"
           >
             Sign up
           </a>
           <a
             href="https://falkordb.com/try-free/"
             className="h-10 bg-gradient-to-r from-[#EC806C] via-[#B66EBD] to-[#7568F2] text-white font-medium text-base px-4 py-2 rounded-lg shadow-md hover:opacity-90 transition-all duration-200 flex text-center justify-center"
+            target="_blank"
           >
             Start Free
           </a>
