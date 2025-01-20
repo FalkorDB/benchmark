@@ -15,3 +15,5 @@ falkor-metrics*.json
 neo4j-metrics*.json
 html
 .DS_Store
+/ui/playwright-report
+/ui/test-results
