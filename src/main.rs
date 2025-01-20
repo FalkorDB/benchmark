@@ -1,89 +1,53 @@
-mod cli;
-mod compare_template;
-mod error;
-mod falkor;
-mod metrics_collector;
-mod neo4j;
-mod neo4j_client;
-mod queries_repository;
-mod query;
-pub mod scenario;
-mod utils;
-
-use crate::cli::Commands;
-use crate::cli::Commands::GenerateAutoComplete;
-use crate::compare_template::{CompareRuns, CompareTemplate};
-use crate::error::BenchmarkError::OtherError;
-use crate::error::BenchmarkResult;
-use crate::falkor::{Connected, Disconnected, Falkor};
-use crate::metrics_collector::{MachineMetadata, MetricsCollector};
-use crate::queries_repository::Queries;
-use crate::scenario::{Size, Spec, Vendor};
-use crate::utils::{delete_file, file_exists, format_number, write_to_file};
-use askama::Template;
+use benchmark::cli::Cli;
+use benchmark::cli::Commands;
+use benchmark::cli::Commands::GenerateAutoComplete;
+use benchmark::error::BenchmarkError::OtherError;
+use benchmark::error::BenchmarkResult;
+use benchmark::falkor::{Falkor, Started, Stopped};
+use benchmark::neo4j_client::Neo4jClient;
+use benchmark::queries_repository::PreparedQuery;
+use benchmark::scenario::Name::Users;
+use benchmark::scenario::{Size, Spec, Vendor};
+use benchmark::scheduler::Msg;
+use benchmark::utils::{delete_file, file_exists, format_number};
+use benchmark::{
+    scheduler, FALKOR_ERROR_REQUESTS_DURATION_HISTOGRAM,
+    FALKOR_SUCCESS_REQUESTS_DURATION_HISTOGRAM, NEO4J_ERROR_REQUESTS_DURATION_HISTOGRAM,
+    NEO4J_SUCCESS_REQUESTS_DURATION_HISTOGRAM,
+};
 use clap::{Command, CommandFactory, Parser};
 use clap_complete::{generate, Generator};
-use cli::Cli;
 use futures::StreamExt;
 use histogram::Histogram;
-use opentelemetry::{global, KeyValue};
-use opentelemetry_sdk::trace::Config;
-use opentelemetry_sdk::Resource;
-use opentelemetry_semantic_conventions::resource::SERVICE_NAME;
+use serde::{Deserialize, Serialize};
 use std::io;
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::fs::File;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
+use tokio::sync::mpsc::Receiver;
+use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
 use tokio::time::Instant;
-use tracing::{error, info};
-use tracing_subscriber::fmt::Layer;
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::{EnvFilter, Registry};
+use tracing::{error, info, instrument};
+use tracing_subscriber::filter::LevelFilter;
+use tracing_subscriber::{fmt, EnvFilter};
 
 #[tokio::main]
 async fn main() -> BenchmarkResult<()> {
     let mut cmd = Cli::command();
     let cli = Cli::parse();
 
-    let fmt_layer = Layer::new().pretty();
-    let filter_layer = EnvFilter::try_from_default_env()
-        .or_else(|_| EnvFilter::try_new("info"))
-        .unwrap();
+    let filter = EnvFilter::from_default_env().add_directive(LevelFilter::INFO.into());
+    let subscriber = fmt()
+        .pretty()
+        .with_file(true)
+        .with_line_number(true)
+        .with_env_filter(filter);
 
-    let _drop_tracer = if cli.otel {
-        let resource = Resource::new(vec![KeyValue::new(SERVICE_NAME, "otel-demo1")]);
-        let otel_tracer = opentelemetry_otlp::new_pipeline()
-            .tracing()
-            .with_trace_config(Config::default().with_resource(resource.clone()))
-            .with_exporter(opentelemetry_otlp::new_exporter().tonic())
-            .with_batch_config(
-                opentelemetry_sdk::trace::BatchConfigBuilder::default()
-                    .with_max_queue_size(2048 * 10)
-                    .with_max_concurrent_exports(10)
-                    .build(),
-            )
-            .install_batch(opentelemetry_sdk::runtime::Tokio)
-            .unwrap();
-        // let otel_layer = OpenTelemetryLayer::new(otel_tracer);
-        let otel_layer = tracing_opentelemetry::layer().with_tracer(otel_tracer);
-        Registry::default()
-            .with(filter_layer)
-            .with(fmt_layer)
-            .with(otel_layer)
-            .try_init()
-            .unwrap();
-        // tracing::subscriber::set_global_default(subscriber)
-        //     .expect("setting default subscriber failed");
-        Some(DropTracer)
-    } else {
-        Registry::default()
-            .with(filter_layer)
-            .with(fmt_layer)
-            .try_init()
-            .unwrap();
-        // tracing::subscriber::set_global_default(subscriber)
-        //     .expect("setting default subscriber failed");
-        None
-    };
+    subscriber.init();
+
+    let prometheus_endpoint = benchmark::prometheus_endpoint::PrometheusEndpoint::default();
 
     match cli.command {
         GenerateAutoComplete { shell } => {
@@ -91,7 +55,7 @@ async fn main() -> BenchmarkResult<()> {
             print_completions(shell, &mut cmd);
         }
 
-        Commands::Init {
+        Commands::Load {
             vendor,
             size,
             force,
@@ -118,68 +82,44 @@ async fn main() -> BenchmarkResult<()> {
         }
         Commands::Run {
             vendor,
-            size,
-            queries,
-        } => {
-            let machine_metadata = MachineMetadata::new();
-            info!(
-                "Run benchmark vendor: {}, graph-size:{}, queries: {}, machine_metadata: {:?}",
-                vendor, size, queries, machine_metadata
-            );
-
-            match vendor {
-                Vendor::Neo4j => {
-                    run_neo4j(size, queries, machine_metadata).await?;
-                }
-                Vendor::Falkor => {
-                    run_falkor(size, queries, machine_metadata).await?;
-                }
+            parallel,
+            name,
+            mps,
+            simulate,
+        } => match vendor {
+            Vendor::Neo4j => {
+                run_neo4j(parallel, name, mps, simulate).await?;
             }
-        }
+            Vendor::Falkor => {
+                run_falkor(parallel, name, mps, simulate).await?;
+            }
+        },
 
-        Commands::Clear {
-            vendor,
+        Commands::GenerateQueries {
             size,
-            force,
+            dataset,
+            name,
+            write_ratio,
         } => {
-            info!("Clear benchmark {} {} {}", vendor, size, force);
-        }
-        Commands::Compare { file1, file2 } => {
-            info!(
-                "Compare benchmark {} {}",
-                file1.path().display(),
-                file2.path().display()
-            );
-            let collector_1 = MetricsCollector::from_file(file1.path()).await?;
-            let collector_2 = MetricsCollector::from_file(file2.path()).await?;
-            info!("got both collectors");
-            let compare_runs = CompareRuns {
-                run_1: collector_1.to_percentile(),
-                run_2: collector_2.to_percentile(),
-            };
-            // let json = serde_json::to_string_pretty(&compare_runs)?;
-            // info!("{}", json);
-            let compare_template = CompareTemplate { data: compare_runs };
-            let compare_report = compare_template.render().unwrap();
-            write_to_file("html/compare.html", compare_report.as_str()).await?;
-            info!("report was written to html/compare.html");
-            // println!("{}", compare_report);
+            prepare_queries(dataset, size, name, write_ratio).await?;
         }
     }
-
+    drop(prometheus_endpoint);
     Ok(())
 }
 
 async fn run_neo4j(
-    size: Size,
-    number_of_queries: u64,
-    machine_metadata: MachineMetadata,
+    parallel: usize,
+    file_name: String,
+    mps: usize,
+    simulate: Option<usize>,
 ) -> BenchmarkResult<()> {
-    let neo4j = neo4j::Neo4j::new();
+    let mut neo4j = benchmark::neo4j::Neo4j::default();
     // stop neo4j if it is running
     neo4j.stop(false).await?;
-    // restore the dump
-    let spec = Spec::new(scenario::Name::Users, size, Vendor::Neo4j);
+    let (queries_metadata, queries) = read_queries(file_name).await?;
+    let number_of_queries = queries_metadata.size;
+    let spec = Spec::new(Users, queries_metadata.dataset, Vendor::Neo4j);
     neo4j.restore_db(spec).await?;
     // start neo4j
     neo4j.start().await?;
@@ -187,44 +127,39 @@ async fn run_neo4j(
     info!("client connected to neo4j");
     // get the graph size
     let (node_count, relation_count) = client.graph_size().await?;
-    let mut metric_collector = MetricsCollector::new(
-        node_count,
-        relation_count,
-        number_of_queries,
-        "Neo4J".to_owned(),
-        machine_metadata,
-    )?;
-    // generate queries
-    let mut queries_repository = queries_repository::UsersQueriesRepository::new(9998, 121716);
-    let queries = Box::new(
-        queries_repository
-            .random_queries(number_of_queries)
-            .map(|(q_name, q_type, q)| (q_name, q_type, q.to_bolt())),
-    );
+
     info!(
         "graph has {} nodes and {} relations",
         format_number(node_count),
         format_number(relation_count)
     );
-    info!("running {} queries", format_number(number_of_queries));
+    info!(
+        "running {} queries",
+        format_number(number_of_queries as u64)
+    );
+    // prepare the mpsc channel
+    let (tx, rx) = tokio::sync::mpsc::channel::<Msg<PreparedQuery>>(20 * parallel);
+    let rx: Arc<Mutex<Receiver<Msg<PreparedQuery>>>> = Arc::new(Mutex::new(rx));
+    let scheduler_handle = scheduler::spawn_scheduler::<PreparedQuery>(mps, tx.clone(), queries);
+    let mut workers_handles = Vec::with_capacity(parallel);
+
     let start = Instant::now();
-    client
-        .clone()
-        .execute_query_iterator(queries, &mut metric_collector)
-        .await?;
+    for spawn_id in 0..parallel {
+        let handle = spawn_neo4j_worker(client.clone(), spawn_id, &rx, simulate).await?;
+        workers_handles.push(handle);
+    }
+    let _ = scheduler_handle.await;
+    drop(tx);
+
+    for handle in workers_handles {
+        let _ = handle.await;
+    }
+
     let elapsed = start.elapsed();
-    let report_file = "neo4j-results.md";
-    info!("report was written to {}", report_file);
-    write_to_file(report_file, metric_collector.markdown_report().as_str()).await?;
-    metric_collector
-        .save(format!(
-            "neo4j-metrics_{}_q{}.json",
-            size, number_of_queries
-        ))
-        .await?;
+
     info!(
         "running {} queries took {:?}",
-        format_number(number_of_queries),
+        format_number(number_of_queries as u64),
         elapsed
     );
     neo4j.stop(true).await?;
@@ -232,90 +167,229 @@ async fn run_neo4j(
     // write the report
     Ok(())
 }
+
+async fn spawn_neo4j_worker(
+    client: Neo4jClient,
+    worker_id: usize,
+    receiver: &Arc<Mutex<Receiver<Msg<PreparedQuery>>>>,
+    simulate: Option<usize>,
+) -> BenchmarkResult<JoinHandle<()>> {
+    info!("spawning worker");
+    let receiver = Arc::clone(receiver);
+    let handle = tokio::spawn(async move {
+        let worker_id = worker_id.to_string();
+        let worker_id_str = worker_id.as_str();
+        let mut counter = 0u32;
+        let mut client = client.clone();
+        loop {
+            // get the next value and release the mutex
+            let received = receiver.lock().await.recv().await;
+
+            match received {
+                Some(prepared_query) => {
+                    let start_time = Instant::now();
+
+                    let r = client
+                        .execute_prepared_query(worker_id_str, &prepared_query, &simulate)
+                        .await;
+                    let duration = start_time.elapsed();
+                    match r {
+                        Ok(_) => {
+                            NEO4J_SUCCESS_REQUESTS_DURATION_HISTOGRAM
+                                .observe(duration.as_secs_f64());
+                            counter += 1;
+                            if counter % 1000 == 0 {
+                                info!("worker {} processed {} queries", worker_id, counter);
+                            }
+                        }
+                        Err(e) => {
+                            NEO4J_ERROR_REQUESTS_DURATION_HISTOGRAM.observe(duration.as_secs_f64());
+                            let seconds_wait = 3u64;
+                            info!(
+                                "worker {} failed to process query, not sleeping for {} seconds {:?}",
+                                worker_id, seconds_wait, e
+                            );
+                        }
+                    }
+                }
+                None => {
+                    info!("worker {} received None, exiting", worker_id);
+                    break;
+                }
+            }
+        }
+        info!("worker {} finished", worker_id);
+    });
+
+    Ok(handle)
+}
+#[instrument]
 async fn run_falkor(
-    size: Size,
-    number_of_queries: u64,
-    machine_metadata: MachineMetadata,
+    parallel: usize,
+    file_name: String,
+    mps: usize,
+    simulate: Option<usize>,
 ) -> BenchmarkResult<()> {
-    let falkor: Falkor<Disconnected> = falkor::Falkor::new();
-    // stop falkor if it is running
-    falkor.stop(false).await?;
+    if parallel == 0 {
+        return Err(OtherError(
+            "Parallelism level must be greater than zero.".to_string(),
+        ));
+    }
+    let falkor: Falkor<Stopped> = benchmark::falkor::Falkor::default();
+
+    let (queries_metadata, queries) = read_queries(file_name).await?;
+
     // if dump not present return error
-    falkor.dump_exists_or_error(size).await?;
+    falkor
+        .dump_exists_or_error(queries_metadata.dataset)
+        .await?;
     // restore the dump
-    falkor.restore_db(size).await?;
+    falkor.restore_db(queries_metadata.dataset).await?;
     // start falkor
-    falkor.start().await?;
-    // connect to falkor
-    let mut falkor: Falkor<Connected> = falkor.connect().await?;
+    let falkor = falkor.start().await?;
+
     // get the graph size
     let (node_count, relation_count) = falkor.graph_size().await?;
-    let mut metric_collector = MetricsCollector::new(
-        node_count,
-        relation_count,
-        number_of_queries,
-        "FalkorDB".to_owned(),
-        machine_metadata,
-    )?;
-    // generate queries
-    let mut queries_repository = queries_repository::UsersQueriesRepository::new(9998, 121716);
-    let queries = Box::new(
-        queries_repository
-            .random_queries(number_of_queries)
-            .map(|(q_name, q_type, q)| (q_name, q_type, q.to_cypher())),
-    );
+
     info!(
         "graph has {} nodes and {} relations",
         format_number(node_count),
         format_number(relation_count)
     );
-    info!("running {} queries", format_number(number_of_queries));
+
+    // prepare the mpsc channel
+    let (tx, rx) = tokio::sync::mpsc::channel::<Msg<PreparedQuery>>(20 * parallel);
+    let rx: Arc<Mutex<Receiver<Msg<PreparedQuery>>>> = Arc::new(Mutex::new(rx));
+
+    // iterate over queries and send them to the workers
+
+    let number_of_queries = queries_metadata.size;
+    info!(
+        "running {} queries",
+        format_number(number_of_queries as u64)
+    );
+
+    let scheduler_handle = scheduler::spawn_scheduler::<PreparedQuery>(mps, tx.clone(), queries);
+    let mut workers_handles = Vec::with_capacity(parallel);
+    // start workers
     let start = Instant::now();
-    falkor
-        .execute_query_iterator(queries, &mut metric_collector)
-        .await?;
+    for spawn_id in 0..parallel {
+        let handle = spawn_falkor_worker(&falkor, spawn_id, &rx, simulate).await?;
+        workers_handles.push(handle);
+    }
+
+    let _ = scheduler_handle.await;
+    drop(tx);
+
+    for handle in workers_handles {
+        let _ = handle.await;
+    }
+
     let elapsed = start.elapsed();
-    let report_file = "falkor-results.md";
-    info!("report was written to {}", report_file);
-    write_to_file(report_file, metric_collector.markdown_report().as_str()).await?;
-    metric_collector
-        .save(format!(
-            "falkor-metrics_{}_q{}.json",
-            size, number_of_queries
-        ))
-        .await?;
     info!(
         "running {} queries took {:?}",
-        format_number(number_of_queries),
+        format_number(number_of_queries as u64),
         elapsed
     );
+
     // stop falkor
-    falkor.stop(false).await
+    let _stopped = falkor.stop().await?;
+    Ok(())
 }
 
+async fn spawn_falkor_worker(
+    falkor: &Falkor<Started>,
+    worker_id: usize,
+    receiver: &Arc<Mutex<Receiver<Msg<PreparedQuery>>>>,
+    simulate: Option<usize>,
+) -> BenchmarkResult<JoinHandle<()>> {
+    info!("spawning worker");
+    let mut client = falkor.client().await?;
+    let receiver = Arc::clone(receiver);
+    let handle = tokio::spawn(async move {
+        let worker_id = worker_id.to_string();
+        let worker_id_str = worker_id.as_str();
+        let mut counter = 0u32;
+        loop {
+            // get the next value and release the mutex
+            let received = receiver.lock().await.recv().await;
+
+            match received {
+                Some(prepared_query) => {
+                    let start_time = Instant::now();
+
+                    let r = client
+                        .execute_prepared_query(worker_id_str, &prepared_query, &simulate)
+                        .await;
+                    let duration = start_time.elapsed();
+                    match r {
+                        Ok(_) => {
+                            FALKOR_SUCCESS_REQUESTS_DURATION_HISTOGRAM
+                                .observe(duration.as_secs_f64());
+                            counter += 1;
+                            if counter % 1000 == 0 {
+                                info!("worker {} processed {} queries", worker_id, counter);
+                            }
+                        }
+                        Err(e) => {
+                            FALKOR_ERROR_REQUESTS_DURATION_HISTOGRAM
+                                .observe(duration.as_secs_f64());
+                            let seconds_wait = 3u64;
+                            info!(
+                                "worker {} failed to process query, not sleeping for {} seconds {:?}",
+                                worker_id, seconds_wait, e
+                            );
+                        }
+                    }
+                }
+                None => {
+                    info!("worker {} received None, exiting", worker_id);
+                    break;
+                }
+            }
+        }
+        info!("worker {} finished", worker_id);
+    });
+
+    Ok(handle)
+}
 async fn init_falkor(
     size: Size,
     _force: bool,
 ) -> BenchmarkResult<()> {
-    let mut histogram = Histogram::new(7, 64)?;
-    let spec = Spec::new(scenario::Name::Users, size, Vendor::Neo4j);
-    let falkor = falkor::Falkor::new();
-    falkor.stop(false).await?;
+    let spec = Spec::new(benchmark::scenario::Name::Users, size, Vendor::Neo4j);
+    let falkor = benchmark::falkor::Falkor::default();
     falkor.clean_db().await?;
-    // falkor.restore_db(size).await?;
 
-    falkor.start().await?;
+    let falkor = falkor.start().await?;
     info!("writing index and data");
     // let index_iterator = spec.init_index_iterator().await?;
-    let mut falkor = falkor.connect().await?;
     let start = Instant::now();
-    falkor
-        .execute_query_un_trace("CREATE INDEX FOR (u:User) ON (u.id)")
+
+    let mut falkor_client = falkor.client().await?;
+    falkor_client
+        ._execute_query(
+            "main",
+            "create_index",
+            "CREATE INDEX FOR (u:User) ON (u.id)",
+        )
         .await?;
-    let data_iterator = spec.init_data_iterator().await?;
-    falkor
-        .execute_query_stream(data_iterator, &mut histogram)
-        .await?;
+
+    let mut data_iterator = spec.init_data_iterator().await?;
+
+    while let Some(result) = data_iterator.next().await {
+        match result {
+            Ok(query) => {
+                falkor_client
+                    ._execute_query("loader", "", query.as_str())
+                    .await?;
+            }
+            Err(e) => {
+                error!("error {}", e);
+            }
+        }
+    }
+
     let (node_count, relation_count) = falkor.graph_size().await?;
     info!(
         "{} nodes and {} relations were imported at {:?}",
@@ -324,11 +398,9 @@ async fn init_falkor(
         start.elapsed()
     );
     info!("writing done, took: {:?}", start.elapsed());
-    falkor.disconnect().await?;
-    falkor.stop(true).await?;
+    let falkor = falkor.stop().await?;
     falkor.save_db(size).await?;
 
-    show_historgam(histogram);
     Ok(())
 }
 
@@ -343,7 +415,7 @@ fn show_historgam(histogram: Histogram) {
 }
 
 async fn dry_init_neo4j(size: Size) -> BenchmarkResult<()> {
-    let spec = Spec::new(scenario::Name::Users, size, Vendor::Neo4j);
+    let spec = Spec::new(benchmark::scenario::Name::Users, size, Vendor::Neo4j);
     let mut data_stream = spec.init_data_iterator().await?;
     let mut success = 0;
     let mut error = 0;
@@ -372,8 +444,8 @@ async fn init_neo4j(
     size: Size,
     force: bool,
 ) -> BenchmarkResult<()> {
-    let spec = Spec::new(scenario::Name::Users, size, Vendor::Neo4j);
-    let neo4j = neo4j::Neo4j::new();
+    let spec = Spec::new(benchmark::scenario::Name::Users, size, Vendor::Neo4j);
+    let mut neo4j = benchmark::neo4j::Neo4j::default();
     let _ = neo4j.stop(false).await?;
     let backup_path = format!("{}/neo4j.dump", spec.backup_path());
     if !force {
@@ -413,7 +485,10 @@ async fn init_neo4j(
             "graph is not empty, node count: {}, relation count: {}",
             node_count, relation_count
         );
-        return Err(OtherError("graph is not empty".to_string()));
+        info!("stopping neo4j and deleting database neo4j");
+        neo4j.stop(false).await?;
+        neo4j.clean_db().await?;
+        neo4j.stop(true).await?;
     }
     let mut histogram = Histogram::new(7, 64)?;
 
@@ -435,7 +510,7 @@ async fn init_neo4j(
         format_number(relation_count),
         start.elapsed()
     );
-    neo4j.clone().stop(true).await?;
+    neo4j.stop(true).await?;
     neo4j.dump(spec.clone()).await?;
     info!("---> histogram");
 
@@ -452,10 +527,66 @@ fn print_completions<G: Generator>(
     generate(gen, cmd, cmd.get_name().to_string(), &mut io::stdout());
 }
 
-struct DropTracer;
+#[derive(Debug, Serialize, Deserialize)]
+struct PrepareQueriesMetadata {
+    size: usize,
+    dataset: Size,
+}
+async fn prepare_queries(
+    dataset: Size,
+    size: usize,
+    file_name: String,
+    write_ratio: f32,
+) -> BenchmarkResult<()> {
+    let metadata = PrepareQueriesMetadata { size, dataset };
+    let start = Instant::now();
+    let queries_repository =
+        benchmark::queries_repository::UsersQueriesRepository::new(9998, 121716);
+    let queries = Box::new(queries_repository.random_queries(size, write_ratio));
 
-impl Drop for DropTracer {
-    fn drop(&mut self) {
-        global::shutdown_tracer_provider();
+    let file = File::create(file_name).await?;
+    let mut writer = BufWriter::new(file);
+    let metadata_line = serde_json::to_string(&metadata)?;
+    writer.write_all(metadata_line.as_bytes()).await?;
+    writer.write_all(b"\n").await?;
+
+    for query in queries {
+        let json_string = serde_json::to_string(&query)?;
+        writer.write_all(json_string.as_bytes()).await?;
+        writer.write_all(b"\n").await?;
+    }
+    writer.flush().await?;
+
+    let duration = start.elapsed();
+    info!("Time taken to prepare queries: {:?}", duration);
+    Ok(())
+}
+
+async fn read_queries(
+    file_name: String
+) -> BenchmarkResult<(PrepareQueriesMetadata, Vec<PreparedQuery>)> {
+    let start = Instant::now();
+    let file = File::open(file_name).await?;
+    let mut reader = BufReader::new(file);
+
+    // the first line is PrepareQueriesMetadata read it
+    let mut metadata_line = String::new();
+    reader.read_line(&mut metadata_line).await?;
+
+    match serde_json::from_str::<PrepareQueriesMetadata>(&metadata_line) {
+        Ok(metadata) => {
+            let size = metadata.size;
+            let mut queries = Vec::with_capacity(size);
+            let mut lines = reader.lines();
+
+            while let Some(line) = lines.next_line().await? {
+                let query: PreparedQuery = serde_json::from_str(&line)?;
+                queries.push(query);
+            }
+            let duration = start.elapsed();
+            info!("Reading {} queries took {:?}", size, duration);
+            Ok((metadata, queries))
+        }
+        Err(e) => Err(OtherError(format!("Error parsing metadata: {}", e))),
     }
 }
