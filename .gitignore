@@ -14,6 +14,7 @@ falkor-results.md
 falkor-metrics*.json
 neo4j-metrics*.json
 html
+
 falkordb.log
 .DS_Store
 dump.rdb
@@ -22,4 +23,5 @@ queries.json
 docker-compose.yml
 grafana-datasources.yml
 prometheus.yml
+.DS_Store
 
