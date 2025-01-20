@@ -30,7 +30,7 @@ export default class NavBarComponent extends BasePage {
         await this.falkorDBLogo.click();
     }
 
-    async clickOnFalkor(): Promise<Page> {
+    async clickOnFalkordb(): Promise<Page> {
         await this.page.waitForLoadState('networkidle');
         const [newPage] = await Promise.all([
             this.page.waitForEvent('popup'),
