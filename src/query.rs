@@ -1,8 +1,9 @@
 // CYPHER name_param = "Niccolò Machiavelli" birth_year_param = 1469 MATCH (p:Person {name: $name_param, birth_year: $birth_year_param}) RETURN p
 use neo4rs::BoltType;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Query {
     pub text: String,
     pub params: HashMap<String, QueryParam>,
@@ -30,9 +31,19 @@ impl Query {
             .collect();
         (query, params)
     }
+    pub fn to_bolt_struct(&self) -> Bolt {
+        let (query, params) = self.to_bolt();
+        Bolt { query, params }
+    }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct Bolt {
+    pub query: String,
+    pub params: Vec<(String, QueryParam)>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum QueryParam {
     String(String),
     Integer(i32),
@@ -40,9 +51,9 @@ pub enum QueryParam {
     Boolean(bool),
 }
 
-impl Into<BoltType> for QueryParam {
-    fn into(self) -> BoltType {
-        match self {
+impl From<QueryParam> for BoltType {
+    fn from(param: QueryParam) -> BoltType {
+        match param {
             QueryParam::String(s) => s.into(),
             QueryParam::Integer(i) => i.into(),
             QueryParam::Float(f) => f.into(),
@@ -50,8 +61,9 @@ impl Into<BoltType> for QueryParam {
         }
     }
 }
+
 impl QueryParam {
-    pub(crate) fn to_cypher_string(&self) -> String {
+    pub fn to_cypher_string(&self) -> String {
         match self {
             QueryParam::String(s) => format!("\"{}\"", s.replace("\"", "\\\"")),
             QueryParam::Integer(i) => i.to_string(),
@@ -186,7 +198,7 @@ mod tests {
             "\"test\""
         );
         assert_eq!(QueryParam::Integer(42).to_cypher_string(), "42");
-        assert_eq!(QueryParam::Float(3.14).to_cypher_string(), "3.14");
+        assert_eq!(QueryParam::Float(3.16).to_cypher_string(), "3.16");
         assert_eq!(QueryParam::Boolean(true).to_cypher_string(), "true");
     }
 
@@ -197,7 +209,7 @@ mod tests {
             matches!(QueryParam::from("test".to_string()), QueryParam::String(s) if s == "test")
         );
         assert!(matches!(QueryParam::from(42), QueryParam::Integer(i) if i == 42));
-        assert!(matches!(QueryParam::from(3.14), QueryParam::Float(f) if f == 3.14));
+        assert!(matches!(QueryParam::from(3.16), QueryParam::Float(f) if f == 3.16));
         assert!(matches!(QueryParam::from(true), QueryParam::Boolean(b) if b));
     }
 }
