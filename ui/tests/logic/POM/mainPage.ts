@@ -10,19 +10,25 @@ export default class NavBarComponent extends BasePage {
         return this.page.locator("//header//img[@alt='FalkorDB']")
     }
 
-    private get navBarSocialLink(): (navItem: string) => Locator {
+    private get headerSocialLink(): (navItem: string) => Locator {
         return (navItem: string) => this.page.locator(`//a[@title="${navItem}"]`);
     }
 
-    private get navBarLink(): (navItem: string) => Locator {
+    private get headerLink(): (navItem: string) => Locator {
         return (navItem: string) => this.page.locator(`//a[contains(text(), '${navItem}')]`);
     }
+
+     /* Footer Locators */
+
+     private get footerLink(): (item: string) => Locator {
+        return (item: string) => this.page.locator(`//a[contains(text(), '${item}')]`);
+    }
+
+    /* Header Functionality  */
 
     async clickOnFalkorLogo(): Promise<void> {
         await this.falkorDBLogo.click();
     }
-
-    /* Header Functionality  */
 
     async clickOnFalkor(): Promise<Page> {
         await this.page.waitForLoadState('networkidle');
@@ -33,20 +39,31 @@ export default class NavBarComponent extends BasePage {
         return newPage
     }
 
-    async getNavBarSocialLink(navItem : string): Promise<Page> {
+    async getHeaderSocialLink(navItem : string): Promise<Page> {
         await this.page.waitForLoadState('networkidle'); 
         const [newPage] = await Promise.all([
             this.page.waitForEvent('popup'),
-            this.navBarSocialLink(navItem).click(),
+            this.headerSocialLink(navItem).click(),
         ]);
         return newPage
     }
 
-    async getNavBarLink(navItem : string): Promise<Page> {
+    async getHeaderLink(navItem : string): Promise<Page> {
         await this.page.waitForLoadState('networkidle'); 
         const [newPage] = await Promise.all([
             this.page.waitForEvent('popup'),
-            this.navBarLink(navItem).click(),
+            this.headerLink(navItem).click(),
+        ]);
+        return newPage
+    }
+
+    /* Footer Functionality  */
+
+    async getFooterLink(item : string): Promise<Page> {
+        await this.page.waitForLoadState('networkidle'); 
+        const [newPage] = await Promise.all([
+            this.page.waitForEvent('popup'),
+            this.footerLink(item).click(),
         ]);
         return newPage
     }

@@ -30,7 +30,6 @@ jobs:
         run: npx playwright install --with-deps
       - name: Set up environment and run tests
         run: |
-          npm install
           npm run build
           npm start &
           npx playwright test --reporter=dot,list
