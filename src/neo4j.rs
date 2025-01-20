@@ -49,9 +49,9 @@ impl Neo4j {
         }
     }
 
-    pub async fn restore_db<'a>(
+    pub async fn restore_db(
         &self,
-        spec: Spec<'a>,
+        spec: Spec<'_>,
     ) -> BenchmarkResult<Output> {
         self.restore(spec).await
     }
@@ -77,9 +77,9 @@ impl Neo4j {
         format!("{}/bin/neo4j-admin", self.neo4j_home.clone())
     }
 
-    pub async fn dump<'a>(
+    pub async fn dump(
         &self,
-        spec: Spec<'a>,
+        spec: Spec<'_>,
     ) -> BenchmarkResult<Output> {
         if fs::metadata(&self.neo4j_pid()).await.is_ok() {
             return Err(OtherError(
@@ -103,9 +103,9 @@ impl Neo4j {
         spawn_command(command.as_str(), &args).await
     }
 
-    pub async fn restore<'a>(
+    pub async fn restore(
         &self,
-        spec: Spec<'a>,
+        spec: Spec<'_>,
     ) -> BenchmarkResult<Output> {
         info!("Restoring DB");
         if fs::metadata(&self.neo4j_pid()).await.is_ok() {
@@ -238,9 +238,7 @@ impl Neo4j {
     }
 }
 
-async fn report_metrics(
-    sys: std::sync::Arc<std::sync::Mutex<sysinfo::System>>
-) -> BenchmarkResult<()> {
+async fn report_metrics(sys: std::sync::Arc<std::sync::Mutex<System>>) -> BenchmarkResult<()> {
     let mut system = sys.lock().unwrap();
     // Refresh CPU usage
     system.refresh_all();
@@ -276,10 +274,7 @@ fn search_in_os_strings(
     os_strings: &[OsString],
     target: &str,
 ) -> bool {
-    os_strings.iter().any(|os_string| {
-        os_string
-            .as_os_str()
-            .to_str()
-            .map_or(false, |s| s == target)
-    })
+    os_strings
+        .iter()
+        .any(|os_string| os_string.as_os_str().to_str() == Some(target))
 }

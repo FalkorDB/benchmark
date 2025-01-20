@@ -45,7 +45,7 @@ pub struct Spec<'a> {
     index_url: &'a str,
 }
 
-impl<'a> Spec<'a> {
+impl Spec<'_> {
     pub fn new(
         name: Name,
         size: Size,
