@@ -17,7 +17,7 @@ export interface Result {
 export interface Run {
   vendor: string;
   "read-write-ratio": number;
-  "clients:": number;
+  "clients": number;
   platform: string;
   "target-messages-per-second": number;
   edges: number;
