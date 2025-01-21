@@ -47,11 +47,12 @@ const HorizontalBarChart: React.FC<HorizontalBarChartProps> = ({
 }) => {
   const containerRef = useRef<null | HTMLDivElement>(null);
   const chartRef = useRef<Chart | null>(null);
-  const rootStyles = getComputedStyle(document.documentElement);
-  const backgroundColors = [
-    rootStyles.getPropertyValue("--FalkorDB-color").trim(),
-    rootStyles.getPropertyValue("--Neo4j-color").trim(),
-  ];
+  const backgroundColors = typeof window !== "undefined"
+  ? [
+      getComputedStyle(document.documentElement).getPropertyValue("--FalkorDB-color").trim(),
+      getComputedStyle(document.documentElement).getPropertyValue("--Neo4j-color").trim(),
+    ]
+  : ["#FF66B3", "#0B6190"];
 
   const chartData = {
     labels: data.map((item) => item.vendor),
