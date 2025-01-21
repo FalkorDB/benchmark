@@ -47,6 +47,11 @@ const HorizontalBarChart: React.FC<HorizontalBarChartProps> = ({
 }) => {
   const containerRef = useRef<null | HTMLDivElement>(null);
   const chartRef = useRef<Chart | null>(null);
+  const rootStyles = getComputedStyle(document.documentElement);
+  const backgroundColors = [
+    rootStyles.getPropertyValue("--FalkorDB-color").trim(),
+    rootStyles.getPropertyValue("--Neo4j-color").trim(),
+  ];
 
   const chartData = {
     labels: data.map((item) => item.vendor),
@@ -54,7 +59,7 @@ const HorizontalBarChart: React.FC<HorizontalBarChartProps> = ({
       {
         label: chartLabel,
         data: data.map((item) => item[dataKey]),
-        backgroundColor: ["#FF66B3", "#0B6190"],
+        backgroundColor: backgroundColors,
         borderRadius: 8,
         barThickness: "flex" as const,
         categoryPercentage: 1,

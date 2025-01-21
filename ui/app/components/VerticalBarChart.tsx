@@ -28,14 +28,14 @@ interface VerticalBarChartProps {
   xAxisTitle: string;
 }
 
-const getBarColor = (vendor: string, defaultColor: string) => {
+const getBarColor = (vendor: string) => {
   switch (vendor.toLowerCase()) {
     case "falkordb":
-      return "#FF66B3";
+      return getComputedStyle(document.documentElement).getPropertyValue("--FalkorDB-color").trim();
     case "neo4j":
-      return "#0B6190";
+      return getComputedStyle(document.documentElement).getPropertyValue("--Neo4j-color").trim();;
     default:
-      return defaultColor;
+      return "#191919";
   }
 };
 
@@ -51,19 +51,19 @@ const VerticalBarChart: React.FC<VerticalBarChartProps> = ({
       {
         label: `${item.vendor} P50`,
         data: [item.p50, 0, 0],
-        backgroundColor: getBarColor(item.vendor, "#FF804D"),
+        backgroundColor: getBarColor(item.vendor),
         stack: `${index}`,
       },
       {
         label: `${item.vendor} P95`,
         data: [0, item.p95, 0],
-        backgroundColor: getBarColor(item.vendor, "#7466FF"),
+        backgroundColor: getBarColor(item.vendor),
         stack: `${index}`,
       },
       {
         label: `${item.vendor} P99`,
         data: [0, 0, item.p99],
-        backgroundColor: getBarColor(item.vendor, "#191919"),
+        backgroundColor: getBarColor(item.vendor),
         stack: `${index}`,
       },
     ]),

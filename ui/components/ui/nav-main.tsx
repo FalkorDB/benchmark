@@ -84,9 +84,9 @@ export function NavMain({
                       className={`font-fira px-4 py-2 rounded-md border text-center w-full ${
                         selectedOptions[group.title]?.includes(option.id)
                           ? option.id === "falkordb"
-                            ? "bg-[#F5F4FF] text-[#FF66B3] border-[#FF66B3]"
+                            ? "bg-[#F5F4FF] text-FalkorDB border-FalkorDB"
                             : option.id === "neo4j"
-                            ? "bg-[#F5F4FF] text-[#0B6190] border-[#0B6190]"
+                            ? "bg-[#F5F4FF] text-Neo4j border-Neo4j"
                             : "bg-[#F5F4FF] text-[#7466FF] border-[#7466FF]"
                           : "bg-gray-100 text-gray-800 border-transparent"
                       }`}
