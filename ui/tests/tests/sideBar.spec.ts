@@ -51,7 +51,7 @@ test.describe("SideBar tests", () => {
   });
 
   sideBarItems.forEach(({ item, expectedRes}) => {
-    test(`verify selecting different hardware changes the charts ${item}`, async () => {
+    test(`Verify ${item} selection updates the chart results`, async () => {
       const sidebar = await browser.createNewPage(MainPage, urls.baseUrl);
       const graphDetails = await sidebar.getGraphDetails();
       await sidebar.clickOnSidebarSelection(item);
@@ -67,6 +67,14 @@ test.describe("SideBar tests", () => {
         expect(areValuesDifferent).toBe(expectedRes);
       }
     });
+  });
+
+  test("Verify Sidebar trigger button toggles the sidebar open and closed", async () => {
+    const sidebar = await browser.createNewPage(MainPage, urls.baseUrl);
+    await sidebar.clickOnSideBarToggle();
+    expect(await sidebar.getSideBarState()).toBe("collapsed");
+    await sidebar.clickOnSideBarToggle();
+    expect(await sidebar.getSideBarState()).toBe("expanded");
   });
   
 });
