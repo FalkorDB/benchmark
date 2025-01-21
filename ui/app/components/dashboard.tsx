@@ -180,6 +180,28 @@ export default function DashBoard() {
       : "0.00",
   }));
 
+
+  //saving data to window.allChartData
+  /* eslint-disable */
+  if (typeof window !== "undefined") {
+    (window as any).allChartData = (window as any).allChartData || [];
+    const addOrReplaceChartData = (key: string, value: any) => {
+      const chartDataArray = (window as any).allChartData;
+      const existingIndex = chartDataArray.findIndex((entry: any) => entry.key === key);
+      if (existingIndex !== -1) {
+        chartDataArray.splice(existingIndex, 1);
+      }
+      chartDataArray.push({ key, value });
+    };
+
+    addOrReplaceChartData("throughputData", throughputData);
+    addOrReplaceChartData("deadlineData", deadlineData);
+    addOrReplaceChartData("memoryData", memoryData);
+    addOrReplaceChartData("cpuData", cpuData);
+    addOrReplaceChartData("latencyData", latencyData);
+  }
+  
+  
   return (
     <SidebarProvider className="h-screen w-screen overflow-hidden">
       <div className="flex h-full w-full">

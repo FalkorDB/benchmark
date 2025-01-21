@@ -27,7 +27,7 @@ test.describe("Header tests", () => {
 
   test("Verify clicking on falkordb logo redirects to specified URL", async () => {
     const header = await browser.createNewPage(MainPage, urls.baseUrl);
-    const page = await header.clickOnFalkordb();
+    const page = await header.clickOnFalkorLogo();
     expect(page.url()).toBe(urls.falkorDBUrl);
   });
 
