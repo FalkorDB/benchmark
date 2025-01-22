@@ -1,0 +1,12 @@
+{
+    "baseUrl": "http://localhost:3000/",
+    "falkorDBUrl": "https://www.falkordb.com/",
+    "benchmarkGithubUrl": "https://github.com/FalkorDB/benchmark",
+    "falkordbDiscordUrl": "https://discord.com/invite/99y2Ubh6tg",
+    "signUpUrl": "https://app.falkordb.cloud/signup",
+    "startFreeUrl": "https://www.falkordb.com/try-free/",
+    "DatasetUrl": "https://github.com/FalkorDB/benchmark/blob/master/readme.md#data",
+    "ReadmeUrl": "https://github.com/FalkorDB/benchmark/blob/master/readme.md",
+    "FAQUrl": "https://github.com/FalkorDB/benchmark/blob/master/readme.md#faq",
+    "runBenchmarkWithYourDataUrl": "https://github.com/FalkorDB/benchmark/blob/master/readme.md#installation-steps"
+}

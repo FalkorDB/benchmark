@@ -7,6 +7,7 @@ const FooterComponent = () => {
         <a
           href="https://github.com/FalkorDB/benchmark/blob/master/readme.md#data"
           className="hover:text-gray-800 flex items-center h-full whitespace-nowrap"
+          target="_blank"
         >
           DATASET USED <MoveUpRight size={16} />
         </a>
@@ -23,6 +24,7 @@ const FooterComponent = () => {
         <a
           href="https://github.com/FalkorDB/benchmark/blob/master/readme.md"
           className="hover:text-gray-800 flex items-center h-full whitespace-nowrap"
+          target="_blank"
         >
           README <MoveUpRight size={16} />
         </a>
@@ -31,6 +33,7 @@ const FooterComponent = () => {
         <a
           href="https://github.com/FalkorDB/benchmark/blob/master/readme.md#faq"
           className="hover:text-gray-800 flex items-center h-full whitespace-nowrap"
+          target="_blank"
         >
           FAQ <MoveUpRight size={16} />
         </a>

@@ -180,6 +180,28 @@ export default function DashBoard() {
       : "0.00",
   }));
 
+
+  //saving data to window.allChartData
+  /* eslint-disable */
+  if (typeof window !== "undefined") {
+    (window as any).allChartData = (window as any).allChartData || [];
+    const addOrReplaceChartData = (key: string, value: any) => {
+      const chartDataArray = (window as any).allChartData;
+      const existingIndex = chartDataArray.findIndex((entry: any) => entry.key === key);
+      if (existingIndex !== -1) {
+        chartDataArray.splice(existingIndex, 1);
+      }
+      chartDataArray.push({ key, value });
+    };
+
+    addOrReplaceChartData("throughputData", throughputData);
+    addOrReplaceChartData("deadlineData", deadlineData);
+    addOrReplaceChartData("memoryData", memoryData);
+    addOrReplaceChartData("cpuData", cpuData);
+    addOrReplaceChartData("latencyData", latencyData);
+  }
+  
+  
   return (
     <SidebarProvider className="h-screen w-screen overflow-hidden">
       <div className="flex h-full w-full">
@@ -190,7 +212,7 @@ export default function DashBoard() {
         />
         <SidebarInset className="flex-grow h-full min-h-0">
           <div className="grid h-full grid-cols-2 grid-rows-[2fr,1fr,1fr,50px] gap-2 p-1">
-            <div className="col-span-2 bg-muted/50 rounded-xl p-4 min-h-0">
+            <div className="col-span-2 bg-muted/50 rounded-xl p-4 min-h-0" id="latency-chart">
               <VerticalBarChart
                 data={latencyData}
                 title="Vendor Latency Metrics"
@@ -198,7 +220,7 @@ export default function DashBoard() {
                 xAxisTitle="Vendors"
               />
             </div>
-            <div className="bg-muted/50 rounded-xl p-4 min-h-0">
+            <div className="bg-muted/50 rounded-xl p-4 min-h-0" id="throughput-chart">
               <HorizontalBarChart
                 data={throughputData}
                 dataKey="actualMessagesPerSecond"
@@ -209,7 +231,7 @@ export default function DashBoard() {
                 unit=""
               />
             </div>
-            <div className="bg-muted/50 rounded-xl p-4 min-h-0 relative">
+            <div className="bg-muted/50 rounded-xl p-4 min-h-0 relative" id="deadline-chart">
               <HoverCard>
                 <HoverCardTrigger>
                   <span
@@ -237,7 +259,7 @@ export default function DashBoard() {
                 unit="min"
               />
             </div>
-            <div className="bg-muted/50 rounded-xl p-4 min-h-0">
+            <div className="bg-muted/50 rounded-xl p-4 min-h-0" id="memory-chart">
               <HorizontalBarChart
                 data={memoryData}
                 dataKey="memory"
@@ -248,7 +270,7 @@ export default function DashBoard() {
                 unit="mb"
               />
             </div>
-            <div className="bg-muted/50 rounded-xl p-4 min-h-0">
+            <div className="bg-muted/50 rounded-xl p-4 min-h-0" id="cpu-chart">
               <HorizontalBarChart
                 data={cpuData}
                 dataKey="cpu"
