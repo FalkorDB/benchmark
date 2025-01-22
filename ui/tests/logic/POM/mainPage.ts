@@ -53,8 +53,8 @@ export default class NavBarComponent extends BasePage {
     return this.page.locator("//div[@id='sidebar-container']");
   }
 
-  private get sideBarMenu(): Locator {
-    return this.page.locator("(//ul[@data-sidebar='menu'])[2]");
+  private get sideBarContent(): Locator {
+    return this.page.locator("div[data-sidebar='content']");
   }
 
   /* Header Functionality  */
@@ -91,6 +91,16 @@ export default class NavBarComponent extends BasePage {
 
   async getSideBarState(): Promise<string | null> {
     return await this.sideBarContainer.getAttribute("data-state");
+  }
+
+  async scrollToBottomInSidebar(): Promise<void> {
+    await this.sideBarContent.evaluate((el) => el.scrollTo(0, el.scrollHeight));
+  }
+
+  async isScrolledToBottomInSidebar(): Promise<boolean> {
+    return await this.sideBarContent.evaluate((el) => {
+      return el.scrollTop + el.clientHeight >= el.scrollHeight;
+    });
   }
 
   async getGraphDetails(): Promise<any> {

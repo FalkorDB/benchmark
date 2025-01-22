@@ -5,10 +5,19 @@ import urls from "../config/urls.json";
 import { sideBarItems } from "../config/testData";
 
 function extractSecondValues(
-  graphDetails: { key: any; value: any[] }[],
-  updatedGraphDetails: { key: any; value: any[] }[],
+  graphDetails: { key: string; value: Array<Record<string, number>> }[],
+  updatedGraphDetails: { key: string; value: Array<Record<string, number>> }[],
   index: number
-): { originalValue: any; updatedValue: any } {
+): { originalValue: number; updatedValue: number } {
+  if (
+    index < 0 ||
+    index >= graphDetails.length ||
+    index >= updatedGraphDetails.length
+  ) {
+    throw new Error(
+      `Invalid index ${index}. Index must be within array bounds.`
+    );
+  }
   const matchedUpdatedData = updatedGraphDetails.find(
     (data: { key: any }) => data.key === graphDetails[index].key
   );
@@ -17,7 +26,9 @@ function extractSecondValues(
   );
 
   if (!matchedUpdatedData || !matchedOriginalData) {
-    throw new Error(`Matching data not found for index ${index}`);
+    throw new Error(
+      `No matching data found for key "${graphDetails[index].key}" at index ${index}`
+    );
   }
 
   const originalSecondValue = matchedOriginalData.value[1];
@@ -50,21 +61,23 @@ test.describe("SideBar tests", () => {
     }
   });
 
-  sideBarItems.forEach(({ item, expectedRes}) => {
+  sideBarItems.forEach(({ item, expectedRes }) => {
     test(`Verify ${item} selection updates the chart results`, async () => {
       const sidebar = await browser.createNewPage(MainPage, urls.baseUrl);
       const graphDetails = await sidebar.getGraphDetails();
       await sidebar.clickOnSidebarSelection(item);
       const updatedGraphDetails = await sidebar.getGraphDetails();
-  
+
       for (let i = 0; i < graphDetails.length; i++) {
-        const { originalValue, updatedValue } = extractSecondValues(
-          graphDetails,
-          updatedGraphDetails,
-          i
-        );
-        const areValuesDifferent = originalValue !== updatedValue;
-        expect(areValuesDifferent).toBe(expectedRes);
+        await expect(async () => {
+          const { originalValue, updatedValue } = extractSecondValues(
+            graphDetails,
+            updatedGraphDetails,
+            i
+          );
+          const areValuesDifferent = originalValue !== updatedValue;
+          expect(areValuesDifferent).toBe(expectedRes);
+        }).toPass({ timeout: 5000 });
       }
     });
   });
@@ -76,5 +89,10 @@ test.describe("SideBar tests", () => {
     await sidebar.clickOnSideBarToggle();
     expect(await sidebar.getSideBarState()).toBe("expanded");
   });
-  
+
+  test(`Verify manual scroll functionality`, async () => {
+    const sidebar = await browser.createNewPage(MainPage, urls.baseUrl);
+    await sidebar.scrollToBottomInSidebar();
+    expect(await sidebar.isScrolledToBottomInSidebar()).toBe(true);
+  });
 });
