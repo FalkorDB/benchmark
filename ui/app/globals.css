@@ -50,7 +50,7 @@ body {
     --chart-5: 27 87% 67%;
     --radius: 0.5rem;
     --FalkorDB-color: #FF804D;
-    --Neo4j-color: #0B6190
+    --Neo4j-color: #0B6190;
   }
 
   .dark {
