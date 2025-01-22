@@ -44,7 +44,7 @@ const FooterComponent = () => {
           href="https://github.com/FalkorDB/benchmark/blob/master/readme.md#installation-steps"
           target="_blank"
           rel="noopener noreferrer"
-          className="ml-auto bg-pink-500 text-white px-4 py-2 rounded-lg font-semibold text-sm hover:bg-pink-600 min-w-[150px] max-w-full min-h-[40px] max-h-full whitespace-normal break-words text-center flex items-center justify-center"
+          className="ml-auto bg-[#F5F4FF] text-[#7466FF] border-[#7466FF] border px-4 py-2 rounded-lg font-semibold text-sm hover:bg-[#E5E4FF] min-w-[150px] max-w-full min-h-[40px] max-h-full whitespace-normal break-words text-center flex items-center justify-center"
         >
           RUN THE BENCHMARK WITH YOUR DATA
         </a>
