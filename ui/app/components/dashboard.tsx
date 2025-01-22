@@ -212,7 +212,7 @@ export default function DashBoard() {
         />
         <SidebarInset className="flex-grow h-full min-h-0">
           <div className="grid h-full grid-cols-2 grid-rows-[2fr,1fr,1fr,50px] gap-2 p-1">
-            <div className="col-span-2 bg-muted/50 rounded-xl p-4 min-h-0">
+            <div className="col-span-2 bg-muted/50 rounded-xl p-4 min-h-0" id="latency-chart">
               <VerticalBarChart
                 data={latencyData}
                 title="Vendor Latency Metrics"
@@ -220,7 +220,7 @@ export default function DashBoard() {
                 xAxisTitle="Vendors"
               />
             </div>
-            <div className="bg-muted/50 rounded-xl p-4 min-h-0">
+            <div className="bg-muted/50 rounded-xl p-4 min-h-0" id="throughput-chart">
               <HorizontalBarChart
                 data={throughputData}
                 dataKey="actualMessagesPerSecond"
@@ -231,7 +231,7 @@ export default function DashBoard() {
                 unit=""
               />
             </div>
-            <div className="bg-muted/50 rounded-xl p-4 min-h-0 relative">
+            <div className="bg-muted/50 rounded-xl p-4 min-h-0 relative" id="deadline-chart">
               <HoverCard>
                 <HoverCardTrigger>
                   <span
@@ -259,7 +259,7 @@ export default function DashBoard() {
                 unit="min"
               />
             </div>
-            <div className="bg-muted/50 rounded-xl p-4 min-h-0">
+            <div className="bg-muted/50 rounded-xl p-4 min-h-0" id="memory-chart">
               <HorizontalBarChart
                 data={memoryData}
                 dataKey="memory"
@@ -270,7 +270,7 @@ export default function DashBoard() {
                 unit="mb"
               />
             </div>
-            <div className="bg-muted/50 rounded-xl p-4 min-h-0">
+            <div className="bg-muted/50 rounded-xl p-4 min-h-0" id="cpu-chart">
               <HorizontalBarChart
                 data={cpuData}
                 dataKey="cpu"

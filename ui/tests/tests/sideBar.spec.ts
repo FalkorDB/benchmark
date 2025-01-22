@@ -2,7 +2,7 @@ import { test, expect } from "@playwright/test";
 import BrowserWrapper from "../infra/ui/browserWrapper";
 import MainPage from "../logic/POM/mainPage";
 import urls from "../config/urls.json";
-import { sideBarItems } from "../config/testData";
+import { hoverItems, sideBarItems } from "../config/testData";
 
 function extractSecondValues(
   graphDetails: { key: string; value: Array<Record<string, number>> }[],
@@ -94,5 +94,23 @@ test.describe("SideBar tests", () => {
     const sidebar = await browser.createNewPage(MainPage, urls.baseUrl);
     await sidebar.scrollToBottomInSidebar();
     expect(await sidebar.isScrolledToBottomInSidebar()).toBe(true);
+  });
+
+  hoverItems.forEach(({ item, expectedRes }) => {
+    test(`Verify hover behavior for hardware item: ${item}`, async () => {
+      const sidebar = await browser.createNewPage(MainPage, urls.baseUrl);
+      await sidebar.hoverOnSideBarHardware(item);
+      expect(await sidebar.isHoverElementVisible()).toBe(expectedRes);
+    });
+  });
+
+  test(`Hover over 'Deadline Offset Analysis' link and validate its content`, async () => {
+    const sidebar = await browser.createNewPage(MainPage, urls.baseUrl);
+    await sidebar.hoverOnDeadlineInfoLink();
+    expect(await sidebar.isHoverElementVisible()).toBe(true);
+    const expectedText =
+      "Deadline Offset Analysis Comparison of the time delays (deadlines) between different vendors to evaluate their performance and responsiveness.";
+    const actualText = await sidebar.getDeadlineInfoLinkText();
+    expect(actualText).toBe(expectedText);
   });
 });

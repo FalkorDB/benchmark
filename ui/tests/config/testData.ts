@@ -21,3 +21,8 @@ export const headerItems: { navItem: string; expectedRes: string }[] = [
     { item: "40", expectedRes: true },
     { item: "Neo4j", expectedRes: false },
   ];
+
+  export const hoverItems: { item: string; expectedRes: boolean }[] = [
+    { item: "MacBook", expectedRes: true },
+    { item: "Linux", expectedRes: true },
+  ];

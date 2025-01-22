@@ -17,6 +17,21 @@ export default class NavBarComponent extends BasePage {
     }
   }
 
+  /* General Locators */
+
+  private get hoverElementPopUp(): Locator {
+    return this.page.locator("//div[@data-side='bottom']");
+  }
+
+  private get hoverElement(): (item: string) => Locator {
+    return (item: string) =>
+      this.page.locator(`//button[text()="${item}"]/following-sibling::a/span`);
+  }
+
+  private get deadlineInfoLink(): Locator {
+    return this.page.locator("//div[@id='deadline-chart']/a/span");
+  }
+
   /* Header Locators */
 
   private get falkorDBLogo(): Locator {
@@ -55,6 +70,25 @@ export default class NavBarComponent extends BasePage {
 
   private get sideBarContent(): Locator {
     return this.page.locator("div[data-sidebar='content']");
+  }
+
+  /* General Functionality  */
+
+  async hoverOnSideBarHardware(item: string): Promise<void> {
+    await this.hoverElement(item).hover();
+  }
+
+  async isHoverElementVisible(): Promise<boolean> {
+    await this.page.waitForTimeout(2000);
+    return this.hoverElementPopUp.isVisible();
+  }
+
+  async hoverOnDeadlineInfoLink(): Promise<void> {
+    await this.deadlineInfoLink.hover();
+  }
+
+  async getDeadlineInfoLinkText(): Promise<string> {
+    return await this.hoverElementPopUp.innerText();
   }
 
   /* Header Functionality  */
@@ -125,5 +159,4 @@ export default class NavBarComponent extends BasePage {
       throw error;
     }
   }
-
 }
