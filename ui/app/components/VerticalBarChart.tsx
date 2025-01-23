@@ -82,13 +82,12 @@ const VerticalBarChart: React.FC<VerticalBarChartProps> = ({
         font: {
           size: 20,
           weight: "bold" as const,
-          family: "space"
         },
       },
       subtitle: {
         display: true,
         text: subTitle,
-        font: { size: 13 , family: "fira"},
+        font: { size: 12 },
       },
       legend: {
         display: true,

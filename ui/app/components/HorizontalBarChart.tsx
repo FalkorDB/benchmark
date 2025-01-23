@@ -82,7 +82,6 @@ const HorizontalBarChart: React.FC<HorizontalBarChartProps> = ({
         font: {
           size: 20,
           weight: "bold" as const,
-          family: "space"
         },
         padding: {
           bottom: 2,
@@ -92,9 +91,8 @@ const HorizontalBarChart: React.FC<HorizontalBarChartProps> = ({
         display: true,
         text: subTitle,
         font: {
-          size: 13,
+          size: 12,
           weight: "normal" as const,
-          family: "fira"
         },
         padding: {
           bottom: 2,
