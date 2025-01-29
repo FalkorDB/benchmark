@@ -12,7 +12,7 @@
         "deadline-offset": "0ms",
         "actual-messages-per-second": 500,
         "latency": {
-          "p50": "37ms",
+          "p50": "21ms",
           "p95": "46ms",
           "p99": "49ms"
         },
@@ -458,7 +458,7 @@
         "deadline-offset": "0ms",
         "actual-messages-per-second": 500,
         "latency": {
-          "p50": "37.5ms",
+          "p50": "30.5ms",
           "p95": "47.6ms",
           "p99": "49.9ms"
         },
