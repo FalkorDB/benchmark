@@ -20,7 +20,7 @@ export const sidebarConfig: {
 } = {
   sidebarData: [
     {
-      title: "Realstic",
+      title: "Realistic",
       description: "",
       layout: "row",
       icon: Activity,

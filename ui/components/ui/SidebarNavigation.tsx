@@ -41,7 +41,7 @@ export function NavMain({
 }) {
   const { state } = useSidebar();
   const isRealisticWorkloadOn =
-    selectedOptions["Realstic"]?.includes("on");
+    selectedOptions["Realistic"]?.includes("on");
 
   const filteredItems = items.filter((group) => {
     if (group.title === "Queries" && isRealisticWorkloadOn) return false;
