@@ -1055,7 +1055,7 @@
       }
     },
     {
-      "vendor": "Neo4J",
+      "vendor": "Neo4j",
       "node_count": 100000,
       "relation_count": 1768515,
       "query_count": 100000,
