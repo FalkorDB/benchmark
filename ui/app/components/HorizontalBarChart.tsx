@@ -69,6 +69,10 @@ const HorizontalBarChart: React.FC<HorizontalBarChartProps> = ({
   };
 
   const maxDataValue = Math.max(...data.map((item) => item[dataKey]));
+  const dataValues = data.map((item) => item[dataKey]);
+  const maxValue = Math.max(...dataValues);
+  const minValue = Math.min(...dataValues);
+  const ratio = Math.round(maxValue / minValue).toFixed(0);
 
   const options = {
     indexAxis: "y" as const,
@@ -90,9 +94,9 @@ const HorizontalBarChart: React.FC<HorizontalBarChartProps> = ({
       subtitle: {
         display: true,
         text: subTitle,
-        font: {
-          size: 12,
-          weight: "normal" as const,
+        font: { 
+          size: 13,
+          weight: "bold" as const,
         },
         padding: {
           bottom: 2,
@@ -100,6 +104,21 @@ const HorizontalBarChart: React.FC<HorizontalBarChartProps> = ({
       },
       legend: {
         display: false,
+      },
+      datalabels: {
+        anchor: "end" as const,
+        align: "right" as const,
+        color: "#000",
+        font: {
+          weight: "bold" as const,
+          size: 14,
+        },
+        formatter: (_: any, context: { dataIndex: any; dataset: { data: { [x: string]: any; }; }; }) => {
+          const index = context.dataIndex;
+          const value = context.dataset.data[index];
+          
+          return value === maxValue ? `x${ratio}` : "";
+        },
       },
     },
     scales: {

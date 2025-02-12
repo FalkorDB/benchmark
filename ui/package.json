@@ -22,6 +22,7 @@
     "@shadcn/ui": "^0.0.4",
     "autoprefixer": "^10.4.20",
     "chart.js": "^4.4.7",
+    "chartjs-plugin-datalabels": "^2.2.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "lucide-react": "^0.469.0",

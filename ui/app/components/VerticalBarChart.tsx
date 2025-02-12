@@ -11,6 +11,7 @@ import {
   Legend,
   Title,
 } from "chart.js";
+import ChartDataLabels from "chartjs-plugin-datalabels";
 
 ChartJS.register(
   BarElement,
@@ -18,60 +19,25 @@ ChartJS.register(
   LinearScale,
   Tooltip,
   Legend,
-  Title
+  Title,
+  ChartDataLabels
 );
 
 interface VerticalBarChartProps {
-  data: { vendor: string; p50: number; p95: number; p99: number }[];
+  chartId: string;
+  chartData: any;
   title: string;
   subTitle: string;
   xAxisTitle: string;
 }
 
-const getBarColor = (vendor: string) => {
-  switch (vendor.toLowerCase()) {
-    case "falkordb":
-      return getComputedStyle(document.documentElement).getPropertyValue("--FalkorDB-color").trim();
-    case "neo4j":
-      return getComputedStyle(document.documentElement).getPropertyValue("--Neo4j-color").trim();;
-    default:
-      return "#191919";
-  }
-};
-
 const VerticalBarChart: React.FC<VerticalBarChartProps> = ({
-  data,
+  chartId,
+  chartData,
   title,
   subTitle,
   xAxisTitle,
 }) => {
-  const chartData = {
-    labels: ["P50", "P95", "P99"],
-    datasets: data.flatMap((item, index) => [
-      {
-        label: `${item.vendor} P50`,
-        data: [item.p50, 0, 0],
-        backgroundColor: getBarColor(item.vendor),
-        stack: `${index}`,
-        borderRadius: 8,
-      },
-      {
-        label: `${item.vendor} P95`,
-        data: [0, item.p95, 0],
-        backgroundColor: getBarColor(item.vendor),
-        stack: `${index}`,
-        borderRadius: 8,
-      },
-      {
-        label: `${item.vendor} P99`,
-        data: [0, 0, item.p99],
-        backgroundColor: getBarColor(item.vendor),
-        stack: `${index}`,
-        borderRadius: 8,
-      },
-    ]),
-  };
-
   const options = {
     responsive: true,
     maintainAspectRatio: false,
@@ -79,47 +45,40 @@ const VerticalBarChart: React.FC<VerticalBarChartProps> = ({
       title: {
         display: true,
         text: title,
-        font: {
-          size: 20,
-          weight: "bold" as const,
-        },
+        font: { size: 20, weight: "bold" as const },
       },
       subtitle: {
         display: true,
         text: subTitle,
-        font: { size: 12 },
+        font: { size: 13, weight: "bold" as const },
       },
-      legend: {
-        display: true,
-        position: "top" as const,
-      },
+      legend: { display: true, position: "top" as const },
       tooltip: {
         callbacks: {
-          // eslint-disable-next-line
           label: function (context: any) {
             const value = context.raw;
             return `${context.dataset.label}: ${value} ms`;
           },
         },
       },
+      datalabels: {
+        display: chartId === "2" ? "auto" : false,
+        anchor: "end" as const,
+        align: "top" as const,
+        formatter: (value: number) => (value > 0 ? `${Math.round(value)}` : ""),
+        font: { weight: "bold" as const},
+        color: "#000",
+      },
     },
     scales: {
       x: {
         grid: { display: false },
-        title: {
-          display: true,
-          text: xAxisTitle,
-          font: { size: 16 },
-        },
-        stacked: true,
+        title: { display: true, text: xAxisTitle, font: { size: 16 } },
       },
       y: {
         beginAtZero: true,
         grid: { display: true },
-        ticks: {
-          // eslint-disable-next-line
-          callback: (value: any) => `${value} ms`,
-        },
+        ticks: { callback: (value: any) => `${value} ms` },
       },
     },
   };
