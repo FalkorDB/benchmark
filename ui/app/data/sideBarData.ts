@@ -1,13 +1,10 @@
 import {
   Layers,
   Cpu,
-  Send,
   Users,
   Activity,
   BarChart,
   Search,
-  Database,
-  Filter,
 } from "lucide-react";
 export const sidebarConfig: {
   sidebarData: {

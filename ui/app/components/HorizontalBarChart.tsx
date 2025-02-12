@@ -113,6 +113,7 @@ const HorizontalBarChart: React.FC<HorizontalBarChartProps> = ({
           weight: "bold" as const,
           size: 14,
         },
+        // eslint-disable-next-line
         formatter: (_: any, context: { dataIndex: any; dataset: { data: { [x: string]: any; }; }; }) => {
           const index = context.dataIndex;
           const value = context.dataset.data[index];

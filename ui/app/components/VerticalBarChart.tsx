@@ -25,6 +25,7 @@ ChartJS.register(
 
 interface VerticalBarChartProps {
   chartId: string;
+  // eslint-disable-next-line
   chartData: any;
   title: string;
   subTitle: string;
@@ -55,6 +56,7 @@ const VerticalBarChart: React.FC<VerticalBarChartProps> = ({
       legend: { display: true, position: "top" as const },
       tooltip: {
         callbacks: {
+          // eslint-disable-next-line
           label: function (context: any) {
             const value = context.raw;
             return `${context.dataset.label}: ${value} ms`;
@@ -78,6 +80,7 @@ const VerticalBarChart: React.FC<VerticalBarChartProps> = ({
       y: {
         beginAtZero: true,
         grid: { display: true },
+        // eslint-disable-next-line
         ticks: { callback: (value: any) => `${value} ms` },
       },
     },
