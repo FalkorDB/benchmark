@@ -12,15 +12,6 @@ const FooterComponent = () => {
           DATASET USED <MoveUpRight size={16} />
         </a>
         <span className="border-l-2 border-gray-300 h-2/4 self-center"></span>
-
-        {/* <a
-          href="#"
-          className="hover:text-gray-800 flex items-center h-full whitespace-nowrap"
-        >
-          HOW TO INSTALL <MoveUpRight size={16} />
-        </a> */}
-        {/* <span className="border-l-2 border-gray-300 h-2/4 self-center"></span> */}
-
         <a
           href="https://github.com/FalkorDB/benchmark/blob/master/readme.md"
           className="hover:text-gray-800 flex items-center h-full whitespace-nowrap"
@@ -37,16 +28,24 @@ const FooterComponent = () => {
         >
           FAQ <MoveUpRight size={16} />
         </a>
+        <span className="border-l-2 border-gray-300 h-2/4 self-center"></span>
+        <a
+          href="https://github.com/FalkorDB/benchmark/blob/master/readme.md#installation-steps"
+          className="hover:text-gray-800 flex items-center h-full whitespace-nowrap"
+          target="_blank"
+        >
+          RUN THE BENCHMARK <MoveUpRight size={16} />
+        </a>
       </div>
 
       <div className="flex items-center h-16 w-full bg-muted/50 p-4">
         <a
-          href="https://github.com/FalkorDB/benchmark/blob/master/readme.md#installation-steps"
+          href="https://www.falkordb.com/contact-us/"
           target="_blank"
           rel="noopener noreferrer"
-          className="ml-auto bg-[#F5F4FF] text-[#7466FF] border-[#7466FF] border px-4 py-2 rounded-lg font-semibold text-sm hover:bg-[#E5E4FF] min-w-[150px] max-w-full min-h-[40px] max-h-full whitespace-normal break-words text-center flex items-center justify-center"
+          className="ml-auto bg-[#FF66B3] text-[#ffffff] border px-4 py-2 rounded-lg font-semibold text-sm min-w-[150px] max-w-full min-h-[40px] max-h-full whitespace-normal break-words text-center flex items-center justify-center"
         >
-          RUN THE BENCHMARK WITH YOUR DATA
+          SPEAK WITH US
         </a>
       </div>
     </div>
