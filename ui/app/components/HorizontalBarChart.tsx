@@ -63,7 +63,7 @@ const HorizontalBarChart: React.FC<HorizontalBarChartProps> = ({
         backgroundColor: backgroundColors,
         borderRadius: 8,
         barThickness: "flex" as const,
-        categoryPercentage: 1,
+        categoryPercentage: 1.1,
       },
     ],
   };

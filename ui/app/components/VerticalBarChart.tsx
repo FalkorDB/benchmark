@@ -67,7 +67,7 @@ const VerticalBarChart: React.FC<VerticalBarChartProps> = ({
         display: chartId === "2" ? "auto" : false,
         anchor: "end" as const,
         align: "top" as const,
-        formatter: (value: number) => (value > 0 ? `${Math.round(value)}` : ""),
+        formatter: (value: number) => (value > 0 ? `${(value)}` : ""),
         font: { weight: "bold" as const},
         color: "#000",
       },
