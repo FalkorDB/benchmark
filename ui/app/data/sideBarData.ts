@@ -17,13 +17,13 @@ export const sidebarConfig: {
 } = {
   sidebarData: [
     {
-      title: "Realistic",
+      title: "Workload Type",
       description: "",
       layout: "row",
       icon: Activity,
       options: [
-        { id: "on", label: "ON" },
-        { id: "off", label: "OFF" },
+        { id: "concurrent", label: "Concurrent" },
+        { id: "single", label: "Single" },
       ],
     },
     {

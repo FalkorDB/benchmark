@@ -41,7 +41,7 @@ export function NavMain({
 }) {
   const { state } = useSidebar();
   const isRealisticWorkloadOn =
-    selectedOptions["Realistic"]?.includes("on");
+    selectedOptions["Workload Type"]?.includes("concurrent");
 
   const filteredItems = items.filter((group) => {
     if (group.title === "Queries" && isRealisticWorkloadOn) return false;
@@ -58,7 +58,7 @@ export function NavMain({
       {filteredItems.map((group) => (
         <SidebarMenuItem
           key={group.title}
-          className={`font-space mt-2 ${
+          className={`font-space mt-2 mb-4${
             state === "collapsed" ? "flex justify-center" : ""
           }`}
         >
