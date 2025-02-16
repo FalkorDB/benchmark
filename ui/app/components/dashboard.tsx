@@ -15,18 +15,23 @@ export default function DashBoard() {
   const [gridKey, setGridKey] = useState(0);
   // eslint-disable-next-line
   const [filteredResults, setFilteredResults] = useState<any[]>([]);
+  const [latencyStats, setLatencyStats] = useState({
+    p50: { minValue: 0, maxValue: 0, ratio: 0 },
+    p95: { minValue: 0, maxValue: 0, ratio: 0 },
+    p99: { minValue: 0, maxValue: 0, ratio: 0 },
+  });
   const [filteredUnrealistic, setFilteredUnrealistic] = useState<
     { vendor: string; histogram: number[] }[]
   >([]);
   const [selectedOptions, setSelectedOptions] = React.useState<
     Record<string, string[]>
   >({
-    Realistic: ["on"],
+    "Workload Type": ["concurrent"],
     Vendors: ["falkordb", "neo4j"],
-    Clients: ["20"],
+    Clients: ["40"],
     Throughput: ["2500"],
     Hardware: ["intel"],
-    Queries: ["aggregate_expansion_3"],
+    Queries: ["aggregate_expansion_4_with_filter"],
     "Realistic Workload": ["1"],
   });
 
@@ -72,6 +77,7 @@ export default function DashBoard() {
     });
   };
 
+  // filter unrealstic data
   useEffect(() => {
     if (!data || !data.unrealstic || !selectedOptions.Queries) {
       setFilteredUnrealistic([]);
@@ -89,6 +95,7 @@ export default function DashBoard() {
     );
   }, [data, selectedOptions.Queries]);
 
+  // filter realstic data
   useEffect(() => {
     if (!data || !data.runs) {
       setFilteredResults([]);
@@ -126,7 +133,7 @@ export default function DashBoard() {
     setFilteredResults(results);
   }, [data, selectedOptions]);
 
-  const latencyDataForRealistic = filteredResults.map((item) => {
+  const latencyDataForRealistic = useMemo(() => {
     const convertToMilliseconds = (value: string): number => {
       const match = value.match(/([\d.,]+)([a-zA-Z]+)/);
       if (match) {
@@ -137,16 +144,34 @@ export default function DashBoard() {
       return 0;
     };
 
-    return {
+    const data = filteredResults.map((item) => ({
       vendor: item.vendor,
       p50: convertToMilliseconds(item.result.latency.p50),
       p95: convertToMilliseconds(item.result.latency.p95),
       p99: convertToMilliseconds(item.result.latency.p99),
+    }));
+
+    // Compute min, max, and ratio for each percentile with rounding
+    const computeStats = (key: keyof (typeof data)[0]) => {
+      const values = data.map((d) => d[key]);
+      const minValue = Math.round(Math.min(...values));
+      const maxValue = Math.round(Math.max(...values));
+      const ratio =
+        minValue !== 0 ? Math.round((maxValue / minValue) * 100) / 100 : 0;
+
+      return { minValue, maxValue, ratio };
     };
-  });
+
+    setLatencyStats({
+      p50: computeStats("p50"),
+      p95: computeStats("p95"),
+      p99: computeStats("p99"),
+    });
+
+    return data;
+  }, [filteredResults]);
 
   const getBarColor = useCallback((vendor: string) => {
-
     return (
       getComputedStyle(document.documentElement)
         .getPropertyValue(`--${vendor}-color`)
@@ -194,18 +219,21 @@ export default function DashBoard() {
             data: [p50, 0, 0],
             backgroundColor: getBarColor(vendor),
             stack: `${index}`,
+            borderRadius: 8,
           },
           {
             label: `${vendor} P95`,
             data: [0, p95, 0],
             backgroundColor: getBarColor(vendor),
             stack: `${index}`,
+            borderRadius: 8,
           },
           {
             label: `${vendor} P99`,
             data: [0, 0, p99],
             backgroundColor: getBarColor(vendor),
             stack: `${index}`,
+            borderRadius: 8,
           },
         ]
       ),
@@ -216,6 +244,15 @@ export default function DashBoard() {
     vendor: item.vendor,
     actualMessagesPerSecond: item.result["actual-messages-per-second"],
   }));
+
+  const maxThroughput = Math.max(
+    ...throughputData.map((item) => item.actualMessagesPerSecond)
+  );
+  const minThroughput = Math.min(
+    ...throughputData.map((item) => item.actualMessagesPerSecond)
+  );
+  const throughputRatio =
+    minThroughput !== 0 ? Math.round(maxThroughput / minThroughput) : 0;
 
   const memoryData = filteredResults.map((item) => {
     const memoryValue = item.result["ram-usage"] ?? "0MB";
@@ -236,9 +273,14 @@ export default function DashBoard() {
     };
   });
 
+  const maxMemoryUsage = Math.max(...memoryData.map((item) => item.memory));
+  const minMemoryUsage = Math.min(...memoryData.map((item) => item.memory));
+  const memoryUsageRatio =
+    minMemoryUsage !== 0 ? Math.round(maxMemoryUsage / minMemoryUsage) : 0;
+
   useEffect(() => {
     setGridKey((prevKey) => prevKey + 1);
-  }, [selectedOptions["Realistic"]]);
+  }, [selectedOptions["Workload Type"]]);
 
   //saving data to window.allChartData
   /* eslint-disable */
@@ -272,58 +314,112 @@ export default function DashBoard() {
           <div
             key={gridKey}
             className={`grid h-full grid-cols-2 ${
-              selectedOptions["Realistic"]?.includes("on")
-                ? "grid-rows-[2fr,1fr,50px]"
+              selectedOptions["Workload Type"]?.includes("concurrent")
+                ? "grid-rows-[2fr,1.5fr,50px]"
                 : "grid-rows-[2fr,50px]"
             } gap-2 p-1`}
           >
             <div
-              className="col-span-2 bg-muted/50 rounded-xl p-4 min-h-0"
+              className="col-span-2 bg-muted/50 rounded-xl p-4 min-h-0 w-full flex flex-col items-center justify-between"
               id="latency-chart"
             >
-              <VerticalBarChart
-                chartData={
-                  selectedOptions["Realistic"]?.includes("on")
-                    ? chartDataForRealistic
-                    : chartDataForUnrealistic
-                }
-                chartId={
-                  selectedOptions["Realistic"]?.includes("on") ? "1" : "2"
-                }
-                title="Vendor Latency Metrics"
-                subTitle="P50, P95, and P99 Latency Comparison ( Less is better )"
-                xAxisTitle="Vendors"
-              />
+              <h2 className="text-2xl font-bold text-center">LATENCY</h2>
+              <p className="pb-1 text-gray-600 text-center">
+                (LOWER IS BETTER)
+              </p>
+              <div className="pt-1 w-full border-b border-gray-400"></div>
+              {selectedOptions["Workload Type"]?.includes("concurrent") && (
+                <p className="text-lg font-semibold text-center mb-2">
+                  Superior Latency:{" "}
+                  <span className="text-purple-600 font-bold">
+                    {latencyStats ? Math.round(latencyStats.p99.ratio) : ""}x
+                  </span>{" "}
+                  faster at P99
+                </p>
+              )}
+
+              <div className="w-full flex-grow flex items-center justify-center min-h-0">
+                <div className="w-full h-full">
+                {latencyStats.p99.ratio > 0 &&
+                  <VerticalBarChart
+                    chartData={
+                      selectedOptions["Workload Type"]?.includes("concurrent")
+                        ? chartDataForRealistic
+                        : chartDataForUnrealistic
+                    }
+                    chartId={
+                      selectedOptions["Workload Type"]?.includes("concurrent")
+                        ? "concurrent"
+                        : "single"
+                    }
+                    unit="ms"
+                    latencyStats={latencyStats}
+                  />}
+                </div>
+              </div>
             </div>
-            {selectedOptions["Realistic"]?.includes("on") && (
+
+            {selectedOptions["Workload Type"]?.includes("concurrent") && (
               <>
                 <div
-                  className="bg-muted/50 rounded-xl p-4 min-h-0"
+                  className="bg-muted/50 rounded-xl p-4 min-h-0 w-full flex flex-col items-center justify-between"
                   id="throughput-chart"
                 >
-                  <HorizontalBarChart
-                    data={throughputData}
-                    dataKey="actualMessagesPerSecond"
-                    chartLabel="Messages Per Second"
-                    title="Throughput"
-                    subTitle="Performance Metrics ( More is better )"
-                    yAxisTitle="Vendors"
-                    unit=""
-                  />
+                  <h2 className="text-2xl font-bold text-center">THROUGHPUT</h2>
+                  <p className="text-gray-600 text-center">
+                    (HIGHER IS BETTER)
+                  </p>
+                  <div className="pb-1 w-full border-b border-gray-400"></div>
+                  <p className="pt-1 text-lg font-semibold text-center">
+                    Execute{" "}
+                    <span className="text-purple-600 font-bold">
+                      {throughputRatio ? throughputRatio : ""}x
+                    </span>{" "}
+                    more queries with the same hardware
+                  </p>
+                  <div className="w-full flex-grow flex items-center justify-center min-h-0">
+                    <div className="w-full h-full">
+                      <HorizontalBarChart
+                        data={throughputData}
+                        dataKey="actualMessagesPerSecond"
+                        chartLabel="Messages Per Second"
+                        ratio={throughputRatio}
+                        maxValue={maxThroughput}
+                        minValue={minThroughput}
+                        unit="mb"
+                      />
+                    </div>
+                  </div>
                 </div>
+
                 <div
-                  className="bg-muted/50 rounded-xl p-4 min-h-0"
+                  className="bg-muted/50 rounded-xl p-4 min-h-0 w-full flex flex-col items-center justify-between"
                   id="memory-chart"
                 >
-                  <HorizontalBarChart
-                    data={memoryData}
-                    dataKey="memory"
-                    chartLabel="Memory Utilization (MB)"
-                    title="Memory Usage"
-                    subTitle="Memory Allocation ( Less is better )"
-                    yAxisTitle="Vendors"
-                    unit="mb"
-                  />
+                  <h2 className="text-2xl font-bold text-center">
+                    MEMORY USAGE
+                  </h2>
+                  <p className="text-gray-600 text-center">(LOWER IS BETTER)</p>
+                  <div className="pb-1 w-full border-b border-gray-400"></div>
+                  <p className="pt-1 text-lg font-semibold text-center">
+                    <span className="text-purple-600 font-bold">
+                      {memoryUsageRatio ? memoryUsageRatio : ""}x
+                    </span>{" "}
+                    Better performance, lower overall costs
+                  </p>
+                  <div className="w-full flex-grow flex items-center justify-center min-h-0">
+                    <div className="w-full h-full">
+                      <HorizontalBarChart
+                        data={memoryData}
+                        dataKey="memory"
+                        chartLabel="Memory Utilization (MB)"
+                        ratio={memoryUsageRatio}
+                        maxValue={maxMemoryUsage}
+                        minValue={minMemoryUsage}
+                        unit="mb"
+                      />
+                    </div>
+                  </div>
                 </div>
               </>
             )}
