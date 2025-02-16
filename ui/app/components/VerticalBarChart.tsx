@@ -23,65 +23,105 @@ ChartJS.register(
   ChartDataLabels
 );
 
+interface LatencyStats {
+  minValue: number;
+  maxValue: number;
+  ratio: number;
+}
+
 interface VerticalBarChartProps {
   chartId: string;
   // eslint-disable-next-line
   chartData: any;
-  title: string;
-  subTitle: string;
-  xAxisTitle: string;
+  unit: string;
+  latencyStats: {
+    p50: LatencyStats;
+    p95: LatencyStats;
+    p99: LatencyStats;
+  };
 }
 
 const VerticalBarChart: React.FC<VerticalBarChartProps> = ({
   chartId,
   chartData,
-  title,
-  subTitle,
-  xAxisTitle,
+  unit,
+  latencyStats
 }) => {
   const options = {
     responsive: true,
     maintainAspectRatio: false,
     plugins: {
-      title: {
-        display: true,
-        text: title,
-        font: { size: 20, weight: "bold" as const },
-      },
-      subtitle: {
-        display: true,
-        text: subTitle,
-        font: { size: 13, weight: "bold" as const },
-      },
       legend: { display: true, position: "top" as const },
       tooltip: {
         callbacks: {
           // eslint-disable-next-line
           label: function (context: any) {
             const value = context.raw;
-            return `${context.dataset.label}: ${value} ms`;
+            return `${context.dataset.label}: ${value}${unit}`;
           },
         },
       },
       datalabels: {
-        display: chartId === "2" ? "auto" : false,
+        display: chartId === "single" ? "auto" : true,
         anchor: "end" as const,
         align: "top" as const,
-        formatter: (value: number) => (value > 0 ? `${(value)}` : ""),
-        font: { weight: "bold" as const},
-        color: "#000",
+        font: {
+          weight: "bold" as const,
+          family: "font-fira",
+          size: 18,
+        },
+        color: "grey",
+        formatter: (value: number, context: any) => {
+          if (chartId === "single") {
+            return value > 0 ? `${value}` : "";
+          }
+          const label = context.dataset.label;
+          if (!label) return "";
+          let percentileKey: keyof typeof latencyStats;
+          if (label.includes("P50")) percentileKey = "p50";
+          else if (label.includes("P95")) percentileKey = "p95";
+          else if (label.includes("P99")) percentileKey = "p99";
+          else return ""; 
+      
+          const maxValue = latencyStats[percentileKey].maxValue;
+          const ratio = latencyStats[percentileKey].ratio; 
+          const isMaxValue = Math.abs(value - maxValue) < 0.5;
+  
+          return isMaxValue ? `${Math.round(ratio)}x` : "";
+        },
       },
+      
+      
     },
     scales: {
       x: {
         grid: { display: false },
-        title: { display: true, text: xAxisTitle, font: { size: 16 } },
+        ticks: {
+          font: {
+            size: 16,
+            family: 'font-fira',
+            weight: "bold" as const
+          },
+          color: "#000",
+          padding: 10,
+          callback: function (index: string | number) {
+            return chartData.labels[index];
+          },
+        },
+        // title: { display: true, text: xAxisTitle, font: { size: 16 } }
       },
       y: {
         beginAtZero: true,
         grid: { display: true },
         // eslint-disable-next-line
-        ticks: { callback: (value: any) => `${value} ms` },
+        ticks: {
+          font: {
+            size: 15,
+            family: "font-fira",
+          },
+          color: "#333",
+          callback: (value: any) => `${value}${unit}` 
+        },
       },
     },
   };
