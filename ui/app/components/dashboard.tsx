@@ -13,6 +13,7 @@ export default function DashBoard() {
   const [data, setData] = useState<BenchmarkData | null>(null);
   const { toast } = useToast();
   const [gridKey, setGridKey] = useState(0);
+  const [p99SingleRatio, setP99SingleRatio] = useState<number | null>(null);
   // eslint-disable-next-line
   const [filteredResults, setFilteredResults] = useState<any[]>([]);
   const [latencyStats, setLatencyStats] = useState({
@@ -151,7 +152,6 @@ export default function DashBoard() {
       p99: convertToMilliseconds(item.result.latency.p99),
     }));
 
-    // Compute min, max, and ratio for each percentile with rounding
     const computeStats = (key: keyof (typeof data)[0]) => {
       const values = data.map((d) => d[key]);
       const minValue = Math.round(Math.min(...values));
@@ -180,7 +180,10 @@ export default function DashBoard() {
   }, []);
 
   const chartDataForUnrealistic = useMemo(() => {
-    if (!filteredUnrealistic.length) return { labels: [], datasets: [] };
+    if (!filteredUnrealistic.length) {
+      setP99SingleRatio(null);
+      return { labels: [], datasets: [] };
+    }
 
     const labels = [
       "P10",
@@ -196,17 +199,30 @@ export default function DashBoard() {
       "P99",
     ];
 
-    return {
-      labels,
-      datasets: filteredUnrealistic.map(({ vendor, histogram }) => ({
-        label: vendor,
-        data: histogram,
-        backgroundColor: getBarColor(vendor),
-        borderRadius: 8,
-        barPercentage: 0.95,
-        categoryPercentage: 0.8,
-      })),
-    };
+    const datasets = filteredUnrealistic.map(({ vendor, histogram }) => ({
+      label: vendor,
+      data: histogram,
+      backgroundColor: getBarColor(vendor),
+      borderRadius: 8,
+      barPercentage: 0.95,
+      categoryPercentage: 0.8,
+    }));
+
+    if (filteredUnrealistic.length >= 2) {
+      const p99Values = filteredUnrealistic
+        .map(({ histogram }) => histogram[10])
+        .sort((a, b) => b - a);
+
+      if (p99Values.length >= 2 && p99Values[1] !== 0) {
+        setP99SingleRatio(p99Values[0] / p99Values[1]);
+      } else {
+        setP99SingleRatio(null);
+      }
+    } else {
+      setP99SingleRatio(null);
+    }
+
+    return { labels, datasets };
   }, [filteredUnrealistic, getBarColor]);
 
   const chartDataForRealistic = useMemo(() => {
@@ -328,37 +344,40 @@ export default function DashBoard() {
                 (LOWER IS BETTER)
               </p>
               <div className="pt-1 w-full border-b border-gray-400"></div>
-              {selectedOptions["Workload Type"]?.includes("concurrent") && (
-                <p className="text-lg font-semibold text-center mb-2">
-                  Superior Latency:{" "}
-                  <span className="text-purple-600 font-bold">
-                    {latencyStats ? Math.round(latencyStats.p99.ratio) : ""}x
-                  </span>{" "}
-                  faster at P99
-                </p>
-              )}
-
+              <p className="text-lg font-semibold text-center mb-2">
+                Superior Latency:{" "}
+                <span className="text-purple-600 font-bold">
+                  {selectedOptions["Workload Type"]?.includes("concurrent")
+                    ? latencyStats
+                      ? `${Math.round(latencyStats.p99.ratio)}x`
+                      : ""
+                    : p99SingleRatio
+                    ? `${Math.round(p99SingleRatio)}x`
+                    : ""}
+                </span>{" "}
+                faster at P99
+              </p>
               <div className="w-full flex-grow flex items-center justify-center min-h-0">
                 <div className="w-full h-full">
-                {latencyStats.p99.ratio > 0 &&
-                  <VerticalBarChart
-                    chartData={
-                      selectedOptions["Workload Type"]?.includes("concurrent")
-                        ? chartDataForRealistic
-                        : chartDataForUnrealistic
-                    }
-                    chartId={
-                      selectedOptions["Workload Type"]?.includes("concurrent")
-                        ? "concurrent"
-                        : "single"
-                    }
-                    unit="ms"
-                    latencyStats={latencyStats}
-                  />}
+                  {latencyStats.p99.ratio > 0 && (
+                    <VerticalBarChart
+                      chartData={
+                        selectedOptions["Workload Type"]?.includes("concurrent")
+                          ? chartDataForRealistic
+                          : chartDataForUnrealistic
+                      }
+                      chartId={
+                        selectedOptions["Workload Type"]?.includes("concurrent")
+                          ? "concurrent"
+                          : "single"
+                      }
+                      unit="ms"
+                      latencyStats={latencyStats}
+                    />
+                  )}
                 </div>
               </div>
             </div>
-
             {selectedOptions["Workload Type"]?.includes("concurrent") && (
               <>
                 <div
@@ -391,7 +410,6 @@ export default function DashBoard() {
                     </div>
                   </div>
                 </div>
-
                 <div
                   className="bg-muted/50 rounded-xl p-4 min-h-0 w-full flex flex-col items-center justify-between"
                   id="memory-chart"
