@@ -1,6 +1,11 @@
 import { MoveUpRight } from "lucide-react";
+import { useState } from "react";
+import ContactUsSheet from "./ContactUsSheet";
 
 const FooterComponent = () => {
+  
+  const [isOpen, setIsOpen] = useState(false);
+
   return (
     <div className="h-full w-full border-t flex items-center justify-between px-4 bg-[#F7F3EF]">
       <div className="flex h-full items-center space-x-4 text-gray-600 text-sm">
@@ -39,14 +44,13 @@ const FooterComponent = () => {
       </div>
 
       <div className="flex items-center h-16 w-full bg-muted/50 p-4">
-        <a
-          href="https://www.falkordb.com/contact-us/"
-          target="_blank"
-          rel="noopener noreferrer"
+        <button
+          onClick={() => setIsOpen(true)}
           className="ml-auto bg-[#FF66B3] text-[#ffffff] border px-4 py-2 rounded-lg font-semibold text-sm min-w-[150px] max-w-full min-h-[40px] max-h-full whitespace-normal break-words text-center flex items-center justify-center"
         >
           SPEAK WITH US
-        </a>
+        </button>
+        <ContactUsSheet isOpen={isOpen} setIsOpen={setIsOpen} />
       </div>
     </div>
   );
