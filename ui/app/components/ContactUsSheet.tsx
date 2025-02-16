@@ -102,14 +102,14 @@ export default function ContactUsSheet({ isOpen, setIsOpen }: ContactUsSheetProp
         {submitted ? (
           <div className="flex flex-col items-center justify-center h-full">
             <CheckCircleIcon className="w-20 h-20 text-green-500" />
-            <p className="mt-4 text-lg font-semibold">Thank you, you're all set.</p>
+            <p className="mt-4 text-lg font-semibold">Thank you, you&apos;re all set.</p>
             <p className="text-gray-500">We’ll be in touch shortly!</p>
           </div>
         ) : (
           <>
             <SheetHeader className="flex flex-col items-center mt-20">
               <Image src={Logo} alt="FalkorDB Logo" width={150} height={40} className="mb-4" />
-              <SheetTitle className="text-center text-[1.45rem] font-bold">Let's talk about your use case</SheetTitle>
+              <SheetTitle className="text-center text-[1.45rem] font-bold">Let&apos;s talk about your use case</SheetTitle>
               <SheetDescription className="text-center text-lg">Get a follow-up from FalkorDB</SheetDescription>
             </SheetHeader>
             {step === 1 ? (
@@ -136,13 +136,13 @@ export default function ContactUsSheet({ isOpen, setIsOpen }: ContactUsSheetProp
                   Next
                 </Button>
                 <p className="mt-4 text-xs text-gray-500 text-center">
-                  I agree that my submitted data is being collected and stored. <strong>We don't resell your data.</strong>
+                    I agree that my submitted data is being collected and stored. <strong>We don&apos;t resell your data.</strong>
                 </p>
               </div>
             ) : (
               <div className="mt-6">
                 <h2 className="text-sm text-gray-500">STEP 2 OF 2</h2>
-                <p className="mt-2 text-lg font-bold">Let's get acquainted</p>
+                <p className="mt-2 text-lg font-bold">Let&apos;s get acquainted</p>
                 <div className="mt-4 space-y-4">
                   <Input
                     placeholder="Your Name"
@@ -170,7 +170,7 @@ export default function ContactUsSheet({ isOpen, setIsOpen }: ContactUsSheetProp
                   </Button>
                 </div>
                 <p className="mt-4 text-xs text-gray-500 text-center">
-                  I agree that my submitted data is being collected and stored. <strong>We don't resell your data.</strong>
+                    I agree that my submitted data is being collected and stored. <strong>We don&apos;t resell your data.</strong>
                 </p>
               </div>
             )}

@@ -105,9 +105,9 @@ const HorizontalBarChart: React.FC<HorizontalBarChartProps> = ({
             family: "font-fira",
           },
           color: "#333",
+          // eslint-disable-next-line
           callback: (value: any) => `${Math.round(value)}${unit}`,
           stepSize: dataKey === "memory" ? maxValue / 5 : minValue / 0.5,
-          // eslint-disable-next-line
         },
         grid: {
           display: false,

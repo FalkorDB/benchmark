@@ -71,6 +71,7 @@ const VerticalBarChart: React.FC<VerticalBarChartProps> = ({
           size: 18,
         },
         color: "grey",
+        // eslint-disable-next-line
         formatter: (value: number, context: any) => {
           if (chartId === "single") {
             return value > 0 ? `${value}` : "";
@@ -120,6 +121,7 @@ const VerticalBarChart: React.FC<VerticalBarChartProps> = ({
             family: "font-fira",
           },
           color: "#333",
+          // eslint-disable-next-line
           callback: (value: any) => `${value}${unit}` 
         },
       },
