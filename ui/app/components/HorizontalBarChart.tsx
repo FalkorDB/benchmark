@@ -30,20 +30,20 @@ interface HorizontalBarChartProps {
   data: { [key: string]: any }[];
   dataKey: string;
   chartLabel: string;
-  title: string;
-  subTitle: string;
-  yAxisTitle: string;
   unit?: string;
+  ratio: number;
+  maxValue: number;
+  minValue: number;
 }
 
 const HorizontalBarChart: React.FC<HorizontalBarChartProps> = ({
   data,
   dataKey,
   chartLabel,
-  title,
-  subTitle,
-  yAxisTitle,
-  unit
+  unit,
+  ratio,
+  maxValue,
+  minValue
 }) => {
   const containerRef = useRef<null | HTMLDivElement>(null);
   const chartRef = useRef<Chart | null>(null);
@@ -68,93 +68,68 @@ const HorizontalBarChart: React.FC<HorizontalBarChartProps> = ({
     ],
   };
 
-  const maxDataValue = Math.max(...data.map((item) => item[dataKey]));
-  const dataValues = data.map((item) => item[dataKey]);
-  const maxValue = Math.max(...dataValues);
-  const minValue = Math.min(...dataValues);
-  const ratio = Math.round(maxValue / minValue).toFixed(0);
-
   const options = {
     indexAxis: "y" as const,
     responsive: true,
-
     maintainAspectRatio: false,
     plugins: {
-      title: {
-        display: true,
-        text: title,
-        font: {
-          size: 20,
-          weight: "bold" as const,
-        },
-        padding: {
-          bottom: 2,
-        },
-      },
-      subtitle: {
-        display: true,
-        text: subTitle,
-        font: { 
-          size: 13,
-          weight: "bold" as const,
-        },
-        padding: {
-          bottom: 2,
-        },
-      },
       legend: {
         display: false,
       },
       datalabels: {
         anchor: "end" as const,
         align: "right" as const,
-        color: "#000",
+        color: "grey",
         font: {
           weight: "bold" as const,
-          size: 14,
+          family: "font-fira",
+          size: 18,
         },
         // eslint-disable-next-line
         formatter: (_: any, context: { dataIndex: any; dataset: { data: { [x: string]: any; }; }; }) => {
           const index = context.dataIndex;
           const value = context.dataset.data[index];
           
-          return value === maxValue ? `x${ratio}` : "";
+          return value === maxValue ? ` x${ratio} ` : "";
         },
       },
     },
     scales: {
       x: {
         beginAtZero: true,
-        max: maxDataValue * 1.1,
+        max: maxValue * 1.1,
+        ticks: {
+          padding: 10,
+          font: {
+            size: 15,
+            family: "font-fira",
+          },
+          color: "#333",
+          callback: (value: any) => `${Math.round(value)}${unit}`,
+          stepSize: dataKey === "memory" ? maxValue / 5 : minValue / 0.5,
+          // eslint-disable-next-line
+        },
         grid: {
           display: false,
-        },
-        ticks: {
-          font: {
-            size: 14,
-          },
-          stepSize: dataKey === "memory" ? 5000 : 300,
-          // eslint-disable-next-line
-          callback: function (value: any) {
-            return `${Math.round(Number(value)).toLocaleString()}${unit}`;
-          },
+          drawBorder: false,
         },
       },
       y: {
-        grid: {
-          display: false,
-        },
-        title: {
-          display: true,
-          text: yAxisTitle,
+        ticks: {
           font: {
             size: 16,
+            family: "font-fira",
           },
+          color: "#333",
+        },
+        grid: {
+          display: false,
+          drawBorder: false,
         },
       },
     },
   };
-
+  
 
   return (
     <div ref={containerRef} className="w-full h-full relative">
