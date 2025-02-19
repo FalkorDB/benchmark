@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { NavMain } from "@/components/ui/nav-main";
+import { NavMain } from "@/components/ui/SidebarNavigation";
 import { SidebarBrand } from "@/components/ui/SidebarBrand";
 import {
   Sidebar,
@@ -22,12 +22,12 @@ type Platforms = Record<
 
 export function AppSidebar({
   selectedOptions,
-  handleSelection,
+  handleSideBarSelection,
   platform,
   ...props
 }: React.ComponentProps<typeof Sidebar> & {
   selectedOptions: Record<string, string[]>;
-  handleSelection: (groupTitle: string, optionId: string) => void;
+  handleSideBarSelection: (groupTitle: string, optionId: string) => void;
   platform?: Platforms;
 }) {
   return (
@@ -44,7 +44,7 @@ export function AppSidebar({
         <NavMain
           items={sidebarConfig?.sidebarData}
           selectedOptions={selectedOptions}
-          handleSelection={handleSelection}
+          handleSideBarSelection={handleSideBarSelection}
           platform={platform}
         />
       </SidebarContent>
