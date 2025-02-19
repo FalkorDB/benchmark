@@ -210,9 +210,9 @@
         "deadline-offset": "0ms",
         "actual-messages-per-second": 2500,
         "latency": {
-          "p50": "18ms",
-          "p95": "26ms",
-          "p99": "14ms"
+          "p50": "14ms",
+          "p95": "18ms",
+          "p99": "26ms"
         },
         "cpu-usage": 0.2,
         "ram-usage": "17MB",
