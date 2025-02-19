@@ -38,7 +38,6 @@ export default function ContactUsSheet({ isOpen, setIsOpen }: ContactUsSheetProp
 
   const handleSubmit = async () => {
     if (!formData.name || !isValidEmail(formData.email) || !formData.company) return;
-    console.log(process.env.NEXT_PUBLIC_HUBSPOT_PORTAL_ID);
     
     const portalId = process.env.NEXT_PUBLIC_HUBSPOT_PORTAL_ID;
     const formId = process.env.NEXT_PUBLIC_HUBSPOT_FORM_ID;

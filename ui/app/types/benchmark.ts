@@ -25,7 +25,7 @@ export interface Run {
   result: Result;
 }
 
-interface UnRealsticData {
+interface UnrealisticData {
   vendor: string;
   histogram_for_type: Record<string, number[]>;
 }
@@ -53,6 +53,6 @@ export interface ApiResponse {
 
 export interface BenchmarkData {
   runs: Run[];
-  unrealstic: UnRealsticData[];
+  unrealstic: UnrealisticData[];
   platforms: Platforms;
 }
