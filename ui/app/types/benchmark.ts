@@ -25,6 +25,11 @@ export interface Run {
   result: Result;
 }
 
+interface UnrealisticData {
+  vendor: string;
+  histogram_for_type: Record<string, number[]>;
+}
+
 export interface PlatformDetails {
   cpu: string;
   ram: string;
@@ -48,5 +53,6 @@ export interface ApiResponse {
 
 export interface BenchmarkData {
   runs: Run[];
+  unrealstic: UnrealisticData[];
   platforms: Platforms;
 }

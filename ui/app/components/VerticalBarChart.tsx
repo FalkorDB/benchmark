@@ -11,6 +11,7 @@ import {
   Legend,
   Title,
 } from "chart.js";
+import ChartDataLabels from "chartjs-plugin-datalabels";
 
 ChartJS.register(
   BarElement,
@@ -18,107 +19,110 @@ ChartJS.register(
   LinearScale,
   Tooltip,
   Legend,
-  Title
+  Title,
+  ChartDataLabels
 );
 
-interface VerticalBarChartProps {
-  data: { vendor: string; p50: number; p95: number; p99: number }[];
-  title: string;
-  subTitle: string;
-  xAxisTitle: string;
+interface LatencyStats {
+  minValue: number;
+  maxValue: number;
+  ratio: number;
 }
 
-const getBarColor = (vendor: string) => {
-  switch (vendor.toLowerCase()) {
-    case "falkordb":
-      return getComputedStyle(document.documentElement).getPropertyValue("--FalkorDB-color").trim();
-    case "neo4j":
-      return getComputedStyle(document.documentElement).getPropertyValue("--Neo4j-color").trim();;
-    default:
-      return "#191919";
-  }
-};
+interface VerticalBarChartProps {
+  chartId: string;
+  // eslint-disable-next-line
+  chartData: any;
+  unit: string;
+  latencyStats: {
+    p50: LatencyStats;
+    p95: LatencyStats;
+    p99: LatencyStats;
+  };
+}
 
 const VerticalBarChart: React.FC<VerticalBarChartProps> = ({
-  data,
-  title,
-  subTitle,
-  xAxisTitle,
+  chartId,
+  chartData,
+  unit,
+  latencyStats
 }) => {
-  const chartData = {
-    labels: ["P50", "P95", "P99"],
-    datasets: data.flatMap((item, index) => [
-      {
-        label: `${item.vendor} P50`,
-        data: [item.p50, 0, 0],
-        backgroundColor: getBarColor(item.vendor),
-        stack: `${index}`,
-        borderRadius: 8,
-      },
-      {
-        label: `${item.vendor} P95`,
-        data: [0, item.p95, 0],
-        backgroundColor: getBarColor(item.vendor),
-        stack: `${index}`,
-        borderRadius: 8,
-      },
-      {
-        label: `${item.vendor} P99`,
-        data: [0, 0, item.p99],
-        backgroundColor: getBarColor(item.vendor),
-        stack: `${index}`,
-        borderRadius: 8,
-      },
-    ]),
-  };
-
   const options = {
     responsive: true,
     maintainAspectRatio: false,
     plugins: {
-      title: {
-        display: true,
-        text: title,
-        font: {
-          size: 20,
-          weight: "bold" as const,
-        },
-      },
-      subtitle: {
-        display: true,
-        text: subTitle,
-        font: { size: 12 },
-      },
-      legend: {
-        display: true,
-        position: "top" as const,
-      },
+      legend: { display: true, position: "top" as const },
       tooltip: {
         callbacks: {
           // eslint-disable-next-line
           label: function (context: any) {
             const value = context.raw;
-            return `${context.dataset.label}: ${value} ms`;
+            return `${context.dataset.label}: ${value}${unit}`;
           },
         },
       },
+      datalabels: {
+        display: chartId === "single" ? "auto" : true,
+        anchor: "end" as const,
+        align: "top" as const,
+        font: {
+          weight: "bold" as const,
+          family: "font-fira",
+          size: 18,
+        },
+        color: "grey",
+        // eslint-disable-next-line
+        formatter: (value: number, context: any) => {
+          if (chartId === "single") {
+            return value > 0 ? `${value}` : "";
+          }
+          const label = context.dataset.label;
+          if (!label) return "";
+          let percentileKey: keyof typeof latencyStats;
+          if (label.includes("P50")) percentileKey = "p50";
+          else if (label.includes("P95")) percentileKey = "p95";
+          else if (label.includes("P99")) percentileKey = "p99";
+          else return ""; 
+      
+          const maxValue = latencyStats[percentileKey].maxValue;
+          const ratio = latencyStats[percentileKey].ratio; 
+          const isMaxValue = Math.abs(value - maxValue) < 0.5;
+  
+          return isMaxValue ? `${Math.round(ratio)}x` : "";
+        },
+      },
+      
+      
     },
     scales: {
       x: {
         grid: { display: false },
-        title: {
-          display: true,
-          text: xAxisTitle,
-          font: { size: 16 },
+        ticks: {
+          font: {
+            size: 16,
+            family: 'font-fira',
+            weight: "bold" as const
+          },
+          color: "#000",
+          padding: 10,
+          callback: function (index: string | number) {
+            return chartData.labels[index];
+          },
         },
-        stacked: true,
+        // title: { display: true, text: xAxisTitle, font: { size: 16 } }
       },
       y: {
         beginAtZero: true,
         grid: { display: true },
+        // eslint-disable-next-line
         ticks: {
+          font: {
+            size: 15,
+            family: "font-fira",
+          },
+          color: "#333",
           // eslint-disable-next-line
-          callback: (value: any) => `${value} ms`,
+          callback: (value: any) => `${value}${unit}` 
         },
       },
     },
