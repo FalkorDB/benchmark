@@ -61,6 +61,7 @@ const HorizontalBarChart: React.FC<HorizontalBarChartProps> = ({
         label: chartLabel,
         data: data.map((item) => item[dataKey]),
         backgroundColor: backgroundColors,
+        hoverBackgroundColor: backgroundColors,
         borderRadius: 8,
         barThickness: "flex" as const,
         categoryPercentage: 1.1,

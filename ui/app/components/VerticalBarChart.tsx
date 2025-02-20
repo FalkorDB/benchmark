@@ -67,7 +67,7 @@ const VerticalBarChart: React.FC<VerticalBarChartProps> = ({
         align: "top" as const,
         font: {
           weight: "bold" as const,
-          family: "font-fira",
+          family: "Fira Code",
           size: 18,
         },
         color: "grey",
@@ -100,7 +100,7 @@ const VerticalBarChart: React.FC<VerticalBarChartProps> = ({
         ticks: {
           font: {
             size: 16,
-            family: 'font-fira',
+            family: 'Fira Code',
             weight: "bold" as const
           },
           color: "#000",
@@ -118,7 +118,7 @@ const VerticalBarChart: React.FC<VerticalBarChartProps> = ({
         ticks: {
           font: {
             size: 15,
-            family: "font-fira",
+            family: "Fira Code",
           },
           color: "#333",
           // eslint-disable-next-line

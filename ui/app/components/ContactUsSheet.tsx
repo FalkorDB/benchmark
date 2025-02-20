@@ -80,7 +80,7 @@ export default function ContactUsSheet({ isOpen, setIsOpen }: ContactUsSheetProp
         setTimeout(() => {
           setIsOpen(false);
           resetForm();
-        }, 1500);
+        }, 1000);
       } else {
         console.error("HubSpot Submission Error:", responseData);
       }
@@ -100,22 +100,22 @@ export default function ContactUsSheet({ isOpen, setIsOpen }: ContactUsSheetProp
       <SheetContent className="w-full max-w-md p-6">
         {submitted ? (
           <div className="flex flex-col items-center justify-center h-full">
-            <CheckCircleIcon className="w-20 h-20 text-green-500" />
+            <CheckCircleIcon className="w-20 h-20 text-green-500 font-fira" />
             <p className="mt-4 text-lg font-semibold">Thank you, you&apos;re all set.</p>
-            <p className="text-gray-500">We’ll be in touch shortly!</p>
+            <p className="text-gray-500 font-fira">We’ll be in touch shortly!</p>
           </div>
         ) : (
           <>
             <SheetHeader className="flex flex-col items-center mt-20">
               <Image src={Logo} alt="FalkorDB Logo" width={150} height={40} className="mb-4" />
-              <SheetTitle className="text-center text-[1.45rem] font-bold">Let&apos;s talk about your use case</SheetTitle>
-              <SheetDescription className="text-center text-lg">Get a follow-up from FalkorDB</SheetDescription>
+              <SheetTitle className="text-center text-[1.4rem] font-bold font-space">Let&apos;s talk about your use case</SheetTitle>
+              <SheetDescription className="text-center text-lg font-fira">Get a follow-up from FalkorDB</SheetDescription>
             </SheetHeader>
             {step === 1 ? (
               <div className="mt-10">
-                <h2 className="text-sm text-gray-500">STEP 1 OF 2</h2>
-                <p className="mt-2 text-[1.25rem] font-bold">What are you working on?</p>
-                <div className="mt-6 space-y-2">
+                <h2 className="text-sm text-gray-500 font-fira">STEP 1 OF 2</h2>
+                <p className="mt-2 text-[1.25rem] font-bold font-fira">What are you working on?</p>
+                <div className="mt-6 space-y-2 font-fira">
                   {[
                     "Already doing RAG",
                     "Wants to start using RAG",
@@ -131,44 +131,47 @@ export default function ContactUsSheet({ isOpen, setIsOpen }: ContactUsSheetProp
                     </div>
                   ))}
                 </div>
-                <Button className="mt-6 w-full bg-black text-white py-2" onClick={() => setStep(2)} disabled={selectedOptions.length === 0}>
+                <Button className="mt-6 w-full bg-black text-white py-2 font-fira" onClick={() => setStep(2)} disabled={selectedOptions.length === 0}>
                   Next
                 </Button>
-                <p className="mt-4 text-xs text-gray-500 text-center">
+                <p className="mt-4 text-xs text-gray-500 text-center font-fira">
                     I agree that my submitted data is being collected and stored. <strong>We don&apos;t resell your data.</strong>
                 </p>
               </div>
             ) : (
               <div className="mt-6">
-                <h2 className="text-sm text-gray-500">STEP 2 OF 2</h2>
-                <p className="mt-2 text-lg font-bold">Let&apos;s get acquainted</p>
-                <div className="mt-4 space-y-4">
+                <h2 className="text-sm text-gray-500 font-fira">STEP 2 OF 2</h2>
+                <p className="mt-2 text-lg font-bold font-fira">Let&apos;s get acquainted</p>
+                <div className="mt-4 space-y-4 font-fira">
                   <Input
                     placeholder="Your Name"
                     value={formData.name}
                     onChange={(e) => setFormData((prev) => ({ ...prev, name: e.target.value }))}
+                    required
                   />
                   <Input
                     placeholder="Email"
                     type="email"
                     value={formData.email}
                     onChange={(e) => setFormData((prev) => ({ ...prev, email: e.target.value }))}
+                    required
                   />
                   <Input
                     placeholder="Company Name"
                     value={formData.company}
                     onChange={(e) => setFormData((prev) => ({ ...prev, company: e.target.value }))}
+                    required
                   />
                 </div>
-                <div className="mt-6 flex justify-between">
+                <div className="mt-6 flex justify-between font-fira">
                   <Button variant="secondary" onClick={() => setStep(1)}>
                     Back
                   </Button>
-                  <Button className="bg-green-500 text-white py-2" onClick={handleSubmit} disabled={!formData.name || !isValidEmail(formData.email) || !formData.company}>
+                  <Button className="bg-green-500 text-white py-2 font-fira" onClick={handleSubmit} disabled={!formData.name || !isValidEmail(formData.email) || !formData.company}>
                     Submit
                   </Button>
                 </div>
-                <p className="mt-4 text-xs text-gray-500 text-center">
+                <p className="mt-4 text-xs text-gray-500 text-center font-fira">
                     I agree that my submitted data is being collected and stored. <strong>We don&apos;t resell your data.</strong>
                 </p>
               </div>
