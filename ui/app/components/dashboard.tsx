@@ -203,6 +203,7 @@ export default function DashBoard() {
       label: vendor,
       data: histogram,
       backgroundColor: getBarColor(vendor),
+      hoverBackgroundColor: getBarColor(vendor),
       borderRadius: 8,
       barPercentage: 0.95,
       categoryPercentage: 0.8,
@@ -234,6 +235,7 @@ export default function DashBoard() {
             label: `${vendor} P50`,
             data: [p50, 0, 0],
             backgroundColor: getBarColor(vendor),
+            hoverBackgroundColor: getBarColor(vendor),
             stack: `${index}`,
             borderRadius: 8,
           },
@@ -241,6 +243,7 @@ export default function DashBoard() {
             label: `${vendor} P95`,
             data: [0, p95, 0],
             backgroundColor: getBarColor(vendor),
+            hoverBackgroundColor: getBarColor(vendor),
             stack: `${index}`,
             borderRadius: 8,
           },
@@ -248,6 +251,7 @@ export default function DashBoard() {
             label: `${vendor} P99`,
             data: [0, 0, p99],
             backgroundColor: getBarColor(vendor),
+            hoverBackgroundColor: getBarColor(vendor),
             stack: `${index}`,
             borderRadius: 8,
           },
@@ -339,14 +343,13 @@ export default function DashBoard() {
               className="col-span-2 bg-muted/50 rounded-xl p-4 min-h-0 w-full flex flex-col items-center justify-between"
               id="latency-chart"
             >
-              <h2 className="text-2xl font-bold text-center">LATENCY</h2>
-              <p className="pb-1 text-gray-600 text-center">
+              <h2 className="text-2xl font-bold text-center font-space">LATENCY</h2>
+              <p className="pb-1 text-gray-600 text-center font-fira">
                 (LOWER IS BETTER)
               </p>
-              <div className="pt-1 w-full border-b border-gray-400"></div>
-              <p className="text-lg font-semibold text-center mb-2">
+              <p className="text-lg font-semibold text-center mb-2 font-fira">
                 Superior Latency:{" "}
-                <span className="text-purple-600 font-bold">
+                <span className="text-[#FF66B3] font-bold">
                   {selectedOptions["Workload Type"]?.includes("concurrent")
                     ? latencyStats
                       ? `${Math.round(latencyStats.p99.ratio)}x`
@@ -384,14 +387,13 @@ export default function DashBoard() {
                   className="bg-muted/50 rounded-xl p-4 min-h-0 w-full flex flex-col items-center justify-between"
                   id="throughput-chart"
                 >
-                  <h2 className="text-2xl font-bold text-center">THROUGHPUT</h2>
-                  <p className="text-gray-600 text-center">
+                  <h2 className="text-2xl font-bold text-center font-space">THROUGHPUT</h2>
+                  <p className="text-gray-600 text-center font-fira">
                     (HIGHER IS BETTER)
                   </p>
-                  <div className="pb-1 w-full border-b border-gray-400"></div>
-                  <p className="pt-1 text-lg font-semibold text-center">
+                  <p className="pt-1 text-lg font-semibold text-center font-fira">
                     Execute{" "}
-                    <span className="text-purple-600 font-bold">
+                    <span className="text-[#FF66B3] font-bold">
                       {throughputRatio ? throughputRatio : ""}x
                     </span>{" "}
                     more queries with the same hardware
@@ -414,13 +416,12 @@ export default function DashBoard() {
                   className="bg-muted/50 rounded-xl p-4 min-h-0 w-full flex flex-col items-center justify-between"
                   id="memory-chart"
                 >
-                  <h2 className="text-2xl font-bold text-center">
+                  <h2 className="text-2xl font-bold text-center font-space">
                     MEMORY USAGE
                   </h2>
-                  <p className="text-gray-600 text-center">(LOWER IS BETTER)</p>
-                  <div className="pb-1 w-full border-b border-gray-400"></div>
-                  <p className="pt-1 text-lg font-semibold text-center">
-                    <span className="text-purple-600 font-bold">
+                  <p className="text-gray-600 text-center font-fira">(LOWER IS BETTER)</p>
+                  <p className="pt-1 text-lg font-semibold text-center font-fira">
+                    <span className="text-[#FF66B3] font-bold">
                       {memoryUsageRatio ? memoryUsageRatio : ""}x
                     </span>{" "}
                     Better performance, lower overall costs
