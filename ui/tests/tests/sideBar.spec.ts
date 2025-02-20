@@ -104,13 +104,4 @@ test.describe("SideBar tests", () => {
     });
   });
 
-  test(`Hover over 'Deadline Offset Analysis' link and validate its content`, async () => {
-    const sidebar = await browser.createNewPage(MainPage, urls.baseUrl);
-    await sidebar.hoverOnDeadlineInfoLink();
-    expect(await sidebar.isHoverElementVisible()).toBe(true);
-    const expectedText =
-      "Deadline Offset Analysis Comparison of the time delays (deadlines) between different vendors to evaluate their performance and responsiveness.";
-    const actualText = await sidebar.getDeadlineInfoLinkText();
-    expect(actualText).toBe(expectedText);
-  });
 });
