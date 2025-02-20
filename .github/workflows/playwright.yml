@@ -2,9 +2,9 @@ name: Playwright Tests
 
 on:
   push:
-    branches: master
+    branches: [ master, staging ]
   pull_request:
-    branches: master
+    branches: [ master, staging ]
 
 jobs:
   test:
@@ -29,12 +29,14 @@ jobs:
       - name: Install Playwright Browsers
         run: npx playwright install --with-deps
       - name: Set up environment and run tests
+        env:
+          NEXT_PUBLIC_HUBSPOT_PORTAL_ID: ${{ secrets.NEXT_PUBLIC_HUBSPOT_PORTAL_ID }}
+          NEXT_PUBLIC_HUBSPOT_FORM_ID: ${{ secrets.NEXT_PUBLIC_HUBSPOT_FORM_ID }}
         run: |
           npm run build
           npm start &
           npx playwright test --reporter=dot,list
 
-      # Step 6: Upload Playwright report
       - name: Upload Playwright report
         uses: actions/upload-artifact@v4
         if: ${{ always() }}

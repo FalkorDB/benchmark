@@ -31,7 +31,7 @@ export default function DashBoard() {
     Vendors: ["falkordb", "neo4j"],
     Clients: ["40"],
     Throughput: ["2500"],
-    Hardware: ["intel"],
+    Hardware: ["arm"],
     Queries: ["aggregate_expansion_4_with_filter"],
     "Realistic Workload": ["1"],
   });
