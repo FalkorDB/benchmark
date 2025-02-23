@@ -3,7 +3,7 @@ import {
   Cpu,
   Users,
   Activity,
-  BarChart,
+  // BarChart,
   Search,
 } from "lucide-react";
 export const sidebarConfig: {

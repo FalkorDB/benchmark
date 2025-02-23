@@ -64,6 +64,7 @@ test.describe("SideBar tests", () => {
   sideBarItems.forEach(({ item, expectedRes }) => {
     test(`Verify ${item} selection updates the chart results`, async () => {
       const sidebar = await browser.createNewPage(MainPage, urls.baseUrl);
+      await sidebar.selectWorkloadType("Concurrent");
       const graphDetails = await sidebar.getGraphDetails();
       await sidebar.clickOnSidebarSelection(item);
       const updatedGraphDetails = await sidebar.getGraphDetails();
@@ -99,6 +100,7 @@ test.describe("SideBar tests", () => {
   hoverItems.forEach(({ item, expectedRes }) => {
     test(`Verify hover behavior for hardware item: ${item}`, async () => {
       const sidebar = await browser.createNewPage(MainPage, urls.baseUrl);
+      await sidebar.selectWorkloadType("Concurrent");
       await sidebar.hoverOnSideBarHardware(item);
       expect(await sidebar.isHoverElementVisible()).toBe(expectedRes);
     });

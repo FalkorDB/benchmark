@@ -274,29 +274,29 @@ export default function DashBoard() {
   const throughputRatio =
     minThroughput !== 0 ? Math.round(maxThroughput / minThroughput) : 0;
 
-  const memoryData = filteredResults.map((item) => {
-    const memoryValue = item.result["ram-usage"] ?? "0MB";
-    const match = memoryValue.match(/([\d.]+)([a-zA-Z]+)/);
-    if (match) {
-      const value = parseFloat(match[1]);
-      const unit = match[2].toUpperCase();
-      const memoryInMB = unit === "GB" ? value * 1024 : value;
-      return {
-        vendor: item.vendor,
-        memory: memoryInMB,
-      };
-    }
+  // const memoryData = filteredResults.map((item) => {
+  //   const memoryValue = item.result["ram-usage"] ?? "0MB";
+  //   const match = memoryValue.match(/([\d.]+)([a-zA-Z]+)/);
+  //   if (match) {
+  //     const value = parseFloat(match[1]);
+  //     const unit = match[2].toUpperCase();
+  //     const memoryInMB = unit === "GB" ? value * 1024 : value;
+  //     return {
+  //       vendor: item.vendor,
+  //       memory: memoryInMB,
+  //     };
+  //   }
 
-    return {
-      vendor: item.vendor,
-      memory: 0,
-    };
-  });
+  //   return {
+  //     vendor: item.vendor,
+  //     memory: 0,
+  //   };
+  // });
 
-  const maxMemoryUsage = Math.max(...memoryData.map((item) => item.memory));
-  const minMemoryUsage = Math.min(...memoryData.map((item) => item.memory));
-  const memoryUsageRatio =
-    minMemoryUsage !== 0 ? Math.round(maxMemoryUsage / minMemoryUsage) : 0;
+  // const maxMemoryUsage = Math.max(...memoryData.map((item) => item.memory));
+  // const minMemoryUsage = Math.min(...memoryData.map((item) => item.memory));
+  // const memoryUsageRatio =
+  //   minMemoryUsage !== 0 ? Math.round(maxMemoryUsage / minMemoryUsage) : 0;
 
   useEffect(() => {
     setGridKey((prevKey) => prevKey + 1);
@@ -318,7 +318,7 @@ export default function DashBoard() {
     };
 
     addOrReplaceChartData("throughputData", throughputData);
-    addOrReplaceChartData("memoryData", memoryData);
+    // addOrReplaceChartData("memoryData", memoryData);
     addOrReplaceChartData("latencyData", latencyDataForRealistic);
   }
 
