@@ -27,13 +27,13 @@ export default function DashBoard() {
   const [selectedOptions, setSelectedOptions] = React.useState<
     Record<string, string[]>
   >({
-    "Workload Type": ["concurrent"],
+    "Workload Type": ["single"],
     Vendors: ["falkordb", "neo4j"],
     Clients: ["40"],
     Throughput: ["2500"],
     Hardware: ["arm"],
     Queries: ["aggregate_expansion_4_with_filter"],
-    "Realistic Workload": ["1"],
+    // "Realistic Workload": ["1"],
   });
 
   const fetchData = useCallback(async () => {
@@ -206,7 +206,7 @@ export default function DashBoard() {
       hoverBackgroundColor: getBarColor(vendor),
       borderRadius: 8,
       barPercentage: 0.95,
-      categoryPercentage: 0.8,
+      categoryPercentage: 0.9,
     }));
 
     if (filteredUnrealistic.length >= 2) {
@@ -274,29 +274,29 @@ export default function DashBoard() {
   const throughputRatio =
     minThroughput !== 0 ? Math.round(maxThroughput / minThroughput) : 0;
 
-  const memoryData = filteredResults.map((item) => {
-    const memoryValue = item.result["ram-usage"] ?? "0MB";
-    const match = memoryValue.match(/([\d.]+)([a-zA-Z]+)/);
-    if (match) {
-      const value = parseFloat(match[1]);
-      const unit = match[2].toUpperCase();
-      const memoryInMB = unit === "GB" ? value * 1024 : value;
-      return {
-        vendor: item.vendor,
-        memory: memoryInMB,
-      };
-    }
+  // const memoryData = filteredResults.map((item) => {
+  //   const memoryValue = item.result["ram-usage"] ?? "0MB";
+  //   const match = memoryValue.match(/([\d.]+)([a-zA-Z]+)/);
+  //   if (match) {
+  //     const value = parseFloat(match[1]);
+  //     const unit = match[2].toUpperCase();
+  //     const memoryInMB = unit === "GB" ? value * 1024 : value;
+  //     return {
+  //       vendor: item.vendor,
+  //       memory: memoryInMB,
+  //     };
+  //   }
 
-    return {
-      vendor: item.vendor,
-      memory: 0,
-    };
-  });
+  //   return {
+  //     vendor: item.vendor,
+  //     memory: 0,
+  //   };
+  // });
 
-  const maxMemoryUsage = Math.max(...memoryData.map((item) => item.memory));
-  const minMemoryUsage = Math.min(...memoryData.map((item) => item.memory));
-  const memoryUsageRatio =
-    minMemoryUsage !== 0 ? Math.round(maxMemoryUsage / minMemoryUsage) : 0;
+  // const maxMemoryUsage = Math.max(...memoryData.map((item) => item.memory));
+  // const minMemoryUsage = Math.min(...memoryData.map((item) => item.memory));
+  // const memoryUsageRatio =
+  //   minMemoryUsage !== 0 ? Math.round(maxMemoryUsage / minMemoryUsage) : 0;
 
   useEffect(() => {
     setGridKey((prevKey) => prevKey + 1);
@@ -318,7 +318,7 @@ export default function DashBoard() {
     };
 
     addOrReplaceChartData("throughputData", throughputData);
-    addOrReplaceChartData("memoryData", memoryData);
+    // addOrReplaceChartData("memoryData", memoryData);
     addOrReplaceChartData("latencyData", latencyDataForRealistic);
   }
 
@@ -384,10 +384,10 @@ export default function DashBoard() {
             {selectedOptions["Workload Type"]?.includes("concurrent") && (
               <>
                 <div
-                  className="bg-muted/50 rounded-xl p-4 min-h-0 w-full flex flex-col items-center justify-between"
+                  className="bg-muted/50 rounded-xl p-4 min-h-0 w-full flex flex-col items-center justify-between col-span-2"
                   id="throughput-chart"
                 >
-                  <h2 className="text-2xl font-bold text-center font-space">THROUGHPUT</h2>
+                  <h2 className="text-2xl font-bold text-center font-space">MAX THROUGHPUT</h2>
                   <p className="text-gray-600 text-center font-fira">
                     (HIGHER IS BETTER)
                   </p>
@@ -412,7 +412,7 @@ export default function DashBoard() {
                     </div>
                   </div>
                 </div>
-                <div
+                {/* <div
                   className="bg-muted/50 rounded-xl p-4 min-h-0 w-full flex flex-col items-center justify-between"
                   id="memory-chart"
                 >
@@ -439,7 +439,7 @@ export default function DashBoard() {
                       />
                     </div>
                   </div>
-                </div>
+                </div> */}
               </>
             )}
             <div className="col-span-2 bg-muted/50 rounded-xl flex items-center justify-center h-[50px]">
