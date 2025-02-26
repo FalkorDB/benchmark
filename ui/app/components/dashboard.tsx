@@ -314,7 +314,7 @@ export default function DashBoard() {
     };
 
     addOrReplaceChartData("throughputData", throughputData);
-    addOrReplaceChartData("memoryData", singleMemory);
+    // addOrReplaceChartData("memoryData", singleMemory);
     addOrReplaceChartData("latencyData", latencyDataForRealistic);
   }
 
