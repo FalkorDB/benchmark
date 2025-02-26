@@ -67,8 +67,8 @@ const VerticalBarChart: React.FC<VerticalBarChartProps> = ({
         align: "top" as const,
         font: {
           weight: "bold" as const,
-          family: "Fira Code",
-          size: 18,
+          family: chartId !==  "single" ? "Fira Code" : undefined,
+          size: chartId !== "single" ? 18 : undefined,
         },
         color: "grey",
         // eslint-disable-next-line

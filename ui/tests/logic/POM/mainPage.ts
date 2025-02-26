@@ -72,6 +72,10 @@ export default class NavBarComponent extends BasePage {
     return this.page.locator("div[data-sidebar='content']");
   }
 
+  private get sideBarWorkloadType(): (type: string) => Locator {
+    return (type: string) => this.page.locator("button", { hasText: type });
+  }
+
   /* General Functionality  */
 
   async hoverOnSideBarHardware(item: string): Promise<void> {
@@ -129,6 +133,10 @@ export default class NavBarComponent extends BasePage {
 
   async scrollToBottomInSidebar(): Promise<void> {
     await this.sideBarContent.evaluate((el) => el.scrollTo(0, el.scrollHeight));
+  }
+
+  async selectWorkloadType(type: string): Promise<void> {
+    await this.sideBarWorkloadType(type).click();
   }
 
   async isScrolledToBottomInSidebar(): Promise<boolean> {

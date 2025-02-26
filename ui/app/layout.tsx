@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import "./globals.css";
 import { Toaster } from "@/components/ui/toaster";
+import GTM from "./GTM";
 
 export const metadata: Metadata = {
   title: "Benchmark by FalkorDB",
@@ -15,6 +16,7 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body>
+        <GTM />
         {children}
         <Toaster />
       </body>

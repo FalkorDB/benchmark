@@ -3,7 +3,7 @@ import {
   Cpu,
   Users,
   Activity,
-  BarChart,
+  // BarChart,
   Search,
 } from "lucide-react";
 export const sidebarConfig: {
@@ -76,13 +76,13 @@ export const sidebarConfig: {
         { id: "single_vertex_read", label: "Read Vertex" },
       ],
     },
-    {
-      title: "Realistic Workload",
-      description: "",
-      layout: "col",
-      icon: BarChart,
-      options: [{ id: "1", label: "100% Read / 0% Write" }],
-    },
+    // {
+    //   title: "Realistic Workload",
+    //   description: "",
+    //   layout: "col",
+    //   icon: BarChart,
+    //   options: [{ id: "1", label: "100% Read / 0% Write" }],
+    // },
   ],
 };
 
