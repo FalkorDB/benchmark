@@ -37,7 +37,6 @@ const MemoryBarChart: React.FC<MemoryBarChartProps> = ({
   unit,
   ratio,
   maxValue,
-  minValue,
   getBarColor,
 }) => {
   const chartDataForMemory = useMemo(() => {
@@ -69,6 +68,7 @@ const MemoryBarChart: React.FC<MemoryBarChartProps> = ({
       legend: { display: false },
       tooltip: {
         callbacks: {
+          // eslint-disable-next-line
           label: function (context: any) {
             const value = context.raw;
             return `${context.dataset.label}: ${value}${unit}`;
@@ -99,6 +99,7 @@ const MemoryBarChart: React.FC<MemoryBarChartProps> = ({
             family: "Fira Code",
           },
           color: "#000",
+          // eslint-disable-next-line
           callback: (value: any, index: number) => chartDataForMemory.labels[index],
         },
       },
@@ -111,6 +112,7 @@ const MemoryBarChart: React.FC<MemoryBarChartProps> = ({
             family: "Fira Code",
           },
           color: "#333",
+          // eslint-disable-next-line
           callback: (value: any) => `${value}${unit}`,
         },
       },
