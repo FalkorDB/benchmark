@@ -22,8 +22,8 @@ export const sidebarConfig: {
       layout: "row",
       icon: Activity,
       options: [
-        { id: "concurrent", label: "Concurrent" },
         { id: "single", label: "Single" },
+        { id: "concurrent", label: "Concurrent" },
       ],
     },
     {

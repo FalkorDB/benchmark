@@ -895,6 +895,7 @@
       "node_count": 100000,
       "relation_count": 1768515,
       "query_count": 100000,
+      "memory": "95MB",
       "histogram_for_type": {
         "aggregate_expansion_1_with_filter": [
           0.7,
@@ -1059,6 +1060,7 @@
       "node_count": 100000,
       "relation_count": 1768515,
       "query_count": 100000,
+      "memory": "600MB",
       "histogram_for_type": {
         "aggregate_expansion_3_with_filter": [
           2.5,
