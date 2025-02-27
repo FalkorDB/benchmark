@@ -28,6 +28,7 @@ export interface Run {
 interface UnrealisticData {
   vendor: string;
   histogram_for_type: Record<string, number[]>;
+  memory: string;
 }
 
 export interface PlatformDetails {

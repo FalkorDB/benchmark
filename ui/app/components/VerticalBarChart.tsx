@@ -74,7 +74,7 @@ const VerticalBarChart: React.FC<VerticalBarChartProps> = ({
         // eslint-disable-next-line
         formatter: (value: number, context: any) => {
           if (chartId === "single") {
-            return value > 0 ? `${value}` : "";
+            return value > 0 ? `${Math.round(value)}` : "";
           }
           const label = context.dataset.label;
           if (!label) return "";

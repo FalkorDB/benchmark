@@ -8,6 +8,7 @@ import { BenchmarkData } from "../types/benchmark";
 import { useToast } from "@/hooks/use-toast";
 import HorizontalBarChart from "./HorizontalBarChart";
 import VerticalBarChart from "./VerticalBarChart";
+import MemoryBarChart from "./MemoryBarChart";
 
 export default function DashBoard() {
   const [data, setData] = useState<BenchmarkData | null>(null);
@@ -22,7 +23,7 @@ export default function DashBoard() {
     p99: { minValue: 0, maxValue: 0, ratio: 0 },
   });
   const [filteredUnrealistic, setFilteredUnrealistic] = useState<
-    { vendor: string; histogram: number[] }[]
+    { vendor: string; histogram: number[]; memory: string }[]
   >([]);
   const [selectedOptions, setSelectedOptions] = React.useState<
     Record<string, string[]>
@@ -33,7 +34,6 @@ export default function DashBoard() {
     Throughput: ["2500"],
     Hardware: ["arm"],
     Queries: ["aggregate_expansion_4_with_filter"],
-    // "Realistic Workload": ["1"],
   });
 
   const fetchData = useCallback(async () => {
@@ -88,13 +88,16 @@ export default function DashBoard() {
 
     setFilteredUnrealistic(
       data.unrealstic
-        .map(({ vendor, histogram_for_type }) => ({
+        .map(({ vendor, histogram_for_type, memory }) => ({
           vendor,
           histogram: histogram_for_type[selectedQuery] || [],
+          memory,
         }))
         .filter((entry) => entry.histogram.length > 0)
     );
   }, [data, selectedOptions.Queries]);
+
+  console.log(filteredUnrealistic);
 
   // filter realstic data
   useEffect(() => {
@@ -265,6 +268,8 @@ export default function DashBoard() {
     actualMessagesPerSecond: item.result["actual-messages-per-second"],
   }));
 
+  console.log(throughputData);
+
   const maxThroughput = Math.max(
     ...throughputData.map((item) => item.actualMessagesPerSecond)
   );
@@ -274,29 +279,20 @@ export default function DashBoard() {
   const throughputRatio =
     minThroughput !== 0 ? Math.round(maxThroughput / minThroughput) : 0;
 
-  // const memoryData = filteredResults.map((item) => {
-  //   const memoryValue = item.result["ram-usage"] ?? "0MB";
-  //   const match = memoryValue.match(/([\d.]+)([a-zA-Z]+)/);
-  //   if (match) {
-  //     const value = parseFloat(match[1]);
-  //     const unit = match[2].toUpperCase();
-  //     const memoryInMB = unit === "GB" ? value * 1024 : value;
-  //     return {
-  //       vendor: item.vendor,
-  //       memory: memoryInMB,
-  //     };
-  //   }
+  const parseMemory = (memory: string): number => {
+    const match = memory.match(/([\d.]+)/);
+    return match ? parseFloat(match[1]) : 0;
+  };
 
-  //   return {
-  //     vendor: item.vendor,
-  //     memory: 0,
-  //   };
-  // });
+  const singleMemory = filteredUnrealistic.map(({ vendor, memory }) => ({
+    vendor,
+    memory: parseMemory(memory),
+  }));
 
-  // const maxMemoryUsage = Math.max(...memoryData.map((item) => item.memory));
-  // const minMemoryUsage = Math.min(...memoryData.map((item) => item.memory));
-  // const memoryUsageRatio =
-  //   minMemoryUsage !== 0 ? Math.round(maxMemoryUsage / minMemoryUsage) : 0;
+  const maxSingleMemory = Math.max(...singleMemory.map((item) => item.memory));
+  const minSingleMemory = Math.min(...singleMemory.map((item) => item.memory));
+  const singleMemoryRatio =
+    minSingleMemory !== 0 ? Math.round(maxSingleMemory / minSingleMemory) : 0;
 
   useEffect(() => {
     setGridKey((prevKey) => prevKey + 1);
@@ -318,9 +314,11 @@ export default function DashBoard() {
     };
 
     addOrReplaceChartData("throughputData", throughputData);
-    // addOrReplaceChartData("memoryData", memoryData);
+    // addOrReplaceChartData("memoryData", singleMemory);
     addOrReplaceChartData("latencyData", latencyDataForRealistic);
   }
+
+  const isConcurrent = selectedOptions["Workload Type"]?.includes("concurrent");
 
   return (
     <SidebarProvider className="h-screen w-screen overflow-hidden">
@@ -333,24 +331,28 @@ export default function DashBoard() {
         <SidebarInset className="flex-grow h-full min-h-0">
           <div
             key={gridKey}
-            className={`grid h-full grid-cols-2 ${
-              selectedOptions["Workload Type"]?.includes("concurrent")
-                ? "grid-rows-[2fr,1.5fr,50px]"
-                : "grid-rows-[2fr,50px]"
+            className={`grid w-full h-full min-w-0 ${
+              isConcurrent
+                ? "grid-cols-2 grid-rows-[2fr,1.5fr,50px]"
+                : "grid-cols-[7fr_3fr] grid-rows-[2fr,50px]"
             } gap-2 p-1`}
           >
             <div
-              className="col-span-2 bg-muted/50 rounded-xl p-4 min-h-0 w-full flex flex-col items-center justify-between"
+              className={`bg-muted/50 rounded-xl p-4 min-h-0 w-full flex flex-col min-w-0 items-center justify-between ${
+                isConcurrent ? "col-span-2" : ""
+              }`}
               id="latency-chart"
             >
-              <h2 className="text-2xl font-bold text-center font-space">LATENCY</h2>
+              <h2 className="text-2xl font-bold text-center font-space">
+                LATENCY
+              </h2>
               <p className="pb-1 text-gray-600 text-center font-fira">
                 (LOWER IS BETTER)
               </p>
               <p className="text-lg font-semibold text-center mb-2 font-fira">
                 Superior Latency:{" "}
                 <span className="text-[#FF66B3] font-bold">
-                  {selectedOptions["Workload Type"]?.includes("concurrent")
+                  {isConcurrent
                     ? latencyStats
                       ? `${Math.round(latencyStats.p99.ratio)}x`
                       : ""
@@ -365,15 +367,11 @@ export default function DashBoard() {
                   {latencyStats.p99.ratio > 0 && (
                     <VerticalBarChart
                       chartData={
-                        selectedOptions["Workload Type"]?.includes("concurrent")
+                        isConcurrent
                           ? chartDataForRealistic
                           : chartDataForUnrealistic
                       }
-                      chartId={
-                        selectedOptions["Workload Type"]?.includes("concurrent")
-                          ? "concurrent"
-                          : "single"
-                      }
+                      chartId={isConcurrent ? "concurrent" : "single"}
                       unit="ms"
                       latencyStats={latencyStats}
                     />
@@ -381,13 +379,43 @@ export default function DashBoard() {
                 </div>
               </div>
             </div>
-            {selectedOptions["Workload Type"]?.includes("concurrent") && (
+            {!isConcurrent && (
+              <div className="bg-muted/50 rounded-xl p-4 min-h-0 w-full flex flex-col min-w-0 items-center justify-between">
+                <h2 className="text-2xl font-bold text-center font-space">
+                  MEMORY USAGE
+                </h2>
+                <p className="text-gray-600 text-center font-fira">
+                  (LOWER IS BETTER)
+                </p>
+                <p className="pt-1 text-lg font-semibold text-center font-fira pb-1">
+                  <span className="text-[#FF66B3] font-bold">
+                    {singleMemoryRatio ? singleMemoryRatio : ""}x
+                  </span>{" "}
+                  Better performance, lower overall costs
+                </p>
+                <div className="w-full flex-grow flex items-center justify-center min-h-0">
+                  <div className="w-full h-full">
+                    <MemoryBarChart
+                      singleMemory={singleMemory}
+                      ratio={singleMemoryRatio}
+                      maxValue={maxSingleMemory}
+                      minValue={minSingleMemory}
+                      unit="MB"
+                      getBarColor={getBarColor}
+                    />
+                  </div>
+                </div>
+              </div>
+            )}
+            {isConcurrent && (
               <>
                 <div
                   className="bg-muted/50 rounded-xl p-4 min-h-0 w-full flex flex-col items-center justify-between col-span-2"
                   id="throughput-chart"
                 >
-                  <h2 className="text-2xl font-bold text-center font-space">MAX THROUGHPUT</h2>
+                  <h2 className="text-2xl font-bold text-center font-space">
+                    MAX THROUGHPUT
+                  </h2>
                   <p className="text-gray-600 text-center font-fira">
                     (HIGHER IS BETTER)
                   </p>
@@ -412,34 +440,6 @@ export default function DashBoard() {
                     </div>
                   </div>
                 </div>
-                {/* <div
-                  className="bg-muted/50 rounded-xl p-4 min-h-0 w-full flex flex-col items-center justify-between"
-                  id="memory-chart"
-                >
-                  <h2 className="text-2xl font-bold text-center font-space">
-                    MEMORY USAGE
-                  </h2>
-                  <p className="text-gray-600 text-center font-fira">(LOWER IS BETTER)</p>
-                  <p className="pt-1 text-lg font-semibold text-center font-fira">
-                    <span className="text-[#FF66B3] font-bold">
-                      {memoryUsageRatio ? memoryUsageRatio : ""}x
-                    </span>{" "}
-                    Better performance, lower overall costs
-                  </p>
-                  <div className="w-full flex-grow flex items-center justify-center min-h-0">
-                    <div className="w-full h-full">
-                      <HorizontalBarChart
-                        data={memoryData}
-                        dataKey="memory"
-                        chartLabel="Memory Utilization (MB)"
-                        ratio={memoryUsageRatio}
-                        maxValue={maxMemoryUsage}
-                        minValue={minMemoryUsage}
-                        unit="mb"
-                      />
-                    </div>
-                  </div>
-                </div> */}
               </>
             )}
             <div className="col-span-2 bg-muted/50 rounded-xl flex items-center justify-center h-[50px]">
