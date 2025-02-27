@@ -97,8 +97,6 @@ export default function DashBoard() {
     );
   }, [data, selectedOptions.Queries]);
 
-  console.log(filteredUnrealistic);
-
   // filter realstic data
   useEffect(() => {
     if (!data || !data.runs) {
@@ -267,8 +265,6 @@ export default function DashBoard() {
     vendor: item.vendor,
     actualMessagesPerSecond: item.result["actual-messages-per-second"],
   }));
-
-  console.log(throughputData);
 
   const maxThroughput = Math.max(
     ...throughputData.map((item) => item.actualMessagesPerSecond)
