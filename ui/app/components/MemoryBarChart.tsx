@@ -36,7 +36,6 @@ const MemoryBarChart: React.FC<MemoryBarChartProps> = ({
   singleMemory,
   unit,
   ratio,
-  maxValue,
   minValue,
   getBarColor,
 }) => {
