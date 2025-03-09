@@ -97,8 +97,6 @@ export default function DashBoard() {
     );
   }, [data, selectedOptions.Queries]);
 
-  console.log(filteredUnrealistic);
-
   // filter realstic data
   useEffect(() => {
     if (!data || !data.runs) {
@@ -268,8 +266,6 @@ export default function DashBoard() {
     actualMessagesPerSecond: item.result["actual-messages-per-second"],
   }));
 
-  console.log(throughputData);
-
   const maxThroughput = Math.max(
     ...throughputData.map((item) => item.actualMessagesPerSecond)
   );
@@ -347,7 +343,7 @@ export default function DashBoard() {
                 LATENCY
               </h2>
               <p className="pb-1 text-gray-600 text-center font-fira">
-                (LOWER IS BETTER)
+                (HIGHER IS BETTER)
               </p>
               <p className="text-lg font-semibold text-center mb-2 font-fira">
                 Superior Latency:{" "}
@@ -385,7 +381,7 @@ export default function DashBoard() {
                   MEMORY USAGE
                 </h2>
                 <p className="text-gray-600 text-center font-fira">
-                  (LOWER IS BETTER)
+                  (HIGHER IS BETTER)
                 </p>
                 <p className="pt-1 text-lg font-semibold text-center font-fira pb-1">
                   <span className="text-[#FF66B3] font-bold">
