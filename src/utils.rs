@@ -337,3 +337,107 @@ pub fn format_number(num: u64) -> String {
     }
     s
 }
+
+/// Collects items from a stream into batches of specified size
+pub async fn collect_batches<T, S, E>(
+    mut stream: S,
+    batch_size: usize,
+) -> Vec<Vec<T>>
+where
+    S: StreamExt<Item = Result<T, E>> + Unpin,
+    E: std::fmt::Debug,
+{
+    let mut batches = Vec::new();
+    let mut current_batch = Vec::with_capacity(batch_size);
+
+    while let Some(item_result) = stream.next().await {
+        match item_result {
+            Ok(item) => {
+                current_batch.push(item);
+                if current_batch.len() >= batch_size {
+                    batches.push(current_batch);
+                    current_batch = Vec::with_capacity(batch_size);
+                }
+            }
+            Err(e) => {
+                error!("Error processing stream item: {:?}", e);
+            }
+        }
+    }
+
+    // Add remaining items if any
+    if !current_batch.is_empty() {
+        batches.push(current_batch);
+    }
+
+    batches
+}
+
+/// Process items from a stream in batches with a callback function
+pub async fn process_stream_in_batches<T, S, E, F, Fut>(
+    mut stream: S,
+    batch_size: usize,
+    mut process_batch: F,
+) -> BenchmarkResult<usize>
+where
+    S: StreamExt<Item = Result<T, E>> + Unpin,
+    E: std::fmt::Debug,
+    F: FnMut(Vec<T>) -> Fut,
+    Fut: std::future::Future<Output = BenchmarkResult<()>>,
+{
+    let mut current_batch = Vec::with_capacity(batch_size);
+    let mut total_processed = 0;
+    let mut batch_count = 0;
+    let start_time = tokio::time::Instant::now();
+    let mut last_progress_report = start_time;
+    const PROGRESS_INTERVAL_SECS: u64 = 5;
+
+    while let Some(item_result) = stream.next().await {
+        match item_result {
+            Ok(item) => {
+                current_batch.push(item);
+                total_processed += 1;
+
+                if current_batch.len() >= batch_size {
+                    batch_count += 1;
+                    let batch_start = tokio::time::Instant::now();
+                    
+                    info!("Processing batch {} with {} items (total processed: {})", 
+                          batch_count, current_batch.len(), total_processed);
+                    
+                    process_batch(current_batch).await?;
+                    current_batch = Vec::with_capacity(batch_size);
+                    
+                    let batch_duration = batch_start.elapsed();
+                    trace!("Batch {} completed in {:?}", batch_count, batch_duration);
+                    
+                    // Report progress every 5 seconds
+                    let now = tokio::time::Instant::now();
+                    if now.duration_since(last_progress_report).as_secs() >= PROGRESS_INTERVAL_SECS {
+                        let elapsed = now.duration_since(start_time);
+                        let rate = total_processed as f64 / elapsed.as_secs_f64();
+                        info!("Progress: {} items processed in {:?} ({:.2} items/sec, {} batches completed)", 
+                              format_number(total_processed as u64), elapsed, rate, batch_count);
+                        last_progress_report = now;
+                    }
+                }
+            }
+            Err(e) => {
+                error!("Error processing stream item: {:?}", e);
+            }
+        }
+    }
+
+    // Process remaining items if any
+    if !current_batch.is_empty() {
+        batch_count += 1;
+        info!("Processing final batch {} with {} items", batch_count, current_batch.len());
+        process_batch(current_batch).await?;
+    }
+
+    let total_duration = start_time.elapsed();
+    let final_rate = total_processed as f64 / total_duration.as_secs_f64();
+    info!("Completed processing {} items in {} batches over {:?} (avg {:.2} items/sec)", 
+          format_number(total_processed as u64), batch_count, total_duration, final_rate);
+    Ok(total_processed)
+}

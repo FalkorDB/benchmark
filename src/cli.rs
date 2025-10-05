@@ -38,6 +38,14 @@ pub enum Commands {
             help = "only load the data from the cache and iterate over it, show how much time it takes, do not send it to the server"
         )]
         dry_run: bool,
+        #[arg(
+            short,
+            long,
+            required = false,
+            default_value_t = 1000,
+            help = "number of cypher commands to execute in a single batch"
+        )]
+        batch_size: usize,
     },
     #[command(
         about = "generate a set of queries and store them in a file to be used with the run command"

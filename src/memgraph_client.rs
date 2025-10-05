@@ -2,7 +2,7 @@ use crate::error::BenchmarkError::{Neo4rsError, OtherError};
 use crate::error::BenchmarkResult;
 use crate::queries_repository::PreparedQuery;
 use crate::scheduler::Msg;
-use crate::{NEO4J_MSG_DEADLINE_OFFSET_GAUGE, OPERATION_COUNTER};
+use crate::{MEMGRAPH_MSG_DEADLINE_OFFSET_GAUGE, OPERATION_COUNTER};
 use futures::stream::TryStreamExt;
 use futures::{Stream, StreamExt};
 use histogram::Histogram;
@@ -10,26 +10,35 @@ use neo4rs::{query, Graph, Row};
 use std::hint::black_box;
 use std::pin::Pin;
 use std::time::Duration;
-use tokio::io;
+use tokio::fs::File;
+use tokio::io::{self, AsyncWriteExt};
 use tokio::time::Instant;
 use tracing::{error, info, trace};
 
 #[derive(Clone)]
-pub struct Neo4jClient {
+pub struct MemgraphClient {
     graph: Graph,
 }
 
-impl Neo4jClient {
+impl MemgraphClient {
     pub async fn new(
         uri: String,
         user: String,
         password: String,
-    ) -> BenchmarkResult<Neo4jClient> {
-        let graph = Graph::new(&uri, user.clone(), password.clone())
-            .await
-            .map_err(Neo4rsError)?;
-        Ok(Neo4jClient { graph })
+    ) -> BenchmarkResult<MemgraphClient> {
+        let graph = if user.is_empty() {
+            // Memgraph often runs without authentication in development
+            Graph::new(&format!("bolt://{}", uri), "", "")
+                .await
+                .map_err(Neo4rsError)?
+        } else {
+            Graph::new(&format!("bolt://{}", uri), user.clone(), password.clone())
+                .await
+                .map_err(Neo4rsError)?
+        };
+        Ok(MemgraphClient { graph })
     }
+
     pub async fn execute_prepared_query<S: AsRef<str>>(
         &mut self,
         worker_id: S,
@@ -46,7 +55,7 @@ impl Neo4jClient {
         let timeout = Duration::from_secs(60);
         let offset = msg.compute_offset_ms();
 
-        NEO4J_MSG_DEADLINE_OFFSET_GAUGE.set(offset);
+        MEMGRAPH_MSG_DEADLINE_OFFSET_GAUGE.set(offset);
         if offset > 0 {
             // sleep offset millis
             tokio::time::sleep(Duration::from_millis(offset as u64)).await;
@@ -55,7 +64,7 @@ impl Neo4jClient {
         let bolt_query = bolt.query.as_str();
         let bolt_params = bolt.clone().params;
 
-        let neo4j_result = self
+        let memgraph_result = self
             .graph
             .execute(neo4rs::query(bolt_query).params(bolt_params));
 
@@ -67,11 +76,11 @@ impl Neo4jClient {
             return Ok(());
         }
 
-        let neo4j_result = tokio::time::timeout(timeout, neo4j_result).await;
+        let memgraph_result = tokio::time::timeout(timeout, memgraph_result).await;
         OPERATION_COUNTER
-            .with_label_values(&["neo4j", worker_id, "", q_name, "", ""])
+            .with_label_values(&["memgraph", worker_id, "", q_name, "", ""])
             .inc();
-        match neo4j_result {
+        match memgraph_result {
             Ok(Ok(mut stream)) => {
                 while let Ok(Some(row)) = stream.next().await {
                     trace!("Row: {:?}", row);
@@ -80,13 +89,13 @@ impl Neo4jClient {
             }
             Ok(Err(e)) => {
                 OPERATION_COUNTER
-                    .with_label_values(&["neo4j", worker_id, "error", q_name, "", ""])
+                    .with_label_values(&["memgraph", worker_id, "error", q_name, "", ""])
                     .inc();
                 return Err(Neo4rsError(e));
             }
             Err(_) => {
                 OPERATION_COUNTER
-                    .with_label_values(&["falkor", worker_id, "timeout", q_name, "", ""])
+                    .with_label_values(&["memgraph", worker_id, "timeout", q_name, "", ""])
                     .inc();
                 return Err(OtherError("Timeout".to_string()));
             }
@@ -113,6 +122,7 @@ impl Neo4jClient {
         }
         Ok((number_of_nodes, number_of_relationships))
     }
+
     pub async fn execute_query_iterator(
         &mut self,
         iter: Box<dyn Iterator<Item = PreparedQuery> + '_>,
@@ -149,6 +159,33 @@ impl Neo4jClient {
     /// Execute a batch of queries as a single transaction
     pub async fn execute_batch(
         &self,
+        _worker_id: &str,
+        batch_queries: &[String],
+    ) -> BenchmarkResult<()> {
+        if batch_queries.is_empty() {
+            return Ok(());
+        }
+
+        // Execute each query individually since Memgraph handles transactions differently
+        for query_str in batch_queries {
+            let mut results = self.execute_query(query_str).await?;
+            while let Some(row_or_error) = results.next().await {
+                match row_or_error {
+                    Ok(row) => {
+                        trace!("Row: {:?}", row);
+                        black_box(row);
+                    }
+                    Err(e) => error!("Error reading batch result row: {}", e),
+                }
+            }
+        }
+        
+        Ok(())
+    }
+
+    /// Execute a batch of queries with histogram tracking
+    pub async fn execute_batch_with_histogram(
+        &self,
         batch_queries: &[String],
         histogram: &mut Histogram,
     ) -> BenchmarkResult<()> {
@@ -158,19 +195,17 @@ impl Neo4jClient {
 
         let start = Instant::now();
         
-        // Execute all queries in a single transaction
-        let transaction_query = format!(
-            "BEGIN\n{}\nCOMMIT",
-            batch_queries.join(";\n")
-        );
-        
-        let mut results = self.execute_query(&transaction_query).await?;
-        while let Some(row_or_error) = results.next().await {
-            match row_or_error {
-                Ok(row) => {
-                    trace!("Row: {:?}", row);
+        // Execute each query individually 
+        for query_str in batch_queries {
+            let mut results = self.execute_query(query_str).await?;
+            while let Some(row_or_error) = results.next().await {
+                match row_or_error {
+                    Ok(row) => {
+                        trace!("Row: {:?}", row);
+                        black_box(row);
+                    }
+                    Err(e) => error!("Error reading batch result row: {}", e),
                 }
-                Err(e) => error!("Error reading batch result row: {}", e),
             }
         }
         
@@ -202,6 +237,7 @@ impl Neo4jClient {
                         match row_or_error {
                             Ok(row) => {
                                 trace!("Row: {:?}", row);
+                                black_box(row);
                             }
                             Err(e) => error!("Error reading row: {}", e),
                         }
@@ -229,7 +265,7 @@ impl Neo4jClient {
     where
         S: StreamExt<Item = Result<String, io::Error>> + Unpin,
     {
-        info!("Processing Neo4j queries in batches of {}", batch_size);
+        info!("Processing Memgraph queries in batches of {}", batch_size);
         
         let mut current_batch = Vec::with_capacity(batch_size);
         let mut total_processed = 0;
@@ -253,7 +289,7 @@ impl Neo4jClient {
                             info!("Processing batch {} with {} items (total processed: {})", 
                                   batch_count, current_batch.len(), total_processed);
                             
-                            self.execute_batch(&current_batch, histogram).await?;
+                            self.execute_batch_with_histogram(&current_batch, histogram).await?;
                             current_batch = Vec::with_capacity(batch_size);
                             
                             let batch_duration = batch_start.elapsed();
@@ -281,7 +317,7 @@ impl Neo4jClient {
         if !current_batch.is_empty() {
             batch_count += 1;
             info!("Processing final batch {} with {} items", batch_count, current_batch.len());
-            self.execute_batch(&current_batch, histogram).await?;
+            self.execute_batch_with_histogram(&current_batch, histogram).await?;
         }
 
         let total_duration = start_time.elapsed();
@@ -290,5 +326,54 @@ impl Neo4jClient {
               crate::utils::format_number(total_processed as u64), batch_count, total_duration, final_rate);
         
         Ok(total_processed)
+    }
+
+    /// Export database to a cypher file
+    pub async fn export_to_file(&self, file_path: &str) -> BenchmarkResult<()> {
+        info!("Exporting database to {}", file_path);
+        
+        let mut file = File::create(file_path).await?;
+        
+        // Export nodes
+        let mut result = self.graph.execute(query("MATCH (n) RETURN n")).await?;
+        while let Ok(Some(row)) = result.next().await {
+            // This is a simplified export - in a real implementation,
+            // you'd want to properly serialize the node properties
+            let export_line = format!("CREATE ({:?});\n", row);
+            file.write_all(export_line.as_bytes()).await?;
+        }
+        
+        // Export relationships
+        let mut result = self.graph.execute(query("MATCH ()-[r]->() RETURN r")).await?;
+        while let Ok(Some(row)) = result.next().await {
+            // This is a simplified export - in a real implementation,
+            // you'd want to properly serialize the relationship
+            let export_line = format!("CREATE ({:?});\n", row);
+            file.write_all(export_line.as_bytes()).await?;
+        }
+        
+        file.flush().await?;
+        info!("Database exported successfully");
+        Ok(())
+    }
+
+    /// Import database from a cypher file
+    pub async fn import_from_file(&self, file_path: &str) -> BenchmarkResult<()> {
+        info!("Importing database from {}", file_path);
+        
+        // Read and execute each line from the file
+        let content = tokio::fs::read_to_string(file_path).await?;
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if !trimmed.is_empty() && !trimmed.starts_with("//") {
+                let mut results = self.execute_query(trimmed).await?;
+                while let Some(_) = results.next().await {
+                    // Process results
+                }
+            }
+        }
+        
+        info!("Database imported successfully");
+        Ok(())
     }
 }

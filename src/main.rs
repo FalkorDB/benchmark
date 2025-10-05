@@ -4,6 +4,7 @@ use benchmark::cli::Commands::GenerateAutoComplete;
 use benchmark::error::BenchmarkError::OtherError;
 use benchmark::error::BenchmarkResult;
 use benchmark::falkor::{Falkor, Started, Stopped};
+use benchmark::memgraph_client::MemgraphClient;
 use benchmark::neo4j_client::Neo4jClient;
 use benchmark::queries_repository::PreparedQuery;
 use benchmark::scenario::Name::Users;
@@ -12,7 +13,8 @@ use benchmark::scheduler::Msg;
 use benchmark::utils::{delete_file, file_exists, format_number};
 use benchmark::{
     scheduler, FALKOR_ERROR_REQUESTS_DURATION_HISTOGRAM,
-    FALKOR_SUCCESS_REQUESTS_DURATION_HISTOGRAM, NEO4J_ERROR_REQUESTS_DURATION_HISTOGRAM,
+    FALKOR_SUCCESS_REQUESTS_DURATION_HISTOGRAM, MEMGRAPH_ERROR_REQUESTS_DURATION_HISTOGRAM,
+    MEMGRAPH_SUCCESS_REQUESTS_DURATION_HISTOGRAM, NEO4J_ERROR_REQUESTS_DURATION_HISTOGRAM,
     NEO4J_SUCCESS_REQUESTS_DURATION_HISTOGRAM,
 };
 use clap::{Command, CommandFactory, Parser};
@@ -29,7 +31,7 @@ use tokio::sync::mpsc::Receiver;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
-use tracing::{error, info, instrument};
+use tracing::{error, info, instrument, trace};
 use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::{fmt, EnvFilter};
 
@@ -60,14 +62,15 @@ async fn main() -> BenchmarkResult<()> {
             size,
             force,
             dry_run,
+            batch_size,
         } => {
-            info!("Init benchmark {} {} {}", vendor, size, force);
+            info!("Init benchmark {} {} {} (batch_size: {})", vendor, size, force, batch_size);
             match vendor {
                 Vendor::Neo4j => {
                     if dry_run {
-                        dry_init_neo4j(size).await?;
+                        dry_init_neo4j(size, batch_size).await?;
                     } else {
-                        init_neo4j(size, force).await?;
+                        init_neo4j(size, force, batch_size).await?;
                     }
                 }
                 Vendor::Falkor => {
@@ -75,7 +78,14 @@ async fn main() -> BenchmarkResult<()> {
                         info!("Dry run");
                         todo!()
                     } else {
-                        init_falkor(size, force).await?;
+                        init_falkor(size, force, batch_size).await?;
+                    }
+                }
+                Vendor::Memgraph => {
+                    if dry_run {
+                        dry_init_memgraph(size, batch_size).await?;
+                    } else {
+                        init_memgraph(size, force, batch_size).await?;
                     }
                 }
             }
@@ -92,6 +102,9 @@ async fn main() -> BenchmarkResult<()> {
             }
             Vendor::Falkor => {
                 run_falkor(parallel, name, mps, simulate).await?;
+            }
+            Vendor::Memgraph => {
+                run_memgraph(parallel, name, mps, simulate).await?;
             }
         },
 
@@ -356,6 +369,7 @@ async fn spawn_falkor_worker(
 async fn init_falkor(
     size: Size,
     _force: bool,
+    batch_size: usize,
 ) -> BenchmarkResult<()> {
     let spec = Spec::new(benchmark::scenario::Name::Users, size, Vendor::Neo4j);
     let falkor = benchmark::falkor::Falkor::default();
@@ -376,19 +390,63 @@ async fn init_falkor(
         .await?;
 
     let mut data_iterator = spec.init_data_iterator().await?;
+    
+    info!("Loading data in batches of {} commands", batch_size);
+    
+    let mut current_batch = Vec::with_capacity(batch_size);
+    let mut total_processed = 0;
+    let mut batch_count = 0;
+    let start_time = tokio::time::Instant::now();
+    let mut last_progress_report = start_time;
+    const PROGRESS_INTERVAL_SECS: u64 = 5;
 
     while let Some(result) = data_iterator.next().await {
         match result {
             Ok(query) => {
-                falkor_client
-                    ._execute_query("loader", "", query.as_str())
-                    .await?;
+                current_batch.push(query);
+                total_processed += 1;
+
+                if current_batch.len() >= batch_size {
+                    batch_count += 1;
+                    let batch_start = tokio::time::Instant::now();
+                    
+                    info!("Processing batch {} with {} items (total processed: {})", 
+                          batch_count, current_batch.len(), total_processed);
+                    
+                    falkor_client.execute_batch("loader", &current_batch).await?;
+                    current_batch = Vec::with_capacity(batch_size);
+                    
+                    let batch_duration = batch_start.elapsed();
+                    trace!("Batch {} completed in {:?}", batch_count, batch_duration);
+                    
+                    // Report progress every 5 seconds
+                    let now = tokio::time::Instant::now();
+                    if now.duration_since(last_progress_report).as_secs() >= PROGRESS_INTERVAL_SECS {
+                        let elapsed = now.duration_since(start_time);
+                        let rate = total_processed as f64 / elapsed.as_secs_f64();
+                        info!("Progress: {} items processed in {:?} ({:.2} items/sec, {} batches completed)", 
+                              format_number(total_processed as u64), elapsed, rate, batch_count);
+                        last_progress_report = now;
+                    }
+                }
             }
             Err(e) => {
-                error!("error {}", e);
+                error!("Error processing stream item: {:?}", e);
             }
         }
     }
+
+    // Process remaining items if any
+    if !current_batch.is_empty() {
+        batch_count += 1;
+        info!("Processing final batch {} with {} items", batch_count, current_batch.len());
+        falkor_client.execute_batch("loader", &current_batch).await?;
+    }
+
+    let total_duration = start_time.elapsed();
+    let final_rate = total_processed as f64 / total_duration.as_secs_f64();
+    info!("Completed processing {} items in {} batches over {:?} (avg {:.2} items/sec)", 
+          format_number(total_processed as u64), batch_count, total_duration, final_rate);
 
     let (node_count, relation_count) = falkor.graph_size().await?;
     info!(
@@ -414,7 +472,7 @@ fn show_historgam(histogram: Histogram) {
     }
 }
 
-async fn dry_init_neo4j(size: Size) -> BenchmarkResult<()> {
+async fn dry_init_neo4j(size: Size, _batch_size: usize) -> BenchmarkResult<()> {
     let spec = Spec::new(benchmark::scenario::Name::Users, size, Vendor::Neo4j);
     let mut data_stream = spec.init_data_iterator().await?;
     let mut success = 0;
@@ -443,6 +501,7 @@ async fn dry_init_neo4j(size: Size) -> BenchmarkResult<()> {
 async fn init_neo4j(
     size: Size,
     force: bool,
+    batch_size: usize,
 ) -> BenchmarkResult<()> {
     let spec = Spec::new(benchmark::scenario::Name::Users, size, Vendor::Neo4j);
     let mut neo4j = benchmark::neo4j::Neo4j::default();
@@ -497,12 +556,13 @@ async fn init_neo4j(
     client
         .execute_query_stream(&mut index_stream, &mut histogram)
         .await?;
-    let mut data_stream = spec.init_data_iterator().await?;
-    info!("importing data");
+    let data_stream = spec.init_data_iterator().await?;
+    info!("importing data in batches of {}", batch_size);
     let start = Instant::now();
-    client
-        .execute_query_stream(&mut data_stream, &mut histogram)
+    let total_processed = client
+        .execute_query_stream_batched(data_stream, batch_size, &mut histogram)
         .await?;
+    info!("Processed {} data commands in batches", total_processed);
     let (node_count, relation_count) = client.graph_size().await?;
     info!(
         "{} nodes and {} relations were imported at {:?}",
@@ -589,4 +649,225 @@ async fn read_queries(
         }
         Err(e) => Err(OtherError(format!("Error parsing metadata: {}", e))),
     }
+}
+
+async fn run_memgraph(
+    parallel: usize,
+    file_name: String,
+    mps: usize,
+    simulate: Option<usize>,
+) -> BenchmarkResult<()> {
+    let mut memgraph = benchmark::memgraph::Memgraph::default();
+    // stop memgraph if it is running
+    memgraph.stop(false).await?;
+    let (queries_metadata, queries) = read_queries(file_name).await?;
+    let number_of_queries = queries_metadata.size;
+    let spec = Spec::new(Users, queries_metadata.dataset, Vendor::Memgraph);
+    memgraph.restore_db(spec).await?;
+    // start memgraph
+    memgraph.start().await?;
+    let client = memgraph.client().await?;
+    info!("client connected to memgraph");
+    // get the graph size
+    let (node_count, relation_count) = client.graph_size().await?;
+
+    info!(
+        "graph has {} nodes and {} relations",
+        format_number(node_count),
+        format_number(relation_count)
+    );
+    info!(
+        "running {} queries",
+        format_number(number_of_queries as u64)
+    );
+    // prepare the mpsc channel
+    let (tx, rx) = tokio::sync::mpsc::channel::<Msg<PreparedQuery>>(20 * parallel);
+    let rx: Arc<Mutex<Receiver<Msg<PreparedQuery>>>> = Arc::new(Mutex::new(rx));
+    let scheduler_handle = scheduler::spawn_scheduler::<PreparedQuery>(mps, tx.clone(), queries);
+    let mut workers_handles = Vec::with_capacity(parallel);
+
+    let start = Instant::now();
+    for spawn_id in 0..parallel {
+        let handle = spawn_memgraph_worker(client.clone(), spawn_id, &rx, simulate).await?;
+        workers_handles.push(handle);
+    }
+    let _ = scheduler_handle.await;
+    drop(tx);
+
+    for handle in workers_handles {
+        let _ = handle.await;
+    }
+
+    let elapsed = start.elapsed();
+
+    info!(
+        "running {} queries took {:?}",
+        format_number(number_of_queries as u64),
+        elapsed
+    );
+    memgraph.stop(true).await?;
+    Ok(())
+}
+
+async fn spawn_memgraph_worker(
+    client: MemgraphClient,
+    worker_id: usize,
+    receiver: &Arc<Mutex<Receiver<Msg<PreparedQuery>>>>,
+    simulate: Option<usize>,
+) -> BenchmarkResult<JoinHandle<()>> {
+    info!("spawning worker");
+    let receiver = Arc::clone(receiver);
+    let handle = tokio::spawn(async move {
+        let worker_id = worker_id.to_string();
+        let worker_id_str = worker_id.as_str();
+        let mut counter = 0u32;
+        let mut client = client.clone();
+        loop {
+            // get the next value and release the mutex
+            let received = receiver.lock().await.recv().await;
+
+            match received {
+                Some(prepared_query) => {
+                    let start_time = Instant::now();
+
+                    let r = client
+                        .execute_prepared_query(worker_id_str, &prepared_query, &simulate)
+                        .await;
+                    let duration = start_time.elapsed();
+                    match r {
+                        Ok(_) => {
+                            MEMGRAPH_SUCCESS_REQUESTS_DURATION_HISTOGRAM
+                                .observe(duration.as_secs_f64());
+                            counter += 1;
+                            if counter % 1000 == 0 {
+                                info!("worker {} processed {} queries", worker_id, counter);
+                            }
+                        }
+                        Err(e) => {
+                            MEMGRAPH_ERROR_REQUESTS_DURATION_HISTOGRAM.observe(duration.as_secs_f64());
+                            let seconds_wait = 3u64;
+                            info!(
+                                "worker {} failed to process query, not sleeping for {} seconds {:?}",
+                                worker_id, seconds_wait, e
+                            );
+                        }
+                    }
+                }
+                None => {
+                    info!("worker {} received None, exiting", worker_id);
+                    break;
+                }
+            }
+        }
+        info!("worker {} finished", worker_id);
+    });
+
+    Ok(handle)
+}
+
+async fn dry_init_memgraph(size: Size, _batch_size: usize) -> BenchmarkResult<()> {
+    let spec = Spec::new(benchmark::scenario::Name::Users, size, Vendor::Memgraph);
+    let mut data_stream = spec.init_data_iterator().await?;
+    let mut success = 0;
+    let mut error = 0;
+
+    let start = Instant::now();
+    while let Some(result) = data_stream.next().await {
+        match result {
+            Ok(_query) => {
+                success += 1;
+            }
+            Err(e) => {
+                error!("error {}", e);
+                error += 1;
+            }
+        }
+    }
+    info!(
+        "importing (dry run) done at {:?}, {} records process successfully, {} failed",
+        start.elapsed(),
+        success,
+        error
+    );
+    Ok(())
+}
+
+async fn init_memgraph(
+    size: Size,
+    force: bool,
+    batch_size: usize,
+) -> BenchmarkResult<()> {
+    let spec = Spec::new(benchmark::scenario::Name::Users, size, Vendor::Memgraph);
+    let mut memgraph = benchmark::memgraph::Memgraph::default();
+    let _ = memgraph.stop(false).await?;
+    let backup_path = format!("{}/memgraph.cypher", spec.backup_path());
+    if !force {
+        if file_exists(backup_path.as_str()).await && !force {
+            info!(
+                "Backup file exists, skipping init, use --force to override ({})",
+                backup_path.as_str()
+            );
+            return Ok(());
+        }
+    } else {
+        delete_file(backup_path.as_str()).await?;
+        let out = memgraph.clean_db().await?;
+        info!(
+            "memgraph clean_db std_error returns {} ",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        info!(
+            "memgraph clean_db std_out returns {} ",
+            String::from_utf8_lossy(&out.stdout)
+        );
+    }
+
+    memgraph.start().await?;
+
+    let client = memgraph.client().await?;
+    let (node_count, relation_count) = client.graph_size().await?;
+    info!(
+        "node count: {}, relation count: {}",
+        format_number(node_count),
+        format_number(relation_count)
+    );
+    if node_count != 0 || relation_count != 0 {
+        error!(
+            "graph is not empty, node count: {}, relation count: {}",
+            node_count, relation_count
+        );
+        info!("stopping memgraph and deleting database");
+        memgraph.stop(false).await?;
+        memgraph.clean_db().await?;
+        memgraph.stop(true).await?;
+    }
+    let mut histogram = Histogram::new(7, 64)?;
+
+    let mut index_stream = spec.init_index_iterator().await?;
+    info!("importing indexes");
+    client
+        .execute_query_stream(&mut index_stream, &mut histogram)
+        .await?;
+    let data_stream = spec.init_data_iterator().await?;
+    info!("importing data in batches of {}", batch_size);
+    let start = Instant::now();
+    let total_processed = client
+        .execute_query_stream_batched(data_stream, batch_size, &mut histogram)
+        .await?;
+    info!("Processed {} data commands in batches", total_processed);
+    let (node_count, relation_count) = client.graph_size().await?;
+    info!(
+        "{} nodes and {} relations were imported at {:?}",
+        format_number(node_count),
+        format_number(relation_count),
+        start.elapsed()
+    );
+    memgraph.stop(true).await?;
+    memgraph.dump(spec.clone()).await?;
+    info!("---> histogram");
+
+    show_historgam(histogram);
+
+    info!("---> Done");
+    Ok(())
 }

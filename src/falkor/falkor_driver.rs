@@ -282,6 +282,29 @@ impl FalkorBenchmarkClient {
         Self::read_reply(spawn_id, query_name, query, falkor_result)
     }
 
+    /// Execute a batch of cypher commands as a single multi-statement query
+    pub async fn execute_batch<'a>(
+        &'a mut self,
+        spawn_id: &'a str,
+        batch_queries: &[String],
+    ) -> BenchmarkResult<()> {
+        if batch_queries.is_empty() {
+            return Ok(());
+        }
+
+        // Join all queries with semicolons to create a multi-statement query
+        let combined_query = batch_queries.join("; ");
+        
+        OPERATION_COUNTER
+            .with_label_values(&["falkor", spawn_id, "", "batch", "", ""])
+            .inc();
+
+        let falkor_result = self.graph.query(&combined_query).with_timeout(30000).execute();
+        let timeout = Duration::from_secs(30);
+        let falkor_result = tokio::time::timeout(timeout, falkor_result).await;
+        Self::read_reply(spawn_id, "batch", &combined_query, falkor_result)
+    }
+
     fn read_reply<'a>(
         spawn_id: &'a str,
         query_name: &'a str,

@@ -32,6 +32,7 @@ pub enum Name {
 pub enum Vendor {
     Neo4j,
     Falkor,
+    Memgraph,
 }
 
 #[derive(Debug, Clone)]
