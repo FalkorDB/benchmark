@@ -63,6 +63,7 @@ async fn main() -> BenchmarkResult<()> {
             force,
             dry_run,
             batch_size,
+            endpoint,
         } => {
             info!("Init benchmark {} {} {} (batch_size: {})", vendor, size, force, batch_size);
             match vendor {
@@ -78,7 +79,7 @@ async fn main() -> BenchmarkResult<()> {
                         info!("Dry run");
                         todo!()
                     } else {
-                        init_falkor(size, force, batch_size).await?;
+                        init_falkor(size, force, batch_size, endpoint).await?;
                     }
                 }
                 Vendor::Memgraph => {
@@ -96,12 +97,13 @@ async fn main() -> BenchmarkResult<()> {
             name,
             mps,
             simulate,
+            endpoint,
         } => match vendor {
             Vendor::Neo4j => {
                 run_neo4j(parallel, name, mps, simulate).await?;
             }
             Vendor::Falkor => {
-                run_falkor(parallel, name, mps, simulate).await?;
+                run_falkor(parallel, name, mps, simulate, endpoint).await?;
             }
             Vendor::Memgraph => {
                 run_memgraph(parallel, name, mps, simulate).await?;
@@ -242,22 +244,29 @@ async fn run_falkor(
     file_name: String,
     mps: usize,
     simulate: Option<usize>,
+    endpoint: Option<String>,
 ) -> BenchmarkResult<()> {
     if parallel == 0 {
         return Err(OtherError(
             "Parallelism level must be greater than zero.".to_string(),
         ));
     }
-    let falkor: Falkor<Stopped> = benchmark::falkor::Falkor::default();
+    let falkor: Falkor<Stopped> = benchmark::falkor::Falkor::new_with_endpoint(endpoint.clone());
 
     let (queries_metadata, queries) = read_queries(file_name).await?;
 
-    // if dump not present return error
-    falkor
-        .dump_exists_or_error(queries_metadata.dataset)
-        .await?;
-    // restore the dump
-    falkor.restore_db(queries_metadata.dataset).await?;
+    // if external endpoint, skip dump operations
+    if endpoint.is_none() {
+        // if dump not present, initialize the database
+        if falkor.dump_exists_or_error(queries_metadata.dataset).await.is_err() {
+            info!("Dump file not found, initializing falkor database...");
+            init_falkor(queries_metadata.dataset, false, 1000, endpoint.clone()).await?;
+        }
+        // restore the dump
+        falkor.restore_db(queries_metadata.dataset).await?;
+    } else {
+        info!("Using external endpoint, skipping dump restore operations");
+    }
     // start falkor
     let falkor = falkor.start().await?;
 
@@ -370,10 +379,13 @@ async fn init_falkor(
     size: Size,
     _force: bool,
     batch_size: usize,
+    endpoint: Option<String>,
 ) -> BenchmarkResult<()> {
     let spec = Spec::new(benchmark::scenario::Name::Users, size, Vendor::Neo4j);
-    let falkor = benchmark::falkor::Falkor::default();
-    falkor.clean_db().await?;
+    let falkor = benchmark::falkor::Falkor::new_with_endpoint(endpoint.clone());
+    if endpoint.is_none() {
+        falkor.clean_db().await?;
+    }
 
     let falkor = falkor.start().await?;
     info!("writing index and data");
@@ -381,8 +393,10 @@ async fn init_falkor(
     let start = Instant::now();
 
     let mut falkor_client = falkor.client().await?;
+    
+    // Create index with graceful handling of "already exists" error
     falkor_client
-        ._execute_query(
+        .create_index_if_not_exists(
             "main",
             "create_index",
             "CREATE INDEX FOR (u:User) ON (u.id)",
@@ -457,7 +471,9 @@ async fn init_falkor(
     );
     info!("writing done, took: {:?}", start.elapsed());
     let falkor = falkor.stop().await?;
-    falkor.save_db(size).await?;
+    if endpoint.is_none() {
+        falkor.save_db(size).await?;
+    }
 
     Ok(())
 }

@@ -46,6 +46,13 @@ pub enum Commands {
             help = "number of cypher commands to execute in a single batch"
         )]
         batch_size: usize,
+        #[arg(
+            short,
+            long,
+            required = false,
+            help = "endpoint for external database connection (e.g., falkor://127.0.0.1:6379)"
+        )]
+        endpoint: Option<String>,
     },
     #[command(
         about = "generate a set of queries and store them in a file to be used with the run command"
@@ -110,6 +117,13 @@ pub enum Commands {
             help = "simulate the benchmark without sending the messages to the server, the value the process time in milliseconds"
         )]
         simulate: Option<usize>,
+        #[arg(
+            short,
+            long,
+            required = false,
+            help = "endpoint for external database connection (e.g., falkor://127.0.0.1:6379)"
+        )]
+        endpoint: Option<String>,
     },
 }
 

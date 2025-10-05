@@ -29,6 +29,7 @@ pub struct Stopped;
 
 pub struct Falkor<U> {
     path: String,
+    endpoint: Option<String>,
     #[allow(dead_code)]
     state: U,
 }
@@ -41,21 +42,46 @@ impl Default for Falkor<Stopped> {
 
 impl Falkor<Stopped> {
     fn new() -> Falkor<Stopped> {
+        Self::with_endpoint(None)
+    }
+    
+    pub fn new_with_endpoint(endpoint: Option<String>) -> Self {
+        Self::with_endpoint(endpoint)
+    }
+    
+    fn with_endpoint(endpoint: Option<String>) -> Falkor<Stopped> {
         let default = falkor_shared_lib_path().unwrap();
         let path = env::var("FALKOR_PATH").unwrap_or(default);
-        info!("falkor shared lib path: {}", path);
+        if let Some(ref ep) = endpoint {
+            info!("using external falkor endpoint: {}", ep);
+        } else {
+            info!("falkor shared lib path: {}", path);
+        }
         Falkor {
             path,
+            endpoint,
             state: Stopped,
         }
     }
     pub async fn start(self) -> BenchmarkResult<Falkor<Started>> {
-        let falkor_process: FalkorProcess = FalkorProcess::new().await?;
-        Self::wait_for_ready().await?;
-        Ok(Falkor {
-            path: self.path.clone(),
-            state: Started(falkor_process),
-        })
+        if self.endpoint.is_some() {
+            // For external endpoints, we don't manage a process
+            // Just verify the connection is available
+            info!("using external falkor endpoint, skipping process management");
+            Ok(Falkor {
+                path: self.path.clone(),
+                endpoint: self.endpoint.clone(),
+                state: Started(FalkorProcess::external()),
+            })
+        } else {
+            let falkor_process: FalkorProcess = FalkorProcess::new().await?;
+            Self::wait_for_ready().await?;
+            Ok(Falkor {
+                path: self.path.clone(),
+                endpoint: self.endpoint.clone(),
+                state: Started(falkor_process),
+            })
+        }
     }
     pub async fn clean_db(&self) -> BenchmarkResult<()> {
         info!("deleting: {}", REDIS_DUMP_FILE);
@@ -87,10 +113,13 @@ impl Falkor<Stopped> {
 }
 impl Falkor<Started> {
     pub async fn stop(self) -> BenchmarkResult<Falkor<Stopped>> {
-        redis_save().await?;
-        Self::wait_for_ready().await?;
+        if self.endpoint.is_none() {
+            redis_save().await?;
+            Self::wait_for_ready().await?;
+        }
         Ok(Falkor {
             path: self.path.clone(),
+            endpoint: self.endpoint.clone(),
             state: Stopped,
         })
     }
@@ -126,10 +155,14 @@ impl Falkor<Started> {
 
 impl<U> Falkor<U> {
     pub async fn client(&self) -> BenchmarkResult<FalkorBenchmarkClient> {
-        let connection_info = "falkor://127.0.0.1:6379".try_into()?;
+        let connection_string = self.endpoint
+            .as_ref()
+            .map(|s| s.as_str())
+            .unwrap_or("falkor://127.0.0.1:6379");
+        let connection_info = connection_string.try_into()?;
         let client = FalkorClientBuilder::new_async()
             .with_connection_info(connection_info)
-            .with_num_connections(nonzero::nonzero!(1u8))
+            .with_num_connections(nonzero::nonzero!(8u8))
             .build()
             .await?;
         Ok(FalkorBenchmarkClient {
@@ -282,7 +315,7 @@ impl FalkorBenchmarkClient {
         Self::read_reply(spawn_id, query_name, query, falkor_result)
     }
 
-    /// Execute a batch of cypher commands as a single multi-statement query
+    /// Execute a batch of cypher commands individually (FalkorDB doesn't support multi-statement queries)
     pub async fn execute_batch<'a>(
         &'a mut self,
         spawn_id: &'a str,
@@ -292,17 +325,75 @@ impl FalkorBenchmarkClient {
             return Ok(());
         }
 
-        // Join all queries with semicolons to create a multi-statement query
-        let combined_query = batch_queries.join("; ");
+        // Execute each query individually since FalkorDB doesn't support multi-statement queries
+        for (i, query) in batch_queries.iter().enumerate() {
+            OPERATION_COUNTER
+                .with_label_values(&["falkor", spawn_id, "", &format!("batch_{}", i), "", ""])
+                .inc();
+
+            let falkor_result = self.graph.query(query).with_timeout(30000).execute();
+            let timeout = Duration::from_secs(30);
+            let falkor_result = tokio::time::timeout(timeout, falkor_result).await;
+            
+            // If any query fails, return the error
+            if let Err(e) = Self::read_reply(spawn_id, &format!("batch_{}", i), query, falkor_result) {
+                return Err(e);
+            }
+        }
         
+        Ok(())
+    }
+
+    /// Create an index with graceful handling of "already indexed" errors
+    pub async fn create_index_if_not_exists<'a>(
+        &'a mut self,
+        spawn_id: &'a str,
+        query_name: &'a str,
+        query: &'a str,
+    ) -> BenchmarkResult<()> {
         OPERATION_COUNTER
-            .with_label_values(&["falkor", spawn_id, "", "batch", "", ""])
+            .with_label_values(&["falkor", spawn_id, "", query_name, "", ""])
             .inc();
 
-        let falkor_result = self.graph.query(&combined_query).with_timeout(30000).execute();
-        let timeout = Duration::from_secs(30);
+        let falkor_result = self.graph.query(query).with_timeout(5000).execute();
+        let timeout = Duration::from_secs(5);
         let falkor_result = tokio::time::timeout(timeout, falkor_result).await;
-        Self::read_reply(spawn_id, "batch", &combined_query, falkor_result)
+        
+        match falkor_result {
+            Ok(falkor_result) => match falkor_result {
+                Ok(query_result) => {
+                    for row in query_result.data {
+                        black_box(row);
+                    }
+                    Ok(())
+                }
+                Err(e) => {
+                    let error_str = format!("{:?}", e);
+                    if error_str.contains("already indexed") {
+                        info!("Index already exists for query '{}', continuing", query);
+                        Ok(())
+                    } else {
+                        let error_type = std::any::type_name_of_val(&e);
+                        error!("Error executing query: {}, the error is: {:?}", query, e);
+                        Err(OtherError(format!(
+                            "Error (type {}) executing query: {}, the error is: {:?}",
+                            error_type, query, e
+                        )))
+                    }
+                }
+            },
+            Err(e) => {
+                OPERATION_ERROR_COUNTER
+                    .with_label_values(&["falkor", spawn_id, "", query_name, "", ""])
+                    .inc();
+                let error_type = std::any::type_name_of_val(&e);
+                error!("Error executing query: {}, the error is: {:?}", query, e);
+                Err(OtherError(format!(
+                    "Error (type {}) executing query: {}, the error is: {:?}",
+                    error_type, query, e
+                )))
+            }
+        }
     }
 
     fn read_reply<'a>(
