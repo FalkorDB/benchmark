@@ -61,6 +61,7 @@ impl Neo4j {
             self.uri.to_string(),
             self.user.to_string(),
             self.password.to_string(),
+            Some("neo4j".to_string()),
         )
         .await
     }

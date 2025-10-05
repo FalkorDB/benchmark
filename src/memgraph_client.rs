@@ -6,7 +6,7 @@ use crate::{MEMGRAPH_MSG_DEADLINE_OFFSET_GAUGE, OPERATION_COUNTER};
 use futures::stream::TryStreamExt;
 use futures::{Stream, StreamExt};
 use histogram::Histogram;
-use neo4rs::{query, Graph, Row};
+use neo4rs::{query, Graph, Row, ConfigBuilder};
 use std::hint::black_box;
 use std::pin::Pin;
 use std::time::Duration;
@@ -26,16 +26,20 @@ impl MemgraphClient {
         user: String,
         password: String,
     ) -> BenchmarkResult<MemgraphClient> {
-        let graph = if user.is_empty() {
-            // Memgraph often runs without authentication in development
-            Graph::new(&format!("bolt://{}", uri), "", "")
-                .await
-                .map_err(Neo4rsError)?
-        } else {
-            Graph::new(&format!("bolt://{}", uri), user.clone(), password.clone())
-                .await
-                .map_err(Neo4rsError)?
-        };
+        // Try using ConfigBuilder with "memgraph" as database name
+        // Some versions of Memgraph might expect a specific database name
+        let config = ConfigBuilder::default()
+            .uri(&uri)
+            .user(&user)
+            .password(&password)
+            .db("memgraph") // Try "memgraph" as database name
+            .build()
+            .map_err(Neo4rsError)?;
+        
+        let graph = Graph::connect(config)
+            .await
+            .map_err(Neo4rsError)?;
+            
         Ok(MemgraphClient { graph })
     }
 

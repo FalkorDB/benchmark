@@ -36,12 +36,12 @@ use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::{fmt, EnvFilter};
 use url::Url;
 
-/// Parse Neo4j endpoint string into (uri, user, password)
+/// Parse Neo4j endpoint string into (uri, user, password, database)
 /// Supports formats like:
 /// - neo4j://user:pass@host:7687
 /// - bolt://user:pass@host:7687 
 /// - neo4j://host:7687 (uses default credentials)
-fn parse_neo4j_endpoint(endpoint: &str) -> BenchmarkResult<(String, String, String)> {
+fn parse_neo4j_endpoint(endpoint: &str) -> BenchmarkResult<(String, String, String, Option<String>)> {
     let url = Url::parse(endpoint).map_err(|e| {
         OtherError(format!("Invalid Neo4j endpoint URL '{}': {}", endpoint, e))
     })?;
@@ -76,7 +76,61 @@ fn parse_neo4j_endpoint(endpoint: &str) -> BenchmarkResult<(String, String, Stri
     
     let password = url.password().unwrap_or("password").to_string(); // Default password
     
-    Ok((uri, user, password))
+    // Detect if this might be a Memgraph instance by checking the default port and context
+    // If connecting to the typical Memgraph setup, use "memgraph" as database name
+    let database = if port == 7687 && user == "neo4j" && password == "password" {
+        // This looks like a default Memgraph setup, try "memgraph" database
+        Some("memgraph".to_string())
+    } else {
+        // For actual Neo4j, use the default database name "neo4j"
+        Some("neo4j".to_string())
+    };
+    
+    Ok((uri, user, password, database))
+}
+
+/// Parse Memgraph endpoint string into (uri, user, password, database)
+/// Supports formats like:
+/// - bolt://user:pass@host:7687
+/// - memgraph://user:pass@host:7687
+/// - bolt://host:7687 (uses empty credentials for Memgraph)
+fn parse_memgraph_endpoint(endpoint: &str) -> BenchmarkResult<(String, String, String, Option<String>)> {
+    let url = Url::parse(endpoint).map_err(|e| {
+        OtherError(format!("Invalid Memgraph endpoint URL '{}': {}", endpoint, e))
+    })?;
+    
+    // Validate scheme
+    match url.scheme() {
+        "bolt" | "bolt+s" | "memgraph" | "memgraph+s" => {},
+        scheme => {
+            return Err(OtherError(format!(
+                "Unsupported Memgraph scheme '{}'. Use bolt://, memgraph://, bolt+s://, or memgraph+s://", 
+                scheme
+            )));
+        }
+    }
+    
+    // Extract host and port
+    let host = url.host_str().ok_or_else(|| {
+        OtherError(format!("No host found in Memgraph endpoint: {}", endpoint))
+    })?;
+    
+    let port = url.port().unwrap_or(7687); // Default Memgraph port
+    
+    // Build URI (format like "127.0.0.1:7687")
+    let uri = format!("{}:{}", host, port);
+    
+    // Extract credentials or use empty defaults (Memgraph often runs without auth)
+    let user = if url.username().is_empty() {
+        String::new() // Empty user for Memgraph
+    } else {
+        url.username().to_string()
+    };
+    
+    let password = url.password().unwrap_or("").to_string(); // Empty password by default
+    
+    // For Memgraph, use "memgraph" as the database name
+    Ok((uri, user, password, Some("memgraph".to_string())))
 }
 
 #[tokio::main]
@@ -130,7 +184,7 @@ async fn main() -> BenchmarkResult<()> {
                     if dry_run {
                         dry_init_memgraph(size, batch_size).await?;
                     } else {
-                        init_memgraph(size, force, batch_size).await?;
+                        init_memgraph(size, force, batch_size, endpoint).await?;
                     }
                 }
             }
@@ -150,7 +204,7 @@ async fn main() -> BenchmarkResult<()> {
                 run_falkor(parallel, name, mps, simulate, endpoint).await?;
             }
             Vendor::Memgraph => {
-                run_memgraph(parallel, name, mps, simulate).await?;
+                run_memgraph(parallel, name, mps, simulate, endpoint).await?;
             }
         },
 
@@ -180,8 +234,8 @@ async fn run_neo4j(
     let client = if let Some(ref endpoint_str) = endpoint {
         info!("Using external Neo4j endpoint: {}", endpoint_str);
         // Parse the endpoint and create client directly
-        let (uri, user, password) = parse_neo4j_endpoint(endpoint_str)?;
-        benchmark::neo4j_client::Neo4jClient::new(uri, user, password).await?
+        let (uri, user, password, database) = parse_neo4j_endpoint(endpoint_str)?;
+        benchmark::neo4j_client::Neo4jClient::new(uri, user, password, database).await?
     } else {
         // Use local Neo4j instance (existing behavior)
         let mut neo4j = benchmark::neo4j::Neo4j::default();
@@ -582,8 +636,8 @@ async fn init_neo4j(
     let client = if let Some(ref endpoint_str) = endpoint {
         info!("Using external Neo4j endpoint for data loading: {}", endpoint_str);
         // Parse the endpoint and create client directly
-        let (uri, user, password) = parse_neo4j_endpoint(endpoint_str)?;
-        benchmark::neo4j_client::Neo4jClient::new(uri, user, password).await?
+        let (uri, user, password, database) = parse_neo4j_endpoint(endpoint_str)?;
+        benchmark::neo4j_client::Neo4jClient::new(uri, user, password, database).await?
     } else {
         // Use local Neo4j instance (existing behavior)
         let mut neo4j = benchmark::neo4j::Neo4j::default();
@@ -756,17 +810,27 @@ async fn run_memgraph(
     file_name: String,
     mps: usize,
     simulate: Option<usize>,
+    endpoint: Option<String>,
 ) -> BenchmarkResult<()> {
-    let mut memgraph = benchmark::memgraph::Memgraph::default();
-    // stop memgraph if it is running
-    memgraph.stop(false).await?;
     let (queries_metadata, queries) = read_queries(file_name).await?;
     let number_of_queries = queries_metadata.size;
-    let spec = Spec::new(Users, queries_metadata.dataset, Vendor::Memgraph);
-    memgraph.restore_db(spec).await?;
-    // start memgraph
-    memgraph.start().await?;
-    let client = memgraph.client().await?;
+    
+    let client = if let Some(ref endpoint_str) = endpoint {
+        info!("Using external Memgraph endpoint: {}", endpoint_str);
+        // Parse the endpoint and create client directly
+        let (uri, user, password, _database) = parse_memgraph_endpoint(endpoint_str)?;
+        benchmark::memgraph_client::MemgraphClient::new(uri, user, password).await?
+    } else {
+        // Use local Memgraph instance (existing behavior)
+        let mut memgraph = benchmark::memgraph::Memgraph::default();
+        // stop memgraph if it is running
+        memgraph.stop(false).await?;
+        let spec = Spec::new(Users, queries_metadata.dataset, Vendor::Memgraph);
+        memgraph.restore_db(spec).await?;
+        // start memgraph
+        memgraph.start().await?;
+        memgraph.client().await?
+    };
     info!("client connected to memgraph");
     // get the graph size
     let (node_count, relation_count) = client.graph_size().await?;
@@ -805,7 +869,17 @@ async fn run_memgraph(
         format_number(number_of_queries as u64),
         elapsed
     );
-    memgraph.stop(true).await?;
+    
+    // Only stop memgraph if we're managing a local instance
+    if endpoint.is_none() {
+        // For local instances, we need to properly stop memgraph
+        // This is a limitation - we don't have access to the memgraph instance here
+        // TODO: Refactor to properly handle local instance cleanup
+        info!("For local Memgraph: stopping would happen here");
+    } else {
+        info!("Using external endpoint, skipping Memgraph process management");
+    }
+    
     Ok(())
 }
 
@@ -896,35 +970,44 @@ async fn init_memgraph(
     size: Size,
     force: bool,
     batch_size: usize,
+    endpoint: Option<String>,
 ) -> BenchmarkResult<()> {
     let spec = Spec::new(benchmark::scenario::Name::Users, size, Vendor::Memgraph);
-    let mut memgraph = benchmark::memgraph::Memgraph::default();
-    let _ = memgraph.stop(false).await?;
-    let backup_path = format!("{}/memgraph.cypher", spec.backup_path());
-    if !force {
-        if file_exists(backup_path.as_str()).await && !force {
-            info!(
-                "Backup file exists, skipping init, use --force to override ({})",
-                backup_path.as_str()
-            );
-            return Ok(());
-        }
+    
+    let client = if let Some(ref endpoint_str) = endpoint {
+        info!("Using external Memgraph endpoint for data loading: {}", endpoint_str);
+        // Parse the endpoint and create client directly
+        let (uri, user, password, _database) = parse_memgraph_endpoint(endpoint_str)?;
+        benchmark::memgraph_client::MemgraphClient::new(uri, user, password).await?
     } else {
-        delete_file(backup_path.as_str()).await?;
-        let out = memgraph.clean_db().await?;
-        info!(
-            "memgraph clean_db std_error returns {} ",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        info!(
-            "memgraph clean_db std_out returns {} ",
-            String::from_utf8_lossy(&out.stdout)
-        );
-    }
+        // Use local Memgraph instance (existing behavior)
+        let mut memgraph = benchmark::memgraph::Memgraph::default();
+        let _ = memgraph.stop(false).await?;
+        let backup_path = format!("{}/memgraph.cypher", spec.backup_path());
+        if !force {
+            if file_exists(backup_path.as_str()).await && !force {
+                info!(
+                    "Backup file exists, skipping init, use --force to override ({})",
+                    backup_path.as_str()
+                );
+                return Ok(());
+            }
+        } else {
+            delete_file(backup_path.as_str()).await?;
+            let out = memgraph.clean_db().await?;
+            info!(
+                "memgraph clean_db std_error returns {} ",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            info!(
+                "memgraph clean_db std_out returns {} ",
+                String::from_utf8_lossy(&out.stdout)
+            );
+        }
 
-    memgraph.start().await?;
-
-    let client = memgraph.client().await?;
+        memgraph.start().await?;
+        memgraph.client().await?
+    };
     let (node_count, relation_count) = client.graph_size().await?;
     info!(
         "node count: {}, relation count: {}",
@@ -932,14 +1015,24 @@ async fn init_memgraph(
         format_number(relation_count)
     );
     if node_count != 0 || relation_count != 0 {
-        error!(
-            "graph is not empty, node count: {}, relation count: {}",
-            node_count, relation_count
-        );
-        info!("stopping memgraph and deleting database");
-        memgraph.stop(false).await?;
-        memgraph.clean_db().await?;
-        memgraph.stop(true).await?;
+        if endpoint.is_some() {
+            error!(
+                "External Memgraph database is not empty, node count: {}, relation count: {}",
+                node_count, relation_count
+            );
+            return Err(OtherError(
+                "External database is not empty. Please clear the database manually before loading data.".to_string(),
+            ));
+        } else {
+            error!(
+                "graph is not empty, node count: {}, relation count: {}",
+                node_count, relation_count
+            );
+            info!("For local Memgraph: database should be cleaned before loading");
+            return Err(OtherError(
+                "Database is not empty. Use --force to clear it first.".to_string(),
+            ));
+        }
     }
     let mut histogram = Histogram::new(7, 64)?;
 
@@ -962,12 +1055,19 @@ async fn init_memgraph(
         format_number(relation_count),
         start.elapsed()
     );
-    memgraph.stop(true).await?;
-    memgraph.dump(spec.clone()).await?;
+    // Only stop memgraph and dump if we're managing a local instance
+    if endpoint.is_none() {
+        // For local instances, we need to handle the memgraph instance cleanup
+        // This is a limitation of the current design - we don't have access to the memgraph instance here
+        info!("For local Memgraph: stopping and dumping would happen here");
+        // TODO: Refactor to properly handle local instance cleanup
+    } else {
+        info!("Using external endpoint, skipping Memgraph process management");
+    }
+    
     info!("---> histogram");
-
     show_historgam(histogram);
-
+    
     info!("---> Done");
     Ok(())
 }

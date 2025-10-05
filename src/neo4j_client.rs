@@ -6,7 +6,7 @@ use crate::{NEO4J_MSG_DEADLINE_OFFSET_GAUGE, OPERATION_COUNTER};
 use futures::stream::TryStreamExt;
 use futures::{Stream, StreamExt};
 use histogram::Histogram;
-use neo4rs::{query, Graph, Row};
+use neo4rs::{query, Graph, Row, ConfigBuilder};
 use std::hint::black_box;
 use std::pin::Pin;
 use std::time::Duration;
@@ -24,8 +24,20 @@ impl Neo4jClient {
         uri: String,
         user: String,
         password: String,
+        database: Option<String>,
     ) -> BenchmarkResult<Neo4jClient> {
-        let graph = Graph::new(&uri, user.clone(), password.clone())
+        let config = ConfigBuilder::default()
+            .uri(&uri)
+            .user(&user)
+            .password(&password);
+        
+        let config = if let Some(db) = database {
+            config.db(db)
+        } else {
+            config
+        };
+        
+        let graph = Graph::connect(config.build().map_err(Neo4rsError)?)
             .await
             .map_err(Neo4rsError)?;
         Ok(Neo4jClient { graph })
