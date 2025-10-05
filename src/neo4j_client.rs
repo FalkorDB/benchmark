@@ -146,7 +146,7 @@ impl Neo4jClient {
         Ok(Box::pin(stream))
     }
 
-    /// Execute a batch of queries as a single transaction
+    /// Execute a batch of queries individually (external endpoints don't support explicit transactions)
     pub async fn execute_batch(
         &self,
         batch_queries: &[String],
@@ -158,19 +158,19 @@ impl Neo4jClient {
 
         let start = Instant::now();
         
-        // Execute all queries in a single transaction
-        let transaction_query = format!(
-            "BEGIN\n{}\nCOMMIT",
-            batch_queries.join(";\n")
-        );
-        
-        let mut results = self.execute_query(&transaction_query).await?;
-        while let Some(row_or_error) = results.next().await {
-            match row_or_error {
-                Ok(row) => {
-                    trace!("Row: {:?}", row);
+        // Execute queries individually since explicit BEGIN/COMMIT syntax is not supported
+        for query in batch_queries {
+            let trimmed = query.trim();
+            if !trimmed.is_empty() && trimmed != ";" {
+                let mut results = self.execute_query(trimmed).await?;
+                while let Some(row_or_error) = results.next().await {
+                    match row_or_error {
+                        Ok(row) => {
+                            trace!("Row: {:?}", row);
+                        }
+                        Err(e) => error!("Error reading batch result row: {}", e),
+                    }
                 }
-                Err(e) => error!("Error reading batch result row: {}", e),
             }
         }
         

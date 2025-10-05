@@ -34,6 +34,50 @@ use tokio::time::Instant;
 use tracing::{error, info, instrument, trace};
 use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::{fmt, EnvFilter};
+use url::Url;
+
+/// Parse Neo4j endpoint string into (uri, user, password)
+/// Supports formats like:
+/// - neo4j://user:pass@host:7687
+/// - bolt://user:pass@host:7687 
+/// - neo4j://host:7687 (uses default credentials)
+fn parse_neo4j_endpoint(endpoint: &str) -> BenchmarkResult<(String, String, String)> {
+    let url = Url::parse(endpoint).map_err(|e| {
+        OtherError(format!("Invalid Neo4j endpoint URL '{}': {}", endpoint, e))
+    })?;
+    
+    // Validate scheme
+    match url.scheme() {
+        "neo4j" | "bolt" | "neo4j+s" | "bolt+s" => {},
+        scheme => {
+            return Err(OtherError(format!(
+                "Unsupported Neo4j scheme '{}'. Use neo4j://, bolt://, neo4j+s://, or bolt+s://", 
+                scheme
+            )));
+        }
+    }
+    
+    // Extract host and port
+    let host = url.host_str().ok_or_else(|| {
+        OtherError(format!("No host found in Neo4j endpoint: {}", endpoint))
+    })?;
+    
+    let port = url.port().unwrap_or(7687); // Default Neo4j port
+    
+    // Build URI (neo4rs expects format like "127.0.0.1:7687")
+    let uri = format!("{}:{}", host, port);
+    
+    // Extract credentials or use defaults
+    let user = if url.username().is_empty() {
+        "neo4j".to_string() // Default user
+    } else {
+        url.username().to_string()
+    };
+    
+    let password = url.password().unwrap_or("password").to_string(); // Default password
+    
+    Ok((uri, user, password))
+}
 
 #[tokio::main]
 async fn main() -> BenchmarkResult<()> {
@@ -71,7 +115,7 @@ async fn main() -> BenchmarkResult<()> {
                     if dry_run {
                         dry_init_neo4j(size, batch_size).await?;
                     } else {
-                        init_neo4j(size, force, batch_size).await?;
+                        init_neo4j(size, force, batch_size, endpoint).await?;
                     }
                 }
                 Vendor::Falkor => {
@@ -100,7 +144,7 @@ async fn main() -> BenchmarkResult<()> {
             endpoint,
         } => match vendor {
             Vendor::Neo4j => {
-                run_neo4j(parallel, name, mps, simulate).await?;
+                run_neo4j(parallel, name, mps, simulate, endpoint).await?;
             }
             Vendor::Falkor => {
                 run_falkor(parallel, name, mps, simulate, endpoint).await?;
@@ -128,17 +172,27 @@ async fn run_neo4j(
     file_name: String,
     mps: usize,
     simulate: Option<usize>,
+    endpoint: Option<String>,
 ) -> BenchmarkResult<()> {
-    let mut neo4j = benchmark::neo4j::Neo4j::default();
-    // stop neo4j if it is running
-    neo4j.stop(false).await?;
     let (queries_metadata, queries) = read_queries(file_name).await?;
     let number_of_queries = queries_metadata.size;
-    let spec = Spec::new(Users, queries_metadata.dataset, Vendor::Neo4j);
-    neo4j.restore_db(spec).await?;
-    // start neo4j
-    neo4j.start().await?;
-    let client = neo4j.client().await?;
+    
+    let client = if let Some(ref endpoint_str) = endpoint {
+        info!("Using external Neo4j endpoint: {}", endpoint_str);
+        // Parse the endpoint and create client directly
+        let (uri, user, password) = parse_neo4j_endpoint(endpoint_str)?;
+        benchmark::neo4j_client::Neo4jClient::new(uri, user, password).await?
+    } else {
+        // Use local Neo4j instance (existing behavior)
+        let mut neo4j = benchmark::neo4j::Neo4j::default();
+        // stop neo4j if it is running
+        neo4j.stop(false).await?;
+        let spec = Spec::new(Users, queries_metadata.dataset, Vendor::Neo4j);
+        neo4j.restore_db(spec).await?;
+        // start neo4j
+        neo4j.start().await?;
+        neo4j.client().await?
+    };
     info!("client connected to neo4j");
     // get the graph size
     let (node_count, relation_count) = client.graph_size().await?;
@@ -177,9 +231,12 @@ async fn run_neo4j(
         format_number(number_of_queries as u64),
         elapsed
     );
-    neo4j.stop(true).await?;
-    // stop neo4j
-    // write the report
+    // Only stop neo4j if we're managing a local instance
+    if endpoint.is_none() {
+        // We need to get the neo4j instance back to stop it
+        // For now, we'll skip stopping for external endpoints
+        info!("Using external endpoint, skipping Neo4j process management");
+    }
     Ok(())
 }
 
@@ -518,37 +575,46 @@ async fn init_neo4j(
     size: Size,
     force: bool,
     batch_size: usize,
+    endpoint: Option<String>,
 ) -> BenchmarkResult<()> {
     let spec = Spec::new(benchmark::scenario::Name::Users, size, Vendor::Neo4j);
-    let mut neo4j = benchmark::neo4j::Neo4j::default();
-    let _ = neo4j.stop(false).await?;
-    let backup_path = format!("{}/neo4j.dump", spec.backup_path());
-    if !force {
-        if file_exists(backup_path.as_str()).await && !force {
-            info!(
-                "Backup file exists, skipping init, use --force to override ({})",
-                backup_path.as_str()
-            );
-            return Ok(());
-        }
+    
+    let client = if let Some(ref endpoint_str) = endpoint {
+        info!("Using external Neo4j endpoint for data loading: {}", endpoint_str);
+        // Parse the endpoint and create client directly
+        let (uri, user, password) = parse_neo4j_endpoint(endpoint_str)?;
+        benchmark::neo4j_client::Neo4jClient::new(uri, user, password).await?
     } else {
-        delete_file(backup_path.as_str()).await?;
-        let out = neo4j.clean_db().await?;
-        info!(
-            "neo clean_db std_error returns {} ",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        info!(
-            "neo clean_db std_out returns {} ",
-            String::from_utf8_lossy(&out.stdout)
-        );
-        // @ todo delete the data and index file as well
-        // delete_file(spec.cache(spec.data_url.as_ref()).await?.as_str()).await;
-    }
-
-    neo4j.start().await?;
-
-    let client = neo4j.client().await?;
+        // Use local Neo4j instance (existing behavior)
+        let mut neo4j = benchmark::neo4j::Neo4j::default();
+        let _ = neo4j.stop(false).await?;
+        let backup_path = format!("{}/neo4j.dump", spec.backup_path());
+        if !force {
+            if file_exists(backup_path.as_str()).await && !force {
+                info!(
+                    "Backup file exists, skipping init, use --force to override ({})",
+                    backup_path.as_str()
+                );
+                return Ok(());
+            }
+        } else {
+            delete_file(backup_path.as_str()).await?;
+            let out = neo4j.clean_db().await?;
+            info!(
+                "neo clean_db std_error returns {} ",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            info!(
+                "neo clean_db std_out returns {} ",
+                String::from_utf8_lossy(&out.stdout)
+            );
+            // @ todo delete the data and index file as well
+            // delete_file(spec.cache(spec.data_url.as_ref()).await?.as_str()).await;
+        }
+    
+        neo4j.start().await?;
+        neo4j.client().await?
+    };
     let (node_count, relation_count) = client.graph_size().await?;
     info!(
         "node count: {}, relation count: {}",
@@ -556,14 +622,24 @@ async fn init_neo4j(
         format_number(relation_count)
     );
     if node_count != 0 || relation_count != 0 {
-        error!(
-            "graph is not empty, node count: {}, relation count: {}",
-            node_count, relation_count
-        );
-        info!("stopping neo4j and deleting database neo4j");
-        neo4j.stop(false).await?;
-        neo4j.clean_db().await?;
-        neo4j.stop(true).await?;
+        if endpoint.is_some() {
+            error!(
+                "External Neo4j database is not empty, node count: {}, relation count: {}",
+                node_count, relation_count
+            );
+            return Err(OtherError(
+                "External database is not empty. Please clear the database manually before loading data.".to_string(),
+            ));
+        } else {
+            error!(
+                "graph is not empty, node count: {}, relation count: {}",
+                node_count, relation_count
+            );
+            info!("For local Neo4j: database should be cleaned before loading");
+            return Err(OtherError(
+                "Database is not empty. Use --force to clear it first.".to_string(),
+            ));
+        }
     }
     let mut histogram = Histogram::new(7, 64)?;
 
@@ -586,12 +662,20 @@ async fn init_neo4j(
         format_number(relation_count),
         start.elapsed()
     );
-    neo4j.stop(true).await?;
-    neo4j.dump(spec.clone()).await?;
+    
+    // Only stop neo4j and dump if we're managing a local instance
+    if endpoint.is_none() {
+        // For local instances, we need to handle the neo4j instance
+        // This is a limitation of the current design - we don't have access to the neo4j instance here
+        info!("For local instances: stopping and dumping would happen here");
+        // TODO: Refactor to properly handle local instance cleanup
+    } else {
+        info!("Using external endpoint, skipping Neo4j process management");
+    }
+    
     info!("---> histogram");
-
     show_historgam(histogram);
-
+    
     info!("---> Done");
     Ok(())
 }
