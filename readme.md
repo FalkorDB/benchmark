@@ -119,6 +119,9 @@ Options:
 - `cargo run --release --bin benchmark -- load --vendor falkor -s small`
 - `cargo run --release --bin benchmark -- load --vendor neo4j -s small`
 
+Note that it is possible to use externally run falkordb:
+- `cargo run --release --bin benchmark -- load --vendor falkor -s small --endpoint falkor://127.0.0.1:6379`
+
 ##### create a set of queries to be used with the run command
 
 -
@@ -129,6 +132,9 @@ Options:
 
 - `cargo run --release --bin benchmark run --vendor falkor --name small-readonly -p40 --mps 4000`
 - `cargo run --release --bin benchmark run --vendor neo4j --name small-readonly -p40 --mps 4000`
+
+Note that it is possible to use eternally run falkordb:
+- `cargo run --release --bin benchmark run --vendor falkor --name small-readonly -p40 --mps 4000 --endpoint falkor://127.0.0.1:6379`
 
 ##### run simulation to see that the benchmark itself can sustain spesific mps given a fix latency on that hardware
 
