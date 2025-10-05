@@ -128,7 +128,8 @@ NOTE: It is possible to use externally run falkordb:
 
 `cargo run --release --bin benchmark -- generate-queries  -s10000000 --dataset small --name=small-readonly --write-ratio 0.0`
 
-NOTE: preparing a smaller run of 1,000,000 queries
+NOTE: preparing a smaller run of 1,000,000 queries:
+
 `cargo run --release --bin benchmark -- generate-queries  -s1000000 --dataset small --name=small-readonly --write-ratio 0.0`
 
 ##### run the benchmarks
