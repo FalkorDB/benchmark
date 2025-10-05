@@ -119,8 +119,9 @@ Options:
 - `cargo run --release --bin benchmark -- load --vendor falkor -s small`
 - `cargo run --release --bin benchmark -- load --vendor neo4j -s small`
 
-NOTE: It is possible to use externally run falkordb:
+NOTE: It is possible to use the load command with externally run vendor endpoint:
 - `cargo run --release --bin benchmark -- load --vendor falkor -s small --endpoint falkor://127.0.0.1:6379`
+- `cargo run --release --bin benchmark -- load --vendor neo4j -s small --endpoint neo4j://neo4j:benchmark123@127.0.0.1:7687`
 
 ##### create a set of queries to be used with the run command
 
@@ -137,8 +138,9 @@ NOTE: preparing a smaller run of 1,000,000 queries:
 - `cargo run --release --bin benchmark run --vendor falkor --name small-readonly -p40 --mps 4000`
 - `cargo run --release --bin benchmark run --vendor neo4j --name small-readonly -p40 --mps 4000`
 
-NOTE: It is possible to use externally run falkordb:
+NOTE: It is possible to use the run command externally run vendor endpoint:
 - `cargo run --release --bin benchmark run --vendor falkor --name small-readonly -p40 --mps 4000 --endpoint falkor://127.0.0.1:6379`
+- `cargo run --release --bin benchmark run --vendor neo4j --name small-readonly -p40 --mps 4000 --endpoint neo4j://neo4j:benchmark123@127.0.0.1:7687`
 
 ##### run simulation to see that the benchmark itself can sustain spesific mps given a fix latency on that hardware
 
