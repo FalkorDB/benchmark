@@ -4,8 +4,8 @@ use crate::memgraph_client::MemgraphClient;
 use crate::scenario::Spec;
 use crate::utils::{create_directory_if_not_exists, spawn_command};
 use crate::{
-    prometheus_metrics, CPU_USAGE_GAUGE, MEM_USAGE_GAUGE, MEMGRAPH_CPU_USAGE_GAUGE,
-    MEMGRAPH_MEM_USAGE_GAUGE,
+    prometheus_metrics, CPU_USAGE_GAUGE, MEMGRAPH_CPU_USAGE_GAUGE, MEMGRAPH_MEM_USAGE_GAUGE,
+    MEM_USAGE_GAUGE,
 };
 use std::env;
 use std::ffi::OsString;
@@ -33,8 +33,8 @@ impl Default for Memgraph {
 
 impl Memgraph {
     fn new() -> Memgraph {
-        let memgraph_home =
-            env::var("MEMGRAPH_HOME").unwrap_or_else(|_| String::from("./downloads/memgraph_local"));
+        let memgraph_home = env::var("MEMGRAPH_HOME")
+            .unwrap_or_else(|_| String::from("./downloads/memgraph_local"));
         let uri = env::var("MEMGRAPH_URI").unwrap_or_else(|_| String::from("127.0.0.1:7687"));
         let user = env::var("MEMGRAPH_USER").unwrap_or_else(|_| String::from(""));
         let password = env::var("MEMGRAPH_PASSWORD").unwrap_or_else(|_| String::from(""));
@@ -90,13 +90,13 @@ impl Memgraph {
         // Memgraph doesn't have a built-in dump command like Neo4j
         // We'll use a cypher script to export the data
         let dump_file = format!("{}/memgraph.cypher", backup_path);
-        
+
         // Start memgraph temporarily for dump
         let mut temp_process = self.start_temp_for_dump().await?;
-        
+
         let client = self.client().await?;
         client.export_to_file(&dump_file).await?;
-        
+
         // Stop the temporary process
         temp_process.kill()?;
         temp_process.wait()?;
@@ -147,10 +147,10 @@ impl Memgraph {
 
         // Start memgraph temporarily for restore
         let mut temp_process = self.start_temp_for_dump().await?;
-        
+
         let client = self.client().await?;
         client.import_from_file(&dump_file).await?;
-        
+
         // Stop the temporary process
         temp_process.kill()?;
         temp_process.wait()?;
@@ -164,33 +164,33 @@ impl Memgraph {
 
     pub async fn clean_db(&mut self) -> BenchmarkResult<Output> {
         info!("cleaning DB");
-        
+
         if self.is_running().await? {
             info!("stopping memgraph before deleting the data");
             self.stop(false).await?;
         }
-        
+
         let home = self.memgraph_home.clone();
         let data_dir = format!("{}/data", &home);
         let log_dir = format!("{}/log", &home);
-        
+
         let args = ["-rf", &data_dir, &log_dir];
         spawn_command("rm", &args).await
     }
 
     pub async fn start(&mut self) -> BenchmarkResult<Child> {
         trace!("starting Memgraph process: {}", self.memgraph_binary());
-        
+
         if self.is_running().await? {
             self.stop(false).await?;
         }
-        
+
         info!("starting Memgraph process");
-        
+
         // Create data directory if it doesn't exist
         let data_dir = format!("{}/data", self.memgraph_home);
         create_directory_if_not_exists(&data_dir).await?;
-        
+
         let child = Command::new(self.memgraph_binary())
             .arg("--data-directory")
             .arg(&data_dir)
@@ -216,7 +216,9 @@ impl Memgraph {
         }
 
         if retries >= max_retries {
-            return Err(OtherError("Memgraph failed to start within timeout".to_string()));
+            return Err(OtherError(
+                "Memgraph failed to start within timeout".to_string(),
+            ));
         }
 
         tokio::time::sleep(Duration::from_secs(2)).await;
@@ -300,13 +302,11 @@ fn search_in_os_strings(
     os_strings: &[OsString],
     target: &str,
 ) -> bool {
-    os_strings
-        .iter()
-        .any(|os_string| {
-            if let Some(s) = os_string.as_os_str().to_str() {
-                s.contains(target)
-            } else {
-                false
-            }
-        })
+    os_strings.iter().any(|os_string| {
+        if let Some(s) = os_string.as_os_str().to_str() {
+            s.contains(target)
+        } else {
+            false
+        }
+    })
 }

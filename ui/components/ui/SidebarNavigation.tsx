@@ -46,7 +46,10 @@ export function NavMain({
   const filteredItems = items.filter((group) => {
     if (group.title === "Queries" && isRealisticWorkloadOn) return false;
     if (
-      (group.title === "Clients" || group.title === "Realistic Workload" || group.title === "Hardware") &&
+      (group.title === "Clients" ||
+        group.title === "Throughput" ||
+        group.title === "Realistic Workload" ||
+        group.title === "Hardware") &&
       !isRealisticWorkloadOn
     )
       return false;

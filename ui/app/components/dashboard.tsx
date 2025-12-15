@@ -10,7 +10,30 @@ import HorizontalBarChart from "./HorizontalBarChart";
 import VerticalBarChart from "./VerticalBarChart";
 import MemoryBarChart from "./MemoryBarChart";
 
-export default function DashBoard() {
+type DashboardProps = {
+  dataUrl?: string;
+  initialSelectedOptions?: Partial<Record<string, string[]>>;
+  /**
+   * If provided, the dashboard will only show these vendors in the UI (and will
+   * ignore any other vendors present in the data file).
+   */
+  comparisonVendors?: string[];
+};
+
+const DEFAULT_SELECTED_OPTIONS: Record<string, string[]> = {
+  "Workload Type": ["single"],
+  Vendors: ["falkordb", "neo4j"],
+  Clients: ["40"],
+  Throughput: ["2500"],
+  Hardware: ["arm"],
+  Queries: ["aggregate_expansion_4_with_filter"],
+};
+
+export default function DashBoard({
+  dataUrl = "/resultData.json",
+  initialSelectedOptions,
+  comparisonVendors,
+}: DashboardProps) {
   const [data, setData] = useState<BenchmarkData | null>(null);
   const { toast } = useToast();
   const [gridKey, setGridKey] = useState(0);
@@ -25,23 +48,52 @@ export default function DashBoard() {
   const [filteredUnrealistic, setFilteredUnrealistic] = useState<
     { vendor: string; histogram: number[]; memory: string }[]
   >([]);
+
+  const allowedVendors = useMemo(() => {
+    const v = (comparisonVendors ?? []).map((x) => x.toLowerCase()).filter(Boolean);
+    return v.length ? v : null;
+  }, [comparisonVendors]);
+
   const [selectedOptions, setSelectedOptions] = React.useState<
     Record<string, string[]>
-  >({
-    "Workload Type": ["single"],
-    Vendors: ["falkordb", "neo4j"],
-    Clients: ["40"],
-    Throughput: ["2500"],
-    Hardware: ["arm"],
-    Queries: ["aggregate_expansion_4_with_filter"],
+  >(() => {
+    const next: Record<string, string[]> = {
+      ...DEFAULT_SELECTED_OPTIONS,
+      ...(initialSelectedOptions ?? {}),
+    } as Record<string, string[]>;
+
+    // If this page compares a specific set of vendors, lock the vendor selection to those.
+    if (allowedVendors?.length) {
+      next["Vendors"] = allowedVendors;
+    }
+
+    return next;
   });
+
+  const [didInitFromData, setDidInitFromData] = useState(false);
 
   const fetchData = useCallback(async () => {
     try {
-      const response = await fetch("/resultData.json");
+      const response = await fetch(dataUrl);
       if (!response.ok)
         throw new Error(`HTTP error! status: ${response.status}`);
-      setData(await response.json());
+
+      const json = (await response.json()) as BenchmarkData;
+
+      if (allowedVendors?.length) {
+        const filtered: BenchmarkData = {
+          ...json,
+          runs: (json.runs ?? []).filter((r) =>
+            allowedVendors.includes(r.vendor?.toLowerCase())
+          ),
+          unrealstic: (json.unrealstic ?? []).filter((u) =>
+            allowedVendors.includes(u.vendor?.toLowerCase())
+          ),
+        };
+        setData(filtered);
+      } else {
+        setData(json);
+      }
     } catch (error) {
       toast({
         title: "Error fetching data",
@@ -49,28 +101,97 @@ export default function DashBoard() {
         variant: "destructive",
       });
     }
-  }, [toast]);
+  }, [toast, dataUrl, allowedVendors]);
 
   useEffect(() => {
     fetchData();
   }, [fetchData]);
+
+  // On first load of a summary file, auto-pick filters that match the data.
+  useEffect(() => {
+    if (didInitFromData || !data?.runs?.length) return;
+
+    const vendors = allowedVendors?.length
+      ? allowedVendors
+      : Array.from(
+          new Set(
+            data.runs
+              .map((r) => r.vendor?.toString().toLowerCase())
+              .filter(Boolean)
+          )
+        );
+    const clients = Array.from(
+      new Set(data.runs.map((r) => String(r.clients)).filter(Boolean))
+    );
+    const throughputs = Array.from(
+      new Set(
+        data.runs
+          .map((r) => String(r["target-messages-per-second"]))
+          .filter(Boolean)
+      )
+    );
+    const hardware = Array.from(
+      new Set(data.runs.map((r) => r.platform?.toLowerCase()).filter(Boolean))
+    );
+
+    setSelectedOptions((prev) => {
+      const next = { ...prev };
+
+      // Only overwrite if current selection doesn't intersect available values.
+      const replaceIfNoMatch = (
+        key: string,
+        available: string[],
+        normalize?: (v: string) => string
+      ) => {
+        const current = next[key] ?? [];
+        const norm = normalize ?? ((v: string) => v);
+        const hasMatch = current.some((c) =>
+          available.some((a) => norm(a) === norm(c))
+        );
+        if (!hasMatch && available.length) {
+          next[key] = [available[0]];
+        }
+      };
+
+      replaceIfNoMatch("Vendors", vendors);
+      replaceIfNoMatch("Clients", clients);
+      replaceIfNoMatch("Throughput", throughputs);
+      replaceIfNoMatch("Hardware", hardware);
+
+      return next;
+    });
+
+    setDidInitFromData(true);
+  }, [data, didInitFromData, allowedVendors]);
 
   const handleSideBarSelection = (groupTitle: string, optionId: string) => {
     setSelectedOptions((prev) => {
       const groupSelections = prev[groupTitle] || [];
 
       if (groupTitle === "Vendors") {
-        if (optionId === "falkordb" || optionId === "neo4j") {
+        // If this page is restricted to a specific vendor pair, ignore toggles outside it.
+        if (
+          allowedVendors?.length &&
+          !allowedVendors.includes(optionId.toLowerCase())
+        ) {
           return prev;
         }
+
         const updatedSelections = groupSelections.includes(optionId)
           ? groupSelections.filter((id) => id !== optionId)
           : [...groupSelections, optionId];
+
+        // Never allow an empty vendor selection.
+        if (updatedSelections.length === 0) {
+          return prev;
+        }
+
         return {
           ...prev,
           [groupTitle]: updatedSelections,
         };
       }
+
       return {
         ...prev,
         [groupTitle]: [optionId],
@@ -105,27 +226,31 @@ export default function DashBoard() {
     }
 
     const results = data.runs.filter((run) => {
-      const isHardwareMatch =
-        run.platform &&
-        selectedOptions.Hardware.some((hardware) =>
-          run.platform.toLowerCase().includes(hardware.toLowerCase())
-        );
+      const isHardwareMatch = selectedOptions.Hardware?.length
+        ? run.platform &&
+          selectedOptions.Hardware.some((hardware) =>
+            run.platform.toLowerCase().includes(hardware.toLowerCase())
+          )
+        : true;
 
-      const isVendorMatch =
-        run.vendor &&
-        selectedOptions.Vendors.some(
-          (vendor) => vendor.toLowerCase() === run.vendor.toLowerCase()
-        );
+      const isVendorMatch = selectedOptions.Vendors?.length
+        ? run.vendor &&
+          selectedOptions.Vendors.some(
+            (vendor) => vendor.toLowerCase() === run.vendor.toLowerCase()
+          )
+        : true;
 
-      const isClientMatch =
-        run.clients !== undefined &&
-        selectedOptions.Clients.includes(String(run.clients));
+      const isClientMatch = selectedOptions.Clients?.length
+        ? run.clients !== undefined &&
+          selectedOptions.Clients.includes(String(run.clients))
+        : true;
 
-      const isThroughputMatch =
-        run["target-messages-per-second"] !== undefined &&
-        selectedOptions.Throughput.includes(
-          String(run["target-messages-per-second"])
-        );
+      const isThroughputMatch = selectedOptions.Throughput?.length
+        ? run["target-messages-per-second"] !== undefined &&
+          selectedOptions.Throughput.includes(
+            String(run["target-messages-per-second"])
+          )
+        : true;
 
       return (
         isVendorMatch && isClientMatch && isThroughputMatch && isHardwareMatch
@@ -323,6 +448,7 @@ export default function DashBoard() {
           selectedOptions={selectedOptions}
           handleSideBarSelection={handleSideBarSelection}
           platform={data?.platforms}
+          allowedVendors={allowedVendors ?? undefined}
         />
         <SidebarInset className="flex-grow h-full min-h-0">
           <div
@@ -427,11 +553,11 @@ export default function DashBoard() {
                       <HorizontalBarChart
                         data={throughputData}
                         dataKey="actualMessagesPerSecond"
-                        chartLabel="Messages Per Second"
+                        chartLabel="Queries Per Second"
                         ratio={throughputRatio}
                         maxValue={maxThroughput}
                         minValue={minThroughput}
-                        unit="mb"
+                        unit=" qps"
                       />
                     </div>
                   </div>

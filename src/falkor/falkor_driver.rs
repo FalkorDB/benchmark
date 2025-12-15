@@ -44,11 +44,11 @@ impl Falkor<Stopped> {
     fn new() -> Falkor<Stopped> {
         Self::with_endpoint(None)
     }
-    
+
     pub fn new_with_endpoint(endpoint: Option<String>) -> Self {
         Self::with_endpoint(endpoint)
     }
-    
+
     fn with_endpoint(endpoint: Option<String>) -> Falkor<Stopped> {
         let default = falkor_shared_lib_path().unwrap();
         let path = env::var("FALKOR_PATH").unwrap_or(default);
@@ -155,7 +155,8 @@ impl Falkor<Started> {
 
 impl<U> Falkor<U> {
     pub async fn client(&self) -> BenchmarkResult<FalkorBenchmarkClient> {
-        let connection_string = self.endpoint
+        let connection_string = self
+            .endpoint
             .as_ref()
             .map(|s| s.as_str())
             .unwrap_or("falkor://127.0.0.1:6379");
@@ -334,13 +335,15 @@ impl FalkorBenchmarkClient {
             let falkor_result = self.graph.query(query).with_timeout(30000).execute();
             let timeout = Duration::from_secs(30);
             let falkor_result = tokio::time::timeout(timeout, falkor_result).await;
-            
+
             // If any query fails, return the error
-            if let Err(e) = Self::read_reply(spawn_id, &format!("batch_{}", i), query, falkor_result) {
+            if let Err(e) =
+                Self::read_reply(spawn_id, &format!("batch_{}", i), query, falkor_result)
+            {
                 return Err(e);
             }
         }
-        
+
         Ok(())
     }
 
@@ -358,7 +361,7 @@ impl FalkorBenchmarkClient {
         let falkor_result = self.graph.query(query).with_timeout(5000).execute();
         let timeout = Duration::from_secs(5);
         let falkor_result = tokio::time::timeout(timeout, falkor_result).await;
-        
+
         match falkor_result {
             Ok(falkor_result) => match falkor_result {
                 Ok(query_result) => {

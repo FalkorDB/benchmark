@@ -1,0 +1,48 @@
+{
+  "runs": [
+    {
+      "vendor": "falkordb",
+      "read-write-ratio": 0.0,
+      "clients": 20,
+      "platform": "arm",
+      "target-messages-per-second": 2000,
+      "edges": 10000,
+      "relationships": 121716,
+      "result": {
+        "deadline-offset": "0ms",
+        "actual-messages-per-second": 1999.1923263001747,
+        "latency": {
+          "p50": "10ms",
+          "p95": "25ms",
+          "p99": "25ms"
+        },
+        "cpu-usage": 0.0,
+        "ram-usage": "0MB",
+        "errors": 0,
+        "successful-requests": 1000000
+      }
+    },
+    {
+      "vendor": "memgraph",
+      "read-write-ratio": 0.0,
+      "clients": 20,
+      "platform": "arm",
+      "target-messages-per-second": 2000,
+      "edges": 10000,
+      "relationships": 121716,
+      "result": {
+        "deadline-offset": "0ms",
+        "actual-messages-per-second": 468.75556647235186,
+        "latency": {
+          "p50": "25ms",
+          "p95": "250ms",
+          "p99": "500ms"
+        },
+        "cpu-usage": 0.0,
+        "ram-usage": "0MB",
+        "errors": 0,
+        "successful-requests": 1000000
+      }
+    }
+  ]
+}

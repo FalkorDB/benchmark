@@ -6,7 +6,7 @@ use crate::{MEMGRAPH_MSG_DEADLINE_OFFSET_GAUGE, OPERATION_COUNTER};
 use futures::stream::TryStreamExt;
 use futures::{Stream, StreamExt};
 use histogram::Histogram;
-use neo4rs::{query, Graph, Row, ConfigBuilder};
+use neo4rs::{query, ConfigBuilder, Graph, Row};
 use std::hint::black_box;
 use std::pin::Pin;
 use std::time::Duration;
@@ -35,11 +35,9 @@ impl MemgraphClient {
             .db("memgraph") // Try "memgraph" as database name
             .build()
             .map_err(Neo4rsError)?;
-        
-        let graph = Graph::connect(config)
-            .await
-            .map_err(Neo4rsError)?;
-            
+
+        let graph = Graph::connect(config).await.map_err(Neo4rsError)?;
+
         Ok(MemgraphClient { graph })
     }
 
@@ -127,6 +125,26 @@ impl MemgraphClient {
         Ok((number_of_nodes, number_of_relationships))
     }
 
+    /// Clear all user data in an external Memgraph instance.
+    ///
+    /// We intentionally avoid Neo4j's `cypher-shell` for Memgraph because recent versions
+    /// call `db.ping` on connect, which Memgraph doesn't implement.
+    pub async fn clean_db(&self) -> BenchmarkResult<()> {
+        // Best-effort: drop the benchmark's known index, ignore errors if it doesn't exist.
+        if let Err(e) = self.graph.run(query("DROP INDEX ON :User(id); ")).await {
+            trace!("Ignoring error while dropping Memgraph index: {}", e);
+        }
+
+        // Delete everything.
+        // NOTE: This can be expensive on large graphs, but it's fine for benchmark setup.
+        self.graph
+            .run(query("MATCH (n) DETACH DELETE n;"))
+            .await
+            .map_err(Neo4rsError)?;
+
+        Ok(())
+    }
+
     pub async fn execute_query_iterator(
         &mut self,
         iter: Box<dyn Iterator<Item = PreparedQuery> + '_>,
@@ -183,7 +201,7 @@ impl MemgraphClient {
                 }
             }
         }
-        
+
         Ok(())
     }
 
@@ -198,8 +216,8 @@ impl MemgraphClient {
         }
 
         let start = Instant::now();
-        
-        // Execute each query individually 
+
+        // Execute each query individually
         for query_str in batch_queries {
             let mut results = self.execute_query(query_str).await?;
             while let Some(row_or_error) = results.next().await {
@@ -212,10 +230,10 @@ impl MemgraphClient {
                 }
             }
         }
-        
+
         let duration = start.elapsed();
         histogram.increment(duration.as_micros() as u64)?;
-        
+
         Ok(())
     }
 
@@ -270,7 +288,7 @@ impl MemgraphClient {
         S: StreamExt<Item = Result<String, io::Error>> + Unpin,
     {
         info!("Processing Memgraph queries in batches of {}", batch_size);
-        
+
         let mut current_batch = Vec::with_capacity(batch_size);
         let mut total_processed = 0;
         let mut batch_count = 0;
@@ -289,19 +307,26 @@ impl MemgraphClient {
                         if current_batch.len() >= batch_size {
                             batch_count += 1;
                             let batch_start = tokio::time::Instant::now();
-                            
-                            info!("Processing batch {} with {} items (total processed: {})", 
-                                  batch_count, current_batch.len(), total_processed);
-                            
-                            self.execute_batch_with_histogram(&current_batch, histogram).await?;
+
+                            info!(
+                                "Processing batch {} with {} items (total processed: {})",
+                                batch_count,
+                                current_batch.len(),
+                                total_processed
+                            );
+
+                            self.execute_batch_with_histogram(&current_batch, histogram)
+                                .await?;
                             current_batch = Vec::with_capacity(batch_size);
-                            
+
                             let batch_duration = batch_start.elapsed();
                             trace!("Batch {} completed in {:?}", batch_count, batch_duration);
-                            
+
                             // Report progress every 5 seconds
                             let now = tokio::time::Instant::now();
-                            if now.duration_since(last_progress_report).as_secs() >= PROGRESS_INTERVAL_SECS {
+                            if now.duration_since(last_progress_report).as_secs()
+                                >= PROGRESS_INTERVAL_SECS
+                            {
                                 let elapsed = now.duration_since(start_time);
                                 let rate = total_processed as f64 / elapsed.as_secs_f64();
                                 info!("Progress: {} items processed in {:?} ({:.2} items/sec, {} batches completed)", 
@@ -320,24 +345,37 @@ impl MemgraphClient {
         // Process remaining items if any
         if !current_batch.is_empty() {
             batch_count += 1;
-            info!("Processing final batch {} with {} items", batch_count, current_batch.len());
-            self.execute_batch_with_histogram(&current_batch, histogram).await?;
+            info!(
+                "Processing final batch {} with {} items",
+                batch_count,
+                current_batch.len()
+            );
+            self.execute_batch_with_histogram(&current_batch, histogram)
+                .await?;
         }
 
         let total_duration = start_time.elapsed();
         let final_rate = total_processed as f64 / total_duration.as_secs_f64();
-        info!("Completed processing {} items in {} batches over {:?} (avg {:.2} items/sec)", 
-              crate::utils::format_number(total_processed as u64), batch_count, total_duration, final_rate);
-        
+        info!(
+            "Completed processing {} items in {} batches over {:?} (avg {:.2} items/sec)",
+            crate::utils::format_number(total_processed as u64),
+            batch_count,
+            total_duration,
+            final_rate
+        );
+
         Ok(total_processed)
     }
 
     /// Export database to a cypher file
-    pub async fn export_to_file(&self, file_path: &str) -> BenchmarkResult<()> {
+    pub async fn export_to_file(
+        &self,
+        file_path: &str,
+    ) -> BenchmarkResult<()> {
         info!("Exporting database to {}", file_path);
-        
+
         let mut file = File::create(file_path).await?;
-        
+
         // Export nodes
         let mut result = self.graph.execute(query("MATCH (n) RETURN n")).await?;
         while let Ok(Some(row)) = result.next().await {
@@ -346,25 +384,31 @@ impl MemgraphClient {
             let export_line = format!("CREATE ({:?});\n", row);
             file.write_all(export_line.as_bytes()).await?;
         }
-        
+
         // Export relationships
-        let mut result = self.graph.execute(query("MATCH ()-[r]->() RETURN r")).await?;
+        let mut result = self
+            .graph
+            .execute(query("MATCH ()-[r]->() RETURN r"))
+            .await?;
         while let Ok(Some(row)) = result.next().await {
             // This is a simplified export - in a real implementation,
             // you'd want to properly serialize the relationship
             let export_line = format!("CREATE ({:?});\n", row);
             file.write_all(export_line.as_bytes()).await?;
         }
-        
+
         file.flush().await?;
         info!("Database exported successfully");
         Ok(())
     }
 
     /// Import database from a cypher file
-    pub async fn import_from_file(&self, file_path: &str) -> BenchmarkResult<()> {
+    pub async fn import_from_file(
+        &self,
+        file_path: &str,
+    ) -> BenchmarkResult<()> {
         info!("Importing database from {}", file_path);
-        
+
         // Read and execute each line from the file
         let content = tokio::fs::read_to_string(file_path).await?;
         for line in content.lines() {
@@ -376,7 +420,7 @@ impl MemgraphClient {
                 }
             }
         }
-        
+
         info!("Database imported successfully");
         Ok(())
     }

@@ -44,7 +44,7 @@ impl FalkorProcess {
             dropped: true, // Mark as dropped so Drop doesn't try to terminate
         }
     }
-    
+
     pub async fn new() -> BenchmarkResult<Self> {
         redis_shutdown().await?; // if redis run on this machine, use redis-cli to shut it down
 

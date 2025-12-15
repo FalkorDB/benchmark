@@ -34,6 +34,20 @@ export const sidebarConfig: {
       options: [
         { id: "falkordb", label: "FalkorDB" },
         { id: "neo4j", label: "Neo4j" },
+        { id: "memgraph", label: "Memgraph" },
+      ],
+    },
+    {
+      title: "Throughput",
+      description: "Target messages per second",
+      layout: "row",
+      icon: Activity,
+      options: [
+        { id: "500", label: "500" },
+        { id: "1000", label: "1000" },
+        { id: "1500", label: "1500" },
+        { id: "2000", label: "2000" },
+        { id: "2500", label: "2500" },
       ],
     },
     {

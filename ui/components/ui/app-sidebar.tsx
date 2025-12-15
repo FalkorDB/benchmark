@@ -24,12 +24,27 @@ export function AppSidebar({
   selectedOptions,
   handleSideBarSelection,
   platform,
+  allowedVendors,
   ...props
 }: React.ComponentProps<typeof Sidebar> & {
   selectedOptions: Record<string, string[]>;
   handleSideBarSelection: (groupTitle: string, optionId: string) => void;
   platform?: Platforms;
+  allowedVendors?: string[];
 }) {
+  const filteredSidebarItems = React.useMemo(() => {
+    const allowed = (allowedVendors ?? []).map((v) => v.toLowerCase());
+    if (!allowed.length) return sidebarConfig.sidebarData;
+
+    return sidebarConfig.sidebarData.map((group) => {
+      if (group.title !== "Vendors") return group;
+      return {
+        ...group,
+        options: group.options.filter((o) => allowed.includes(o.id.toLowerCase())),
+      };
+    });
+  }, [allowedVendors]);
+
   return (
     <Sidebar
       collapsible="icon"
@@ -42,7 +57,7 @@ export function AppSidebar({
       </SidebarHeader>
       <SidebarContent className="pb-20">
         <NavMain
-          items={sidebarConfig?.sidebarData}
+          items={filteredSidebarItems ?? []}
           selectedOptions={selectedOptions}
           handleSideBarSelection={handleSideBarSelection}
           platform={platform}

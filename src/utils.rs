@@ -401,19 +401,24 @@ where
                 if current_batch.len() >= batch_size {
                     batch_count += 1;
                     let batch_start = tokio::time::Instant::now();
-                    
-                    info!("Processing batch {} with {} items (total processed: {})", 
-                          batch_count, current_batch.len(), total_processed);
-                    
+
+                    info!(
+                        "Processing batch {} with {} items (total processed: {})",
+                        batch_count,
+                        current_batch.len(),
+                        total_processed
+                    );
+
                     process_batch(current_batch).await?;
                     current_batch = Vec::with_capacity(batch_size);
-                    
+
                     let batch_duration = batch_start.elapsed();
                     trace!("Batch {} completed in {:?}", batch_count, batch_duration);
-                    
+
                     // Report progress every 5 seconds
                     let now = tokio::time::Instant::now();
-                    if now.duration_since(last_progress_report).as_secs() >= PROGRESS_INTERVAL_SECS {
+                    if now.duration_since(last_progress_report).as_secs() >= PROGRESS_INTERVAL_SECS
+                    {
                         let elapsed = now.duration_since(start_time);
                         let rate = total_processed as f64 / elapsed.as_secs_f64();
                         info!("Progress: {} items processed in {:?} ({:.2} items/sec, {} batches completed)", 
@@ -431,13 +436,22 @@ where
     // Process remaining items if any
     if !current_batch.is_empty() {
         batch_count += 1;
-        info!("Processing final batch {} with {} items", batch_count, current_batch.len());
+        info!(
+            "Processing final batch {} with {} items",
+            batch_count,
+            current_batch.len()
+        );
         process_batch(current_batch).await?;
     }
 
     let total_duration = start_time.elapsed();
     let final_rate = total_processed as f64 / total_duration.as_secs_f64();
-    info!("Completed processing {} items in {} batches over {:?} (avg {:.2} items/sec)", 
-          format_number(total_processed as u64), batch_count, total_duration, final_rate);
+    info!(
+        "Completed processing {} items in {} batches over {:?} (avg {:.2} items/sec)",
+        format_number(total_processed as u64),
+        batch_count,
+        total_duration,
+        final_rate
+    );
     Ok(total_processed)
 }

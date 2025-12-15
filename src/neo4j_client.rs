@@ -6,7 +6,7 @@ use crate::{NEO4J_MSG_DEADLINE_OFFSET_GAUGE, OPERATION_COUNTER};
 use futures::stream::TryStreamExt;
 use futures::{Stream, StreamExt};
 use histogram::Histogram;
-use neo4rs::{query, Graph, Row, ConfigBuilder};
+use neo4rs::{query, ConfigBuilder, Graph, Row};
 use std::hint::black_box;
 use std::pin::Pin;
 use std::time::Duration;
@@ -30,13 +30,13 @@ impl Neo4jClient {
             .uri(&uri)
             .user(&user)
             .password(&password);
-        
+
         let config = if let Some(db) = database {
             config.db(db)
         } else {
             config
         };
-        
+
         let graph = Graph::connect(config.build().map_err(Neo4rsError)?)
             .await
             .map_err(Neo4rsError)?;
@@ -169,7 +169,7 @@ impl Neo4jClient {
         }
 
         let start = Instant::now();
-        
+
         // Execute queries individually since explicit BEGIN/COMMIT syntax is not supported
         for query in batch_queries {
             let trimmed = query.trim();
@@ -185,10 +185,10 @@ impl Neo4jClient {
                 }
             }
         }
-        
+
         let duration = start.elapsed();
         histogram.increment(duration.as_micros() as u64)?;
-        
+
         Ok(())
     }
 
@@ -242,7 +242,7 @@ impl Neo4jClient {
         S: StreamExt<Item = Result<String, io::Error>> + Unpin,
     {
         info!("Processing Neo4j queries in batches of {}", batch_size);
-        
+
         let mut current_batch = Vec::with_capacity(batch_size);
         let mut total_processed = 0;
         let mut batch_count = 0;
@@ -261,19 +261,25 @@ impl Neo4jClient {
                         if current_batch.len() >= batch_size {
                             batch_count += 1;
                             let batch_start = tokio::time::Instant::now();
-                            
-                            info!("Processing batch {} with {} items (total processed: {})", 
-                                  batch_count, current_batch.len(), total_processed);
-                            
+
+                            info!(
+                                "Processing batch {} with {} items (total processed: {})",
+                                batch_count,
+                                current_batch.len(),
+                                total_processed
+                            );
+
                             self.execute_batch(&current_batch, histogram).await?;
                             current_batch = Vec::with_capacity(batch_size);
-                            
+
                             let batch_duration = batch_start.elapsed();
                             trace!("Batch {} completed in {:?}", batch_count, batch_duration);
-                            
+
                             // Report progress every 5 seconds
                             let now = tokio::time::Instant::now();
-                            if now.duration_since(last_progress_report).as_secs() >= PROGRESS_INTERVAL_SECS {
+                            if now.duration_since(last_progress_report).as_secs()
+                                >= PROGRESS_INTERVAL_SECS
+                            {
                                 let elapsed = now.duration_since(start_time);
                                 let rate = total_processed as f64 / elapsed.as_secs_f64();
                                 info!("Progress: {} items processed in {:?} ({:.2} items/sec, {} batches completed)", 
@@ -292,15 +298,24 @@ impl Neo4jClient {
         // Process remaining items if any
         if !current_batch.is_empty() {
             batch_count += 1;
-            info!("Processing final batch {} with {} items", batch_count, current_batch.len());
+            info!(
+                "Processing final batch {} with {} items",
+                batch_count,
+                current_batch.len()
+            );
             self.execute_batch(&current_batch, histogram).await?;
         }
 
         let total_duration = start_time.elapsed();
         let final_rate = total_processed as f64 / total_duration.as_secs_f64();
-        info!("Completed processing {} items in {} batches over {:?} (avg {:.2} items/sec)", 
-              crate::utils::format_number(total_processed as u64), batch_count, total_duration, final_rate);
-        
+        info!(
+            "Completed processing {} items in {} batches over {:?} (avg {:.2} items/sec)",
+            crate::utils::format_number(total_processed as u64),
+            batch_count,
+            total_duration,
+            final_rate
+        );
+
         Ok(total_processed)
     }
 }

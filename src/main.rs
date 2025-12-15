@@ -10,7 +10,9 @@ use benchmark::queries_repository::PreparedQuery;
 use benchmark::scenario::Name::Users;
 use benchmark::scenario::{Size, Spec, Vendor};
 use benchmark::scheduler::Msg;
-use benchmark::utils::{delete_file, file_exists, format_number};
+use benchmark::utils::{
+    create_directory_if_not_exists, delete_file, file_exists, format_number, write_to_file,
+};
 use benchmark::{
     scheduler, FALKOR_ERROR_REQUESTS_DURATION_HISTOGRAM,
     FALKOR_SUCCESS_REQUESTS_DURATION_HISTOGRAM, MEMGRAPH_ERROR_REQUESTS_DURATION_HISTOGRAM,
@@ -23,8 +25,11 @@ use futures::StreamExt;
 use histogram::Histogram;
 use serde::{Deserialize, Serialize};
 use std::io;
+use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use prometheus::{Encoder, TextEncoder};
 use tokio::fs::File;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::sync::mpsc::Receiver;
@@ -34,58 +39,82 @@ use tokio::time::Instant;
 use tracing::{error, info, instrument, trace};
 use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::{fmt, EnvFilter};
+mod aggregator;
+
 use url::Url;
+
+fn default_results_dir() -> String {
+    use time::macros::format_description;
+
+    // YYMMDD-HH:MM (UTC)
+    let fmt = format_description!("[year repr:last_two][month padding:zero][day padding:zero]-[hour padding:zero]:[minute padding:zero]");
+
+    let ts = time::OffsetDateTime::now_utc()
+        .format(&fmt)
+        .unwrap_or_else(|_| "000000-00:00".to_string());
+
+    format!("Results-{}", ts)
+}
+
+fn redact_endpoint(endpoint: &str) -> String {
+    // Best-effort: if this isn't a valid URL, just return a placeholder.
+    if let Ok(mut url) = Url::parse(endpoint) {
+        // Strip password if present; keep username to help identify which creds are being used.
+        let _ = url.set_password(None);
+        return url.to_string();
+    }
+    "<invalid-endpoint>".to_string()
+}
 
 /// Parse Neo4j endpoint string into (uri, user, password, database)
 /// Supports formats like:
 /// - neo4j://user:pass@host:7687
-/// - bolt://user:pass@host:7687 
+/// - bolt://user:pass@host:7687
 /// - neo4j://host:7687 (uses default credentials)
-fn parse_neo4j_endpoint(endpoint: &str) -> BenchmarkResult<(String, String, String, Option<String>)> {
-    let url = Url::parse(endpoint).map_err(|e| {
-        OtherError(format!("Invalid Neo4j endpoint URL '{}': {}", endpoint, e))
-    })?;
-    
+fn parse_neo4j_endpoint(
+    endpoint: &str
+) -> BenchmarkResult<(String, String, String, Option<String>)> {
+    let url = Url::parse(endpoint)
+        .map_err(|e| OtherError(format!("Invalid Neo4j endpoint URL '{}': {}", endpoint, e)))?;
+
     // Validate scheme
     match url.scheme() {
-        "neo4j" | "bolt" | "neo4j+s" | "bolt+s" => {},
+        "neo4j" | "bolt" | "neo4j+s" | "bolt+s" => {}
         scheme => {
             return Err(OtherError(format!(
-                "Unsupported Neo4j scheme '{}'. Use neo4j://, bolt://, neo4j+s://, or bolt+s://", 
+                "Unsupported Neo4j scheme '{}'. Use neo4j://, bolt://, neo4j+s://, or bolt+s://",
                 scheme
             )));
         }
     }
-    
+
     // Extract host and port
-    let host = url.host_str().ok_or_else(|| {
-        OtherError(format!("No host found in Neo4j endpoint: {}", endpoint))
-    })?;
-    
+    let host = url
+        .host_str()
+        .ok_or_else(|| OtherError(format!("No host found in Neo4j endpoint: {}", endpoint)))?;
+
     let port = url.port().unwrap_or(7687); // Default Neo4j port
-    
+
     // Build URI (neo4rs expects format like "127.0.0.1:7687")
     let uri = format!("{}:{}", host, port);
-    
-    // Extract credentials or use defaults
-    let user = if url.username().is_empty() {
-        "neo4j".to_string() // Default user
-    } else {
+
+    // Extract credentials.
+    // If missing from URL, fall back to env vars so users don't need to embed secrets in endpoints.
+    let user = if !url.username().is_empty() {
         url.username().to_string()
-    };
-    
-    let password = url.password().unwrap_or("password").to_string(); // Default password
-    
-    // Detect if this might be a Memgraph instance by checking the default port and context
-    // If connecting to the typical Memgraph setup, use "memgraph" as database name
-    let database = if port == 7687 && user == "neo4j" && password == "password" {
-        // This looks like a default Memgraph setup, try "memgraph" database
-        Some("memgraph".to_string())
     } else {
-        // For actual Neo4j, use the default database name "neo4j"
-        Some("neo4j".to_string())
+        std::env::var("NEO4J_USER").unwrap_or_else(|_| "neo4j".to_string())
     };
-    
+
+    let password = if let Some(pw) = url.password() {
+        pw.to_string()
+    } else {
+        std::env::var("NEO4J_PASSWORD").unwrap_or_else(|_| "password".to_string())
+    };
+
+    // Default database name for Neo4j
+    let database = Some("neo4j".to_string());
+
     Ok((uri, user, password, database))
 }
 
@@ -94,42 +123,51 @@ fn parse_neo4j_endpoint(endpoint: &str) -> BenchmarkResult<(String, String, Stri
 /// - bolt://user:pass@host:7687
 /// - memgraph://user:pass@host:7687
 /// - bolt://host:7687 (uses empty credentials for Memgraph)
-fn parse_memgraph_endpoint(endpoint: &str) -> BenchmarkResult<(String, String, String, Option<String>)> {
+fn parse_memgraph_endpoint(
+    endpoint: &str
+) -> BenchmarkResult<(String, String, String, Option<String>)> {
     let url = Url::parse(endpoint).map_err(|e| {
-        OtherError(format!("Invalid Memgraph endpoint URL '{}': {}", endpoint, e))
+        OtherError(format!(
+            "Invalid Memgraph endpoint URL '{}': {}",
+            endpoint, e
+        ))
     })?;
-    
+
     // Validate scheme
     match url.scheme() {
-        "bolt" | "bolt+s" | "memgraph" | "memgraph+s" => {},
+        "bolt" | "bolt+s" | "memgraph" | "memgraph+s" => {}
         scheme => {
             return Err(OtherError(format!(
-                "Unsupported Memgraph scheme '{}'. Use bolt://, memgraph://, bolt+s://, or memgraph+s://", 
+                "Unsupported Memgraph scheme '{}'. Use bolt://, memgraph://, bolt+s://, or memgraph+s://",
                 scheme
             )));
         }
     }
-    
+
     // Extract host and port
-    let host = url.host_str().ok_or_else(|| {
-        OtherError(format!("No host found in Memgraph endpoint: {}", endpoint))
-    })?;
-    
+    let host = url
+        .host_str()
+        .ok_or_else(|| OtherError(format!("No host found in Memgraph endpoint: {}", endpoint)))?;
+
     let port = url.port().unwrap_or(7687); // Default Memgraph port
-    
+
     // Build URI (format like "127.0.0.1:7687")
     let uri = format!("{}:{}", host, port);
-    
-    // Extract credentials or use empty defaults (Memgraph often runs without auth)
-    let user = if url.username().is_empty() {
-        String::new() // Empty user for Memgraph
-    } else {
+
+    // Extract credentials.
+    // If missing from URL, fall back to env vars so users don't need to embed secrets in endpoints.
+    let user = if !url.username().is_empty() {
         url.username().to_string()
+    } else {
+        std::env::var("MEMGRAPH_USER").unwrap_or_else(|_| String::new())
     };
-    
-    let password = url.password().unwrap_or("").to_string(); // Empty password by default
-    
-    // For Memgraph, use "memgraph" as the database name
+
+    let password = if let Some(pw) = url.password() {
+        pw.to_string()
+    } else {
+        std::env::var("MEMGRAPH_PASSWORD").unwrap_or_else(|_| String::new())
+    };
+
     Ok((uri, user, password, Some("memgraph".to_string())))
 }
 
@@ -163,7 +201,10 @@ async fn main() -> BenchmarkResult<()> {
             batch_size,
             endpoint,
         } => {
-            info!("Init benchmark {} {} {} (batch_size: {})", vendor, size, force, batch_size);
+            info!(
+                "Init benchmark {} {} {} (batch_size: {})",
+                vendor, size, force, batch_size
+            );
             match vendor {
                 Vendor::Neo4j => {
                     if dry_run {
@@ -196,17 +237,22 @@ async fn main() -> BenchmarkResult<()> {
             mps,
             simulate,
             endpoint,
-        } => match vendor {
-            Vendor::Neo4j => {
-                run_neo4j(parallel, name, mps, simulate, endpoint).await?;
+            results_dir,
+        } => {
+            // Always store results; if user didn't provide a directory, generate one.
+            let results_dir = Some(results_dir.unwrap_or_else(default_results_dir));
+            match vendor {
+                Vendor::Neo4j => {
+                    run_neo4j(parallel, name, mps, simulate, endpoint, results_dir).await?;
+                }
+                Vendor::Falkor => {
+                    run_falkor(parallel, name, mps, simulate, endpoint, results_dir).await?;
+                }
+                Vendor::Memgraph => {
+                    run_memgraph(parallel, name, mps, simulate, endpoint, results_dir).await?;
+                }
             }
-            Vendor::Falkor => {
-                run_falkor(parallel, name, mps, simulate, endpoint).await?;
-            }
-            Vendor::Memgraph => {
-                run_memgraph(parallel, name, mps, simulate, endpoint).await?;
-            }
-        },
+        }
 
         Commands::GenerateQueries {
             size,
@@ -215,6 +261,12 @@ async fn main() -> BenchmarkResult<()> {
             write_ratio,
         } => {
             prepare_queries(dataset, size, name, write_ratio).await?;
+        }
+        Commands::Aggregate {
+            results_dir,
+            out_dir,
+        } => {
+            aggregator::aggregate_results(&results_dir, &out_dir)?;
         }
     }
     drop(prometheus_endpoint);
@@ -227,12 +279,17 @@ async fn run_neo4j(
     mps: usize,
     simulate: Option<usize>,
     endpoint: Option<String>,
+    results_dir: Option<String>,
 ) -> BenchmarkResult<()> {
+    let queries_file = file_name.clone();
     let (queries_metadata, queries) = read_queries(file_name).await?;
     let number_of_queries = queries_metadata.size;
-    
+
     let client = if let Some(ref endpoint_str) = endpoint {
-        info!("Using external Neo4j endpoint: {}", endpoint_str);
+        info!(
+            "Using external Neo4j endpoint: {}",
+            redact_endpoint(endpoint_str)
+        );
         // Parse the endpoint and create client directly
         let (uri, user, password, database) = parse_neo4j_endpoint(endpoint_str)?;
         benchmark::neo4j_client::Neo4jClient::new(uri, user, password, database).await?
@@ -266,6 +323,7 @@ async fn run_neo4j(
     let scheduler_handle = scheduler::spawn_scheduler::<PreparedQuery>(mps, tx.clone(), queries);
     let mut workers_handles = Vec::with_capacity(parallel);
 
+    let started_at = SystemTime::now();
     let start = Instant::now();
     for spawn_id in 0..parallel {
         let handle = spawn_neo4j_worker(client.clone(), spawn_id, &rx, simulate).await?;
@@ -279,12 +337,29 @@ async fn run_neo4j(
     }
 
     let elapsed = start.elapsed();
+    let finished_at = SystemTime::now();
 
     info!(
         "running {} queries took {:?}",
         format_number(number_of_queries as u64),
         elapsed
     );
+
+    write_run_results(
+        results_dir,
+        Vendor::Neo4j,
+        queries_metadata.dataset,
+        &queries_file,
+        parallel,
+        mps,
+        simulate,
+        &endpoint,
+        number_of_queries,
+        started_at,
+        finished_at,
+        elapsed,
+    )
+    .await?;
     // Only stop neo4j if we're managing a local instance
     if endpoint.is_none() {
         // We need to get the neo4j instance back to stop it
@@ -356,6 +431,7 @@ async fn run_falkor(
     mps: usize,
     simulate: Option<usize>,
     endpoint: Option<String>,
+    results_dir: Option<String>,
 ) -> BenchmarkResult<()> {
     if parallel == 0 {
         return Err(OtherError(
@@ -364,12 +440,17 @@ async fn run_falkor(
     }
     let falkor: Falkor<Stopped> = benchmark::falkor::Falkor::new_with_endpoint(endpoint.clone());
 
+    let queries_file = file_name.clone();
     let (queries_metadata, queries) = read_queries(file_name).await?;
 
     // if external endpoint, skip dump operations
     if endpoint.is_none() {
         // if dump not present, initialize the database
-        if falkor.dump_exists_or_error(queries_metadata.dataset).await.is_err() {
+        if falkor
+            .dump_exists_or_error(queries_metadata.dataset)
+            .await
+            .is_err()
+        {
             info!("Dump file not found, initializing falkor database...");
             init_falkor(queries_metadata.dataset, false, 1000, endpoint.clone()).await?;
         }
@@ -404,6 +485,8 @@ async fn run_falkor(
 
     let scheduler_handle = scheduler::spawn_scheduler::<PreparedQuery>(mps, tx.clone(), queries);
     let mut workers_handles = Vec::with_capacity(parallel);
+
+    let started_at = SystemTime::now();
     // start workers
     let start = Instant::now();
     for spawn_id in 0..parallel {
@@ -419,11 +502,29 @@ async fn run_falkor(
     }
 
     let elapsed = start.elapsed();
+    let finished_at = SystemTime::now();
+
     info!(
         "running {} queries took {:?}",
         format_number(number_of_queries as u64),
         elapsed
     );
+
+    write_run_results(
+        results_dir,
+        Vendor::Falkor,
+        queries_metadata.dataset,
+        &queries_file,
+        parallel,
+        mps,
+        simulate,
+        &endpoint,
+        number_of_queries,
+        started_at,
+        finished_at,
+        elapsed,
+    )
+    .await?;
 
     // stop falkor
     let _stopped = falkor.stop().await?;
@@ -504,7 +605,7 @@ async fn init_falkor(
     let start = Instant::now();
 
     let mut falkor_client = falkor.client().await?;
-    
+
     // Create index with graceful handling of "already exists" error
     falkor_client
         .create_index_if_not_exists(
@@ -515,9 +616,9 @@ async fn init_falkor(
         .await?;
 
     let mut data_iterator = spec.init_data_iterator().await?;
-    
+
     info!("Loading data in batches of {} commands", batch_size);
-    
+
     let mut current_batch = Vec::with_capacity(batch_size);
     let mut total_processed = 0;
     let mut batch_count = 0;
@@ -534,19 +635,26 @@ async fn init_falkor(
                 if current_batch.len() >= batch_size {
                     batch_count += 1;
                     let batch_start = tokio::time::Instant::now();
-                    
-                    info!("Processing batch {} with {} items (total processed: {})", 
-                          batch_count, current_batch.len(), total_processed);
-                    
-                    falkor_client.execute_batch("loader", &current_batch).await?;
+
+                    info!(
+                        "Processing batch {} with {} items (total processed: {})",
+                        batch_count,
+                        current_batch.len(),
+                        total_processed
+                    );
+
+                    falkor_client
+                        .execute_batch("loader", &current_batch)
+                        .await?;
                     current_batch = Vec::with_capacity(batch_size);
-                    
+
                     let batch_duration = batch_start.elapsed();
                     trace!("Batch {} completed in {:?}", batch_count, batch_duration);
-                    
+
                     // Report progress every 5 seconds
                     let now = tokio::time::Instant::now();
-                    if now.duration_since(last_progress_report).as_secs() >= PROGRESS_INTERVAL_SECS {
+                    if now.duration_since(last_progress_report).as_secs() >= PROGRESS_INTERVAL_SECS
+                    {
                         let elapsed = now.duration_since(start_time);
                         let rate = total_processed as f64 / elapsed.as_secs_f64();
                         info!("Progress: {} items processed in {:?} ({:.2} items/sec, {} batches completed)", 
@@ -564,14 +672,25 @@ async fn init_falkor(
     // Process remaining items if any
     if !current_batch.is_empty() {
         batch_count += 1;
-        info!("Processing final batch {} with {} items", batch_count, current_batch.len());
-        falkor_client.execute_batch("loader", &current_batch).await?;
+        info!(
+            "Processing final batch {} with {} items",
+            batch_count,
+            current_batch.len()
+        );
+        falkor_client
+            .execute_batch("loader", &current_batch)
+            .await?;
     }
 
     let total_duration = start_time.elapsed();
     let final_rate = total_processed as f64 / total_duration.as_secs_f64();
-    info!("Completed processing {} items in {} batches over {:?} (avg {:.2} items/sec)", 
-          format_number(total_processed as u64), batch_count, total_duration, final_rate);
+    info!(
+        "Completed processing {} items in {} batches over {:?} (avg {:.2} items/sec)",
+        format_number(total_processed as u64),
+        batch_count,
+        total_duration,
+        final_rate
+    );
 
     let (node_count, relation_count) = falkor.graph_size().await?;
     info!(
@@ -599,7 +718,90 @@ fn show_historgam(histogram: Histogram) {
     }
 }
 
-async fn dry_init_neo4j(size: Size, _batch_size: usize) -> BenchmarkResult<()> {
+#[derive(Debug, Serialize)]
+struct RunResultsMeta {
+    vendor: String,
+    dataset: String,
+    queries_file: String,
+    queries_count: usize,
+    parallel: usize,
+    mps: usize,
+    simulate_ms: Option<usize>,
+    endpoint: Option<String>,
+    started_at_epoch_secs: u64,
+    finished_at_epoch_secs: u64,
+    elapsed_ms: u128,
+}
+
+fn system_time_epoch_secs(t: SystemTime) -> u64 {
+    t.duration_since(UNIX_EPOCH)
+        .unwrap_or_else(|_| Duration::from_secs(0))
+        .as_secs()
+}
+
+async fn write_run_results(
+    results_dir: Option<String>,
+    vendor: Vendor,
+    dataset: Size,
+    queries_file: &str,
+    parallel: usize,
+    mps: usize,
+    simulate: Option<usize>,
+    endpoint: &Option<String>,
+    queries_count: usize,
+    started_at: SystemTime,
+    finished_at: SystemTime,
+    elapsed: Duration,
+) -> BenchmarkResult<()> {
+    let Some(base_dir) = results_dir else {
+        return Ok(());
+    };
+
+    let vendor_dir = PathBuf::from(base_dir).join(vendor.to_string());
+    let vendor_dir_str = vendor_dir.to_string_lossy().to_string();
+    create_directory_if_not_exists(&vendor_dir_str).await?;
+
+    let meta = RunResultsMeta {
+        vendor: vendor.to_string(),
+        dataset: dataset.to_string(),
+        queries_file: queries_file.to_string(),
+        queries_count,
+        parallel,
+        mps,
+        simulate_ms: simulate,
+        endpoint: endpoint.as_ref().map(|e| redact_endpoint(e)),
+        started_at_epoch_secs: system_time_epoch_secs(started_at),
+        finished_at_epoch_secs: system_time_epoch_secs(finished_at),
+        elapsed_ms: elapsed.as_millis(),
+    };
+
+    let meta_json = serde_json::to_string_pretty(&meta)?;
+    let meta_path = vendor_dir.join("meta.json").to_string_lossy().to_string();
+    write_to_file(&meta_path, &meta_json).await?;
+
+    let encoder = TextEncoder::new();
+    let metric_families = prometheus::gather();
+    let mut buffer = Vec::new();
+    encoder
+        .encode(&metric_families, &mut buffer)
+        .map_err(|e| OtherError(format!("Failed to encode prometheus metrics: {}", e)))?;
+    let metrics_text = String::from_utf8_lossy(&buffer).to_string();
+
+    let metrics_path = vendor_dir
+        .join("metrics.prom")
+        .to_string_lossy()
+        .to_string();
+    write_to_file(&metrics_path, &metrics_text).await?;
+
+    info!("Wrote run results to {}", vendor_dir_str);
+
+    Ok(())
+}
+
+async fn dry_init_neo4j(
+    size: Size,
+    _batch_size: usize,
+) -> BenchmarkResult<()> {
     let spec = Spec::new(benchmark::scenario::Name::Users, size, Vendor::Neo4j);
     let mut data_stream = spec.init_data_iterator().await?;
     let mut success = 0;
@@ -632,9 +834,12 @@ async fn init_neo4j(
     endpoint: Option<String>,
 ) -> BenchmarkResult<()> {
     let spec = Spec::new(benchmark::scenario::Name::Users, size, Vendor::Neo4j);
-    
+
     let client = if let Some(ref endpoint_str) = endpoint {
-        info!("Using external Neo4j endpoint for data loading: {}", endpoint_str);
+        info!(
+            "Using external Neo4j endpoint for data loading: {}",
+            redact_endpoint(endpoint_str)
+        );
         // Parse the endpoint and create client directly
         let (uri, user, password, database) = parse_neo4j_endpoint(endpoint_str)?;
         benchmark::neo4j_client::Neo4jClient::new(uri, user, password, database).await?
@@ -665,7 +870,7 @@ async fn init_neo4j(
             // @ todo delete the data and index file as well
             // delete_file(spec.cache(spec.data_url.as_ref()).await?.as_str()).await;
         }
-    
+
         neo4j.start().await?;
         neo4j.client().await?
     };
@@ -716,7 +921,7 @@ async fn init_neo4j(
         format_number(relation_count),
         start.elapsed()
     );
-    
+
     // Only stop neo4j and dump if we're managing a local instance
     if endpoint.is_none() {
         // For local instances, we need to handle the neo4j instance
@@ -726,10 +931,10 @@ async fn init_neo4j(
     } else {
         info!("Using external endpoint, skipping Neo4j process management");
     }
-    
+
     info!("---> histogram");
     show_historgam(histogram);
-    
+
     info!("---> Done");
     Ok(())
 }
@@ -811,12 +1016,17 @@ async fn run_memgraph(
     mps: usize,
     simulate: Option<usize>,
     endpoint: Option<String>,
+    results_dir: Option<String>,
 ) -> BenchmarkResult<()> {
+    let queries_file = file_name.clone();
     let (queries_metadata, queries) = read_queries(file_name).await?;
     let number_of_queries = queries_metadata.size;
-    
+
     let client = if let Some(ref endpoint_str) = endpoint {
-        info!("Using external Memgraph endpoint: {}", endpoint_str);
+        info!(
+            "Using external Memgraph endpoint: {}",
+            redact_endpoint(endpoint_str)
+        );
         // Parse the endpoint and create client directly
         let (uri, user, password, _database) = parse_memgraph_endpoint(endpoint_str)?;
         benchmark::memgraph_client::MemgraphClient::new(uri, user, password).await?
@@ -850,6 +1060,7 @@ async fn run_memgraph(
     let scheduler_handle = scheduler::spawn_scheduler::<PreparedQuery>(mps, tx.clone(), queries);
     let mut workers_handles = Vec::with_capacity(parallel);
 
+    let started_at = SystemTime::now();
     let start = Instant::now();
     for spawn_id in 0..parallel {
         let handle = spawn_memgraph_worker(client.clone(), spawn_id, &rx, simulate).await?;
@@ -863,13 +1074,30 @@ async fn run_memgraph(
     }
 
     let elapsed = start.elapsed();
+    let finished_at = SystemTime::now();
 
     info!(
         "running {} queries took {:?}",
         format_number(number_of_queries as u64),
         elapsed
     );
-    
+
+    write_run_results(
+        results_dir,
+        Vendor::Memgraph,
+        queries_metadata.dataset,
+        &queries_file,
+        parallel,
+        mps,
+        simulate,
+        &endpoint,
+        number_of_queries,
+        started_at,
+        finished_at,
+        elapsed,
+    )
+    .await?;
+
     // Only stop memgraph if we're managing a local instance
     if endpoint.is_none() {
         // For local instances, we need to properly stop memgraph
@@ -879,7 +1107,7 @@ async fn run_memgraph(
     } else {
         info!("Using external endpoint, skipping Memgraph process management");
     }
-    
+
     Ok(())
 }
 
@@ -918,7 +1146,8 @@ async fn spawn_memgraph_worker(
                             }
                         }
                         Err(e) => {
-                            MEMGRAPH_ERROR_REQUESTS_DURATION_HISTOGRAM.observe(duration.as_secs_f64());
+                            MEMGRAPH_ERROR_REQUESTS_DURATION_HISTOGRAM
+                                .observe(duration.as_secs_f64());
                             let seconds_wait = 3u64;
                             info!(
                                 "worker {} failed to process query, not sleeping for {} seconds {:?}",
@@ -939,7 +1168,10 @@ async fn spawn_memgraph_worker(
     Ok(handle)
 }
 
-async fn dry_init_memgraph(size: Size, _batch_size: usize) -> BenchmarkResult<()> {
+async fn dry_init_memgraph(
+    size: Size,
+    _batch_size: usize,
+) -> BenchmarkResult<()> {
     let spec = Spec::new(benchmark::scenario::Name::Users, size, Vendor::Memgraph);
     let mut data_stream = spec.init_data_iterator().await?;
     let mut success = 0;
@@ -973,12 +1205,20 @@ async fn init_memgraph(
     endpoint: Option<String>,
 ) -> BenchmarkResult<()> {
     let spec = Spec::new(benchmark::scenario::Name::Users, size, Vendor::Memgraph);
-    
+
     let client = if let Some(ref endpoint_str) = endpoint {
-        info!("Using external Memgraph endpoint for data loading: {}", endpoint_str);
+        info!(
+            "Using external Memgraph endpoint for data loading: {}",
+            redact_endpoint(endpoint_str)
+        );
         // Parse the endpoint and create client directly
         let (uri, user, password, _database) = parse_memgraph_endpoint(endpoint_str)?;
-        benchmark::memgraph_client::MemgraphClient::new(uri, user, password).await?
+        let client = benchmark::memgraph_client::MemgraphClient::new(uri, user, password).await?;
+        if force {
+            client.clean_db().await?;
+            info!("External Memgraph database cleared (--force)");
+        }
+        client
     } else {
         // Use local Memgraph instance (existing behavior)
         let mut memgraph = benchmark::memgraph::Memgraph::default();
@@ -1064,10 +1304,10 @@ async fn init_memgraph(
     } else {
         info!("Using external endpoint, skipping Memgraph process management");
     }
-    
+
     info!("---> histogram");
     show_historgam(histogram);
-    
+
     info!("---> Done");
     Ok(())
 }

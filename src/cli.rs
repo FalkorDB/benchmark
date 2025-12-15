@@ -124,6 +124,28 @@ pub enum Commands {
             help = "endpoint for external database connection (e.g., falkor://127.0.0.1:6379)"
         )]
         endpoint: Option<String>,
+        #[arg(
+            long,
+            required = false,
+            help = "base directory to write detailed per-vendor run results (will create <results-dir>/<vendor>/...). Defaults to Results-YYMMDD-HH:MM"
+        )]
+        results_dir: Option<String>,
+    },
+    #[command(about = "aggregate per-vendor run results into UI summary JSON files")]
+    Aggregate {
+        #[arg(
+            long,
+            required = true,
+            help = "run results directory (contains subfolders: falkor/ neo4j/ memgraph/)"
+        )]
+        results_dir: String,
+        #[arg(
+            long,
+            required = false,
+            default_value = "ui/public/summaries",
+            help = "directory to write UI summary JSON files"
+        )]
+        out_dir: String,
     },
 }
 
