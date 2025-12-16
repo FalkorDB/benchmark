@@ -138,6 +138,51 @@ lazy_static! {
         "Memory usage in bytes for the neo4j process"
     )
     .unwrap();
+
+    // Neo4j JVM memory (via JMX / dbms.queryJmx). Useful for external endpoints where RSS isn't accessible.
+    pub static ref NEO4J_JVM_HEAP_USED_BYTES: IntGauge = register_int_gauge!(
+        "neo4j_jvm_heap_used_bytes",
+        "JVM heap used bytes reported by java.lang:type=Memory"
+    )
+    .unwrap();
+    pub static ref NEO4J_JVM_NONHEAP_USED_BYTES: IntGauge = register_int_gauge!(
+        "neo4j_jvm_nonheap_used_bytes",
+        "JVM non-heap used bytes reported by java.lang:type=Memory"
+    )
+    .unwrap();
+
+    // Neo4j dataset footprint estimate (bytes) based on Neo4j sizing guidelines.
+    // This is intended as a fallback when store sizing and JMX are unavailable (e.g. external endpoints).
+    pub static ref NEO4J_BASE_DATASET_ESTIMATE_BYTES: IntGauge = register_int_gauge!(
+        "neo4j_base_dataset_estimate_bytes",
+        "Estimated base dataset size in bytes (Neo4j sizing guideline approximation)"
+    )
+    .unwrap();
+
+    // Convenience metric: same estimate in MiB (rounded).
+    pub static ref NEO4J_BASE_DATASET_ESTIMATE_MIB: IntGauge = register_int_gauge!(
+        "neo4j_base_dataset_estimate_mib",
+        "Estimated base dataset size in MiB (Neo4j sizing guideline approximation)"
+    )
+    .unwrap();
+
+    // Neo4j store size (data + indexes) in bytes.
+    //
+    // Local runs: computed from filesystem sizes under the Neo4j DB directory.
+    // External endpoints: best-effort via JMX exposed through Cypher (`dbms.queryJmx`).
+    //
+    // This is intended as a proxy for the dataset footprint that Neo4j would ideally keep hot in page cache.
+    pub static ref NEO4J_STORE_SIZE_BYTES: IntGauge = register_int_gauge!(
+        "neo4j_store_size_bytes",
+        "Approximate size in bytes of Neo4j store files and schema/native indexes"
+    )
+    .unwrap();
+
+    pub static ref NEO4J_STORE_SIZE_COLLECT_FAILURES_TOTAL: IntCounter = register_int_counter!(
+        "neo4j_store_size_collect_failures_total",
+        "Number of failures while trying to collect Neo4j store-size via Cypher/JMX"
+    )
+    .unwrap();
     pub static ref MEMGRAPH_SUCCESS_REQUESTS_DURATION_HISTOGRAM: Histogram = register_histogram!(
         "memgraph_response_time_success_histogram",
         "Response time histogram of the successful requests",

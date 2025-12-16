@@ -460,10 +460,29 @@ export default function DashBoard({
     return `${mib.toFixed(1)}MB`;
   };
 
-  const singleMemory = filteredUnrealistic.map(({ vendor, memory }) => ({
-    vendor,
-    memory: parseMemory(memory),
-  }));
+  const singleMemory = filteredUnrealistic.map(
+    ({ vendor, memory, baseDatasetBytes }) => {
+      const key = (vendor ?? "").toString().trim().toLowerCase();
+
+      // For Memgraph and Neo4j, prefer the "base dataset" estimate (bytes) as the bar value.
+      // This normalizes the chart to dataset footprint rather than process RSS.
+      if (
+        (key === "memgraph" || key === "neo4j") &&
+        baseDatasetBytes &&
+        baseDatasetBytes > 0
+      ) {
+        return {
+          vendor,
+          memory: baseDatasetBytes / (1024 * 1024),
+        };
+      }
+
+      return {
+        vendor,
+        memory: parseMemory(memory),
+      };
+    }
+  );
 
   const baseDatasetByVendor = filteredUnrealistic.reduce<Record<string, number>>(
     (acc, cur) => {

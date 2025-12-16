@@ -316,26 +316,40 @@ fn build_ui_run(v: &VendorArtifacts) -> BenchmarkResult<UiRun> {
 
     let (cpu_usage, ram_usage) = metrics.vendor_cpu_mem(v.vendor);
 
-    let base_dataset_bytes = if v.vendor == Vendor::Memgraph {
-        let from_metric = metrics
-            .get_single_value("memgraph_storage_base_dataset_bytes")
-            .map(|v| v.round().max(0.0) as u64)
-            .filter(|v| *v > 0);
+    let base_dataset_bytes = match v.vendor {
+        Vendor::Memgraph => {
+            let from_metric = metrics
+                .get_single_value("memgraph_storage_base_dataset_bytes")
+                .map(|v| v.round().max(0.0) as u64)
+                .filter(|v| *v > 0);
 
-        // Back-compat for older runs: compute from dataset constants.
-        // StorageRAMUsage = NumberOfVertices×212B + NumberOfEdges×162B
-        let computed = {
-            let bytes: i128 = (spec.vertices as i128) * 212 + (spec.edges as i128) * 162;
-            if bytes > 0 {
-                Some(bytes.min(u64::MAX as i128) as u64)
-            } else {
-                None
-            }
-        };
+            // Back-compat for older runs: compute from dataset constants.
+            // StorageRAMUsage = NumberOfVertices×212B + NumberOfEdges×162B
+            let computed = {
+                let bytes: i128 = (spec.vertices as i128) * 212 + (spec.edges as i128) * 162;
+                if bytes > 0 {
+                    Some(bytes.min(u64::MAX as i128) as u64)
+                } else {
+                    None
+                }
+            };
 
-        from_metric.or(computed)
-    } else {
-        None
+            from_metric.or(computed)
+        }
+        Vendor::Neo4j => {
+            let store = metrics
+                .get_single_value("neo4j_store_size_bytes")
+                .map(|v| v.round().max(0.0) as u64)
+                .filter(|v| *v > 0);
+
+            let estimate = metrics
+                .get_single_value("neo4j_base_dataset_estimate_bytes")
+                .map(|v| v.round().max(0.0) as u64)
+                .filter(|v| *v > 0);
+
+            store.or(estimate)
+        }
+        _ => None,
     };
 
     let operations = metrics.operations_breakdown(v.vendor);

@@ -19,9 +19,10 @@ use benchmark::{
     FALKOR_SUCCESS_REQUESTS_DURATION_HISTOGRAM, MEMGRAPH_ERROR_REQUESTS_DURATION_HISTOGRAM,
     MEMGRAPH_LATENCY_P50_US, MEMGRAPH_LATENCY_P95_US, MEMGRAPH_LATENCY_P99_US,
     MEMGRAPH_QUERY_LATENCY_PCT_US, MEMGRAPH_STORAGE_BASE_DATASET_BYTES,
-    MEMGRAPH_SUCCESS_REQUESTS_DURATION_HISTOGRAM, NEO4J_ERROR_REQUESTS_DURATION_HISTOGRAM,
-    NEO4J_LATENCY_P50_US, NEO4J_LATENCY_P95_US, NEO4J_LATENCY_P99_US, NEO4J_QUERY_LATENCY_PCT_US,
-    NEO4J_SUCCESS_REQUESTS_DURATION_HISTOGRAM,
+    MEMGRAPH_SUCCESS_REQUESTS_DURATION_HISTOGRAM,
+    NEO4J_ERROR_REQUESTS_DURATION_HISTOGRAM, NEO4J_LATENCY_P50_US, NEO4J_LATENCY_P95_US,
+    NEO4J_LATENCY_P99_US, NEO4J_QUERY_LATENCY_PCT_US, NEO4J_SUCCESS_REQUESTS_DURATION_HISTOGRAM,
+    NEO4J_STORE_SIZE_BYTES,
 };
 use clap::{Command, CommandFactory, Parser};
 use clap_complete::{generate, Generator};
@@ -410,11 +411,61 @@ async fn run_neo4j(
         neo4j.restore_db(spec).await?;
         // start neo4j
         neo4j.start().await?;
+
+        // Filesystem-based fallback (when JMX procedure is restricted).
+        let bytes = neo4j.store_size_bytes();
+        NEO4J_STORE_SIZE_BYTES.set(bytes.min(i64::MAX as u64) as i64);
+
         neo4j.client().await?
     };
     info!("client connected to neo4j");
+
+    // Best-effort store sizing via Cypher/JMX (works for external endpoints if allowed).
+    // If it fails (restricted procedure), we'll keep the filesystem fallback value for local runs.
+    client.collect_store_size_metrics().await;
+
+    // For external endpoints we can't inspect the remote process RSS. Best-effort JVM memory via JMX.
+    if endpoint.is_some() {
+        client.collect_jvm_memory_metrics().await;
+    }
     // get the graph size
     let (node_count, relation_count) = client.graph_size().await?;
+
+    // Neo4j sizing-guidelines estimate (fallback when store sizing/JMX are unavailable).
+    // Assumptions (per your dataset):
+    //   - 3 properties per node
+    //   - 0 properties per relationship
+    // Formula (bytes): (nodes*15 + nodes*props*41 + edges*34) * index_multiplier
+    // Index multiplier assumption: 1.2
+    {
+        const PROPS_PER_NODE: u128 = 3;
+        const BYTES_PER_NODE: u128 = 15;
+        const BYTES_PER_NODE_PROP: u128 = 41;
+        const BYTES_PER_EDGE: u128 = 34;
+        // 1.2 = 6/5
+        const INDEX_NUM: u128 = 6;
+        const INDEX_DEN: u128 = 5;
+
+        let nodes = node_count as u128;
+        let edges = relation_count as u128;
+        let base = nodes
+            .saturating_mul(BYTES_PER_NODE)
+            .saturating_add(
+                nodes
+                    .saturating_mul(PROPS_PER_NODE)
+                    .saturating_mul(BYTES_PER_NODE_PROP),
+            )
+            .saturating_add(edges.saturating_mul(BYTES_PER_EDGE));
+        let est_bytes = base.saturating_mul(INDEX_NUM) / INDEX_DEN;
+
+        let est_bytes_u64 = est_bytes.min(u64::MAX as u128) as u64;
+        benchmark::NEO4J_BASE_DATASET_ESTIMATE_BYTES
+            .set(est_bytes_u64.min(i64::MAX as u64) as i64);
+        benchmark::NEO4J_BASE_DATASET_ESTIMATE_MIB.set(
+            (est_bytes_u64 / (1024 * 1024))
+                .min(i64::MAX as u64) as i64,
+        );
+    }
 
     info!(
         "graph has {} nodes and {} relations",

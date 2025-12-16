@@ -148,7 +148,62 @@ const VerticalBarChart: React.FC<VerticalBarChartProps> = ({
       datalabels: {
         display: chartId === "single" ? "auto" : true,
         anchor: "end" as const,
-        align: "top" as const,
+        // Avoid cases where the multi-line "max" label (e.g. `123ms\n3x`) renders into the legend
+        // area when the user zooms the page.
+        //
+        // For the max bar of each percentile, place the label *below* the bar top (still anchored
+        // at the end), so it stays inside the plot area.
+        align: (context: unknown) => {
+          if (chartId === "single") return "top";
+
+          const ctx = context as {
+            dataset?: { label?: string; data?: unknown[] };
+            dataIndex?: number;
+          };
+          const label = (ctx.dataset?.label ?? "").toString();
+          const dataIndex = Number(ctx.dataIndex ?? 0);
+          const vRaw = ctx.dataset?.data?.[dataIndex];
+          const value = typeof vRaw === "number" ? vRaw : 0;
+
+          if (value <= 0) return "top";
+
+          let percentileKey: keyof typeof latencyStats;
+          if (label.includes("P50")) percentileKey = "p50";
+          else if (label.includes("P95")) percentileKey = "p95";
+          else if (label.includes("P99")) percentileKey = "p99";
+          else return "top";
+
+          const maxValue = latencyStats[percentileKey].maxValue;
+          const isMaxValue = Math.abs(value - maxValue) < 0.5;
+
+          return isMaxValue ? "bottom" : "top";
+        },
+        offset: (context: unknown) => {
+          if (chartId === "single") return 0;
+
+          const ctx = context as {
+            dataset?: { label?: string; data?: unknown[] };
+            dataIndex?: number;
+          };
+          const label = (ctx.dataset?.label ?? "").toString();
+          const dataIndex = Number(ctx.dataIndex ?? 0);
+          const vRaw = ctx.dataset?.data?.[dataIndex];
+          const value = typeof vRaw === "number" ? vRaw : 0;
+
+          if (value <= 0) return 0;
+
+          let percentileKey: keyof typeof latencyStats;
+          if (label.includes("P50")) percentileKey = "p50";
+          else if (label.includes("P95")) percentileKey = "p95";
+          else if (label.includes("P99")) percentileKey = "p99";
+          else return 0;
+
+          const maxValue = latencyStats[percentileKey].maxValue;
+          const isMaxValue = Math.abs(value - maxValue) < 0.5;
+
+          return isMaxValue ? 4 : 0;
+        },
+        clamp: true,
         font: {
           weight: "bold" as const,
           family: chartId !== "single" ? "Fira Code" : undefined,

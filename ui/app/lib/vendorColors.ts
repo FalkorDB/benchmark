@@ -29,10 +29,21 @@ function getStops(vendor: VendorKey): GradientStops {
         { offset: 1.0, color: cssVar("--FalkorDB-gradient-end", "#7568F2") },
       ];
     case "neo4j":
-      // Light grey -> dark grey
+      // Neo4j "Baltic" palette: Dark -> Mid -> Baltic -> Light
       return [
-        { offset: 0.0, color: cssVar("--Neo4j-gradient-start", "#d9d9d9") },
-        { offset: 1.0, color: cssVar("--Neo4j-gradient-end", "#6b6b6b") },
+        {
+          offset: 0.0,
+          color: cssVar("--Neo4j-gradient-dark-baltic", "#014063"),
+        },
+        {
+          offset: 0.33,
+          color: cssVar("--Neo4j-gradient-mid-baltic", "#0A6190"),
+        },
+        { offset: 0.66, color: cssVar("--Neo4j-gradient-baltic", "#4C99A4") },
+        {
+          offset: 1.0,
+          color: cssVar("--Neo4j-gradient-light-baltic", "#8FE3E8"),
+        },
       ];
     case "memgraph":
       // Red/pink -> orange -> yellow (Memgraph brand-like gradient)
