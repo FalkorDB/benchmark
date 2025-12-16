@@ -108,16 +108,27 @@ impl QueriesRepositoryBuilder<Flavour> {
     pub fn build(self) -> QueriesRepository {
         let mut queries_repository = QueriesRepository::new();
 
-        for (name, query_type, generator) in self.queries {
-            queries_repository.add(name, query_type, generator);
+        for (idx, (name, query_type, generator)) in self.queries.into_iter().enumerate() {
+            // Stable query ids are assigned in definition order.
+            let id = idx as u16;
+            queries_repository.add_with_id(id, name, query_type, generator);
         }
         queries_repository
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryCatalogEntry {
+    pub id: u16,
+    pub name: String,
+    pub q_type: QueryType,
+}
+
 pub struct QueriesRepository {
     read_queries: HashMap<String, QueryGenerator>,
     write_queries: HashMap<String, QueryGenerator>,
+    name_to_id: HashMap<String, u16>,
+    catalog: Vec<QueryCatalogEntry>,
 }
 
 impl QueriesRepository {
@@ -125,27 +136,42 @@ impl QueriesRepository {
         QueriesRepository {
             read_queries: HashMap::new(),
             write_queries: HashMap::new(),
+            name_to_id: HashMap::new(),
+            catalog: Vec::new(),
         }
     }
 
-    fn add<F>(
+    fn add_with_id<F>(
         &mut self,
+        id: u16,
         name: impl Into<String>,
         query_type: QueryType,
         generator: F,
     ) where
         F: Fn() -> Query + Send + Sync + 'static,
     {
+        let name = name.into();
+        self.name_to_id.insert(name.clone(), id);
+        self.catalog.push(QueryCatalogEntry {
+            id,
+            name: name.clone(),
+            q_type: query_type,
+        });
+
         match query_type {
             QueryType::Read => {
                 self.read_queries
-                    .insert(name.into(), QueryGenerator::new(query_type, generator));
+                    .insert(name, QueryGenerator::new(query_type, generator));
             }
             QueryType::Write => {
                 self.write_queries
-                    .insert(name.into(), QueryGenerator::new(query_type, generator));
+                    .insert(name, QueryGenerator::new(query_type, generator));
             }
         }
+    }
+
+    pub fn catalog(&self) -> Vec<QueryCatalogEntry> {
+        self.catalog.clone()
     }
 
     pub fn random_query(
@@ -160,7 +186,13 @@ impl QueriesRepository {
         let mut rng = rand::thread_rng();
         keys.choose(&mut rng).map(|&key| {
             let generator = queries.get(key).unwrap();
-            PreparedQuery::new(key.clone(), generator.query_type, generator.generate())
+            let q_id = *self.name_to_id.get(key).unwrap_or(&0);
+            PreparedQuery::new(
+                q_id,
+                key.clone(),
+                generator.query_type,
+                generator.generate(),
+            )
         })
     }
 }
@@ -192,6 +224,10 @@ pub struct UsersQueriesRepository {
 }
 
 impl UsersQueriesRepository {
+    pub fn catalog(&self) -> Vec<QueryCatalogEntry> {
+        self.queries_repository.catalog()
+    }
+
     pub fn random_queries(
         self,
         count: usize,
@@ -328,6 +364,8 @@ impl UsersQueriesRepository {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PreparedQuery {
+    #[serde(default)]
+    pub q_id: u16,
     pub q_name: String,
     pub q_type: QueryType,
     pub query: Query,
@@ -337,6 +375,7 @@ pub struct PreparedQuery {
 
 impl PreparedQuery {
     pub fn new(
+        q_id: u16,
         q_name: String,
         q_type: QueryType,
         query: Query,
@@ -344,6 +383,7 @@ impl PreparedQuery {
         let cypher = query.to_cypher();
         let bolt = query.to_bolt_struct();
         Self {
+            q_id,
             q_name,
             q_type,
             query,

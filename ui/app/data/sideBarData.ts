@@ -39,14 +39,11 @@ export const sidebarConfig: {
     },
     {
       title: "Throughput",
-      description: "Target messages per second",
+      description: "Target MPS/QPS",
       layout: "row",
       icon: Activity,
+      // NOTE: options are dynamically overridden from the loaded results (e.g. 7500).
       options: [
-        { id: "500", label: "500" },
-        { id: "1000", label: "1000" },
-        { id: "1500", label: "1500" },
-        { id: "2000", label: "2000" },
         { id: "2500", label: "2500" },
       ],
     },

@@ -6,7 +6,7 @@ use benchmark::error::BenchmarkResult;
 use benchmark::falkor::{Falkor, Started, Stopped};
 use benchmark::memgraph_client::MemgraphClient;
 use benchmark::neo4j_client::Neo4jClient;
-use benchmark::queries_repository::PreparedQuery;
+use benchmark::queries_repository::{PreparedQuery, QueryCatalogEntry};
 use benchmark::scenario::Name::Users;
 use benchmark::scenario::{Size, Spec, Vendor};
 use benchmark::scheduler::Msg;
@@ -14,10 +14,13 @@ use benchmark::utils::{
     create_directory_if_not_exists, delete_file, file_exists, format_number, write_to_file,
 };
 use benchmark::{
-    scheduler, FALKOR_ERROR_REQUESTS_DURATION_HISTOGRAM,
+    scheduler, FALKOR_ERROR_REQUESTS_DURATION_HISTOGRAM, FALKOR_LATENCY_P50_US,
+    FALKOR_LATENCY_P95_US, FALKOR_LATENCY_P99_US, FALKOR_QUERY_LATENCY_PCT_US,
     FALKOR_SUCCESS_REQUESTS_DURATION_HISTOGRAM, MEMGRAPH_ERROR_REQUESTS_DURATION_HISTOGRAM,
-    MEMGRAPH_SUCCESS_REQUESTS_DURATION_HISTOGRAM, NEO4J_ERROR_REQUESTS_DURATION_HISTOGRAM,
-    NEO4J_SUCCESS_REQUESTS_DURATION_HISTOGRAM,
+    MEMGRAPH_LATENCY_P50_US, MEMGRAPH_LATENCY_P95_US, MEMGRAPH_LATENCY_P99_US,
+    MEMGRAPH_QUERY_LATENCY_PCT_US, MEMGRAPH_SUCCESS_REQUESTS_DURATION_HISTOGRAM,
+    NEO4J_ERROR_REQUESTS_DURATION_HISTOGRAM, NEO4J_LATENCY_P50_US, NEO4J_LATENCY_P95_US,
+    NEO4J_LATENCY_P99_US, NEO4J_QUERY_LATENCY_PCT_US, NEO4J_SUCCESS_REQUESTS_DURATION_HISTOGRAM,
 };
 use clap::{Command, CommandFactory, Parser};
 use clap_complete::{generate, Generator};
@@ -185,8 +188,6 @@ async fn main() -> BenchmarkResult<()> {
 
     subscriber.init();
 
-    let prometheus_endpoint = benchmark::prometheus_endpoint::PrometheusEndpoint::default();
-
     match cli.command {
         GenerateAutoComplete { shell } => {
             eprintln!("Generating completion file for {shell}...");
@@ -201,6 +202,10 @@ async fn main() -> BenchmarkResult<()> {
             batch_size,
             endpoint,
         } => {
+            // Expose metrics while running load operations.
+            let _prometheus_endpoint =
+                benchmark::prometheus_endpoint::PrometheusEndpoint::default();
+
             info!(
                 "Init benchmark {} {} {} (batch_size: {})",
                 vendor, size, force, batch_size
@@ -239,6 +244,10 @@ async fn main() -> BenchmarkResult<()> {
             endpoint,
             results_dir,
         } => {
+            // Expose metrics while running benchmarks.
+            let _prometheus_endpoint =
+                benchmark::prometheus_endpoint::PrometheusEndpoint::default();
+
             // Always store results; if user didn't provide a directory, generate one.
             let results_dir = Some(results_dir.unwrap_or_else(default_results_dir));
             match vendor {
@@ -269,8 +278,106 @@ async fn main() -> BenchmarkResult<()> {
             aggregator::aggregate_results(&results_dir, &out_dir)?;
         }
     }
-    drop(prometheus_endpoint);
     Ok(())
+}
+
+fn percentile_us(
+    hist: &histogram::Histogram,
+    p: f64,
+) -> u64 {
+    hist.percentile(p)
+        .ok()
+        .flatten()
+        .map(|b| b.end())
+        .unwrap_or(0)
+}
+
+const QUERY_HIST_PCTS: [f64; 11] = [
+    10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 95.0, 99.0,
+];
+
+struct PerQueryLatency {
+    // Indexed by q_id.
+    catalog: Vec<QueryCatalogEntry>,
+    hists: Vec<std::sync::Mutex<histogram::Histogram>>,
+}
+
+impl PerQueryLatency {
+    fn new(catalog: Vec<QueryCatalogEntry>) -> BenchmarkResult<Self> {
+        let mut hists = Vec::with_capacity(catalog.len());
+        for _ in 0..catalog.len() {
+            hists.push(std::sync::Mutex::new(histogram::Histogram::new(7, 64)?));
+        }
+        Ok(Self { catalog, hists })
+    }
+
+    fn record_us(
+        &self,
+        q_id: u16,
+        us: u64,
+    ) {
+        let idx = q_id as usize;
+        let Some(m) = self.hists.get(idx) else {
+            return;
+        };
+        if let Ok(mut h) = m.lock() {
+            let _ = h.increment(us);
+        }
+    }
+
+    fn export_to_prometheus(
+        &self,
+        vendor: Vendor,
+    ) {
+        // Clear old label values in case multiple runs happen in a single process.
+        match vendor {
+            Vendor::Falkor => FALKOR_QUERY_LATENCY_PCT_US.reset(),
+            Vendor::Neo4j => NEO4J_QUERY_LATENCY_PCT_US.reset(),
+            Vendor::Memgraph => MEMGRAPH_QUERY_LATENCY_PCT_US.reset(),
+        }
+
+        for entry in &self.catalog {
+            let idx = entry.id as usize;
+            let Some(m) = self.hists.get(idx) else {
+                continue;
+            };
+            let Ok(h) = m.lock() else {
+                continue;
+            };
+
+            // Skip empty hists.
+            if percentile_us(&h, 50.0) == 0 {
+                continue;
+            }
+
+            for pct in QUERY_HIST_PCTS {
+                let v = percentile_us(&h, pct) as i64;
+                let pct_label = if (pct - pct.round()).abs() < f64::EPSILON {
+                    format!("{}", pct as i64)
+                } else {
+                    format!("{}", pct)
+                };
+
+                match vendor {
+                    Vendor::Falkor => {
+                        FALKOR_QUERY_LATENCY_PCT_US
+                            .with_label_values(&[entry.name.as_str(), pct_label.as_str()])
+                            .set(v);
+                    }
+                    Vendor::Neo4j => {
+                        NEO4J_QUERY_LATENCY_PCT_US
+                            .with_label_values(&[entry.name.as_str(), pct_label.as_str()])
+                            .set(v);
+                    }
+                    Vendor::Memgraph => {
+                        MEMGRAPH_QUERY_LATENCY_PCT_US
+                            .with_label_values(&[entry.name.as_str(), pct_label.as_str()])
+                            .set(v);
+                    }
+                }
+            }
+        }
+    }
 }
 
 async fn run_neo4j(
@@ -323,10 +430,24 @@ async fn run_neo4j(
     let scheduler_handle = scheduler::spawn_scheduler::<PreparedQuery>(mps, tx.clone(), queries);
     let mut workers_handles = Vec::with_capacity(parallel);
 
+    // HDR histogram for accurate pXX latencies (microseconds)
+    let latency_hist = Arc::new(tokio::sync::Mutex::new(histogram::Histogram::new(7, 64)?));
+
+    // Per-query histograms for "single"-style percentiles (P10..P99)
+    let per_query = Arc::new(PerQueryLatency::new(queries_metadata.catalog.clone())?);
+
     let started_at = SystemTime::now();
     let start = Instant::now();
     for spawn_id in 0..parallel {
-        let handle = spawn_neo4j_worker(client.clone(), spawn_id, &rx, simulate).await?;
+        let handle = spawn_neo4j_worker(
+            client.clone(),
+            spawn_id,
+            &rx,
+            simulate,
+            latency_hist.clone(),
+            per_query.clone(),
+        )
+        .await?;
         workers_handles.push(handle);
     }
     let _ = scheduler_handle.await;
@@ -344,6 +465,17 @@ async fn run_neo4j(
         format_number(number_of_queries as u64),
         elapsed
     );
+
+    // Export accurate pXX latency gauges (microseconds)
+    {
+        let hist = latency_hist.lock().await;
+        NEO4J_LATENCY_P50_US.set(percentile_us(&hist, 50.0) as i64);
+        NEO4J_LATENCY_P95_US.set(percentile_us(&hist, 95.0) as i64);
+        NEO4J_LATENCY_P99_US.set(percentile_us(&hist, 99.0) as i64);
+    }
+
+    // Export per-query percentiles.
+    per_query.export_to_prometheus(Vendor::Neo4j);
 
     write_run_results(
         results_dir,
@@ -374,6 +506,8 @@ async fn spawn_neo4j_worker(
     worker_id: usize,
     receiver: &Arc<Mutex<Receiver<Msg<PreparedQuery>>>>,
     simulate: Option<usize>,
+    latency_hist: Arc<tokio::sync::Mutex<histogram::Histogram>>,
+    per_query: Arc<PerQueryLatency>,
 ) -> BenchmarkResult<JoinHandle<()>> {
     info!("spawning worker");
     let receiver = Arc::clone(receiver);
@@ -398,6 +532,16 @@ async fn spawn_neo4j_worker(
                         Ok(_) => {
                             NEO4J_SUCCESS_REQUESTS_DURATION_HISTOGRAM
                                 .observe(duration.as_secs_f64());
+                            // Accurate percentile source
+                            {
+                                let mut h = latency_hist.lock().await;
+                                let _ = h.increment(duration.as_micros() as u64);
+                            }
+                            // Per-query latency tracking
+                            per_query.record_us(
+                                prepared_query.payload.q_id,
+                                duration.as_micros() as u64,
+                            );
                             counter += 1;
                             if counter % 1000 == 0 {
                                 info!("worker {} processed {} queries", worker_id, counter);
@@ -465,6 +609,9 @@ async fn run_falkor(
     // get the graph size
     let (node_count, relation_count) = falkor.graph_size().await?;
 
+    // Best-effort graph memory reporting (query-interface metric).
+    falkor.collect_graph_memory_usage_metrics().await;
+
     info!(
         "graph has {} nodes and {} relations",
         format_number(node_count),
@@ -486,11 +633,25 @@ async fn run_falkor(
     let scheduler_handle = scheduler::spawn_scheduler::<PreparedQuery>(mps, tx.clone(), queries);
     let mut workers_handles = Vec::with_capacity(parallel);
 
+    // HDR histogram for accurate pXX latencies (microseconds)
+    let latency_hist = Arc::new(tokio::sync::Mutex::new(histogram::Histogram::new(7, 64)?));
+
+    // Per-query histograms for "single"-style percentiles (P10..P99)
+    let per_query = Arc::new(PerQueryLatency::new(queries_metadata.catalog.clone())?);
+
     let started_at = SystemTime::now();
     // start workers
     let start = Instant::now();
     for spawn_id in 0..parallel {
-        let handle = spawn_falkor_worker(&falkor, spawn_id, &rx, simulate).await?;
+        let handle = spawn_falkor_worker(
+            &falkor,
+            spawn_id,
+            &rx,
+            simulate,
+            latency_hist.clone(),
+            per_query.clone(),
+        )
+        .await?;
         workers_handles.push(handle);
     }
 
@@ -509,6 +670,17 @@ async fn run_falkor(
         format_number(number_of_queries as u64),
         elapsed
     );
+
+    // Export accurate pXX latency gauges (microseconds)
+    {
+        let hist = latency_hist.lock().await;
+        FALKOR_LATENCY_P50_US.set(percentile_us(&hist, 50.0) as i64);
+        FALKOR_LATENCY_P95_US.set(percentile_us(&hist, 95.0) as i64);
+        FALKOR_LATENCY_P99_US.set(percentile_us(&hist, 99.0) as i64);
+    }
+
+    // Export per-query percentiles.
+    per_query.export_to_prometheus(Vendor::Falkor);
 
     write_run_results(
         results_dir,
@@ -536,6 +708,8 @@ async fn spawn_falkor_worker(
     worker_id: usize,
     receiver: &Arc<Mutex<Receiver<Msg<PreparedQuery>>>>,
     simulate: Option<usize>,
+    latency_hist: Arc<tokio::sync::Mutex<histogram::Histogram>>,
+    per_query: Arc<PerQueryLatency>,
 ) -> BenchmarkResult<JoinHandle<()>> {
     info!("spawning worker");
     let mut client = falkor.client().await?;
@@ -560,6 +734,16 @@ async fn spawn_falkor_worker(
                         Ok(_) => {
                             FALKOR_SUCCESS_REQUESTS_DURATION_HISTOGRAM
                                 .observe(duration.as_secs_f64());
+                            // Accurate percentile source
+                            {
+                                let mut h = latency_hist.lock().await;
+                                let _ = h.increment(duration.as_micros() as u64);
+                            }
+                            // Per-query latency tracking
+                            per_query.record_us(
+                                prepared_query.payload.q_id,
+                                duration.as_micros() as u64,
+                            );
                             counter += 1;
                             if counter % 1000 == 0 {
                                 info!("worker {} processed {} queries", worker_id, counter);
@@ -950,6 +1134,8 @@ fn print_completions<G: Generator>(
 struct PrepareQueriesMetadata {
     size: usize,
     dataset: Size,
+    #[serde(default)]
+    catalog: Vec<QueryCatalogEntry>,
 }
 async fn prepare_queries(
     dataset: Size,
@@ -957,10 +1143,15 @@ async fn prepare_queries(
     file_name: String,
     write_ratio: f32,
 ) -> BenchmarkResult<()> {
-    let metadata = PrepareQueriesMetadata { size, dataset };
     let start = Instant::now();
     let queries_repository =
         benchmark::queries_repository::UsersQueriesRepository::new(9998, 121716);
+    let catalog = queries_repository.catalog();
+    let metadata = PrepareQueriesMetadata {
+        size,
+        dataset,
+        catalog,
+    };
     let queries = Box::new(queries_repository.random_queries(size, write_ratio));
 
     let file = File::create(file_name).await?;
@@ -1042,6 +1233,10 @@ async fn run_memgraph(
         memgraph.client().await?
     };
     info!("client connected to memgraph");
+
+    // Best-effort Memgraph storage/memory reporting (query-interface metric).
+    client.collect_storage_info_metrics().await;
+
     // get the graph size
     let (node_count, relation_count) = client.graph_size().await?;
 
@@ -1060,10 +1255,24 @@ async fn run_memgraph(
     let scheduler_handle = scheduler::spawn_scheduler::<PreparedQuery>(mps, tx.clone(), queries);
     let mut workers_handles = Vec::with_capacity(parallel);
 
+    // HDR histogram for accurate pXX latencies (microseconds)
+    let latency_hist = Arc::new(tokio::sync::Mutex::new(histogram::Histogram::new(7, 64)?));
+
+    // Per-query histograms for "single"-style percentiles (P10..P99)
+    let per_query = Arc::new(PerQueryLatency::new(queries_metadata.catalog.clone())?);
+
     let started_at = SystemTime::now();
     let start = Instant::now();
     for spawn_id in 0..parallel {
-        let handle = spawn_memgraph_worker(client.clone(), spawn_id, &rx, simulate).await?;
+        let handle = spawn_memgraph_worker(
+            client.clone(),
+            spawn_id,
+            &rx,
+            simulate,
+            latency_hist.clone(),
+            per_query.clone(),
+        )
+        .await?;
         workers_handles.push(handle);
     }
     let _ = scheduler_handle.await;
@@ -1081,6 +1290,20 @@ async fn run_memgraph(
         format_number(number_of_queries as u64),
         elapsed
     );
+
+    // Export accurate pXX latency gauges (microseconds)
+    {
+        let hist = latency_hist.lock().await;
+        MEMGRAPH_LATENCY_P50_US.set(percentile_us(&hist, 50.0) as i64);
+        MEMGRAPH_LATENCY_P95_US.set(percentile_us(&hist, 95.0) as i64);
+        MEMGRAPH_LATENCY_P99_US.set(percentile_us(&hist, 99.0) as i64);
+    }
+
+    // Export per-query percentiles.
+    per_query.export_to_prometheus(Vendor::Memgraph);
+
+    // Capture Memgraph memory numbers after the workload.
+    client.collect_storage_info_metrics().await;
 
     write_run_results(
         results_dir,
@@ -1116,6 +1339,8 @@ async fn spawn_memgraph_worker(
     worker_id: usize,
     receiver: &Arc<Mutex<Receiver<Msg<PreparedQuery>>>>,
     simulate: Option<usize>,
+    latency_hist: Arc<tokio::sync::Mutex<histogram::Histogram>>,
+    per_query: Arc<PerQueryLatency>,
 ) -> BenchmarkResult<JoinHandle<()>> {
     info!("spawning worker");
     let receiver = Arc::clone(receiver);
@@ -1140,6 +1365,16 @@ async fn spawn_memgraph_worker(
                         Ok(_) => {
                             MEMGRAPH_SUCCESS_REQUESTS_DURATION_HISTOGRAM
                                 .observe(duration.as_secs_f64());
+                            // Accurate percentile source
+                            {
+                                let mut h = latency_hist.lock().await;
+                                let _ = h.increment(duration.as_micros() as u64);
+                            }
+                            // Per-query latency tracking
+                            per_query.record_us(
+                                prepared_query.payload.q_id,
+                                duration.as_micros() as u64,
+                            );
                             counter += 1;
                             if counter % 1000 == 0 {
                                 info!("worker {} processed {} queries", worker_id, counter);

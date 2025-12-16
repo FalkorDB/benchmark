@@ -199,23 +199,45 @@ export default function DashBoard({
     });
   };
 
-  // filter unrealstic data
+  // filter unrealistic (single-workload) data
+  // Preferred source: data.unrealstic (legacy file format)
+  // Fallback source: runs[].result.histogram_for_type (aggregated summaries)
   useEffect(() => {
-    if (!data || !data.unrealstic || !selectedOptions.Queries) {
+    if (!data || !selectedOptions.Queries?.length) {
       setFilteredUnrealistic([]);
       return;
     }
+
     const selectedQuery = selectedOptions.Queries[0];
 
-    setFilteredUnrealistic(
-      data.unrealstic
-        .map(({ vendor, histogram_for_type, memory }) => ({
-          vendor,
-          histogram: histogram_for_type[selectedQuery] || [],
-          memory,
-        }))
-        .filter((entry) => entry.histogram.length > 0)
-    );
+    if (data.unrealstic?.length) {
+      setFilteredUnrealistic(
+        data.unrealstic
+          .map(({ vendor, histogram_for_type, memory }) => ({
+            vendor,
+            histogram: histogram_for_type[selectedQuery] || [],
+            memory,
+          }))
+          .filter((entry) => entry.histogram.length > 0)
+      );
+      return;
+    }
+
+    if (data.runs?.length) {
+      // Note: aggregated summaries store the histogram on runs[].result.histogram_for_type.
+      setFilteredUnrealistic(
+        data.runs
+          .map((run: any) => ({
+            vendor: run.vendor,
+            histogram: run?.result?.histogram_for_type?.[selectedQuery] || [],
+            memory: run?.result?.["ram-usage"] ?? "",
+          }))
+          .filter((entry: any) => entry.histogram.length > 0)
+      );
+      return;
+    }
+
+    setFilteredUnrealistic([]);
   }, [data, selectedOptions.Queries]);
 
   // filter realstic data
@@ -441,6 +463,25 @@ export default function DashBoard({
 
   const isConcurrent = selectedOptions["Workload Type"]?.includes("concurrent");
 
+  const formatDuration = (ms: number) => {
+    if (!Number.isFinite(ms) || ms <= 0) return "0s";
+    const totalSeconds = ms / 1000;
+    if (totalSeconds < 60) return `${totalSeconds.toFixed(1)}s`;
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = Math.round(totalSeconds % 60);
+    return `${minutes}m ${seconds}s`;
+  };
+
+  const concurrentRuns = useMemo(() => {
+    const byVendor = new Map<string, any>();
+    for (const r of filteredResults) {
+      const v = (r.vendor ?? "").toString().toLowerCase();
+      if (!v) continue;
+      if (!byVendor.has(v)) byVendor.set(v, r);
+    }
+    return Array.from(byVendor.values());
+  }, [filteredResults]);
+
   return (
     <SidebarProvider className="h-screen w-screen overflow-hidden">
       <div className="flex h-full w-full">
@@ -448,60 +489,171 @@ export default function DashBoard({
           selectedOptions={selectedOptions}
           handleSideBarSelection={handleSideBarSelection}
           platform={data?.platforms}
-          allowedVendors={allowedVendors ?? undefined}
+          allowedVendors={
+            data?.runs?.length
+              ? Array.from(
+                  new Set(
+                    data.runs
+                      .map((r) => r.vendor?.toString().toLowerCase())
+                      .filter(Boolean)
+                  )
+                )
+              : undefined
+          }
+          throughputOptions={
+            data?.runs?.length
+              ? Array.from(
+                  new Set(
+                    data.runs
+                      .map((r) => r["target-messages-per-second"])
+                      .filter((v) => v !== undefined && v !== null)
+                  )
+                ).sort((a: any, b: any) => Number(a) - Number(b))
+              : undefined
+          }
         />
-        <SidebarInset className="flex-grow h-full min-h-0">
-          <div
-            key={gridKey}
-            className={`grid w-full h-full min-w-0 ${
-              isConcurrent
-                ? "grid-cols-2 grid-rows-[2fr,1.5fr,50px]"
-                : "grid-cols-[7fr_3fr] grid-rows-[2fr,50px]"
-            } gap-2 p-1`}
-          >
-            <div
-              className={`bg-muted/50 rounded-xl p-4 min-h-0 w-full flex flex-col min-w-0 items-center justify-between ${
-                isConcurrent ? "col-span-2" : ""
-              }`}
-              id="latency-chart"
-            >
-              <h2 className="text-2xl font-bold text-center font-space">
-                LATENCY
-              </h2>
-              <p className="pb-1 text-gray-600 text-center font-fira">
-                (LOWER IS BETTER)
-              </p>
-              <p className="text-lg font-semibold text-center mb-2 font-fira">
-                Superior Latency:{" "}
-                <span className="text-[#FF66B3] font-bold">
-                  {isConcurrent
-                    ? latencyStats
-                      ? `${Math.round(latencyStats.p99.ratio)}x`
-                      : ""
-                    : p99SingleRatio
-                    ? `${Math.round(p99SingleRatio)}x`
-                    : ""}
-                </span>{" "}
-                faster at P99
-              </p>
-              <div className="w-full flex-grow flex items-center justify-center min-h-0">
-                <div className="w-full h-full">
+        />
+        <SidebarInset className="flex-grow h-full min-h-0 overflow-y-auto">
+          {isConcurrent ? (
+            <div key={gridKey} className="flex flex-col w-full min-w-0 gap-2 p-1">
+              <div className="bg-muted/50 rounded-xl p-4 w-full flex flex-col items-center justify-between min-h-[420px]">
+                <h2 className="text-2xl font-bold text-center font-space">
+                  LATENCY
+                </h2>
+                <p className="pb-1 text-gray-600 text-center font-fira">
+                  (LOWER IS BETTER)
+                </p>
+                <p className="text-lg font-semibold text-center mb-2 font-fira">
+                  Superior Latency:{" "}
+                  <span className="text-[#FF66B3] font-bold">
+                    {latencyStats ? `${Math.round(latencyStats.p99.ratio)}x` : ""}
+                  </span>{" "}
+                  faster at P99
+                </p>
+                <div className="w-full flex-grow min-h-0">
                   {latencyStats.p99.ratio > 0 && (
                     <VerticalBarChart
-                      chartData={
-                        isConcurrent
-                          ? chartDataForRealistic
-                          : chartDataForUnrealistic
-                      }
-                      chartId={isConcurrent ? "concurrent" : "single"}
+                      chartData={chartDataForRealistic}
+                      chartId="concurrent"
                       unit="ms"
                       latencyStats={latencyStats}
                     />
                   )}
                 </div>
               </div>
+
+              <div className="bg-muted/50 rounded-xl p-4 w-full flex flex-col min-h-[180px]">
+                <h2 className="text-2xl font-bold text-center font-space">
+                  RUN DETAILS
+                </h2>
+                <p className="pb-2 text-gray-600 text-center font-fira">
+                  Duration, mean latency, and worker fairness
+                </p>
+                <div className="w-full overflow-x-auto">
+                  <table className="w-full text-sm font-fira">
+                    <thead>
+                      <tr className="text-left text-gray-600">
+                        <th className="py-1 pr-4">Vendor</th>
+                        <th className="py-1 pr-4">Duration</th>
+                        <th className="py-1 pr-4">Avg latency</th>
+                        <th className="py-1 pr-4">Worker imbalance</th>
+                        <th className="py-1 pr-4">Worker CV</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {concurrentRuns.map((r) => {
+                        const elapsedMs = Number(r?.result?.["elapsed-ms"] ?? 0);
+                        const avgLatency = Number(r?.result?.["avg-latency-ms"] ?? 0);
+                        const stats = r?.result?.["spawn-stats"];
+                        const ratio = Number(stats?.["max-min-ratio"] ?? 0);
+                        const cv = Number(stats?.cv ?? 0);
+
+                        return (
+                          <tr key={r.vendor} className="border-t border-gray-200/60">
+                            <td className="py-2 pr-4 font-semibold">{r.vendor}</td>
+                            <td className="py-2 pr-4">{formatDuration(elapsedMs)}</td>
+                            <td className="py-2 pr-4">{avgLatency.toFixed(2)} ms</td>
+                            <td className="py-2 pr-4">
+                              {ratio > 0 ? `${ratio.toFixed(2)}x (max/min)` : "—"}
+                            </td>
+                            <td className="py-2 pr-4">{cv > 0 ? cv.toFixed(3) : "—"}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <div
+                className="bg-muted/50 rounded-xl p-4 w-full flex flex-col items-center justify-between min-h-[420px]"
+                id="throughput-chart"
+              >
+                <h2 className="text-2xl font-bold text-center font-space">
+                  MAX THROUGHPUT
+                </h2>
+                <p className="text-gray-600 text-center font-fira">
+                  (HIGHER IS BETTER)
+                </p>
+                <p className="pt-1 text-lg font-semibold text-center font-fira">
+                  Execute{" "}
+                  <span className="text-[#FF66B3] font-bold">
+                    {throughputRatio ? throughputRatio : ""}x
+                  </span>{" "}
+                  more queries with the same hardware
+                </p>
+                <div className="w-full flex-grow min-h-0">
+                  <HorizontalBarChart
+                    data={throughputData}
+                    dataKey="actualMessagesPerSecond"
+                    chartLabel="Queries Per Second"
+                    ratio={throughputRatio}
+                    maxValue={maxThroughput}
+                    minValue={minThroughput}
+                    unit=" qps"
+                  />
+                </div>
+              </div>
+
+              <div className="bg-muted/50 rounded-xl flex items-center justify-center h-[50px]">
+                <FooterComponent />
+              </div>
             </div>
-            {!isConcurrent && (
+          ) : (
+            <div
+              key={gridKey}
+              className="grid w-full h-full min-w-0 grid-cols-[7fr_3fr] grid-rows-[2fr,50px] gap-2 p-1"
+            >
+              <div
+                className="bg-muted/50 rounded-xl p-4 min-h-0 w-full flex flex-col min-w-0 items-center justify-between"
+                id="latency-chart"
+              >
+                <h2 className="text-2xl font-bold text-center font-space">
+                  LATENCY
+                </h2>
+                <p className="pb-1 text-gray-600 text-center font-fira">
+                  (LOWER IS BETTER)
+                </p>
+                <p className="text-lg font-semibold text-center mb-2 font-fira">
+                  Superior Latency:{" "}
+                  <span className="text-[#FF66B3] font-bold">
+                    {p99SingleRatio ? `${Math.round(p99SingleRatio)}x` : ""}
+                  </span>{" "}
+                  faster at P99
+                </p>
+                <div className="w-full flex-grow flex items-center justify-center min-h-0">
+                  <div className="w-full h-full">
+                    {chartDataForUnrealistic.datasets.length > 0 && (
+                      <VerticalBarChart
+                        chartData={chartDataForUnrealistic}
+                        chartId="single"
+                        unit="ms"
+                        latencyStats={latencyStats}
+                      />
+                    )}
+                  </div>
+                </div>
+              </div>
               <div className="bg-muted/50 rounded-xl p-4 min-h-0 w-full flex flex-col min-w-0 items-center justify-between">
                 <h2 className="text-2xl font-bold text-center font-space">
                   MEMORY USAGE
@@ -528,46 +680,11 @@ export default function DashBoard({
                   </div>
                 </div>
               </div>
-            )}
-            {isConcurrent && (
-              <>
-                <div
-                  className="bg-muted/50 rounded-xl p-4 min-h-0 w-full flex flex-col items-center justify-between col-span-2"
-                  id="throughput-chart"
-                >
-                  <h2 className="text-2xl font-bold text-center font-space">
-                    MAX THROUGHPUT
-                  </h2>
-                  <p className="text-gray-600 text-center font-fira">
-                    (HIGHER IS BETTER)
-                  </p>
-                  <p className="pt-1 text-lg font-semibold text-center font-fira">
-                    Execute{" "}
-                    <span className="text-[#FF66B3] font-bold">
-                      {throughputRatio ? throughputRatio : ""}x
-                    </span>{" "}
-                    more queries with the same hardware
-                  </p>
-                  <div className="w-full flex-grow flex items-center justify-center min-h-0">
-                    <div className="w-full h-full">
-                      <HorizontalBarChart
-                        data={throughputData}
-                        dataKey="actualMessagesPerSecond"
-                        chartLabel="Queries Per Second"
-                        ratio={throughputRatio}
-                        maxValue={maxThroughput}
-                        minValue={minThroughput}
-                        unit=" qps"
-                      />
-                    </div>
-                  </div>
-                </div>
-              </>
-            )}
-            <div className="col-span-2 bg-muted/50 rounded-xl flex items-center justify-center h-[50px]">
-              <FooterComponent />
+              <div className="col-span-2 bg-muted/50 rounded-xl flex items-center justify-center h-[50px]">
+                <FooterComponent />
+              </div>
             </div>
-          </div>
+          )}
         </SidebarInset>
       </div>
     </SidebarProvider>

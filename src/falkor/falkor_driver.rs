@@ -9,7 +9,8 @@ use crate::utils::{
     wait_for_redis_ready,
 };
 use crate::{
-    FALKOR_MSG_DEADLINE_OFFSET_GAUGE, OPERATION_COUNTER, OPERATION_ERROR_COUNTER, REDIS_DATA_DIR,
+    FALKOR_GRAPH_MEMORY_USAGE_MB, FALKOR_MSG_DEADLINE_OFFSET_GAUGE, OPERATION_COUNTER,
+    OPERATION_ERROR_COUNTER, REDIS_DATA_DIR,
 };
 use falkordb::FalkorValue::I64;
 use falkordb::{AsyncGraph, FalkorClientBuilder, FalkorResult, LazyResultSet, QueryResult};
@@ -123,6 +124,43 @@ impl Falkor<Started> {
             state: Stopped,
         })
     }
+
+    /// Best-effort collection of graph memory usage via `GRAPH.MEMORY USAGE <graph>`.
+    ///
+    /// Sets the Prometheus gauge `falkordb_graph_memory_usage_mb` if the command succeeds.
+    pub async fn collect_graph_memory_usage_metrics(&self) {
+        // Avoid stale values when multiple runs happen in a single process.
+        FALKOR_GRAPH_MEMORY_USAGE_MB.set(0);
+
+        let graph_name = "falkor";
+        match self.graph_memory_usage_mb(graph_name).await {
+            Ok(Some(mb)) => {
+                FALKOR_GRAPH_MEMORY_USAGE_MB.set(mb.round().max(0.0) as i64);
+            }
+            Ok(None) => {
+                // Keep the reset-to-0 value.
+            }
+            Err(e) => {
+                tracing::debug!("Failed collecting falkor graph memory: {}", e);
+            }
+        }
+    }
+
+    async fn graph_memory_usage_mb(
+        &self,
+        graph_name: &str,
+    ) -> BenchmarkResult<Option<f64>> {
+        let redis_url = falkor_endpoint_to_redis_url(self.endpoint.as_ref());
+        let client = redis::Client::open(redis_url.as_str())?;
+        let mut con = client.get_multiplexed_async_connection().await?;
+
+        let mut command = redis::cmd("GRAPH.MEMORY");
+        command.arg("USAGE").arg(graph_name);
+        let redis_value = con.send_packed_command(&command).await?;
+
+        Ok(parse_graph_memory_total_mb(redis_value))
+    }
+
     pub async fn graph_size(&self) -> BenchmarkResult<(u64, u64)> {
         let mut graph = self.client().await?.graph;
         let mut falkor_result = graph
@@ -215,6 +253,60 @@ impl<U> Falkor<U> {
         } else {
             Ok(())
         }
+    }
+}
+
+fn falkor_endpoint_to_redis_url(endpoint: Option<&String>) -> String {
+    let ep = endpoint
+        .map(|s| s.as_str())
+        .unwrap_or("falkor://127.0.0.1:6379");
+
+    if let Some(rest) = ep.strip_prefix("falkor://") {
+        format!("redis://{}", rest)
+    } else {
+        ep.to_string()
+    }
+}
+
+fn parse_graph_memory_total_mb(value: redis::Value) -> Option<f64> {
+    // Expected to be an array of key/value pairs.
+    let redis::Value::Array(items) = value else {
+        return None;
+    };
+
+    let mut i = 0;
+    while i + 1 < items.len() {
+        let key = redis_value_to_string(&items[i]);
+        let val = &items[i + 1];
+
+        if let Some(k) = key {
+            if k == "total_graph_sz_mb" || k == "total_graph_size_mb" || k == "total_graph_mb" {
+                return redis_value_to_f64(val);
+            }
+        }
+
+        i += 2;
+    }
+
+    None
+}
+
+fn redis_value_to_string(v: &redis::Value) -> Option<String> {
+    match v {
+        redis::Value::BulkString(bytes) => Some(String::from_utf8_lossy(bytes).to_string()),
+        redis::Value::SimpleString(s) => Some(s.clone()),
+        redis::Value::Int(i) => Some(i.to_string()),
+        _ => None,
+    }
+}
+
+fn redis_value_to_f64(v: &redis::Value) -> Option<f64> {
+    match v {
+        redis::Value::Int(i) => Some(*i as f64),
+        redis::Value::Double(d) => Some(*d),
+        redis::Value::BulkString(bytes) => String::from_utf8_lossy(bytes).parse::<f64>().ok(),
+        redis::Value::SimpleString(s) => s.parse::<f64>().ok(),
+        _ => None,
     }
 }
 

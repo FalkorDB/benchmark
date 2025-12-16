@@ -2,7 +2,11 @@ use crate::error::BenchmarkError::{Neo4rsError, OtherError};
 use crate::error::BenchmarkResult;
 use crate::queries_repository::PreparedQuery;
 use crate::scheduler::Msg;
-use crate::{MEMGRAPH_MSG_DEADLINE_OFFSET_GAUGE, OPERATION_COUNTER};
+use crate::{
+    MEMGRAPH_MSG_DEADLINE_OFFSET_GAUGE, MEMGRAPH_STORAGE_MEMORY_RES_BYTES,
+    MEMGRAPH_STORAGE_MEMORY_TRACKED_BYTES, MEMGRAPH_STORAGE_PEAK_MEMORY_RES_BYTES,
+    OPERATION_COUNTER,
+};
 use futures::stream::TryStreamExt;
 use futures::{Stream, StreamExt};
 use histogram::Histogram;
@@ -14,6 +18,70 @@ use tokio::fs::File;
 use tokio::io::{self, AsyncWriteExt};
 use tokio::time::Instant;
 use tracing::{error, info, trace};
+
+#[derive(Default, Debug, Clone)]
+struct MemgraphStorageInfo {
+    memory_res_bytes: Option<i64>,
+    peak_memory_res_bytes: Option<i64>,
+    memory_tracked_bytes: Option<i64>,
+}
+
+fn parse_human_bytes_to_i64(s: &str) -> Option<i64> {
+    let s = s.trim().trim_matches('"');
+    if s.is_empty() {
+        return None;
+    }
+
+    // Fast path: integer bytes.
+    if let Ok(v) = s.parse::<i64>() {
+        return Some(v);
+    }
+
+    // Float + unit (e.g. 725.66MiB)
+    let mut num = String::new();
+    let mut unit = String::new();
+    for c in s.chars() {
+        if c.is_ascii_digit() || c == '.' {
+            num.push(c);
+        } else if !c.is_whitespace() {
+            unit.push(c);
+        }
+    }
+
+    let value = num.parse::<f64>().ok()?;
+    let unit = unit.to_lowercase();
+
+    let mul = match unit.as_str() {
+        "b" | "bytes" => 1.0,
+        "kb" => 1000.0,
+        "kib" => 1024.0,
+        "mb" => 1000.0 * 1000.0,
+        "mib" => 1024.0 * 1024.0,
+        "gb" => 1000.0 * 1000.0 * 1000.0,
+        "gib" => 1024.0 * 1024.0 * 1024.0,
+        _ => return None,
+    };
+
+    Some((value * mul).round() as i64)
+}
+
+fn get_row_i64(
+    row: &Row,
+    key: &str,
+) -> Option<i64> {
+    // Try a few types since Memgraph may return ints or strings depending on version.
+    if let Ok(v) = row.get::<i64>(key) {
+        return Some(v);
+    }
+    if let Ok(v) = row.get::<u64>(key) {
+        return Some(v as i64);
+    }
+    if let Ok(v) = row.get::<String>(key) {
+        // Either raw bytes ("123") or human-readable sizes ("725.66MiB").
+        return parse_human_bytes_to_i64(&v).or_else(|| v.parse::<i64>().ok());
+    }
+    None
+}
 
 #[derive(Clone)]
 pub struct MemgraphClient {
@@ -123,6 +191,91 @@ impl MemgraphClient {
             number_of_relationships = row.get("count")?;
         }
         Ok((number_of_nodes, number_of_relationships))
+    }
+
+    /// Best-effort: query Memgraph for its storage/memory statistics and write them into Prometheus gauges.
+    ///
+    /// Uses `SHOW STORAGE INFO;` and attempts to read these columns:
+    /// - memory_res
+    /// - peak_memory_res
+    /// - memory_tracked
+    pub async fn collect_storage_info_metrics(&self) {
+        // Avoid stale values when multiple runs happen in a single process.
+        MEMGRAPH_STORAGE_MEMORY_RES_BYTES.set(0);
+        MEMGRAPH_STORAGE_PEAK_MEMORY_RES_BYTES.set(0);
+        MEMGRAPH_STORAGE_MEMORY_TRACKED_BYTES.set(0);
+
+        match self.storage_info().await {
+            Ok(info) => {
+                if let Some(v) = info.memory_res_bytes {
+                    MEMGRAPH_STORAGE_MEMORY_RES_BYTES.set(v);
+                }
+                if let Some(v) = info.peak_memory_res_bytes {
+                    MEMGRAPH_STORAGE_PEAK_MEMORY_RES_BYTES.set(v);
+                }
+                if let Some(v) = info.memory_tracked_bytes {
+                    MEMGRAPH_STORAGE_MEMORY_TRACKED_BYTES.set(v);
+                }
+            }
+            Err(e) => {
+                tracing::debug!("Failed collecting Memgraph storage info: {}", e);
+            }
+        }
+    }
+
+    async fn storage_info(&self) -> BenchmarkResult<MemgraphStorageInfo> {
+        let mut result = self
+            .graph
+            .execute(query("SHOW STORAGE INFO"))
+            .await
+            .map_err(Neo4rsError)?;
+
+        // Memgraph currently returns this as a key/value table:
+        //   | storage info | value |
+        // with values often formatted as strings like "725.66MiB".
+        let mut info = MemgraphStorageInfo::default();
+
+        while let Some(row) = result.next().await.map_err(Neo4rsError)? {
+            // Preferred: key/value shape.
+            let key = row
+                .get::<String>("storage info")
+                .or_else(|_| row.get::<String>("storage_info"))
+                .ok();
+            let value = row
+                .get::<String>("value")
+                .or_else(|_| row.get::<String>("Value"))
+                .ok();
+
+            if let (Some(k), Some(v)) = (key, value) {
+                let k = k.trim().trim_matches('"');
+                match k {
+                    "memory_res" => {
+                        info.memory_res_bytes = parse_human_bytes_to_i64(&v);
+                    }
+                    "peak_memory_res" => {
+                        info.peak_memory_res_bytes = parse_human_bytes_to_i64(&v);
+                    }
+                    "memory_tracked" => {
+                        info.memory_tracked_bytes = parse_human_bytes_to_i64(&v);
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+
+            // Fallback: older/newer shapes with direct columns.
+            if info.memory_res_bytes.is_none() {
+                info.memory_res_bytes = get_row_i64(&row, "memory_res");
+            }
+            if info.peak_memory_res_bytes.is_none() {
+                info.peak_memory_res_bytes = get_row_i64(&row, "peak_memory_res");
+            }
+            if info.memory_tracked_bytes.is_none() {
+                info.memory_tracked_bytes = get_row_i64(&row, "memory_tracked");
+            }
+        }
+
+        Ok(info)
     }
 
     /// Clear all user data in an external Memgraph instance.

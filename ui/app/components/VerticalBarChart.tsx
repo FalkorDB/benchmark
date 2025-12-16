@@ -67,28 +67,37 @@ const VerticalBarChart: React.FC<VerticalBarChartProps> = ({
         align: "top" as const,
         font: {
           weight: "bold" as const,
-          family: chartId !==  "single" ? "Fira Code" : undefined,
-          size: chartId !== "single" ? 18 : undefined,
+          family: chartId !== "single" ? "Fira Code" : undefined,
+          size: chartId !== "single" ? 14 : undefined,
         },
         color: "grey",
         // eslint-disable-next-line
         formatter: (value: number, context: any) => {
+          if (value <= 0) return "";
+
+          // Single mode: show the raw histogram number.
           if (chartId === "single") {
-            return value > 0 ? `${Math.round(value)}` : "";
+            return `${Math.round(value)}`;
           }
+
+          // Concurrent mode: show the bar value (ms/s), and also show the ratio on the max.
+          const roundedValue = Math.round(value);
+          const valueLabel = `${roundedValue}${unit}`;
+
           const label = context.dataset.label;
-          if (!label) return "";
+          if (!label) return valueLabel;
+
           let percentileKey: keyof typeof latencyStats;
           if (label.includes("P50")) percentileKey = "p50";
           else if (label.includes("P95")) percentileKey = "p95";
           else if (label.includes("P99")) percentileKey = "p99";
-          else return ""; 
-      
+          else return valueLabel;
+
           const maxValue = latencyStats[percentileKey].maxValue;
-          const ratio = latencyStats[percentileKey].ratio; 
+          const ratio = latencyStats[percentileKey].ratio;
           const isMaxValue = Math.abs(value - maxValue) < 0.5;
-  
-          return isMaxValue ? `${Math.round(ratio)}x` : "";
+
+          return isMaxValue ? `${valueLabel}\n${Math.round(ratio)}x` : valueLabel;
         },
       },
       

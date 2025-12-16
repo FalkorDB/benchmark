@@ -3,10 +3,12 @@ use prometheus::register_counter_vec;
 use prometheus::register_histogram;
 use prometheus::register_int_counter;
 use prometheus::register_int_gauge;
+use prometheus::register_int_gauge_vec;
 use prometheus::CounterVec;
 use prometheus::Histogram;
 use prometheus::IntCounter;
 use prometheus::IntGauge;
+use prometheus::IntGaugeVec;
 
 pub mod cli;
 pub mod error;
@@ -161,6 +163,104 @@ lazy_static! {
     pub static ref MEMGRAPH_MEM_USAGE_GAUGE: IntGauge = register_int_gauge!(
         "memgraph_memory_usage",
         "Memory usage in bytes for the memgraph process"
+    )
+    .unwrap();
+
+    // Query-interface memory metrics
+    // FalkorDB: derived from `GRAPH.MEMORY USAGE <graph>` (MB).
+    pub static ref FALKOR_GRAPH_MEMORY_USAGE_MB: IntGauge = register_int_gauge!(
+        "falkordb_graph_memory_usage_mb",
+        "Graph memory usage in MB reported by GRAPH.MEMORY USAGE"
+    )
+    .unwrap();
+
+    // Memgraph: derived from `SHOW STORAGE INFO`.
+    pub static ref MEMGRAPH_STORAGE_MEMORY_RES_BYTES: IntGauge = register_int_gauge!(
+        "memgraph_storage_memory_res_bytes",
+        "Resident memory (bytes) reported by Memgraph SHOW STORAGE INFO"
+    )
+    .unwrap();
+    pub static ref MEMGRAPH_STORAGE_PEAK_MEMORY_RES_BYTES: IntGauge = register_int_gauge!(
+        "memgraph_storage_peak_memory_res_bytes",
+        "Peak resident memory (bytes) reported by Memgraph SHOW STORAGE INFO"
+    )
+    .unwrap();
+    pub static ref MEMGRAPH_STORAGE_MEMORY_TRACKED_BYTES: IntGauge = register_int_gauge!(
+        "memgraph_storage_memory_tracked_bytes",
+        "Tracked memory (bytes) reported by Memgraph SHOW STORAGE INFO"
+    )
+    .unwrap();
+
+    // Precise latency percentiles (microseconds) computed in-process (HDR histogram),
+    // exported so the aggregator doesn't need to approximate using Prometheus buckets.
+    pub static ref FALKOR_LATENCY_P50_US: IntGauge = register_int_gauge!(
+        "falkordb_latency_p50_us",
+        "P50 latency in microseconds (computed in-process)"
+    )
+    .unwrap();
+    pub static ref FALKOR_LATENCY_P95_US: IntGauge = register_int_gauge!(
+        "falkordb_latency_p95_us",
+        "P95 latency in microseconds (computed in-process)"
+    )
+    .unwrap();
+    pub static ref FALKOR_LATENCY_P99_US: IntGauge = register_int_gauge!(
+        "falkordb_latency_p99_us",
+        "P99 latency in microseconds (computed in-process)"
+    )
+    .unwrap();
+
+    pub static ref NEO4J_LATENCY_P50_US: IntGauge = register_int_gauge!(
+        "neo4j_latency_p50_us",
+        "P50 latency in microseconds (computed in-process)"
+    )
+    .unwrap();
+    pub static ref NEO4J_LATENCY_P95_US: IntGauge = register_int_gauge!(
+        "neo4j_latency_p95_us",
+        "P95 latency in microseconds (computed in-process)"
+    )
+    .unwrap();
+    pub static ref NEO4J_LATENCY_P99_US: IntGauge = register_int_gauge!(
+        "neo4j_latency_p99_us",
+        "P99 latency in microseconds (computed in-process)"
+    )
+    .unwrap();
+
+    pub static ref MEMGRAPH_LATENCY_P50_US: IntGauge = register_int_gauge!(
+        "memgraph_latency_p50_us",
+        "P50 latency in microseconds (computed in-process)"
+    )
+    .unwrap();
+    pub static ref MEMGRAPH_LATENCY_P95_US: IntGauge = register_int_gauge!(
+        "memgraph_latency_p95_us",
+        "P95 latency in microseconds (computed in-process)"
+    )
+    .unwrap();
+    pub static ref MEMGRAPH_LATENCY_P99_US: IntGauge = register_int_gauge!(
+        "memgraph_latency_p99_us",
+        "P99 latency in microseconds (computed in-process)"
+    )
+    .unwrap();
+
+    // Per-query latency percentiles (microseconds), used to build the "single"-style histogram
+    // (P10..P99) but for concurrent benchmark runs.
+    pub static ref FALKOR_QUERY_LATENCY_PCT_US: IntGaugeVec = register_int_gauge_vec!(
+        "falkordb_query_latency_pct_us",
+        "Latency percentile per query in microseconds (computed in-process)",
+        &["query", "pct"]
+    )
+    .unwrap();
+
+    pub static ref NEO4J_QUERY_LATENCY_PCT_US: IntGaugeVec = register_int_gauge_vec!(
+        "neo4j_query_latency_pct_us",
+        "Latency percentile per query in microseconds (computed in-process)",
+        &["query", "pct"]
+    )
+    .unwrap();
+
+    pub static ref MEMGRAPH_QUERY_LATENCY_PCT_US: IntGaugeVec = register_int_gauge_vec!(
+        "memgraph_query_latency_pct_us",
+        "Latency percentile per query in microseconds (computed in-process)",
+        &["query", "pct"]
     )
     .unwrap();
 }

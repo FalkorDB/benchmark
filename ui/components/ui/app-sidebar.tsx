@@ -25,25 +25,37 @@ export function AppSidebar({
   handleSideBarSelection,
   platform,
   allowedVendors,
+  throughputOptions,
   ...props
 }: React.ComponentProps<typeof Sidebar> & {
   selectedOptions: Record<string, string[]>;
   handleSideBarSelection: (groupTitle: string, optionId: string) => void;
   platform?: Platforms;
   allowedVendors?: string[];
+  throughputOptions?: Array<string | number>;
 }) {
   const filteredSidebarItems = React.useMemo(() => {
     const allowed = (allowedVendors ?? []).map((v) => v.toLowerCase());
-    if (!allowed.length) return sidebarConfig.sidebarData;
+    const throughputs = (throughputOptions ?? []).map((t) => String(t));
 
     return sidebarConfig.sidebarData.map((group) => {
-      if (group.title !== "Vendors") return group;
-      return {
-        ...group,
-        options: group.options.filter((o) => allowed.includes(o.id.toLowerCase())),
-      };
+      if (group.title === "Vendors" && allowed.length) {
+        return {
+          ...group,
+          options: group.options.filter((o) => allowed.includes(o.id.toLowerCase())),
+        };
+      }
+
+      if (group.title === "Throughput" && throughputs.length) {
+        return {
+          ...group,
+          options: throughputs.map((t) => ({ id: t, label: t })),
+        };
+      }
+
+      return group;
     });
-  }, [allowedVendors]);
+  }, [allowedVendors, throughputOptions]);
 
   return (
     <Sidebar
