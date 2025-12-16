@@ -4,7 +4,7 @@ import { AppSidebar } from "@/components/ui/app-sidebar";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import FooterComponent from "./footer";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { BenchmarkData } from "../types/benchmark";
+import { BenchmarkData, Run } from "../types/benchmark";
 import { useToast } from "@/hooks/use-toast";
 import HorizontalBarChart from "./HorizontalBarChart";
 import VerticalBarChart from "./VerticalBarChart";
@@ -38,15 +38,19 @@ export default function DashBoard({
   const { toast } = useToast();
   const [gridKey, setGridKey] = useState(0);
   const [p99SingleRatio, setP99SingleRatio] = useState<number | null>(null);
-  // eslint-disable-next-line
-  const [filteredResults, setFilteredResults] = useState<any[]>([]);
+  const [filteredResults, setFilteredResults] = useState<Run[]>([]);
   const [latencyStats, setLatencyStats] = useState({
     p50: { minValue: 0, maxValue: 0, ratio: 0 },
     p95: { minValue: 0, maxValue: 0, ratio: 0 },
     p99: { minValue: 0, maxValue: 0, ratio: 0 },
   });
   const [filteredUnrealistic, setFilteredUnrealistic] = useState<
-    { vendor: string; histogram: number[]; memory: string }[]
+    {
+      vendor: string;
+      histogram: number[];
+      memory: string;
+      baseDatasetBytes?: number;
+    }[]
   >([]);
 
   const allowedVendors = useMemo(() => {
@@ -227,12 +231,13 @@ export default function DashBoard({
       // Note: aggregated summaries store the histogram on runs[].result.histogram_for_type.
       setFilteredUnrealistic(
         data.runs
-          .map((run: any) => ({
+          .map((run: Run) => ({
             vendor: run.vendor,
             histogram: run?.result?.histogram_for_type?.[selectedQuery] || [],
             memory: run?.result?.["ram-usage"] ?? "",
+            baseDatasetBytes: run?.result?.["base-dataset-bytes"],
           }))
-          .filter((entry: any) => entry.histogram.length > 0)
+          .filter((entry) => entry.histogram.length > 0)
       );
       return;
     }
@@ -293,14 +298,21 @@ export default function DashBoard({
       return 0;
     };
 
-    const data = filteredResults.map((item) => ({
+    type LatencyDatum = {
+      vendor: string;
+      p50: number;
+      p95: number;
+      p99: number;
+    };
+
+    const data: LatencyDatum[] = filteredResults.map((item) => ({
       vendor: item.vendor,
       p50: convertToMilliseconds(item.result.latency.p50),
       p95: convertToMilliseconds(item.result.latency.p95),
       p99: convertToMilliseconds(item.result.latency.p99),
     }));
 
-    const computeStats = (key: keyof (typeof data)[0]) => {
+    const computeStats = (key: "p50" | "p95" | "p99") => {
       const values = data.map((d) => d[key]);
       const minValue = Math.round(Math.min(...values));
       const maxValue = Math.round(Math.max(...values));
@@ -320,9 +332,23 @@ export default function DashBoard({
   }, [filteredResults]);
 
   const getBarColor = useCallback((vendor: string) => {
+    const key = (vendor ?? "").toString().trim().toLowerCase();
+
+    // Map vendor identifiers/names to the same CSS vars used by the MAX THROUGHPUT chart.
+    const cssVar =
+      key === "falkordb" || key === "falkor"
+        ? "--FalkorDB-color"
+        : key === "neo4j"
+        ? "--Neo4j-color"
+        : key === "memgraph"
+        ? "--Memgraph-color"
+        : "";
+
+    if (!cssVar) return "#191919";
+
     return (
       getComputedStyle(document.documentElement)
-        .getPropertyValue(`--${vendor}-color`)
+        .getPropertyValue(cssVar)
         .trim() || "#191919"
     );
   }, []);
@@ -427,19 +453,35 @@ export default function DashBoard({
     return match ? parseFloat(match[1]) : 0;
   };
 
+  const formatBytes = (bytes?: number) => {
+    if (!bytes || bytes <= 0) return "";
+    const mib = bytes / (1024 * 1024);
+    if (mib >= 1024) return `${(mib / 1024).toFixed(2)}GB`;
+    return `${mib.toFixed(1)}MB`;
+  };
+
   const singleMemory = filteredUnrealistic.map(({ vendor, memory }) => ({
     vendor,
     memory: parseMemory(memory),
   }));
+
+  const baseDatasetByVendor = filteredUnrealistic.reduce<Record<string, number>>(
+    (acc, cur) => {
+      if (cur.baseDatasetBytes) acc[cur.vendor] = cur.baseDatasetBytes;
+      return acc;
+    },
+    {}
+  );
 
   const maxSingleMemory = Math.max(...singleMemory.map((item) => item.memory));
   const minSingleMemory = Math.min(...singleMemory.map((item) => item.memory));
   const singleMemoryRatio =
     minSingleMemory !== 0 ? Math.round(maxSingleMemory / minSingleMemory) : 0;
 
+  const workloadType = selectedOptions["Workload Type"];
   useEffect(() => {
     setGridKey((prevKey) => prevKey + 1);
-  }, [selectedOptions["Workload Type"]]);
+  }, [workloadType]);
 
   //saving data to window.allChartData
   /* eslint-disable */
@@ -508,10 +550,9 @@ export default function DashBoard({
                       .map((r) => r["target-messages-per-second"])
                       .filter((v) => v !== undefined && v !== null)
                   )
-                ).sort((a: any, b: any) => Number(a) - Number(b))
+                ).sort((a, b) => Number(a) - Number(b))
               : undefined
           }
-        />
         />
         <SidebarInset className="flex-grow h-full min-h-0 overflow-y-auto">
           {isConcurrent ? (
@@ -611,6 +652,7 @@ export default function DashBoard({
                     maxValue={maxThroughput}
                     minValue={minThroughput}
                     unit=" qps"
+                    getBarColor={getBarColor}
                   />
                 </div>
               </div>
@@ -667,6 +709,16 @@ export default function DashBoard({
                   </span>{" "}
                   Better performance, lower overall costs
                 </p>
+
+                {Object.keys(baseDatasetByVendor).length > 0 && (
+                  <div className="text-sm text-gray-600 text-center font-fira pb-2">
+                    {Object.entries(baseDatasetByVendor).map(([vendor, bytes]) => (
+                      <div key={vendor}>
+                        {vendor} base dataset estimate: {formatBytes(bytes)}
+                      </div>
+                    ))}
+                  </div>
+                )}
                 <div className="w-full flex-grow flex items-center justify-center min-h-0">
                   <div className="w-full h-full">
                     <MemoryBarChart

@@ -2,6 +2,7 @@
 
 import React, { useMemo } from "react";
 import { Bar } from "react-chartjs-2";
+import { normalizeVendor, vendorGradient } from "../lib/vendorColors";
 import {
   Chart as ChartJS,
   BarElement,
@@ -46,8 +47,22 @@ const MemoryBarChart: React.FC<MemoryBarChartProps> = ({
         {
           label: "Memory Usage",
           data: singleMemory.map(({ memory }) => memory),
-          backgroundColor: singleMemory.map(({ vendor }) => getBarColor(vendor)),
-          hoverBackgroundColor: singleMemory.map(({ vendor }) => getBarColor(vendor)),
+          // eslint-disable-next-line
+          backgroundColor: (context: any) => {
+            const i = context?.dataIndex ?? 0;
+            const vendor = (singleMemory[i]?.vendor ?? "").toString();
+            if (normalizeVendor(vendor) === "unknown") return getBarColor(vendor);
+            const h = context?.chart?.chartArea?.height;
+            return vendorGradient(context.chart.ctx, vendor, "vertical", h);
+          },
+          // eslint-disable-next-line
+          hoverBackgroundColor: (context: any) => {
+            const i = context?.dataIndex ?? 0;
+            const vendor = (singleMemory[i]?.vendor ?? "").toString();
+            if (normalizeVendor(vendor) === "unknown") return getBarColor(vendor);
+            const h = context?.chart?.chartArea?.height;
+            return vendorGradient(context.chart.ctx, vendor, "vertical", h);
+          },
           borderRadius: 8,
           barPercentage: 0.9,
           categoryPercentage: 1,

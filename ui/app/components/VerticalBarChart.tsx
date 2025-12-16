@@ -1,7 +1,8 @@
 "use client";
 
-import React from "react";
+import React, { useMemo } from "react";
 import { Bar } from "react-chartjs-2";
+import { normalizeVendor, vendorGradient } from "../lib/vendorColors";
 import {
   Chart as ChartJS,
   BarElement,
@@ -10,6 +11,12 @@ import {
   Tooltip,
   Legend,
   Title,
+} from "chart.js";
+import type {
+  ChartData,
+  Chart as ChartType,
+  LegendItem,
+  ScriptableContext,
 } from "chart.js";
 import ChartDataLabels from "chartjs-plugin-datalabels";
 
@@ -31,8 +38,7 @@ interface LatencyStats {
 
 interface VerticalBarChartProps {
   chartId: string;
-  // eslint-disable-next-line
-  chartData: any;
+  chartData: ChartData<"bar", number[], string>;
   unit: string;
   latencyStats: {
     p50: LatencyStats;
@@ -47,17 +53,95 @@ const VerticalBarChart: React.FC<VerticalBarChartProps> = ({
   unit,
   latencyStats
 }) => {
+  const xLabels = (chartData.labels ?? []) as string[];
+
+  const legendFillForVendor = (chart: ChartType, vendorLike: string) => {
+    // Canvas gradients are defined in absolute canvas coordinates. The legend box is drawn
+    // at some x,y offset, so a small gradient (0..boxWidth) often collapses to a solid color.
+    // To make the legend swatch reliably show the gradient, draw it into a tiny offscreen
+    // canvas and use a repeating pattern.
+    const w = 80;
+    const h = 10;
+
+    const off = document.createElement("canvas");
+    off.width = w;
+    off.height = h;
+
+    const offCtx = off.getContext("2d");
+    if (!offCtx) return vendorGradient(chart.ctx, vendorLike, "horizontal", w);
+
+    const g = vendorGradient(offCtx, vendorLike, "horizontal", w);
+    offCtx.fillStyle = g;
+    offCtx.fillRect(0, 0, w, h);
+
+    return chart.ctx.createPattern(off, "repeat") ?? g;
+  };
+  const chartDataWithGradients = useMemo(() => {
+    const datasets = (chartData?.datasets ?? []).map((ds) => {
+      const labelVendor = typeof ds.label === "string" ? ds.label.split(" ")[0] : "";
+      const vendorLike = (labelVendor || "").toString();
+
+      if (normalizeVendor(vendorLike) === "unknown") {
+        return ds;
+      }
+
+      const backgroundColor = (context: ScriptableContext<"bar">) => {
+        const h = context?.chart?.chartArea?.height;
+        return vendorGradient(context.chart.ctx, vendorLike, "vertical", h);
+      };
+
+      return {
+        ...ds,
+        backgroundColor,
+        hoverBackgroundColor: backgroundColor,
+      };
+    });
+
+    return {
+      ...chartData,
+      datasets,
+    };
+  }, [chartData]);
+
   const options = {
     responsive: true,
     maintainAspectRatio: false,
     plugins: {
-      legend: { display: true, position: "top" as const },
+      legend: {
+        display: true,
+        position: "top" as const,
+        labels: {
+          // Make the swatch wider so vendor gradients are visible (otherwise they can look solid).
+          boxWidth: 80,
+          boxHeight: 10,
+          generateLabels: (chart: ChartType) => {
+            const items: LegendItem[] =
+              ChartJS.defaults.plugins.legend.labels.generateLabels(chart);
+
+            return items.map((item) => {
+              const text = (item?.text ?? "").toString();
+              const vendorLike = text.trim().split(/\s+/)[0] ?? "";
+
+              if (normalizeVendor(vendorLike) === "unknown") return item;
+
+              // Force a legend-sized gradient. Using the chart-area gradient can look like a solid fill.
+              const fill = legendFillForVendor(chart, vendorLike);
+              return {
+                ...item,
+                fillStyle: fill,
+                strokeStyle: fill,
+                lineWidth: 0,
+              };
+            });
+          },
+        },
+      },
       tooltip: {
         callbacks: {
-          // eslint-disable-next-line
-          label: function (context: any) {
-            const value = context.raw;
-            return `${context.dataset.label}: ${value}${unit}`;
+          label: function (context: unknown) {
+            const c = context as { raw?: unknown; dataset?: { label?: string } };
+            const value = c.raw;
+            return `${c.dataset?.label ?? ""}: ${String(value ?? "")}${unit}`;
           },
         },
       },
@@ -71,8 +155,8 @@ const VerticalBarChart: React.FC<VerticalBarChartProps> = ({
           size: chartId !== "single" ? 14 : undefined,
         },
         color: "grey",
-        // eslint-disable-next-line
-        formatter: (value: number, context: any) => {
+        formatter: (value: number, context: unknown) => {
+          const ctx = context as { dataset?: { label?: string } };
           if (value <= 0) return "";
 
           // Single mode: show the raw histogram number.
@@ -84,7 +168,7 @@ const VerticalBarChart: React.FC<VerticalBarChartProps> = ({
           const roundedValue = Math.round(value);
           const valueLabel = `${roundedValue}${unit}`;
 
-          const label = context.dataset.label;
+          const label = ctx.dataset?.label;
           if (!label) return valueLabel;
 
           let percentileKey: keyof typeof latencyStats;
@@ -115,7 +199,8 @@ const VerticalBarChart: React.FC<VerticalBarChartProps> = ({
           color: "#000",
           padding: 10,
           callback: function (index: string | number) {
-            return chartData.labels[index];
+            const i = typeof index === "number" ? index : Number(index);
+            return xLabels[i] ?? "";
           },
         },
         // title: { display: true, text: xAxisTitle, font: { size: 16 } }
@@ -123,15 +208,13 @@ const VerticalBarChart: React.FC<VerticalBarChartProps> = ({
       y: {
         beginAtZero: true,
         grid: { display: true },
-        // eslint-disable-next-line
         ticks: {
           font: {
             size: 15,
             family: "Fira Code",
           },
           color: "#333",
-          // eslint-disable-next-line
-          callback: (value: any) => `${value}${unit}` 
+          callback: (value: string | number) => `${value}${unit}`
         },
       },
     },
@@ -139,7 +222,7 @@ const VerticalBarChart: React.FC<VerticalBarChartProps> = ({
 
   return (
     <div className="w-full h-full relative">
-      <Bar data={chartData} options={options} />
+      <Bar data={chartDataWithGradients} options={options} />
     </div>
   );
 };

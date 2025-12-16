@@ -18,9 +18,10 @@ use benchmark::{
     FALKOR_LATENCY_P95_US, FALKOR_LATENCY_P99_US, FALKOR_QUERY_LATENCY_PCT_US,
     FALKOR_SUCCESS_REQUESTS_DURATION_HISTOGRAM, MEMGRAPH_ERROR_REQUESTS_DURATION_HISTOGRAM,
     MEMGRAPH_LATENCY_P50_US, MEMGRAPH_LATENCY_P95_US, MEMGRAPH_LATENCY_P99_US,
-    MEMGRAPH_QUERY_LATENCY_PCT_US, MEMGRAPH_SUCCESS_REQUESTS_DURATION_HISTOGRAM,
-    NEO4J_ERROR_REQUESTS_DURATION_HISTOGRAM, NEO4J_LATENCY_P50_US, NEO4J_LATENCY_P95_US,
-    NEO4J_LATENCY_P99_US, NEO4J_QUERY_LATENCY_PCT_US, NEO4J_SUCCESS_REQUESTS_DURATION_HISTOGRAM,
+    MEMGRAPH_QUERY_LATENCY_PCT_US, MEMGRAPH_STORAGE_BASE_DATASET_BYTES,
+    MEMGRAPH_SUCCESS_REQUESTS_DURATION_HISTOGRAM, NEO4J_ERROR_REQUESTS_DURATION_HISTOGRAM,
+    NEO4J_LATENCY_P50_US, NEO4J_LATENCY_P95_US, NEO4J_LATENCY_P99_US, NEO4J_QUERY_LATENCY_PCT_US,
+    NEO4J_SUCCESS_REQUESTS_DURATION_HISTOGRAM,
 };
 use clap::{Command, CommandFactory, Parser};
 use clap_complete::{generate, Generator};
@@ -1239,6 +1240,13 @@ async fn run_memgraph(
 
     // get the graph size
     let (node_count, relation_count) = client.graph_size().await?;
+
+    // Memgraph estimate for base dataset storage RAM usage.
+    // Formula (per Memgraph): StorageRAMUsage = NumberOfVertices×212B + NumberOfEdges×162B
+    // NOTE: graph_size returns (nodes, relationships).
+    let base_dataset_bytes: i64 =
+        (node_count as i128 * 212 + relation_count as i128 * 162).min(i64::MAX as i128) as i64;
+    MEMGRAPH_STORAGE_BASE_DATASET_BYTES.set(base_dataset_bytes);
 
     info!(
         "graph has {} nodes and {} relations",

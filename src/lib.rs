@@ -191,6 +191,14 @@ lazy_static! {
     )
     .unwrap();
 
+    // Memgraph estimate for base dataset storage RAM (bytes).
+    // Formula (per Memgraph): StorageRAMUsage = NumberOfVertices×212B + NumberOfEdges×162B
+    pub static ref MEMGRAPH_STORAGE_BASE_DATASET_BYTES: IntGauge = register_int_gauge!(
+        "memgraph_storage_base_dataset_bytes",
+        "Estimated base dataset storage RAM usage in bytes (vertices*212 + edges*162)"
+    )
+    .unwrap();
+
     // Precise latency percentiles (microseconds) computed in-process (HDR histogram),
     // exported so the aggregator doesn't need to approximate using Prometheus buckets.
     pub static ref FALKOR_LATENCY_P50_US: IntGauge = register_int_gauge!(

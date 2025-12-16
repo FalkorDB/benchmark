@@ -33,6 +33,7 @@ export interface Result {
   "elapsed-ms"?: number;
   "cpu-usage": number;
   "ram-usage": string;
+  "base-dataset-bytes"?: number;
   errors: number;
   "successful-requests": number;
   operations?: OpsBreakdown;

@@ -49,8 +49,22 @@ body {
     --chart-4: 43 74% 66%;
     --chart-5: 27 87% 67%;
     --radius: 0.5rem;
+
+    /* Solid accents (used for text/borders) */
     --FalkorDB-color: #7568F2;
     --Neo4j-color: #a6a6a6;
+    --Memgraph-color: #ff2b4a;
+
+    /* Chart gradients */
+    --FalkorDB-gradient-start: #ff66b3;
+    --FalkorDB-gradient-end: #7568F2;
+
+    --Neo4j-gradient-start: #d9d9d9;
+    --Neo4j-gradient-end: #6b6b6b;
+
+    --Memgraph-gradient-start: #ff2b4a;
+    --Memgraph-gradient-mid: #ff7a00;
+    --Memgraph-gradient-end: #ffd000;
   }
 
   .dark {

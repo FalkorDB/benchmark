@@ -77,6 +77,10 @@ struct UiResult {
     cpu_usage: f64,
     #[serde(rename = "ram-usage")]
     ram_usage: String,
+    // Memgraph-only today: base dataset memory estimate from formula
+    // StorageRAMUsage = NumberOfVertices×212B + NumberOfEdges×162B
+    #[serde(rename = "base-dataset-bytes", skip_serializing_if = "Option::is_none")]
+    base_dataset_bytes: Option<u64>,
     errors: u64,
     #[serde(rename = "successful-requests")]
     successful_requests: u64,
@@ -310,12 +314,34 @@ fn build_ui_run(v: &VendorArtifacts) -> BenchmarkResult<UiRun> {
         count: success_hist.count.round().max(0.0) as u64,
     };
 
+    let (cpu_usage, ram_usage) = metrics.vendor_cpu_mem(v.vendor);
+
+    let base_dataset_bytes = if v.vendor == Vendor::Memgraph {
+        let from_metric = metrics
+            .get_single_value("memgraph_storage_base_dataset_bytes")
+            .map(|v| v.round().max(0.0) as u64)
+            .filter(|v| *v > 0);
+
+        // Back-compat for older runs: compute from dataset constants.
+        // StorageRAMUsage = NumberOfVertices×212B + NumberOfEdges×162B
+        let computed = {
+            let bytes: i128 = (spec.vertices as i128) * 212 + (spec.edges as i128) * 162;
+            if bytes > 0 {
+                Some(bytes.min(u64::MAX as i128) as u64)
+            } else {
+                None
+            }
+        };
+
+        from_metric.or(computed)
+    } else {
+        None
+    };
+
     let operations = metrics.operations_breakdown(v.vendor);
     let spawn_stats = compute_spawn_stats(&operations.by_spawn);
 
-    let (cpu_usage, ram_usage) = metrics.vendor_cpu_mem(v.vendor);
     let histogram_for_type = metrics.query_latency_histogram_ms(v.vendor);
-
     Ok(UiRun {
         vendor: vendor_id(v.vendor),
         read_write_ratio: 0.0,
@@ -337,6 +363,7 @@ fn build_ui_run(v: &VendorArtifacts) -> BenchmarkResult<UiRun> {
             elapsed_ms: v.meta.elapsed_ms as u64,
             cpu_usage,
             ram_usage,
+            base_dataset_bytes,
             errors: error_hist.count.round().max(0.0) as u64,
             successful_requests: success_hist.count.round().max(0.0) as u64,
             operations,

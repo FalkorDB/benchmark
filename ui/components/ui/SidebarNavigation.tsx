@@ -137,6 +137,8 @@ export function NavMain({
                         return "bg-[#F5F4FF] text-FalkorDB border-FalkorDB";
                       if (option.id === "neo4j")
                         return "bg-[#F5F4FF] text-Neo4j border-Neo4j";
+                      if (option.id === "memgraph")
+                        return "bg-[#F5F4FF] text-Memgraph border-Memgraph";
                       return "bg-[#F5F4FF] text-[#7466FF] border-[#7466FF]";
                     }
                     return "bg-gray-100 text-gray-800 border-transparent";
