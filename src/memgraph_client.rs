@@ -430,7 +430,170 @@ impl MemgraphClient {
         Ok(())
     }
 
-    /// Execute stream with batch processing
+    async fn run_query_no_results(
+        &self,
+        q: &str,
+    ) -> BenchmarkResult<()> {
+        self.graph.run(query(q)).await.map_err(Neo4rsError)?;
+        Ok(())
+    }
+
+    /// Fast-path loader for the Pokec "Users" dataset using UNWIND batches.
+    /// See `Neo4jClient::execute_pokec_users_import_unwind` for the expected line formats.
+    pub async fn execute_pokec_users_import_unwind<S>(
+        &self,
+        mut stream: S,
+        batch_size: usize,
+        histogram: &mut Histogram,
+    ) -> BenchmarkResult<usize>
+    where
+        S: StreamExt<Item = Result<String, io::Error>> + Unpin,
+    {
+        info!(
+            "Processing Pokec Users import via UNWIND batches of {}",
+            batch_size
+        );
+
+        #[derive(Copy, Clone, PartialEq, Eq)]
+        enum Phase {
+            Nodes,
+            Edges,
+        }
+
+        let mut phase = Phase::Nodes;
+        let mut node_maps: Vec<String> = Vec::with_capacity(batch_size);
+        let mut edge_pairs: Vec<(u64, u64)> = Vec::with_capacity(batch_size);
+
+        let mut total_processed: usize = 0;
+        let mut batch_count: usize = 0;
+
+        async fn flush_nodes(
+            client: &MemgraphClient,
+            node_maps: &mut Vec<String>,
+            histogram: &mut Histogram,
+            batch_count: &mut usize,
+        ) -> BenchmarkResult<()> {
+            if node_maps.is_empty() {
+                return Ok(());
+            }
+            *batch_count += 1;
+            let q = format!(
+                "UNWIND [{}] AS row CREATE (u:User) SET u = row",
+                node_maps.join(",")
+            );
+            let start = Instant::now();
+            client.run_query_no_results(&q).await?;
+            histogram.increment(start.elapsed().as_micros() as u64)?;
+            node_maps.clear();
+            Ok(())
+        }
+
+        async fn flush_edges(
+            client: &MemgraphClient,
+            edge_pairs: &mut Vec<(u64, u64)>,
+            histogram: &mut Histogram,
+            batch_count: &mut usize,
+        ) -> BenchmarkResult<()> {
+            if edge_pairs.is_empty() {
+                return Ok(());
+            }
+            *batch_count += 1;
+            let mut maps = String::new();
+            for (i, (src, dst)) in edge_pairs.iter().enumerate() {
+                if i > 0 {
+                    maps.push(',');
+                }
+                maps.push_str(&format!("{{src:{},dst:{}}}", src, dst));
+            }
+            let q = format!(
+                "UNWIND [{}] AS row MATCH (n:User {{id: row.src}}), (m:User {{id: row.dst}}) CREATE (n)-[:Friend]->(m)",
+                maps
+            );
+            let start = Instant::now();
+            client.run_query_no_results(&q).await?;
+            histogram.increment(start.elapsed().as_micros() as u64)?;
+            edge_pairs.clear();
+            Ok(())
+        }
+
+        while let Some(item_result) = stream.next().await {
+            let line = match item_result {
+                Ok(v) => v,
+                Err(e) => {
+                    error!("Error reading import line: {:?}", e);
+                    continue;
+                }
+            };
+
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed == ";" || trimmed.starts_with("//") {
+                continue;
+            }
+
+            if phase == Phase::Nodes && trimmed.starts_with("MATCH") {
+                flush_nodes(self, &mut node_maps, histogram, &mut batch_count).await?;
+                phase = Phase::Edges;
+            }
+
+            match phase {
+                Phase::Nodes => {
+                    if let (Some(l), Some(r)) = (trimmed.find('{'), trimmed.rfind('}')) {
+                        if r > l {
+                            node_maps.push(trimmed[l..=r].to_string());
+                            total_processed += 1;
+                        }
+                    }
+                    if node_maps.len() >= batch_size {
+                        flush_nodes(self, &mut node_maps, histogram, &mut batch_count).await?;
+                    }
+                }
+                Phase::Edges => {
+                    let mut ids: [u64; 2] = [0, 0];
+                    let mut found = 0usize;
+                    let mut rest = trimmed;
+                    while found < 2 {
+                        let Some(pos) = rest.find("id:") else { break };
+                        rest = &rest[pos + 3..];
+                        let s = rest.trim_start();
+                        let mut end = 0usize;
+                        for (i, ch) in s.char_indices() {
+                            if !ch.is_ascii_digit() {
+                                end = i;
+                                break;
+                            }
+                        }
+                        let end = if end == 0 { s.len() } else { end };
+                        if let Ok(v) = s[..end].parse::<u64>() {
+                            ids[found] = v;
+                            found += 1;
+                        }
+                        rest = &s[end..];
+                    }
+                    if found == 2 {
+                        edge_pairs.push((ids[0], ids[1]));
+                        total_processed += 1;
+                    }
+
+                    if edge_pairs.len() >= batch_size {
+                        flush_edges(self, &mut edge_pairs, histogram, &mut batch_count).await?;
+                    }
+                }
+            }
+        }
+
+        flush_nodes(self, &mut node_maps, histogram, &mut batch_count).await?;
+        flush_edges(self, &mut edge_pairs, histogram, &mut batch_count).await?;
+
+        info!(
+            "Pokec Users import completed: {} statements batched into {} UNWIND queries",
+            total_processed,
+            batch_count
+        );
+
+        Ok(total_processed)
+    }
+
+    /// Execute stream with batch processing (line-by-line statements).
     pub async fn execute_query_stream_batched<S>(
         &self,
         mut stream: S,

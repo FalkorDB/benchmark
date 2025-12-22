@@ -16,8 +16,11 @@ use falkordb::FalkorValue::I64;
 use falkordb::{AsyncGraph, FalkorClientBuilder, FalkorResult, LazyResultSet, QueryResult};
 use std::env;
 use std::hint::black_box;
+use std::io;
 use std::sync::Arc;
 use std::time::Duration;
+
+use futures::StreamExt;
 use tokio::fs;
 use tokio::time::error::Elapsed;
 use tracing::{error, info};
@@ -316,6 +319,193 @@ pub struct FalkorBenchmarkClient {
 }
 
 impl FalkorBenchmarkClient {
+    async fn run_query_no_results(
+        &mut self,
+        q: &str,
+    ) -> BenchmarkResult<()> {
+        // Use a longer timeout for import statements.
+        let res = self.graph.query(q).with_timeout(60_000).execute().await?;
+        // Consume results (for completeness; most CREATE queries return no rows)
+        for row in res.data {
+            black_box(row);
+        }
+        Ok(())
+    }
+
+    /// Fast-path loader for the Pokec "Users" dataset using UNWIND batches.
+    ///
+    /// Input is a stream of cypher statements in two phases:
+    /// - Node lines: `CREATE (:User { ... });`
+    /// - Edge lines: `MATCH (n:User {id: X}), (m:User {id: Y}) CREATE (n)-[e: Friend]->(m);`
+    ///
+    /// We batch into:
+    /// - Nodes: `UNWIND [ {...}, ... ] AS row CREATE (u:User) SET u = row`
+    /// - Edges: `UNWIND [ {src:X,dst:Y}, ... ] AS row MATCH ... CREATE (n)-[:Friend]->(m)`
+    pub async fn execute_pokec_users_import_unwind<S>(
+        &mut self,
+        mut stream: S,
+        batch_size: usize,
+    ) -> BenchmarkResult<usize>
+    where
+        S: StreamExt<Item = Result<String, io::Error>> + Unpin,
+    {
+        info!(
+            "Processing Pokec Users import via UNWIND batches of {}",
+            batch_size
+        );
+
+        #[derive(Copy, Clone, PartialEq, Eq)]
+        enum Phase {
+            Nodes,
+            Edges,
+        }
+
+        let mut phase = Phase::Nodes;
+        let mut node_maps: Vec<String> = Vec::with_capacity(batch_size);
+        let mut edge_pairs: Vec<(u64, u64)> = Vec::with_capacity(batch_size);
+
+        let mut total_processed: usize = 0;
+        let mut batch_count: usize = 0;
+        let start_time = tokio::time::Instant::now();
+        let mut last_progress_report = start_time;
+        const PROGRESS_INTERVAL_SECS: u64 = 5;
+
+        async fn flush_nodes(
+            client: &mut FalkorBenchmarkClient,
+            node_maps: &mut Vec<String>,
+            batch_count: &mut usize,
+        ) -> BenchmarkResult<()> {
+            if node_maps.is_empty() {
+                return Ok(());
+            }
+            *batch_count += 1;
+            let q = format!(
+                "UNWIND [{}] AS row CREATE (u:User) SET u = row",
+                node_maps.join(",")
+            );
+            client.run_query_no_results(&q).await?;
+            node_maps.clear();
+            Ok(())
+        }
+
+        async fn flush_edges(
+            client: &mut FalkorBenchmarkClient,
+            edge_pairs: &mut Vec<(u64, u64)>,
+            batch_count: &mut usize,
+        ) -> BenchmarkResult<()> {
+            if edge_pairs.is_empty() {
+                return Ok(());
+            }
+            *batch_count += 1;
+            let mut maps = String::new();
+            for (i, (src, dst)) in edge_pairs.iter().enumerate() {
+                if i > 0 {
+                    maps.push(',');
+                }
+                maps.push_str(&format!("{{src:{},dst:{}}}", src, dst));
+            }
+            let q = format!(
+                "UNWIND [{}] AS row MATCH (n:User {{id: row.src}}), (m:User {{id: row.dst}}) CREATE (n)-[:Friend]->(m)",
+                maps
+            );
+            client.run_query_no_results(&q).await?;
+            edge_pairs.clear();
+            Ok(())
+        }
+
+        while let Some(item_result) = stream.next().await {
+            let line = match item_result {
+                Ok(v) => v,
+                Err(e) => {
+                    error!("Error reading import line: {:?}", e);
+                    continue;
+                }
+            };
+
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed == ";" || trimmed.starts_with("//") {
+                continue;
+            }
+
+            if phase == Phase::Nodes && trimmed.starts_with("MATCH") {
+                flush_nodes(self, &mut node_maps, &mut batch_count).await?;
+                phase = Phase::Edges;
+            }
+
+            match phase {
+                Phase::Nodes => {
+                    if let (Some(l), Some(r)) = (trimmed.find('{'), trimmed.rfind('}')) {
+                        if r > l {
+                            node_maps.push(trimmed[l..=r].to_string());
+                            total_processed += 1;
+                        }
+                    }
+                    if node_maps.len() >= batch_size {
+                        flush_nodes(self, &mut node_maps, &mut batch_count).await?;
+                    }
+                }
+                Phase::Edges => {
+                    let mut ids: [u64; 2] = [0, 0];
+                    let mut found = 0usize;
+                    let mut rest = trimmed;
+                    while found < 2 {
+                        let Some(pos) = rest.find("id:") else { break };
+                        rest = &rest[pos + 3..];
+                        let s = rest.trim_start();
+                        let mut end = 0usize;
+                        for (i, ch) in s.char_indices() {
+                            if !ch.is_ascii_digit() {
+                                end = i;
+                                break;
+                            }
+                        }
+                        let end = if end == 0 { s.len() } else { end };
+                        if let Ok(v) = s[..end].parse::<u64>() {
+                            ids[found] = v;
+                            found += 1;
+                        }
+                        rest = &s[end..];
+                    }
+
+                    if found == 2 {
+                        edge_pairs.push((ids[0], ids[1]));
+                        total_processed += 1;
+                    }
+
+                    if edge_pairs.len() >= batch_size {
+                        flush_edges(self, &mut edge_pairs, &mut batch_count).await?;
+                    }
+                }
+            }
+
+            // Report progress every 5 seconds
+            let now = tokio::time::Instant::now();
+            if now.duration_since(last_progress_report).as_secs() >= PROGRESS_INTERVAL_SECS {
+                let elapsed = now.duration_since(start_time);
+                let rate = total_processed as f64 / elapsed.as_secs_f64();
+                info!(
+                    "Progress: {} items processed in {:?} ({:.2} items/sec, {} batches completed)",
+                    crate::utils::format_number(total_processed as u64),
+                    elapsed,
+                    rate,
+                    batch_count
+                );
+                last_progress_report = now;
+            }
+        }
+
+        flush_nodes(self, &mut node_maps, &mut batch_count).await?;
+        flush_edges(self, &mut edge_pairs, &mut batch_count).await?;
+
+        info!(
+            "Pokec Users import completed: {} statements batched into {} UNWIND queries",
+            total_processed,
+            batch_count
+        );
+
+        Ok(total_processed)
+    }
+
     pub async fn execute_queries(
         &mut self,
         spawn_id: usize,
