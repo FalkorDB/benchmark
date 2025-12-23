@@ -106,7 +106,7 @@ redis-cli -h "$FALKOR_HOST" -p "$FALKOR_PORT" GRAPH.DELETE falkor >/dev/null 2>&
 
 echo "==> Loading small dataset"
 cargo run --release --bin benchmark -- load --vendor falkor --size small --endpoint "$FALKOR_ENDPOINT" -b "$BATCH_SIZE"
-cargo run --release --bin benchmark -- load --vendor neo4j --size small --endpoint "$NEO4J_ENDPOINT" -b "$BATCH_SIZE"
+#cargo run --release --bin benchmark -- load --vendor neo4j --size small --endpoint "$NEO4J_ENDPOINT" -b "$BATCH_SIZE"
 # --force clears the external Memgraph instance before loading
 cargo run --release --bin benchmark -- load --vendor memgraph --size small --endpoint "$MEMGRAPH_ENDPOINT" -b "$BATCH_SIZE" --force
 
@@ -118,7 +118,7 @@ echo "==> Running ${QUERIES_FILE} workload (parallel=${PARALLEL}, mps=${MPS})"
 echo "==> Writing detailed run results to: ${RESULTS_DIR}/<vendor>/"
 
 cargo run --release --bin benchmark -- run --vendor falkor --name "$QUERIES_FILE" --parallel "$PARALLEL" --mps "$MPS" --endpoint "$FALKOR_ENDPOINT" --results-dir "$RESULTS_DIR"
-cargo run --release --bin benchmark -- run --vendor neo4j --name "$QUERIES_FILE" --parallel "$PARALLEL" --mps "$MPS" --endpoint "$NEO4J_ENDPOINT" --results-dir "$RESULTS_DIR"
+#cargo run --release --bin benchmark -- run --vendor neo4j --name "$QUERIES_FILE" --parallel "$PARALLEL" --mps "$MPS" --endpoint "$NEO4J_ENDPOINT" --results-dir "$RESULTS_DIR"
 cargo run --release --bin benchmark -- run --vendor memgraph --name "$QUERIES_FILE" --parallel "$PARALLEL" --mps "$MPS" --endpoint "$MEMGRAPH_ENDPOINT" --results-dir "$RESULTS_DIR"
 
 echo "==> Aggregating UI summaries to ui/public/summaries"

@@ -448,6 +448,50 @@ export default function DashBoard({
   const throughputRatio =
     minThroughput !== 0 ? Math.round(maxThroughput / minThroughput) : 0;
 
+  // Dataset & workload summary (nodes, edges, read/write queries)
+  const datasetSummary = React.useMemo(() => {
+    if (!data?.runs?.length) return null;
+
+    const baseRun = data.runs[0];
+    const nodes = baseRun.edges ?? 0;
+    const edges = baseRun.relationships ?? 0;
+
+    const opsByQuery = baseRun.result?.operations?.["by-query"] ?? {};
+    const writeQueryNames = new Set([
+      "single_vertex_update",
+      "single_edge_update",
+      "single_vertex_write",
+      "single_edge_write",
+      "write",
+    ]);
+
+    let readQueries = 0;
+    let writeQueries = 0;
+
+    for (const [name, count] of Object.entries(
+      opsByQuery as Record<string, number>
+    )) {
+      if (writeQueryNames.has(name)) {
+        writeQueries += count;
+      } else {
+        readQueries += count;
+      }
+    }
+
+    // Fallback: if we don't have per-query breakdown, treat all successful requests as reads.
+    if (readQueries === 0 && writeQueries === 0) {
+      const total = baseRun.result?.["successful-requests"] ?? 0;
+      return {
+        nodes,
+        edges,
+        readQueries: typeof total === "number" ? total : 0,
+        writeQueries: 0,
+      };
+    }
+
+    return { nodes, edges, readQueries, writeQueries };
+  }, [data]);
+
   const parseMemory = (memory: string): number => {
     const match = memory.match(/([\d.]+)/);
     return match ? parseFloat(match[1]) : 0;
@@ -572,6 +616,7 @@ export default function DashBoard({
                 ).sort((a, b) => Number(a) - Number(b))
               : undefined
           }
+          datasetSummary={datasetSummary}
         />
         <SidebarInset className="flex-grow h-full min-h-0 overflow-y-auto">
           {isConcurrent ? (

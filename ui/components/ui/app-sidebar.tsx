@@ -26,6 +26,7 @@ export function AppSidebar({
   platform,
   allowedVendors,
   throughputOptions,
+  datasetSummary,
   ...props
 }: React.ComponentProps<typeof Sidebar> & {
   selectedOptions: Record<string, string[]>;
@@ -33,6 +34,12 @@ export function AppSidebar({
   platform?: Platforms;
   allowedVendors?: string[];
   throughputOptions?: Array<string | number>;
+  datasetSummary?: {
+    nodes: number;
+    edges: number;
+    readQueries: number;
+    writeQueries: number;
+  } | null;
 }) {
   const filteredSidebarItems = React.useMemo(() => {
     const allowed = (allowedVendors ?? []).map((v) => v.toLowerCase());
@@ -73,6 +80,7 @@ export function AppSidebar({
           selectedOptions={selectedOptions}
           handleSideBarSelection={handleSideBarSelection}
           platform={platform}
+          datasetSummary={datasetSummary}
         />
       </SidebarContent>
     </Sidebar>
