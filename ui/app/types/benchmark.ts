@@ -24,6 +24,12 @@ export interface SpawnStats {
   cv: number;
 }
 
+export interface TelemetryBreakdown {
+  "wait-ms": number;
+  "exec-ms": number;
+  "report-ms": number;
+}
+
 export interface Result {
   "deadline-offset": string;
   "actual-messages-per-second": number;
@@ -40,6 +46,7 @@ export interface Result {
   "spawn-stats"?: SpawnStats;
   // Present in aggregated summaries / newer result formats
   histogram_for_type?: Record<string, number[]>;
+  telemetry_for_type?: Record<string, TelemetryBreakdown>;
 }
 
 export interface Run {

@@ -159,6 +159,7 @@ dependencies = [
  "clap",
  "clap_complete",
  "falkordb",
+ "flate2",
  "futures",
  "histogram",
  "hyper 0.14.31",

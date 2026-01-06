@@ -122,7 +122,8 @@ impl MemgraphClient {
 
         let worker_id = worker_id.as_ref();
         let q_name = q_name.as_str();
-        let timeout = Duration::from_secs(60);
+        // Timeout for individual Memgraph queries (10 seconds)
+        let timeout = Duration::from_secs(10);
         let offset = msg.compute_offset_ms();
 
         MEMGRAPH_MSG_DEADLINE_OFFSET_GAUGE.set(offset);

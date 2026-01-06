@@ -39,6 +39,7 @@ url = "2.5.0"
 # Used for generating a timestamp-based default results directory.
 # Example: Results-251215-12:35
 time = { version = "0.3", features = ["formatting", "macros"] }
+flate2 = "1.0"
 
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }

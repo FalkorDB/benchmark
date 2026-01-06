@@ -3,11 +3,14 @@
 use crate::error::BenchmarkResult;
 use crate::utils::{create_directory_if_not_exists, download_file, read_lines, url_file_name};
 use clap::ValueEnum;
+use flate2::read::GzDecoder;
 use futures::Stream;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
 use std::pin::Pin;
+use std::path::Path;
+use std::io::Read;
 use strum_macros::Display;
 use tracing::info;
 
@@ -118,6 +121,31 @@ impl Spec<'_> {
             );
             download_file(url, cache_file.as_str()).await?;
         }
-        Ok(cache_file)
+
+        // If the cached file is gzip-compressed, transparently decompress it once and
+        // return the path to the decompressed file. This avoids having to teach every
+        // consumer how to handle .gz files.
+        if Path::new(&cache_file)
+            .extension()
+            .and_then(|ext| ext.to_str())
+            == Some("gz")
+        {
+            let decompressed_path = cache_file.trim_end_matches(".gz").to_string();
+            if fs::metadata(&decompressed_path).is_err() {
+                info!(
+                    "Decompressing gzip cache {} to {}",
+                    cache_file,
+                    decompressed_path
+                );
+                let compressed = fs::read(&cache_file)?;
+                let mut decoder = GzDecoder::new(&compressed[..]);
+                let mut out = Vec::new();
+                decoder.read_to_end(&mut out)?;
+                fs::write(&decompressed_path, &out)?;
+            }
+            Ok(decompressed_path)
+        } else {
+            Ok(cache_file)
+        }
     }
 }

@@ -37,28 +37,40 @@ NEO4J_ENDPOINT=${NEO4J_ENDPOINT:-"neo4j://127.0.0.1:7687"}
 NEO4J_USER=${NEO4J_USER:-"neo4j"}
 NEO4J_PASSWORD=${NEO4J_PASSWORD:-"six666six"}
 MEMGRAPH_ENDPOINT=${MEMGRAPH_ENDPOINT:-"bolt://127.0.0.1:17687"}
-MEMGRAPH_USER=${MEMGRAPH_USER:-"six666six"}
-MEMGRAPH_PASSWORD=${MEMGRAPH_PASSWORD:-"${MEMGRAPH_USER}"}
+MEMGRAPH_USER=${MEMGRAPH_USER:-"memgraph"}
+MEMGRAPH_PASSWORD=${MEMGRAPH_PASSWORD:-"six666six"}
+
+# Vendor toggles: set to 1 to enable, 0 to disable
+RUN_FALKOR=${RUN_FALKOR:-1}
+RUN_NEO4J=${RUN_NEO4J:-1}
+RUN_MEMGRAPH=${RUN_MEMGRAPH:-0}
 
 BATCH_SIZE=${BATCH_SIZE:-5000}
 PARALLEL=${PARALLEL:-20}
 MPS=${MPS:-7500}
 QUERIES_FILE=${QUERIES_FILE:-"small-readonly"}
-QUERIES_COUNT=${QUERIES_COUNT:-1000000}
-WRITE_RATIO=${WRITE_RATIO:-0.0}
+QUERIES_COUNT=${QUERIES_COUNT:-60000}
+WRITE_RATIO=${WRITE_RATIO:-0.03}
+
+# Derive per-vendor query file names so each engine can use vendor-optimized queries.
+QUERIES_FILE_BASE="${QUERIES_FILE}"
+FALKOR_QUERIES_FILE="${QUERIES_FILE_BASE}-falkor"
+NEO4J_QUERIES_FILE="${QUERIES_FILE_BASE}-neo4j"
+MEMGRAPH_QUERIES_FILE="${QUERIES_FILE_BASE}-memgraph"
 
 # Use a single shared results directory for all vendors so `benchmark aggregate` can
 # generate neo4j-vs-falkordb and memgraph-vs-falkordb UI summaries from one run.
 RESULTS_DIR=${RESULTS_DIR:-"Results-$(date +%y%m%d-%H:%M)"}
 
-# Prompt for secrets if not set.
-if [[ -z "${NEO4J_PASSWORD:-}" ]]; then
+# Prompt for secrets if not set (only for enabled vendors).
+if [[ "${RUN_NEO4J}" == "1" && -z "${NEO4J_PASSWORD:-}" ]]; then
   read -r -s -p "Neo4j password for user '${NEO4J_USER}': " NEO4J_PASSWORD
   echo
 fi
 
-# MEMGRAPH_PASSWORD defaults to MEMGRAPH_USER above; only prompt if user explicitly cleared it.
-if [[ -z "${MEMGRAPH_PASSWORD:-}" && -n "${MEMGRAPH_USER}" ]]; then
+# MEMGRAPH_PASSWORD defaults to MEMGRAPH_USER above; only prompt if user explicitly cleared it
+# and Memgraph is enabled.
+if [[ "${RUN_MEMGRAPH}" == "1" && -z "${MEMGRAPH_PASSWORD:-}" && -n "${MEMGRAPH_USER}" ]]; then
   read -r -s -p "Memgraph password for user '${MEMGRAPH_USER}': " MEMGRAPH_PASSWORD
   echo
 fi
@@ -70,21 +82,25 @@ export MEMGRAPH_PASSWORD
 export NEO4J_USER
 export MEMGRAPH_USER
 
-echo "==> Verifying Neo4j login"
-cypher-shell -a bolt://127.0.0.1:7687 -u "$NEO4J_USER" -p "$NEO4J_PASSWORD" -d neo4j "RETURN 1 AS ok" >/dev/null
+if [[ "${RUN_NEO4J}" == "1" ]]; then
+  echo "==> Verifying Neo4j login"
+  cypher-shell -a bolt://127.0.0.1:7687 -u "$NEO4J_USER" -p "$NEO4J_PASSWORD" -d neo4j "RETURN 1 AS ok" >/dev/null
 
-echo "==> Clearing Neo4j database (neo4j)"
-# Drop known constraints used in earlier experiments (best-effort)
-cypher-shell -a bolt://127.0.0.1:7687 -u "$NEO4J_USER" -p "$NEO4J_PASSWORD" -d neo4j \
-  "DROP CONSTRAINT movie_title IF EXISTS; DROP CONSTRAINT person_name IF EXISTS;" >/dev/null
-# Wipe all data
-cypher-shell -a bolt://127.0.0.1:7687 -u "$NEO4J_USER" -p "$NEO4J_PASSWORD" -d neo4j \
-  "MATCH (n) DETACH DELETE n;" >/dev/null
+  echo "==> Clearing Neo4j database (neo4j)"
+  # Drop known constraints used in earlier experiments (best-effort)
+  cypher-shell -a bolt://127.0.0.1:7687 -u "$NEO4J_USER" -p "$NEO4J_PASSWORD" -d neo4j \
+    "DROP CONSTRAINT movie_title IF EXISTS; DROP CONSTRAINT person_name IF EXISTS;" >/dev/null
+  # Wipe all data
+  cypher-shell -a bolt://127.0.0.1:7687 -u "$NEO4J_USER" -p "$NEO4J_PASSWORD" -d neo4j \
+    "MATCH (n) DETACH DELETE n;" >/dev/null
+fi
 
-echo "==> Clearing FalkorDB graph (falkor)"
-if ! command -v redis-cli >/dev/null 2>&1; then
-  echo "redis-cli not found (required to wipe FalkorDB graph)." >&2
-  exit 1
+if [[ "${RUN_FALKOR}" == "1" ]]; then
+  echo "==> Clearing FalkorDB graph (falkor)"
+  if ! command -v redis-cli >/dev/null 2>&1; then
+    echo "redis-cli not found (required to wipe FalkorDB graph)." >&2
+    exit 1
+  fi
 fi
 
 # Extract host/port from FALKOR_ENDPOINT (default falkor://127.0.0.1:6379)
@@ -97,29 +113,55 @@ else
   FALKOR_PORT=6379
 fi
 
-# Ignore failures if the graph doesn't exist yet
-redis-cli -h "$FALKOR_HOST" -p "$FALKOR_PORT" GRAPH.DELETE falkor >/dev/null 2>&1 || true
+# Delete the entire FalkorDB graph key; ignore failures if the graph doesn't exist yet
+if [[ "${RUN_FALKOR}" == "1" ]]; then
+  redis-cli -h "$FALKOR_HOST" -p "$FALKOR_PORT" GRAPH.DELETE falkor >/dev/null 2>&1 || true
+  # Also ensure no leftover non-graph key with the same name remains
+  redis-cli -h "$FALKOR_HOST" -p "$FALKOR_PORT" DEL falkor >/dev/null 2>&1 || true
+fi
 
 # NOTE: Newer Neo4j cypher-shell versions send `CALL db.ping()` on connect.
 # Memgraph doesn't implement that procedure, so we avoid using cypher-shell against Memgraph.
 # Instead, we clear Memgraph via the benchmark client during load (see --force below).
 
-echo "==> Loading small dataset"
-cargo run --release --bin benchmark -- load --vendor falkor --size small --endpoint "$FALKOR_ENDPOINT" -b "$BATCH_SIZE"
-#cargo run --release --bin benchmark -- load --vendor neo4j --size small --endpoint "$NEO4J_ENDPOINT" -b "$BATCH_SIZE"
-# --force clears the external Memgraph instance before loading
-cargo run --release --bin benchmark -- load --vendor memgraph --size small --endpoint "$MEMGRAPH_ENDPOINT" -b "$BATCH_SIZE" --force
+if [[ "${RUN_FALKOR}" == "1" ]]; then
+  echo "==> Loading small dataset into FalkorDB"
+  cargo run --release --bin benchmark -- load --vendor falkor --size small --endpoint "$FALKOR_ENDPOINT" -b "$BATCH_SIZE"
+fi
+if [[ "${RUN_NEO4J}" == "1" ]]; then
+  echo "==> Loading small dataset into Neo4j"
+  cargo run --release --bin benchmark -- load --vendor neo4j --size small --endpoint "$NEO4J_ENDPOINT" -b "$BATCH_SIZE"
+fi
+if [[ "${RUN_MEMGRAPH}" == "1" ]]; then
+  echo "==> Loading small dataset into Memgraph"
+  # --force clears the external Memgraph instance before loading
+  cargo run --release --bin benchmark -- load --vendor memgraph --size small --endpoint "$MEMGRAPH_ENDPOINT" -b "$BATCH_SIZE" --force
+fi
 
-echo "==> Generating queries file: ${QUERIES_FILE} (dataset=small, count=${QUERIES_COUNT}, write_ratio=${WRITE_RATIO})"
-# Always regenerate so the file contains the latest query catalog + stable q_id fields.
-cargo run --release --bin benchmark -- generate-queries --dataset small --size "$QUERIES_COUNT" --name "$QUERIES_FILE" --write-ratio "$WRITE_RATIO"
+echo "==> Generating vendor-specific query files (base=${QUERIES_FILE_BASE}, dataset=small, count=${QUERIES_COUNT}, write_ratio=${WRITE_RATIO})"
+# Always regenerate so each vendor gets the latest query catalog + stable q_id fields.
+if [[ "${RUN_FALKOR}" == "1" ]]; then
+  cargo run --release --bin benchmark -- generate-queries --vendor falkor   --dataset small --size "$QUERIES_COUNT" --name "$FALKOR_QUERIES_FILE"   --write-ratio "$WRITE_RATIO"
+fi
+if [[ "${RUN_NEO4J}" == "1" ]]; then
+  cargo run --release --bin benchmark -- generate-queries --vendor neo4j   --dataset small --size "$QUERIES_COUNT" --name "$NEO4J_QUERIES_FILE"   --write-ratio "$WRITE_RATIO"
+fi
+if [[ "${RUN_MEMGRAPH}" == "1" ]]; then
+  cargo run --release --bin benchmark -- generate-queries --vendor memgraph --dataset small --size "$QUERIES_COUNT" --name "$MEMGRAPH_QUERIES_FILE" --write-ratio "$WRITE_RATIO"
+fi
 
 echo "==> Running ${QUERIES_FILE} workload (parallel=${PARALLEL}, mps=${MPS})"
 echo "==> Writing detailed run results to: ${RESULTS_DIR}/<vendor>/"
 
-cargo run --release --bin benchmark -- run --vendor falkor --name "$QUERIES_FILE" --parallel "$PARALLEL" --mps "$MPS" --endpoint "$FALKOR_ENDPOINT" --results-dir "$RESULTS_DIR"
-#cargo run --release --bin benchmark -- run --vendor neo4j --name "$QUERIES_FILE" --parallel "$PARALLEL" --mps "$MPS" --endpoint "$NEO4J_ENDPOINT" --results-dir "$RESULTS_DIR"
-cargo run --release --bin benchmark -- run --vendor memgraph --name "$QUERIES_FILE" --parallel "$PARALLEL" --mps "$MPS" --endpoint "$MEMGRAPH_ENDPOINT" --results-dir "$RESULTS_DIR"
+if [[ "${RUN_FALKOR}" == "1" ]]; then
+  cargo run --release --bin benchmark -- run --vendor falkor   --name "$FALKOR_QUERIES_FILE"   --parallel "$PARALLEL" --mps "$MPS" --endpoint "$FALKOR_ENDPOINT"   --results-dir "$RESULTS_DIR"
+fi
+if [[ "${RUN_NEO4J}" == "1" ]]; then
+  cargo run --release --bin benchmark -- run --vendor neo4j   --name "$NEO4J_QUERIES_FILE"   --parallel "$PARALLEL" --mps "$MPS" --endpoint "$NEO4J_ENDPOINT"   --results-dir "$RESULTS_DIR"
+fi
+if [[ "${RUN_MEMGRAPH}" == "1" ]]; then
+  cargo run --release --bin benchmark -- run --vendor memgraph --name "$MEMGRAPH_QUERIES_FILE" --parallel "$PARALLEL" --mps "$MPS" --endpoint "$MEMGRAPH_ENDPOINT" --results-dir "$RESULTS_DIR"
+fi
 
 echo "==> Aggregating UI summaries to ui/public/summaries"
 cargo run --release --bin benchmark -- aggregate --results-dir "$RESULTS_DIR"

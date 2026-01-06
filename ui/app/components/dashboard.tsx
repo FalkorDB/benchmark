@@ -439,6 +439,27 @@ export default function DashBoard({
     actualMessagesPerSecond: item.result["actual-messages-per-second"],
   }));
 
+  // Telemetry breakdown for FalkorDB (single-workload per-query view)
+  const telemetryBreakdown = useMemo(() => {
+    const selectedQuery = selectedOptions.Queries?.[0];
+    if (!selectedQuery || !data?.runs?.length) return null;
+
+    // Find FalkorDB run if present
+    const falkorRun = data.runs.find(
+      (r) => r.vendor?.toLowerCase() === "falkordb" || r.vendor?.toLowerCase() === "falkor"
+    );
+    const tb = falkorRun?.result?.telemetry_for_type?.[selectedQuery];
+    if (!tb) return null;
+
+    return {
+      vendor: falkorRun.vendor,
+      query: selectedQuery,
+      waitMs: tb["wait-ms"],
+      execMs: tb["exec-ms"],
+      reportMs: tb["report-ms"],
+    };
+  }, [data, selectedOptions.Queries]);
+
   const maxThroughput = Math.max(
     ...throughputData.map((item) => item.actualMessagesPerSecond)
   );
@@ -493,8 +514,28 @@ export default function DashBoard({
   }, [data]);
 
   const parseMemory = (memory: string): number => {
-    const match = memory.match(/([\d.]+)/);
-    return match ? parseFloat(match[1]) : 0;
+    if (!memory) return 0;
+
+    // Parse values like "1.37GB", "800MB", "512kb" and normalize to MB.
+    const match = memory.match(/([\d.]+)\s*([a-zA-Z]+)?/);
+    if (!match) return 0;
+
+    const value = parseFloat(match[1]);
+    if (!Number.isFinite(value)) return 0;
+
+    const unit = (match[2] || "").toLowerCase();
+
+    if (unit.startsWith("g")) {
+      // GB -> MB
+      return value * 1024;
+    }
+    if (unit.startsWith("k")) {
+      // KB -> MB
+      return value / 1024;
+    }
+
+    // Treat everything else ("m", "mb", unknown/empty) as MB
+    return value;
   };
 
   const formatBytes = (bytes?: number) => {
@@ -773,6 +814,23 @@ export default function DashBoard({
                   </span>{" "}
                   Better performance, lower overall costs
                 </p>
+
+                {telemetryBreakdown && (
+                  <p className="text-xs text-gray-600 text-center font-fira pb-1">
+                    FalkorDB telemetry ({telemetryBreakdown.query}): wait {" "}
+                    <span className="font-semibold text-gray-800">
+                      {telemetryBreakdown.waitMs.toFixed(1)} ms
+                    </span>
+                    , exec {" "}
+                    <span className="font-semibold text-gray-800">
+                      {telemetryBreakdown.execMs.toFixed(1)} ms
+                    </span>
+                    , report {" "}
+                    <span className="font-semibold text-gray-800">
+                      {telemetryBreakdown.reportMs.toFixed(1)} ms
+                    </span>
+                  </p>
+                )}
 
                 {Object.keys(baseDatasetByVendor).length > 0 && (
                   <div className="text-sm text-gray-600 text-center font-fira pb-2">

@@ -146,8 +146,8 @@ const VerticalBarChart: React.FC<VerticalBarChartProps> = ({
         },
       },
       datalabels: {
-        display: chartId === "single" ? "auto" : true,
-        anchor: "end" as const,
+        display: chartId === "single" ? true : true,
+         anchor: "end" as const,
         // Avoid cases where the multi-line "max" label (e.g. `123ms\n3x`) renders into the legend
         // area when the user zooms the page.
         //

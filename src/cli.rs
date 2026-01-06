@@ -59,6 +59,8 @@ pub enum Commands {
     )]
     GenerateQueries {
         #[arg(short, long, value_enum)]
+        vendor: Vendor,
+        #[arg(short, long, value_enum)]
         size: usize,
         #[arg(short, long, value_enum)]
         dataset: crate::scenario::Size,
@@ -146,6 +148,28 @@ pub enum Commands {
             help = "directory to write UI summary JSON files"
         )]
         out_dir: String,
+    },
+
+    #[command(
+        about = "Run each generated Memgraph query type once against a Memgraph endpoint to detect failing queries"
+    )]
+    DebugMemgraphQueries {
+        #[arg(short, long, value_enum)]
+        dataset: crate::scenario::Size,
+        #[arg(
+            short,
+            long,
+            help = "endpoint for external Memgraph (e.g., bolt://127.0.0.1:7687)",
+            required = true,
+        )]
+        endpoint: String,
+        #[arg(
+            short,
+            long,
+            default_value = "small-readonly-memgraph",
+            help = "name of json file to load the generated Memgraph queries from",
+        )]
+        name: String,
     },
 }
 

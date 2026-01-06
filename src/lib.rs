@@ -303,6 +303,27 @@ lazy_static! {
     )
     .unwrap();
 
+    // Telemetry-based breakdown of FalkorDB query timings per query type (read and write).
+    // Values are averages in microseconds, aggregated from the FalkorDB telemetry Redis stream.
+    pub static ref FALKOR_TELEMETRY_WAIT_US: IntGaugeVec = register_int_gauge_vec!(
+        "falkordb_telemetry_wait_us",
+        "Average wait duration (queue time) per query type, in microseconds, from telemetry",
+        &["query"]
+    )
+    .unwrap();
+    pub static ref FALKOR_TELEMETRY_EXEC_US: IntGaugeVec = register_int_gauge_vec!(
+        "falkordb_telemetry_exec_us",
+        "Average execution duration per query type, in microseconds, from telemetry",
+        &["query"]
+    )
+    .unwrap();
+    pub static ref FALKOR_TELEMETRY_REPORT_US: IntGaugeVec = register_int_gauge_vec!(
+        "falkordb_telemetry_report_us",
+        "Average report duration per query type, in microseconds, from telemetry",
+        &["query"]
+    )
+    .unwrap();
+
     pub static ref NEO4J_QUERY_LATENCY_PCT_US: IntGaugeVec = register_int_gauge_vec!(
         "neo4j_query_latency_pct_us",
         "Latency percentile per query in microseconds (computed in-process)",

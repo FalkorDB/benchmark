@@ -6,7 +6,7 @@ use benchmark::error::BenchmarkResult;
 use benchmark::falkor::{Falkor, Started, Stopped};
 use benchmark::memgraph_client::MemgraphClient;
 use benchmark::neo4j_client::Neo4jClient;
-use benchmark::queries_repository::{PreparedQuery, QueryCatalogEntry};
+use benchmark::queries_repository::{Flavour, PreparedQuery, QueryCatalogEntry};
 use benchmark::scenario::Name::Users;
 use benchmark::scenario::{Size, Spec, Vendor};
 use benchmark::scheduler::Msg;
@@ -29,6 +29,7 @@ use clap_complete::{generate, Generator};
 use futures::StreamExt;
 use histogram::Histogram;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -41,7 +42,7 @@ use tokio::sync::mpsc::Receiver;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
-use tracing::{error, info, instrument, trace};
+use tracing::{error, info, instrument};
 use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::{fmt, EnvFilter};
 mod aggregator;
@@ -266,18 +267,28 @@ async fn main() -> BenchmarkResult<()> {
         }
 
         Commands::GenerateQueries {
+            vendor,
             size,
             dataset,
             name,
             write_ratio,
         } => {
-            prepare_queries(dataset, size, name, write_ratio).await?;
+            prepare_queries(vendor, dataset, size, name, write_ratio).await?;
         }
         Commands::Aggregate {
             results_dir,
             out_dir,
         } => {
             aggregator::aggregate_results(&results_dir, &out_dir)?;
+        }
+
+        Commands::DebugMemgraphQueries {
+            dataset,
+            endpoint,
+            name,
+        } => {
+            // Lightweight debug helper: run each Memgraph query type once and report failures.
+            debug_memgraph_queries(dataset, endpoint, name).await?;
         }
     }
     Ok(())
@@ -639,6 +650,32 @@ async fn run_falkor(
     let queries_file = file_name.clone();
     let (queries_metadata, queries) = read_queries(file_name).await?;
 
+    // Build a normalised-query -> q_name mapping for all queries (reads and writes).
+    // We rely on the "query.text" field, which is the Cypher without the leading
+    // CYPHER parameter prefix and is stable across random parameter values.
+    let mut telemetry_query_map: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for q in &queries {
+        let norm = q
+            .query
+            .text
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        telemetry_query_map.entry(norm).or_insert_with(|| q.q_name.clone());
+    }
+
+    // Start telemetry collection in the background (best-effort).
+    // Use the same Redis endpoint Falkor is talking to.
+    {
+        let redis_url = benchmark::falkor::falkor_endpoint_to_redis_url(endpoint.as_ref());
+        let _telemetry_handle = benchmark::falkor::telemetry_collector::spawn_falkor_telemetry_collector(
+            redis_url,
+            telemetry_query_map,
+        );
+        // We intentionally don't await this handle; it should live for the duration of the run.
+    }
+
     // if external endpoint, skip dump operations
     if endpoint.is_none() {
         // if dump not present, initialize the database
@@ -663,6 +700,10 @@ async fn run_falkor(
 
     // Best-effort graph memory reporting (query-interface metric).
     falkor.collect_graph_memory_usage_metrics().await;
+
+    // Before running the workload, ensure the benchmark-critical indexes are present
+    // and visible to FalkorDB so we avoid long-running queries due to missing indexes.
+    falkor.wait_for_pokec_indexes_ready().await?;
 
     info!(
         "graph has {} nodes and {} relations",
@@ -842,12 +883,21 @@ async fn init_falkor(
 
     let mut falkor_client = falkor.client().await?;
 
-    // Create index with graceful handling of "already exists" error
+    // Create indexes with graceful handling of "already exists" errors
     falkor_client
         .create_index_if_not_exists(
             "main",
-            "create_index",
+            "create_index_user_id",
             "CREATE INDEX FOR (u:User) ON (u.id)",
+        )
+        .await?;
+
+    // Index on age property to accelerate WHERE n.age >= ... predicates.
+    falkor_client
+        .create_index_if_not_exists(
+            "main",
+            "create_index_user_age",
+            "CREATE INDEX FOR (u:User) ON (u.age)",
         )
         .await?;
 
@@ -1074,11 +1124,27 @@ async fn init_neo4j(
     }
     let mut histogram = Histogram::new(7, 64)?;
 
-    let mut index_stream = spec.init_index_iterator().await?;
-    info!("importing indexes");
-    client
-        .execute_query_stream(&mut index_stream, &mut histogram)
-        .await?;
+    // The legacy `memgraph.cypher` index file uses the old `CREATE INDEX ON :Label(prop)`
+    // syntax, which is rejected by modern Neo4j versions (they expect
+    // `CREATE INDEX <name> IF NOT EXISTS FOR (n:Label) ON (n.prop)`).
+    // Instead of replaying that file, we now create the required indexes explicitly
+    // when talking to a local Neo4j instance. For external endpoints we assume
+    // indexes are managed outside the benchmark.
+    if endpoint.is_none() {
+        let mut idx_hist = Histogram::new(7, 64)?;
+
+        let create_id_index = "CREATE INDEX pokec_user_id IF NOT EXISTS FOR (u:User) ON (u.id)".to_string();
+        let create_age_index = "CREATE INDEX pokec_age IF NOT EXISTS FOR (u:User) ON (u.age)".to_string();
+
+        client
+            .execute_query_stream_batched(
+                futures::stream::iter(vec![Ok(create_id_index), Ok(create_age_index)]),
+                1,
+                &mut idx_hist,
+            )
+            .await?;
+    }
+
     let data_stream = spec.init_data_iterator().await?;
     info!("importing data (fast UNWIND) in batches of {}", batch_size);
     let start = Instant::now();
@@ -1126,14 +1192,27 @@ struct PrepareQueriesMetadata {
     catalog: Vec<QueryCatalogEntry>,
 }
 async fn prepare_queries(
+    vendor: Vendor,
     dataset: Size,
     size: usize,
     file_name: String,
     write_ratio: f32,
 ) -> BenchmarkResult<()> {
     let start = Instant::now();
+
+    // Use dataset spec so vertex/edge ID ranges match the actual graph.
+    let spec = Spec::new(Users, dataset, vendor);
+    let vertices = spec.vertices as i32;
+    let edges = spec.edges as i32;
+
+    let flavour = match vendor {
+        Vendor::Falkor => Flavour::FalkorDB,
+        Vendor::Neo4j => Flavour::Neo4j,
+        Vendor::Memgraph => Flavour::Memgraph,
+    };
+
     let queries_repository =
-        benchmark::queries_repository::UsersQueriesRepository::new(9998, 121716);
+        benchmark::queries_repository::UsersQueriesRepository::new(vertices, edges, flavour);
     let catalog = queries_repository.catalog();
     let metadata = PrepareQueriesMetadata {
         size,
@@ -1329,6 +1408,95 @@ async fn run_memgraph(
     Ok(())
 }
 
+async fn debug_memgraph_queries(
+    dataset: Size,
+    endpoint: String,
+    file_name: String,
+) -> BenchmarkResult<()> {
+    info!("Debugging Memgraph queries from file '{}'", file_name);
+
+    // Read all prepared queries from the given file.
+    let (metadata, queries) = read_queries(file_name).await?;
+
+    // Build a single Memgraph client against the provided endpoint.
+    let (uri, user, password, _database) = parse_memgraph_endpoint(&endpoint)?;
+    let mut client = MemgraphClient::new(uri, user, password).await?;
+    info!(
+        "Debug Memgraph client connected; dataset: {:?}, unique query types: {}",
+        dataset,
+        metadata.catalog.len()
+    );
+
+    // Pick exactly one sample query per q_name.
+    let mut seen = HashSet::new();
+    let mut samples: Vec<PreparedQuery> = Vec::new();
+    for q in queries {
+        if seen.insert(q.q_name.clone()) {
+            samples.push(q);
+        }
+    }
+
+    info!(
+        "Testing {} distinct query names against Memgraph",
+        samples.len()
+    );
+
+    let simulate: Option<usize> = None;
+    let mut failures = 0usize;
+
+    for pq in samples {
+        // Capture the fields we want to log *before* moving `pq` into the message.
+        let q_id = pq.q_id;
+        let q_name = pq.q_name.clone();
+
+        let msg = Msg {
+            start_time: Instant::now(),
+            offset: 0,
+            payload: pq,
+        };
+
+        info!(
+            "[Memgraph debug] Executing query id={} name='{}'",
+            q_id,
+            q_name
+        );
+
+        let start = Instant::now();
+        match client
+            .execute_prepared_query("debug", &msg, &simulate)
+            .await
+        {
+            Ok(()) => {
+                info!(
+                    "[Memgraph debug] OK: id={} name='{}' in {:?}",
+                    q_id,
+                    q_name,
+                    start.elapsed()
+                );
+            }
+            Err(e) => {
+                failures += 1;
+                error!(
+                    "[Memgraph debug] FAIL: id={} name='{}' error={:?}",
+                    q_id,
+                    q_name,
+                    e.to_string()
+                );
+            }
+        }
+    }
+
+    if failures > 0 {
+        Err(OtherError(format!(
+            "{} Memgraph query type(s) failed; see logs above for details",
+            failures
+        )))
+    } else {
+        info!("All tested Memgraph query types succeeded");
+        Ok(())
+    }
+}
+
 async fn spawn_memgraph_worker(
     client: MemgraphClient,
     worker_id: usize,
@@ -1511,6 +1679,23 @@ async fn init_memgraph(
     client
         .execute_query_stream(&mut index_stream, &mut histogram)
         .await?;
+
+    // Ensure index on User(age) exists to accelerate age-filtered queries.
+    {
+        // Memgraph uses the `CREATE INDEX ON :Label(property)` syntax (without `FOR`).
+        // The previous Neo4j-style form `CREATE INDEX FOR (u:User) ON (u.age)`
+        // caused a syntax error: "no viable alternative at input 'CREATEINDEXFOR'".
+        let create_age_index = "CREATE INDEX ON :User(age);".to_string();
+        let mut idx_hist = Histogram::new(7, 64)?;
+        client
+            .execute_query_stream_batched(
+                futures::stream::iter(vec![Ok(create_age_index)]),
+                1,
+                &mut idx_hist,
+            )
+            .await?;
+    }
+
     let data_stream = spec.init_data_iterator().await?;
     info!("importing data (fast UNWIND) in batches of {}", batch_size);
     let start = Instant::now();

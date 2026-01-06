@@ -26,3 +26,7 @@ grafana-datasources.yml
 prometheus.yml
 .DS_Store
 
+# benchmark output
+Results-*/
+csv_output/
+

@@ -165,22 +165,33 @@ impl Falkor<Started> {
     }
 
     pub async fn graph_size(&self) -> BenchmarkResult<(u64, u64)> {
+        // Use FalkorDB's metadata procedure instead of full graph scans.
+        // This is dramatically faster on large graphs and avoids query
+        // timeouts that can occur with `MATCH (n) RETURN count(n)` on
+        // multi-million-node datasets.
         let mut graph = self.client().await?.graph;
         let mut falkor_result = graph
-            .query("MATCH (n) RETURN count(n) as count")
-            .with_timeout(5000)
+            .query("CALL db.meta.stats()")
+            // Allow up to 30 seconds for metadata retrieval on busy servers.
+            .with_timeout(30_000)
             .execute()
             .await?;
-        let node_count = self.extract_u64_value(&mut falkor_result)?;
-        let mut falkor_result = graph
-            .query("MATCH ()-->() RETURN count(*) AS relationshipCount")
-            .with_timeout(5000)
-            .execute()
-            .await?;
-        let relation_count = self.extract_u64_value(&mut falkor_result)?;
-        Ok((node_count, relation_count))
+
+        // According to FalkorDB docs, db.meta.stats() yields the columns:
+        //   labels, relTypes, relCount, nodeCount, labelCount, relTypeCount, propertyKeyCount
+        // in that order.
+        match falkor_result.data.next().as_deref() {
+            Some([_, _, I64(rel_count), I64(node_count), ..]) => {
+                Ok((*node_count as u64, *rel_count as u64))
+            }
+            other => Err(OtherError(format!(
+                "Unexpected response from CALL db.meta.stats(): {:?}",
+                other
+            ))),
+        }
     }
 
+    #[allow(dead_code)]
     fn extract_u64_value(
         &self,
         falkor_result: &mut QueryResult<LazyResultSet>,
@@ -191,6 +202,84 @@ impl Falkor<Started> {
                 "Value not found or not of expected type".to_string(),
             )),
         }
+    }
+
+    /// Best-effort check that the Pokec benchmark indexes exist before
+    /// running workload queries.
+    ///
+    /// This looks for indexes on :User(id) and :User(age) via `CALL db.indexes()`.
+    /// If they are not visible after several attempts, we fail fast so the user
+    /// gets a clear error instead of timeouts during the run.
+    pub async fn wait_for_pokec_indexes_ready(&self) -> BenchmarkResult<()> {
+        const MAX_ATTEMPTS: u32 = 12;
+        const DELAY_SECS: u64 = 5;
+
+        let mut client = self.client().await?;
+
+        for attempt in 1..=MAX_ATTEMPTS {
+            match Self::check_pokec_indexes(&mut client).await {
+                Ok(true) => {
+                    info!(
+                        "FalkorDB Pokec indexes (:User.id, :User.age) are ready after {} attempt(s)",
+                        attempt
+                    );
+                    return Ok(());
+                }
+                Ok(false) => {
+                    info!(
+                        "FalkorDB Pokec indexes not ready yet (attempt {}/{})",
+                        attempt, MAX_ATTEMPTS
+                    );
+                }
+                Err(e) => {
+                    // Log and keep retrying; transient errors are expected while
+                    // FalkorDB is still coming up.
+                    info!(
+                        "Error while checking FalkorDB indexes (attempt {}/{}): {}",
+                        attempt, MAX_ATTEMPTS, e
+                    );
+                }
+            }
+
+            tokio::time::sleep(Duration::from_secs(DELAY_SECS)).await;
+        }
+
+        Err(OtherError(
+            "Timed out waiting for FalkorDB Pokec indexes (:User.id, :User.age) to become ready"
+                .to_string(),
+        ))
+    }
+
+    async fn check_pokec_indexes(
+        client: &mut FalkorBenchmarkClient,
+    ) -> BenchmarkResult<bool> {
+        // `CALL db.indexes()` returns metadata about all indexes.
+        // We do a best-effort scan of the rows looking for :User(id) and :User(age).
+        let mut result = client
+            .graph
+            .query("CALL db.indexes()")
+            .with_timeout(30_000)
+            .execute()
+            .await?;
+
+        let mut have_user_id = false;
+        let mut have_user_age = false;
+
+        while let Some(row) = result.data.next() {
+            let row_str = format!("{:?}", row);
+            if !have_user_id && row_str.contains("User") && row_str.contains("id") {
+                have_user_id = true;
+            }
+            if !have_user_age && row_str.contains("User") && row_str.contains("age") {
+                have_user_age = true;
+            }
+
+            if have_user_id && have_user_age {
+                break;
+            }
+        }
+
+        Ok(have_user_id && have_user_age)
     }
 }
 
@@ -259,7 +348,7 @@ impl<U> Falkor<U> {
     }
 }
 
-fn falkor_endpoint_to_redis_url(endpoint: Option<&String>) -> String {
+pub fn falkor_endpoint_to_redis_url(endpoint: Option<&String>) -> String {
     let ep = endpoint
         .map(|s| s.as_str())
         .unwrap_or("falkor://127.0.0.1:6379");
@@ -551,11 +640,16 @@ impl FalkorBenchmarkClient {
 
         let worker_id = worker_id.as_ref();
         let query = cypher.as_str();
+
+        // Use longer FalkorDB per-query timeouts for large datasets.
+        // This mirrors the extended timeouts used in other Falkor paths
+        // (e.g. index creation, batch execution, graph_size).
         let falkor_result = match q_type {
-            QueryType::Read => self.graph.ro_query(query).execute(),
-            QueryType::Write => self.graph.query(query).execute(),
+            QueryType::Read => self.graph.ro_query(query).with_timeout(60_000).execute(),
+            QueryType::Write => self.graph.query(query).with_timeout(60_000).execute(),
         };
 
+        // Tokio-level guard: slightly above the FalkorDB per-query timeout.
         let timeout = Duration::from_secs(60);
         let offset = msg.compute_offset_ms();
 
@@ -592,8 +686,13 @@ impl FalkorBenchmarkClient {
             .with_label_values(&["falkor", spawn_id, "", query_name, "", ""])
             .inc();
 
-        let falkor_result = self.graph.query(query).with_timeout(5000).execute();
-        let timeout = Duration::from_secs(5);
+        // Increase underlying FalkorDB timeout to 30 seconds for large datasets
+        let falkor_result = self
+            .graph
+            .query(query)
+            .with_timeout(30_000)
+            .execute();
+        let timeout = Duration::from_secs(30);
         let falkor_result = tokio::time::timeout(timeout, falkor_result).await;
         Self::read_reply(spawn_id, query_name, query, falkor_result)
     }
@@ -640,8 +739,13 @@ impl FalkorBenchmarkClient {
             .with_label_values(&["falkor", spawn_id, "", query_name, "", ""])
             .inc();
 
-        let falkor_result = self.graph.query(query).with_timeout(5000).execute();
-        let timeout = Duration::from_secs(5);
+        // Increase index creation timeout to 30 seconds for large datasets
+        let falkor_result = self
+            .graph
+            .query(query)
+            .with_timeout(30_000)
+            .execute();
+        let timeout = Duration::from_secs(30);
         let falkor_result = tokio::time::timeout(timeout, falkor_result).await;
 
         match falkor_result {

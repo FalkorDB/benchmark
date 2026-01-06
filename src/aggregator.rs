@@ -7,6 +7,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Deserialize, Clone)]
+#[allow(dead_code)]
 struct RunResultsMeta {
     vendor: String,
     dataset: String,
@@ -61,6 +62,16 @@ struct UiSpawnStats {
 }
 
 #[derive(Debug, Serialize)]
+struct UiTelemetryBreakdown {
+    #[serde(rename = "wait-ms")]
+    wait_ms: f64,
+    #[serde(rename = "exec-ms")]
+    exec_ms: f64,
+    #[serde(rename = "report-ms")]
+    report_ms: f64,
+}
+
+#[derive(Debug, Serialize)]
 struct UiResult {
     #[serde(rename = "deadline-offset")]
     deadline_offset: String,
@@ -89,11 +100,15 @@ struct UiResult {
     #[serde(rename = "spawn-stats")]
     spawn_stats: UiSpawnStats,
     // "single"-workload style latency percentiles (P10..P99) per query type.
-    #[serde(
-        rename = "histogram_for_type",
+    #[serde(rename = "histogram_for_type",
         skip_serializing_if = "BTreeMap::is_empty"
     )]
     histogram_for_type: BTreeMap<String, Vec<f64>>,
+    #[serde(
+        rename = "telemetry_for_type",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    telemetry_for_type: BTreeMap<String, UiTelemetryBreakdown>,
 }
 
 #[derive(Debug, Serialize)]
@@ -356,6 +371,7 @@ fn build_ui_run(v: &VendorArtifacts) -> BenchmarkResult<UiRun> {
     let spawn_stats = compute_spawn_stats(&operations.by_spawn);
 
     let histogram_for_type = metrics.query_latency_histogram_ms(v.vendor);
+    let telemetry_for_type = metrics.telemetry_for_type(v.vendor);
     Ok(UiRun {
         vendor: vendor_id(v.vendor),
         read_write_ratio: 0.0,
@@ -383,6 +399,7 @@ fn build_ui_run(v: &VendorArtifacts) -> BenchmarkResult<UiRun> {
             operations,
             spawn_stats,
             histogram_for_type,
+            telemetry_for_type,
         },
     })
 }
@@ -554,6 +571,75 @@ impl MetricsIndex {
             if arr.iter().any(|v| *v > 0.0) {
                 out.insert(query, arr);
             }
+        }
+
+        out
+    }
+
+    /// Telemetry-based per-query breakdown (wait / exec / report) when available.
+    ///
+    /// For FalkorDB, this reads the gauges:
+    ///   - falkordb_telemetry_wait_us{query="..."}
+    ///   - falkordb_telemetry_exec_us{query="..."}
+    ///   - falkordb_telemetry_report_us{query="..."}
+    /// and converts them to milliseconds.
+    fn telemetry_for_type(
+        &self,
+        vendor: Vendor,
+    ) -> BTreeMap<String, UiTelemetryBreakdown> {
+        let (wait_metric, exec_metric, report_metric) = match vendor {
+            Vendor::Falkor => (
+                "falkordb_telemetry_wait_us",
+                "falkordb_telemetry_exec_us",
+                "falkordb_telemetry_report_us",
+            ),
+            _ => return BTreeMap::new(),
+        };
+
+        let waits = self
+            .samples
+            .get(wait_metric)
+            .cloned()
+            .unwrap_or_default();
+        let execs = self
+            .samples
+            .get(exec_metric)
+            .cloned()
+            .unwrap_or_default();
+        let reports = self
+            .samples
+            .get(report_metric)
+            .cloned()
+            .unwrap_or_default();
+
+        fn by_query(samples: Vec<(BTreeMap<String, String>, f64)>) -> BTreeMap<String, f64> {
+            let mut out = BTreeMap::new();
+            for (labels, v) in samples {
+                if let Some(q) = labels.get("query").cloned() {
+                    out.insert(q, v);
+                }
+            }
+            out
+        }
+
+        let waits = by_query(waits);
+        let execs = by_query(execs);
+        let reports = by_query(reports);
+
+        let mut out = BTreeMap::new();
+        for (q, wait_us) in &waits {
+            let exec_us = execs.get(q).copied().unwrap_or(0.0);
+            let report_us = reports.get(q).copied().unwrap_or(0.0);
+
+            let to_ms = |us: f64| (us / 1000.0).max(0.0);
+            out.insert(
+                q.clone(),
+                UiTelemetryBreakdown {
+                    wait_ms: to_ms(*wait_us),
+                    exec_ms: to_ms(exec_us),
+                    report_ms: to_ms(report_us),
+                },
+            );
         }
 
         out
