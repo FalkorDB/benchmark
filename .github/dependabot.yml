@@ -9,17 +9,18 @@ updates:
     directory: "/ui" # Location of package manifests
     schedule:
       interval: "weekly"
+    target-branch: "master"
 
   # This is mostly for actions/checkout
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
-    target-branch: "main"
+    target-branch: "master"
 
   # This is actually for cargo crates
   - package-ecosystem: "cargo"
     directory: "/"
     schedule:
       interval: "weekly"
-    target-branch: "main"
+    target-branch: "master"
