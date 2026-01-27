@@ -63,11 +63,11 @@ const VerticalBarChart: React.FC<VerticalBarChartProps> = ({
       },
       datalabels: {
         display: chartId === "single" ? "auto" : true,
-        anchor: "end" as const,
-        align: "top" as const,
+        anchor: "start" as const,
+        align: "start" as const,
         font: {
           weight: "bold" as const,
-          family: chartId !==  "single" ? "Fira Code" : undefined,
+          family: chartId !== "single" ? "Fira Code" : undefined,
           size: chartId !== "single" ? 18 : undefined,
         },
         color: "grey",
@@ -76,26 +76,32 @@ const VerticalBarChart: React.FC<VerticalBarChartProps> = ({
           if (chartId === "single") {
             return value > 0 ? `${Math.round(value)}` : "";
           }
+          
           const label = context.dataset.label;
           if (!label) return "";
-          let percentileKey: keyof typeof latencyStats;
-          if (label.includes("P50")) percentileKey = "p50";
-          else if (label.includes("P95")) percentileKey = "p95";
-          else if (label.includes("P99")) percentileKey = "p99";
-          else return ""; 
+          const percentileKey: keyof typeof latencyStats | undefined = 
+            label.includes("P50") ? "p50" :
+            label.includes("P95") ? "p95" :
+            label.includes("P99") ? "p99" :
+            undefined;
       
-          const maxValue = latencyStats[percentileKey].maxValue;
-          const ratio = latencyStats[percentileKey].ratio; 
-          const isMaxValue = Math.abs(value - maxValue) < 0.5;
-  
-          return isMaxValue ? `${Math.round(ratio)}x` : "";
+          if (!percentileKey) return ""; 
+      
+          const minValue = latencyStats[percentileKey]?.minValue;
+          const ratio = latencyStats[percentileKey]?.ratio;
+          if (minValue === undefined || ratio === undefined) return "";
+          const isMinValue = Math.abs(value - minValue) <= 1;
+      
+          return isMinValue ? `${Math.round(ratio)}x` : "";
         },
       },
+      
       
       
     },
     scales: {
       x: {
+        position: "top" as const,
         grid: { display: false },
         ticks: {
           font: {
@@ -113,6 +119,7 @@ const VerticalBarChart: React.FC<VerticalBarChartProps> = ({
       },
       y: {
         beginAtZero: true,
+        reverse: true,
         grid: { display: true },
         // eslint-disable-next-line
         ticks: {

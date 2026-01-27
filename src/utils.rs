@@ -30,7 +30,7 @@ pub async fn spawn_command(
         let args_str = args.join(" ");
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(FailedToSpawnProcessError(
-            io::Error::new(std::io::ErrorKind::Other, "Process failed"),
+            io::Error::other("Process failed"),
             format!(
                 "Failed to spawn Neo4j process, path: {} with args: {}, Error: {}",
                 command, args_str, stderr
