@@ -35,7 +35,7 @@ set -euo pipefail
 FALKOR_ENDPOINT=${FALKOR_ENDPOINT:-"falkor://127.0.0.1:6379"}
 NEO4J_ENDPOINT=${NEO4J_ENDPOINT:-"neo4j://127.0.0.1:7687"}
 NEO4J_USER=${NEO4J_USER:-"neo4j"}
-NEO4J_PASSWORD=${NEO4J_PASSWORD:-"six666six"}
+NEO4J_PASSWORD=${NEO4J_PASSWORD:-"neo4jpass"}
 MEMGRAPH_ENDPOINT=${MEMGRAPH_ENDPOINT:-"bolt://127.0.0.1:17687"}
 MEMGRAPH_USER=${MEMGRAPH_USER:-"memgraph"}
 MEMGRAPH_PASSWORD=${MEMGRAPH_PASSWORD:-"six666six"}
@@ -44,15 +44,15 @@ MEMGRAPH_CONTAINER_ID=${MEMGRAPH_CONTAINER_ID:-"da0b0f388531"}
 
 # Vendor toggles: set to 1 to enable, 0 to disable
 RUN_FALKOR=${RUN_FALKOR:-1}
-RUN_NEO4J=${RUN_NEO4J:-0}
+RUN_NEO4J=${RUN_NEO4J:-1}
 # Enable Memgraph by default for large benchmark comparisons (can be overridden via env).
-RUN_MEMGRAPH=${RUN_MEMGRAPH:-1}
+RUN_MEMGRAPH=${RUN_MEMGRAPH:-0}
 
 BATCH_SIZE=${BATCH_SIZE:-10000}
 PARALLEL=${PARALLEL:-10}
 MPS=${MPS:-200}
 QUERIES_FILE=${QUERIES_FILE:-"large-readonly"}
-QUERIES_COUNT=${QUERIES_COUNT:-50000}
+QUERIES_COUNT=${QUERIES_COUNT:-40000}
 WRITE_RATIO=${WRITE_RATIO:-0.0}
 
 # Derive per-vendor query file names so each engine can use vendor-optimized queries.
@@ -67,6 +67,19 @@ RESULTS_DIR=${RESULTS_DIR:-"Results-$(date +%y%m%d-%H:%M)"}
 
 # Maximum number of data rows per Memgraph LOAD CSV chunk (header row not counted).
 MEMGRAPH_CHUNK_SIZE=${MEMGRAPH_CHUNK_SIZE:-1000000}
+
+# Helper to run a single non-interactive mgconsole query inside the Memgraph container
+mgconsole_exec() {
+  local query="$1"
+  docker exec -i "$MEMGRAPH_CONTAINER_ID" mgconsole \
+    --host=127.0.0.1 \
+    --port=7687 \
+    --username="$MEMGRAPH_USER" \
+    --password="$MEMGRAPH_PASSWORD" \
+    --no_history \
+    --use_ssl=false \
+    <<<"$query"
+}
 
 # Split a CSV into multiple chunk files with the header repeated in each chunk.
 # Args: input_csv, output_prefix (e.g. /path/User.chunk), chunk_size
@@ -122,16 +135,35 @@ export NEO4J_USER
 export MEMGRAPH_USER
 
 if [[ "${RUN_NEO4J}" == "1" ]]; then
-  echo "==> Verifying Neo4j login"
-  cypher-shell -a bolt://127.0.0.1:7687 -u "$NEO4J_USER" -p "$NEO4J_PASSWORD" -d neo4j "RETURN 1 AS ok" >/dev/null
-
   echo "==> Clearing Neo4j database (neo4j)"
-  # Drop known constraints used in earlier experiments (best-effort)
-  cypher-shell -a bolt://127.0.0.1:7687 -u "$NEO4J_USER" -p "$NEO4J_PASSWORD" -d neo4j \
-    "DROP CONSTRAINT movie_title IF EXISTS; DROP CONSTRAINT person_name IF EXISTS;" >/dev/null
-  # Wipe all data
-  cypher-shell -a bolt://127.0.0.1:7687 -u "$NEO4J_USER" -p "$NEO4J_PASSWORD" -d neo4j \
-    "MATCH (n) DETACH DELETE n;" >/dev/null
+  echo "  - Stopping Neo4j to remove persistent data (large dataset requires fresh start)"
+  neo4j stop >/dev/null 2>&1
+  
+  echo "  - Removing Neo4j data directory"
+  NEO4J_DATA_DIR="/opt/homebrew/var/neo4j/data"
+  if [[ -d "$NEO4J_DATA_DIR" ]]; then
+    rm -rf "$NEO4J_DATA_DIR"/*
+  fi
+  
+  echo "  - Setting initial password for Neo4j"
+  neo4j-admin dbms set-initial-password "$NEO4J_PASSWORD" >/dev/null 2>&1
+  
+  echo "  - Starting Neo4j with clean database"
+  neo4j start >/dev/null 2>&1
+  
+  # Wait for Neo4j to be ready
+  echo "  - Waiting for Neo4j to be ready..."
+  for i in {1..60}; do
+    if cypher-shell -a bolt://127.0.0.1:7687 -u "$NEO4J_USER" -p "$NEO4J_PASSWORD" -d neo4j "RETURN 1 AS ok" >/dev/null 2>&1; then
+      echo "  - Neo4j is ready"
+      break
+    fi
+    if [[ $i -eq 60 ]]; then
+      echo "❌ Neo4j failed to start after 60 seconds" >&2
+      exit 1
+    fi
+    sleep 1
+  done
 fi
 
 if [[ "${RUN_FALKOR}" == "1" ]]; then
@@ -140,20 +172,18 @@ if [[ "${RUN_FALKOR}" == "1" ]]; then
     echo "redis-cli not found (required to delete FalkorDB graph)." >&2
     exit 1
   fi
-fi
 
-# Extract host/port from FALKOR_ENDPOINT (default falkor://127.0.0.1:6379)
-FALKOR_HOSTPORT="${FALKOR_ENDPOINT#falkor://}"
-if [[ "$FALKOR_HOSTPORT" == *:* ]]; then
-  FALKOR_HOST="${FALKOR_HOSTPORT%%:*}"
-  FALKOR_PORT="${FALKOR_HOSTPORT##*:}"
-else
-  FALKOR_HOST="$FALKOR_HOSTPORT"
-  FALKOR_PORT=6379
-fi
+  # Extract host/port from FALKOR_ENDPOINT (default falkor://127.0.0.1:6379)
+  FALKOR_HOSTPORT="${FALKOR_ENDPOINT#falkor://}"
+  if [[ "$FALKOR_HOSTPORT" == *:* ]]; then
+    FALKOR_HOST="${FALKOR_HOSTPORT%%:*}"
+    FALKOR_PORT="${FALKOR_HOSTPORT##*:}"
+  else
+    FALKOR_HOST="$FALKOR_HOSTPORT"
+    FALKOR_PORT=6379
+  fi
 
-# Delete the entire FalkorDB graph key; ignore failures if the graph doesn't exist yet
-if [[ "${RUN_FALKOR}" == "1" ]]; then
+  # Delete the entire FalkorDB graph key; ignore failures if the graph doesn't exist yet
   redis-cli -h "$FALKOR_HOST" -p "$FALKOR_PORT" GRAPH.DELETE falkor >/dev/null 2>&1 || true
   # Also ensure no leftover non-graph key with the same name remains
   redis-cli -h "$FALKOR_HOST" -p "$FALKOR_PORT" DEL falkor >/dev/null 2>&1 || true
@@ -163,33 +193,35 @@ fi
 # Memgraph doesn't implement that procedure, so we avoid using cypher-shell against Memgraph.
 # Instead, we clear and bulk-load Memgraph via mgconsole + LOAD CSV inside the Docker container.
 
-# Prepare CSVs for bulk loading into FalkorDB (large Pokec dataset)
-echo "==> Preparing CSVs for FalkorDB bulk loader (User and FRIEND)"
-CSV_DIR="cache/neo4j/users/large"
-PCH_FILE="$CSV_DIR/pokec_large.setup.cypher"
-if [[ ! -f "$PCH_FILE" ]]; then
-  echo "❌ Expected $PCH_FILE to exist; run the benchmark once to download/decompress the large dataset." >&2
-  exit 1
-fi
+# Prepare CSVs for bulk loading (needed by FalkorDB and Memgraph)
+if [[ "${RUN_FALKOR}" == "1" || "${RUN_MEMGRAPH}" == "1" ]]; then
+  echo "==> Preparing CSVs for bulk loader (User and FRIEND)"
+  CSV_DIR="cache/neo4j/users/large"
+  PCH_FILE="$CSV_DIR/pokec_large.setup.cypher"
+  if [[ ! -f "$PCH_FILE" ]]; then
+    echo "❌ Expected $PCH_FILE to exist; run the benchmark once to download/decompress the large dataset." >&2
+    exit 1
+  fi
 
-mkdir -p "$CSV_DIR"
+  mkdir -p "$CSV_DIR"
 
-# Generate User.csv (nodes) if missing
-if [[ ! -f "$CSV_DIR/User.csv" ]]; then
-  echo "  - Generating User.csv from pokec_large.setup.cypher"
-  (cd "$CSV_DIR" && {
-    echo 'id,completion_percentage,gender,age'
-    perl -ne 'if (/^CREATE \(:User \{(.*)\}\);$/) { my $s=$1; my %f; for my $p (split /,\s*/, $s) { my ($k,$v)=split /:\s*/, $p,2; $v =~ s/^"//; $v =~ s/"$//; $f{$k}=$v; } print "$f{id},$f{completion_percentage},$f{gender},$f{age}\n" if defined $f{id}; }' "$(basename "$PCH_FILE")"
-  } > User.csv)
-fi
+  # Generate User.csv (nodes) if missing
+  if [[ ! -f "$CSV_DIR/User.csv" ]]; then
+    echo "  - Generating User.csv from pokec_large.setup.cypher"
+    (cd "$CSV_DIR" && {
+      echo 'id,completion_percentage,gender,age'
+      perl -ne 'if (/^CREATE \(:User \{(.*)\}\);$/) { my $s=$1; my %f; for my $p (split /,\s*/, $s) { my ($k,$v)=split /:\s*/, $p,2; $v =~ s/^"//; $v =~ s/"$//; $f{$k}=$v; } print "$f{id},$f{completion_percentage},$f{gender},$f{age}\n" if defined $f{id}; }' "$(basename "$PCH_FILE")"
+    } > User.csv)
+  fi
 
-# Generate FRIEND.csv (edges) if missing
-if [[ ! -f "$CSV_DIR/FRIEND.csv" ]]; then
-  echo "  - Generating FRIEND.csv from pokec_large.setup.cypher"
-  (cd "$CSV_DIR" && {
-    echo 'src_id,dst_id'
-    perl -ne 'if (/^MATCH \(n:User {id: (\d+)}\), \(m:User {id: (\d+)}\) CREATE \(n\)-\[e: Friend\]->\(m\);$/) { print "$1,$2\n"; }' "$(basename "$PCH_FILE")"
-  } > FRIEND.csv)
+  # Generate FRIEND.csv (edges) if missing
+  if [[ ! -f "$CSV_DIR/FRIEND.csv" ]]; then
+    echo "  - Generating FRIEND.csv from pokec_large.setup.cypher"
+    (cd "$CSV_DIR" && {
+      echo 'src_id,dst_id'
+      perl -ne 'if (/^MATCH \(n:User {id: (\d+)}\), \(m:User {id: (\d+)}\) CREATE \(n\)-\[e: Friend\]->\(m\);$/) { print "$1,$2\n"; }' "$(basename "$PCH_FILE")"
+    } > FRIEND.csv)
+  fi
 fi
 
 if [[ "${RUN_FALKOR}" == "1" ]]; then
@@ -205,7 +237,7 @@ if [[ "${RUN_FALKOR}" == "1" ]]; then
   # instead of silently skipping, which helps debug edge failures.
   # NOTE: Throttled batch sizes to reduce connection pressure: smaller token count
   # and buffer sizes mean smaller GRAPH.BULK requests and fewer connection retries.
-  PYTHONPATH="../falkordb-bulk-loader" python3 ../falkordb-bulk-loader/falkordb_bulk_loader/bulk_insert.py falkor \
+  PYTHONPATH="../falkordb-bulk-loader" python3 "../falkordb-bulk-loader/falkordb_bulk_loader/bulk_insert.py" falkor \
     -u "$REDIS_URL" \
     -n "$CSV_DIR/User.csv" \
     -r "$CSV_DIR/FRIEND.csv" \
@@ -249,19 +281,6 @@ if [[ "${RUN_MEMGRAPH}" == "1" ]]; then
     docker cp "$f" "$MEMGRAPH_CONTAINER_ID":"$MEMGRAPH_CSV_DIR_IN_CONTAINER/$(basename "$f")"
   done
 
-  # Helper to run a single non-interactive mgconsole query inside the Memgraph container
-  mgconsole_exec() {
-    local query="$1"
-    docker exec -i "$MEMGRAPH_CONTAINER_ID" mgconsole \
-      --host=127.0.0.1 \
-      --port=7687 \
-      --username="$MEMGRAPH_USER" \
-      --password="$MEMGRAPH_PASSWORD" \
-      --no_history \
-      --use_ssl=false \
-      <<<"$query"
-  }
-
   echo "  - Clearing existing Memgraph data"
   mgconsole_exec "MATCH (n) DETACH DELETE n;"
 
@@ -301,6 +320,77 @@ if [[ "${RUN_MEMGRAPH}" == "1" ]]; then
   MEMGRAPH_LOAD_DURATION=$((MEMGRAPH_LOAD_END - MEMGRAPH_LOAD_START))
   echo "  - Memgraph LOAD CSV end: $(date)"
   echo "  - Memgraph LOAD CSV duration: ${MEMGRAPH_LOAD_DURATION}s"
+fi
+
+if [[ "${RUN_NEO4J}" == "1" ]]; then
+  echo "==> Loading large dataset into Neo4j"
+  cargo run --release --bin benchmark -- load --vendor neo4j --size large --endpoint "$NEO4J_ENDPOINT" -b "$BATCH_SIZE"
+fi
+
+if [[ "${RUN_NEO4J}" == "1" || "${RUN_FALKOR}" == "1" || "${RUN_MEMGRAPH}" == "1" ]]; then
+  echo "==> Validating database contents before running queries"
+fi
+
+if [[ "${RUN_NEO4J}" == "1" ]]; then
+  echo "  - Checking Neo4j data..."
+  NODE_COUNT=$(cypher-shell -a bolt://127.0.0.1:7687 -u "$NEO4J_USER" -p "$NEO4J_PASSWORD" -d neo4j --format plain "MATCH (n:User) RETURN count(n) AS count" 2>/dev/null | tail -n1 | tr -d '"' || echo "0")
+  REL_COUNT=$(cypher-shell -a bolt://127.0.0.1:7687 -u "$NEO4J_USER" -p "$NEO4J_PASSWORD" -d neo4j --format plain "MATCH ()-[r:Friend]->() RETURN count(r) AS count" 2>/dev/null | tail -n1 | tr -d '"' || echo "0")
+  # Ensure variables are set (default to 0 if empty)
+  NODE_COUNT=${NODE_COUNT:-0}
+  REL_COUNT=${REL_COUNT:-0}
+  echo "    Neo4j: ${NODE_COUNT} User nodes, ${REL_COUNT} Friend relationships"
+  if [[ "$NODE_COUNT" -eq 0 ]]; then
+    echo "❌ Neo4j has no User nodes loaded. Cannot proceed with benchmark." >&2
+    exit 1
+  fi
+fi
+
+if [[ "${RUN_FALKOR}" == "1" ]]; then
+  echo "  - Checking FalkorDB data..."
+  # Extract host/port if not already set
+  if [[ -z "${FALKOR_HOST:-}" ]]; then
+    FALKOR_HOSTPORT="${FALKOR_ENDPOINT#falkor://}"
+    if [[ "$FALKOR_HOSTPORT" == *:* ]]; then
+      FALKOR_HOST="${FALKOR_HOSTPORT%%:*}"
+      FALKOR_PORT="${FALKOR_HOSTPORT##*:}"
+    else
+      FALKOR_HOST="$FALKOR_HOSTPORT"
+      FALKOR_PORT=6379
+    fi
+  fi
+  # Use db.meta.stats() for efficient metadata retrieval without full graph scan
+  # The output is a Redis RESP array where:
+  # - Line 8: labels (map like {User: count})
+  # - Line 9: relTypes (map like {FRIEND: count})
+  # - Line 10: relCount (integer)
+  # - Line 11: nodeCount (integer)
+  FALKOR_STATS=$(redis-cli -h "$FALKOR_HOST" -p "$FALKOR_PORT" GRAPH.QUERY falkor "CALL db.meta.stats()" 2>/dev/null || echo "")
+  # Extract nodeCount from line 11
+  FALKOR_NODE_COUNT=$(echo "$FALKOR_STATS" | sed -n '11p' | grep -oE '[0-9]+' || echo "0")
+  # Extract relCount from line 10
+  FALKOR_REL_COUNT=$(echo "$FALKOR_STATS" | sed -n '10p' | grep -oE '[0-9]+' || echo "0")
+  # Ensure variables are set (default to 0 if empty)
+  FALKOR_NODE_COUNT=${FALKOR_NODE_COUNT:-0}
+  FALKOR_REL_COUNT=${FALKOR_REL_COUNT:-0}
+  echo "    FalkorDB: ${FALKOR_NODE_COUNT} User nodes, ${FALKOR_REL_COUNT} Friend relationships (via db.meta.stats)"
+  if [[ "$FALKOR_NODE_COUNT" -eq 0 ]]; then
+    echo "❌ FalkorDB has no User nodes loaded. Cannot proceed with benchmark." >&2
+    exit 1
+  fi
+fi
+
+if [[ "${RUN_MEMGRAPH}" == "1" ]]; then
+  echo "  - Checking Memgraph data..."
+  MEMGRAPH_NODE_COUNT=$(mgconsole_exec "MATCH (n:User) RETURN count(n) AS count;" 2>/dev/null | grep -oE '[0-9]+' | tail -n1 || echo "0")
+  MEMGRAPH_REL_COUNT=$(mgconsole_exec "MATCH ()-[r:Friend]->() RETURN count(r) AS count;" 2>/dev/null | grep -oE '[0-9]+' | tail -n1 || echo "0")
+  # Ensure variables are set (default to 0 if empty)
+  MEMGRAPH_NODE_COUNT=${MEMGRAPH_NODE_COUNT:-0}
+  MEMGRAPH_REL_COUNT=${MEMGRAPH_REL_COUNT:-0}
+  echo "    Memgraph: ${MEMGRAPH_NODE_COUNT} User nodes, ${MEMGRAPH_REL_COUNT} Friend relationships"
+  if [[ "$MEMGRAPH_NODE_COUNT" -eq 0 ]]; then
+    echo "❌ Memgraph has no User nodes loaded. Cannot proceed with benchmark." >&2
+    exit 1
+  fi
 fi
 
 echo "==> Generating vendor-specific query files (base=${QUERIES_FILE_BASE}, dataset=large, count=${QUERIES_COUNT}, write_ratio=${WRITE_RATIO})"
