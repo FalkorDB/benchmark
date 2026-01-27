@@ -138,6 +138,27 @@ export default function DashBoard({
       new Set(data.runs.map((r) => r.platform?.toLowerCase()).filter(Boolean))
     );
 
+    // Queries: try to infer available query names from the loaded data so the "single" view
+    // can show histograms + telemetry immediately.
+    const queriesFromUnrealistic = Array.from(
+      new Set(
+        (data.unrealstic ?? [])
+          .flatMap((u) => Object.keys(u.histogram_for_type ?? {}))
+          .filter(Boolean)
+      )
+    );
+    const queriesFromRuns = Array.from(
+      new Set(
+        (data.runs ?? [])
+          .flatMap((r) => Object.keys(r.result?.histogram_for_type ?? {}))
+          .filter(Boolean)
+      )
+    );
+    const queries = (queriesFromUnrealistic.length
+      ? queriesFromUnrealistic
+      : queriesFromRuns
+    ).sort();
+
     setSelectedOptions((prev) => {
       const next = { ...prev };
 
@@ -157,7 +178,17 @@ export default function DashBoard({
         }
       };
 
-      replaceIfNoMatch("Vendors", vendors);
+      // For vendor selection, default to showing *all* vendors present in the file.
+      // This is important for aws-tests comparisons (two runs) and prevents auto-picking only the first vendor.
+      if (vendors.length) {
+        const current = next["Vendors"] ?? [];
+        const hasMatch = current.some((c) => vendors.some((a) => a === c));
+        if (!hasMatch) next["Vendors"] = vendors;
+      }
+
+      // For query selection, pick something that exists in the loaded data so charts + telemetry show up.
+      replaceIfNoMatch("Queries", queries);
+
       replaceIfNoMatch("Clients", clients);
       replaceIfNoMatch("Throughput", throughputs);
       replaceIfNoMatch("Hardware", hardware);
@@ -186,6 +217,22 @@ export default function DashBoard({
           : [...groupSelections, optionId];
 
         // Never allow an empty vendor selection.
+        if (updatedSelections.length === 0) {
+          return prev;
+        }
+
+        return {
+          ...prev,
+          [groupTitle]: updatedSelections,
+        };
+      }
+
+      if (groupTitle === "Hardware") {
+        const updatedSelections = groupSelections.includes(optionId)
+          ? groupSelections.filter((id) => id !== optionId)
+          : [...groupSelections, optionId];
+
+        // Never allow an empty hardware selection.
         if (updatedSelections.length === 0) {
           return prev;
         }
@@ -335,6 +382,7 @@ export default function DashBoard({
     const key = (vendor ?? "").toString().trim().toLowerCase();
 
     // Map vendor identifiers/names to the same CSS vars used by the MAX THROUGHPUT chart.
+    // For aws-tests, the "vendor" is the instance type (e.g. r7i.2xlarge / r8g.2xlarge).
     const cssVar =
       key === "falkordb" || key === "falkor"
         ? "--FalkorDB-color"
@@ -342,6 +390,10 @@ export default function DashBoard({
         ? "--Neo4j-color"
         : key === "memgraph"
         ? "--Memgraph-color"
+        : key === "intel" || key === "x86" || key.startsWith("r7i")
+        ? "--Intel-color"
+        : key === "graviton" || key === "arm" || key.startsWith("r8g")
+        ? "--Graviton-color"
         : "";
 
     if (!cssVar) return "#191919";
@@ -439,26 +491,36 @@ export default function DashBoard({
     actualMessagesPerSecond: item.result["actual-messages-per-second"],
   }));
 
-  // Telemetry breakdown for FalkorDB (single-workload per-query view)
-  const telemetryBreakdown = useMemo(() => {
+  // Telemetry breakdown per run (single-workload per-query view)
+  const telemetryBreakdownPerRun = useMemo(() => {
     const selectedQuery = selectedOptions.Queries?.[0];
-    if (!selectedQuery || !data?.runs?.length) return null;
+    if (!selectedQuery) return [];
 
-    // Find FalkorDB run if present
-    const falkorRun = data.runs.find(
-      (r) => r.vendor?.toLowerCase() === "falkordb" || r.vendor?.toLowerCase() === "falkor"
-    );
-    const tb = falkorRun?.result?.telemetry_for_type?.[selectedQuery];
-    if (!tb) return null;
+    // Use filteredResults so it respects vendor/hardware/throughput filters.
+    const runs = filteredResults.length ? filteredResults : data?.runs ?? [];
 
-    return {
-      vendor: falkorRun.vendor,
-      query: selectedQuery,
-      waitMs: tb["wait-ms"],
-      execMs: tb["exec-ms"],
-      reportMs: tb["report-ms"],
-    };
-  }, [data, selectedOptions.Queries]);
+    return runs
+      .map((r) => {
+        const tb = r?.result?.telemetry_for_type?.[selectedQuery];
+        if (!tb) return null;
+        return {
+          vendor: r.vendor,
+          platform: r.platform,
+          query: selectedQuery,
+          waitMs: tb["wait-ms"],
+          execMs: tb["exec-ms"],
+          reportMs: tb["report-ms"],
+        };
+      })
+      .filter(Boolean) as Array<{
+      vendor: string;
+      platform?: string;
+      query: string;
+      waitMs: number;
+      execMs: number;
+      reportMs: number;
+    }>;
+  }, [data, filteredResults, selectedOptions.Queries]);
 
   const maxThroughput = Math.max(
     ...throughputData.map((item) => item.actualMessagesPerSecond)
@@ -815,21 +877,39 @@ export default function DashBoard({
                   Better performance, lower overall costs
                 </p>
 
-                {telemetryBreakdown && (
-                  <p className="text-xs text-gray-600 text-center font-fira pb-1">
-                    FalkorDB telemetry ({telemetryBreakdown.query}): wait {" "}
-                    <span className="font-semibold text-gray-800">
-                      {telemetryBreakdown.waitMs.toFixed(1)} ms
-                    </span>
-                    , exec {" "}
-                    <span className="font-semibold text-gray-800">
-                      {telemetryBreakdown.execMs.toFixed(1)} ms
-                    </span>
-                    , report {" "}
-                    <span className="font-semibold text-gray-800">
-                      {telemetryBreakdown.reportMs.toFixed(1)} ms
-                    </span>
-                  </p>
+                {telemetryBreakdownPerRun.length > 0 && (
+                  <div className="w-full pb-2">
+                    <p className="text-xs text-gray-600 text-center font-fira pb-1">
+                      Telemetry breakdown for {telemetryBreakdownPerRun[0].query} (wait / exec / report)
+                    </p>
+                    <div className="w-full overflow-x-auto">
+                      <table className="w-full text-xs font-fira">
+                        <thead>
+                          <tr className="text-left text-gray-600">
+                            <th className="py-1 pr-3">Run</th>
+                            <th className="py-1 pr-3">HW</th>
+                            <th className="py-1 pr-3">wait (ms)</th>
+                            <th className="py-1 pr-3">exec (ms)</th>
+                            <th className="py-1 pr-3">report (ms)</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {telemetryBreakdownPerRun.map((t) => (
+                            <tr
+                              key={`${t.vendor}-${t.platform ?? ""}`}
+                              className="border-t border-gray-200/60"
+                            >
+                              <td className="py-1 pr-3 font-semibold">{t.vendor}</td>
+                              <td className="py-1 pr-3">{t.platform ?? "—"}</td>
+                              <td className="py-1 pr-3">{t.waitMs.toFixed(1)}</td>
+                              <td className="py-1 pr-3">{t.execMs.toFixed(1)}</td>
+                              <td className="py-1 pr-3">{t.reportMs.toFixed(1)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
                 )}
 
                 {Object.keys(baseDatasetByVendor).length > 0 && (

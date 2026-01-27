@@ -165,6 +165,10 @@ This produces:
 - `ui/public/summaries/neo4j_vs_falkordb.json`
 - `ui/public/summaries/memgraph_vs_falkordb.json`
 
+AWS instance comparisons (e.g. Graviton vs Intel for FalkorDB runs stored under `aws-tests/`):
+
+- `cargo run --release --bin benchmark -- aggregate-aws-tests --aws-tests-dir aws-tests --out-path ui/public/summaries/aws_tests_falkor_graviton_vs_intel.json`
+
 3) Open the UI:
 
 - `cd ui && npm install && npm run dev`

@@ -55,6 +55,10 @@ body {
     --Neo4j-color: #0A6190;
     --Memgraph-color: #ff2b4a;
 
+    /* AWS instance comparison colors */
+    --Intel-color: #1f77b4;
+    --Graviton-color: #2ca02c;
+
     /* Chart gradients */
     --FalkorDB-gradient-start: #ff66b3;
     --FalkorDB-gradient-end: #7568F2;

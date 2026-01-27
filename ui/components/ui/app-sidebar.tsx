@@ -45,11 +45,23 @@ export function AppSidebar({
     const allowed = (allowedVendors ?? []).map((v) => v.toLowerCase());
     const throughputs = (throughputOptions ?? []).map((t) => String(t));
 
+    const labelForVendor = (id: string) => {
+      const k = (id ?? "").toString();
+      const lower = k.toLowerCase();
+      if (lower === "falkordb" || lower === "falkor") return "FalkorDB";
+      if (lower === "neo4j") return "Neo4j";
+      if (lower === "memgraph") return "Memgraph";
+      if (lower === "intel") return "Intel";
+      if (lower === "graviton") return "Graviton";
+      // Generic fallback: Title Case
+      return lower.replace(/(^|\s|[-_])([a-z])/g, (_, p1, p2) => `${p1}${p2.toUpperCase()}`);
+    };
+
     return sidebarConfig.sidebarData.map((group) => {
       if (group.title === "Vendors" && allowed.length) {
         return {
           ...group,
-          options: group.options.filter((o) => allowed.includes(o.id.toLowerCase())),
+          options: allowed.map((id) => ({ id, label: labelForVendor(id) })),
         };
       }
 
