@@ -6,7 +6,7 @@ use crate::{NEO4J_MSG_DEADLINE_OFFSET_GAUGE, OPERATION_COUNTER};
 use futures::stream::TryStreamExt;
 use futures::{Stream, StreamExt};
 use histogram::Histogram;
-use neo4rs::{query, ConfigBuilder, Graph, Row};
+use neo4rs::{query, BoltList, BoltMap, BoltType, ConfigBuilder, Graph, Row};
 use std::hint::black_box;
 use std::pin::Pin;
 use std::time::Duration;
@@ -362,6 +362,88 @@ RETURN k AS name, attributes[k]['value'] AS value\n"
         self.graph.run(query(q)).await.map_err(Neo4rsError)?;
         Ok(())
     }
+}
+
+/// Parse a Cypher property map string like "{id: 1, age: 20, gender: \"male\", completion_percentage: 75}"
+/// into a BoltMap for parameterized queries.
+fn parse_property_map(map_str: &str) -> BenchmarkResult<BoltMap> {
+    let mut bolt_map = BoltMap::new();
+    
+    // Remove outer braces
+    let content = map_str.trim().trim_start_matches('{').trim_end_matches('}');
+    
+    // Simple parser for key: value pairs
+    let mut current_pos = 0;
+    let chars: Vec<char> = content.chars().collect();
+    
+    while current_pos < chars.len() {
+        // Skip whitespace
+        while current_pos < chars.len() && chars[current_pos].is_whitespace() {
+            current_pos += 1;
+        }
+        if current_pos >= chars.len() {
+            break;
+        }
+        
+        // Parse key (identifier before ':')
+        let key_start = current_pos;
+        while current_pos < chars.len() && chars[current_pos] != ':' {
+            current_pos += 1;
+        }
+        let key = chars[key_start..current_pos].iter().collect::<String>().trim().to_string();
+        
+        if current_pos >= chars.len() {
+            break;
+        }
+        current_pos += 1; // skip ':'
+        
+        // Skip whitespace after ':'
+        while current_pos < chars.len() && chars[current_pos].is_whitespace() {
+            current_pos += 1;
+        }
+        
+        // Parse value
+        let value_start = current_pos;
+        let value: BoltType = if chars[current_pos] == '"' {
+            // String value
+            current_pos += 1; // skip opening quote
+            let str_start = current_pos;
+            while current_pos < chars.len() && chars[current_pos] != '"' {
+                current_pos += 1;
+            }
+            let str_val = chars[str_start..current_pos].iter().collect::<String>();
+            current_pos += 1; // skip closing quote
+            str_val.into()
+        } else {
+            // Numeric value
+            while current_pos < chars.len() && chars[current_pos] != ',' && chars[current_pos] != '}' {
+                current_pos += 1;
+            }
+            let num_str = chars[value_start..current_pos].iter().collect::<String>().trim().to_string();
+            
+            // Try to parse as i64 first, then f64
+            if let Ok(int_val) = num_str.parse::<i64>() {
+                int_val.into()
+            } else if let Ok(float_val) = num_str.parse::<f64>() {
+                float_val.into()
+            } else {
+                // Fallback to string if parsing fails
+                num_str.into()
+            }
+        };
+        
+        bolt_map.put(key.into(), value);
+        
+        // Skip to next comma or end
+        while current_pos < chars.len() && (chars[current_pos].is_whitespace() || chars[current_pos] == ',') {
+            current_pos += 1;
+        }
+    }
+    
+    Ok(bolt_map)
+}
+
+impl Neo4jClient {
 
     /// Fast-path loader for the Pokec "Users" dataset.
     ///
@@ -370,8 +452,10 @@ RETURN k AS name, attributes[k]['value'] AS value\n"
     /// - Edge lines: `MATCH (n:User {id: X}), (m:User {id: Y}) CREATE (n)-[e: Friend]->(m);`
     ///
     /// Instead of sending each line as a separate statement (slow), we batch them into:
-    /// - Nodes: `UNWIND [ {...}, {...} ] AS row CREATE (u:User) SET u = row;`
-    /// - Edges: `UNWIND [ {src:..,dst:..}, ... ] AS row MATCH ... CREATE (n)-[:Friend]->(m);`
+    /// - Nodes: `UNWIND $batch AS row CREATE (u:User) SET u = row` (parameterized)
+    /// - Edges: `UNWIND $batch AS row MATCH ... CREATE (n)-[:Friend]->(m)` (parameterized)
+    ///
+    /// CRITICAL: Indexes on User(id) MUST be created BEFORE calling this function for acceptable performance.
     pub async fn execute_pokec_users_import_unwind<S>(
         &self,
         mut stream: S,
@@ -382,7 +466,7 @@ RETURN k AS name, attributes[k]['value'] AS value\n"
         S: StreamExt<Item = Result<String, io::Error>> + Unpin,
     {
         info!(
-            "Processing Pokec Users import via UNWIND batches of {}",
+            "Processing Pokec Users import via parameterized UNWIND batches of {}",
             batch_size
         );
 
@@ -393,7 +477,7 @@ RETURN k AS name, attributes[k]['value'] AS value\n"
         }
 
         let mut phase = Phase::Nodes;
-        let mut node_maps: Vec<String> = Vec::with_capacity(batch_size);
+        let mut node_maps: Vec<BoltMap> = Vec::with_capacity(batch_size);
         let mut edge_pairs: Vec<(u64, u64)> = Vec::with_capacity(batch_size);
 
         let mut total_processed: usize = 0;
@@ -401,7 +485,7 @@ RETURN k AS name, attributes[k]['value'] AS value\n"
 
         async fn flush_nodes(
             client: &Neo4jClient,
-            node_maps: &mut Vec<String>,
+            node_maps: &mut Vec<BoltMap>,
             histogram: &mut Histogram,
             batch_count: &mut usize,
         ) -> BenchmarkResult<()> {
@@ -409,12 +493,16 @@ RETURN k AS name, attributes[k]['value'] AS value\n"
                 return Ok(());
             }
             *batch_count += 1;
-            let q = format!(
-                "UNWIND [{}] AS row CREATE (u:User) SET u = row",
-                node_maps.join(",")
-            );
+            
+            // Use parameterized query instead of string concatenation
+            let q = "UNWIND $batch AS row CREATE (u:User) SET u = row";
+            
+            // Convert Vec<BoltMap> to Vec<BoltType> for BoltList
+            let bolt_types: Vec<BoltType> = node_maps.iter().map(|m| BoltType::Map(m.clone())).collect();
+            let batch_list = BoltList::from(bolt_types);
+            
             let start = Instant::now();
-            client.run_query_no_results(&q).await?;
+            client.graph.run(query(q).param("batch", BoltType::List(batch_list))).await.map_err(Neo4rsError)?;
             histogram.increment(start.elapsed().as_micros() as u64)?;
             node_maps.clear();
             Ok(())
@@ -430,19 +518,28 @@ RETURN k AS name, attributes[k]['value'] AS value\n"
                 return Ok(());
             }
             *batch_count += 1;
-            let mut maps = String::new();
-            for (i, (src, dst)) in edge_pairs.iter().enumerate() {
-                if i > 0 {
-                    maps.push(',');
-                }
-                maps.push_str(&format!("{{src:{},dst:{}}}", src, dst));
+            
+            // Convert edge pairs to BoltMap list for parameterized query
+            let mut batch_maps = Vec::with_capacity(edge_pairs.len());
+            for (src, dst) in edge_pairs.iter() {
+                let mut map = BoltMap::new();
+                map.put("src".into(), (*src as i64).into());
+                map.put("dst".into(), (*dst as i64).into());
+                batch_maps.push(map);
             }
-            let q = format!(
-                "UNWIND [{}] AS row MATCH (n:User {{id: row.src}}), (m:User {{id: row.dst}}) CREATE (n)-[:Friend]->(m)",
-                maps
-            );
+            
+            // CRITICAL: Use explicit :User label in MATCH to enable index usage.
+            // Without the label, Neo4j cannot use the User(id) index and will do a full scan.
+            // This is the key difference that makes edge loading fast vs. extremely slow.
+            // Now using parameterized query for better performance.
+            let q = "UNWIND $batch AS row MATCH (n:User {id: row.src}), (m:User {id: row.dst}) CREATE (n)-[:Friend]->(m)";
+            
+            // Convert Vec<BoltMap> to Vec<BoltType> for BoltList
+            let bolt_types: Vec<BoltType> = batch_maps.into_iter().map(|m| BoltType::Map(m)).collect();
+            let batch_list = BoltList::from(bolt_types);
+            
             let start = Instant::now();
-            client.run_query_no_results(&q).await?;
+            client.graph.run(query(q).param("batch", BoltType::List(batch_list))).await.map_err(Neo4rsError)?;
             histogram.increment(start.elapsed().as_micros() as u64)?;
             edge_pairs.clear();
             Ok(())
@@ -470,11 +567,15 @@ RETURN k AS name, attributes[k]['value'] AS value\n"
 
             match phase {
                 Phase::Nodes => {
-                    // Extract the `{...}` property map and re-use it as a map literal.
+                    // Parse the property map from the CREATE statement and convert to BoltMap
                     if let (Some(l), Some(r)) = (trimmed.find('{'), trimmed.rfind('}')) {
                         if r > l {
-                            node_maps.push(trimmed[l..=r].to_string());
-                            total_processed += 1;
+                            // Parse the JSON-like map: {id: 1, age: 20, gender: "male", completion_percentage: 75}
+                            let map_str = &trimmed[l..=r];
+                            if let Ok(bolt_map) = parse_property_map(map_str) {
+                                node_maps.push(bolt_map);
+                                total_processed += 1;
+                            }
                         }
                     }
                     if node_maps.len() >= batch_size {

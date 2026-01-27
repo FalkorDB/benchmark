@@ -282,6 +282,13 @@ async fn main() -> BenchmarkResult<()> {
             aggregator::aggregate_results(&results_dir, &out_dir)?;
         }
 
+        Commands::AggregateAwsTests {
+            aws_tests_dir,
+            out_path,
+        } => {
+            aggregator::aggregate_aws_tests(&aws_tests_dir, &out_path)?;
+        }
+
         Commands::DebugMemgraphQueries {
             dataset,
             endpoint,
@@ -1124,26 +1131,25 @@ async fn init_neo4j(
     }
     let mut histogram = Histogram::new(7, 64)?;
 
-    // The legacy `memgraph.cypher` index file uses the old `CREATE INDEX ON :Label(prop)`
-    // syntax, which is rejected by modern Neo4j versions (they expect
-    // `CREATE INDEX <name> IF NOT EXISTS FOR (n:Label) ON (n.prop)`).
-    // Instead of replaying that file, we now create the required indexes explicitly
-    // when talking to a local Neo4j instance. For external endpoints we assume
-    // indexes are managed outside the benchmark.
-    if endpoint.is_none() {
-        let mut idx_hist = Histogram::new(7, 64)?;
+    // CRITICAL: Create indexes BEFORE loading any data.
+    // The User(id) index is essential for edge loading performance.
+    // Without it, each edge match becomes a full table scan (O(n) per edge).
+    // With it, lookups are O(log n), making edge loading orders of magnitude faster.
+    // This applies to both local and external endpoints.
+    let mut idx_hist = Histogram::new(7, 64)?;
 
-        let create_id_index = "CREATE INDEX pokec_user_id IF NOT EXISTS FOR (u:User) ON (u.id)".to_string();
-        let create_age_index = "CREATE INDEX pokec_age IF NOT EXISTS FOR (u:User) ON (u.age)".to_string();
+    let create_id_index = "CREATE INDEX pokec_user_id IF NOT EXISTS FOR (u:User) ON (u.id)".to_string();
+    let create_age_index = "CREATE INDEX pokec_age IF NOT EXISTS FOR (u:User) ON (u.age)".to_string();
 
-        client
-            .execute_query_stream_batched(
-                futures::stream::iter(vec![Ok(create_id_index), Ok(create_age_index)]),
-                1,
-                &mut idx_hist,
-            )
-            .await?;
-    }
+    info!("Creating indexes (CRITICAL for edge loading performance)...");
+    client
+        .execute_query_stream_batched(
+            futures::stream::iter(vec![Ok(create_id_index), Ok(create_age_index)]),
+            1,
+            &mut idx_hist,
+        )
+        .await?;
+    info!("Indexes created successfully");
 
     let data_stream = spec.init_data_iterator().await?;
     info!("importing data (fast UNWIND) in batches of {}", batch_size);

@@ -151,6 +151,26 @@ pub enum Commands {
     },
 
     #[command(
+        about = "aggregate aws-tests/ FalkorDB runs (e.g. graviton vs intel) into a UI summary JSON file"
+    )]
+    AggregateAwsTests {
+        #[arg(
+            long,
+            required = false,
+            default_value = "aws-tests",
+            help = "directory containing subfolders with {meta.json,metrics.prom} (e.g. aws-tests/falkor-r8g-2xl/)"
+        )]
+        aws_tests_dir: String,
+        #[arg(
+            long,
+            required = false,
+            default_value = "ui/public/summaries/aws_tests_falkor_graviton_vs_intel.json",
+            help = "output path for the UI summary JSON file"
+        )]
+        out_path: String,
+    },
+
+    #[command(
         about = "Run each generated Memgraph query type once against a Memgraph endpoint to detect failing queries"
     )]
     DebugMemgraphQueries {

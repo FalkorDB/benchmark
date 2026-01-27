@@ -260,6 +260,216 @@ fn make_summary(vendors: &[VendorArtifacts]) -> BenchmarkResult<UiSummary> {
     })
 }
 
+#[derive(Debug, Clone)]
+struct CustomRunArtifacts {
+    vendor: Vendor,
+    ui_vendor: String,
+    ui_platform: String,
+    meta: RunResultsMeta,
+    metrics_text: String,
+}
+
+/// Aggregate `aws-tests/` style folders into a single UI summary JSON.
+///
+/// Expected layout:
+///   <aws_tests_dir>/<run_name>/{meta.json,metrics.prom}
+///
+/// This is meant for comparing two FalkorDB runs on different AWS instance families
+/// (e.g. Graviton vs Intel) side-by-side in the UI.
+pub fn aggregate_aws_tests(aws_tests_dir: &str, out_path: &str) -> BenchmarkResult<()> {
+    let aws_tests_dir = PathBuf::from(aws_tests_dir);
+    if !aws_tests_dir.exists() {
+        return Err(OtherError(format!(
+            "aws-tests-dir does not exist: {}",
+            aws_tests_dir.display()
+        )));
+    }
+
+    let mut candidates: Vec<CustomRunArtifacts> = Vec::new();
+
+    let entries = fs::read_dir(&aws_tests_dir).map_err(|e| {
+        OtherError(format!(
+            "Failed listing aws-tests dir {}: {}",
+            aws_tests_dir.display(),
+            e
+        ))
+    })?;
+
+    for entry in entries {
+        let entry = entry.map_err(|e| OtherError(format!("Failed reading dir entry: {}", e)))?;
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+
+        let meta_path = path.join("meta.json");
+        let metrics_path = path.join("metrics.prom");
+        if !meta_path.exists() || !metrics_path.exists() {
+            continue;
+        }
+
+        let meta_raw = fs::read_to_string(&meta_path)
+            .map_err(|e| OtherError(format!("Failed reading {}: {}", meta_path.display(), e)))?;
+        let meta: RunResultsMeta = serde_json::from_str(&meta_raw)
+            .map_err(|e| OtherError(format!("Failed parsing {}: {}", meta_path.display(), e)))?;
+
+        // We're intentionally aggregating Falkor runs.
+        let vendor = Vendor::Falkor;
+
+        let metrics_text = fs::read_to_string(&metrics_path).map_err(|e| {
+            OtherError(format!(
+                "Failed reading {}: {}",
+                metrics_path.display(),
+                e
+            ))
+        })?;
+
+        let dir_name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("run")
+            .to_string();
+
+        fn normalize_instance_type(name: &str) -> Option<String> {
+            // Accept already-normalized forms like "r7i.2xlarge".
+            let n = name.trim();
+            if n.contains('.') && n.contains("xlarge") {
+                return Some(n.to_string());
+            }
+
+            // Common shorthand seen in this repo: r7i-2xl, r8g-2xl, etc.
+            // Convert to AWS-like instance type: r7i.2xlarge
+            let lower = n.to_lowercase();
+            let parts: Vec<&str> = lower.split(|c| c == '-' || c == '_' || c == ' ').filter(|p| !p.is_empty()).collect();
+            if parts.is_empty() {
+                return None;
+            }
+
+            // Find AWS instance family token (e.g. r7i, r8g). Some folders prefix it with "falkor-".
+            let mut family: Option<&str> = None;
+            for p in &parts {
+                let has_digit = p.chars().any(|c| c.is_ascii_digit());
+                if has_digit && p.len() >= 3 {
+                    family = Some(p);
+                    break;
+                }
+            }
+            let family = family?;
+
+            // Find size token
+            let mut size: Option<&str> = None;
+            for p in &parts {
+                if p.contains("xlarge") || p.ends_with("xl") {
+                    size = Some(p);
+                    break;
+                }
+            }
+
+            let size = size?;
+            let size_norm = match size {
+                "xl" | "1xl" | "xlarge" => "xlarge".to_string(),
+                "2xl" => "2xlarge".to_string(),
+                "3xl" => "3xlarge".to_string(),
+                "4xl" => "4xlarge".to_string(),
+                "6xl" => "6xlarge".to_string(),
+                "8xl" => "8xlarge".to_string(),
+                "9xl" => "9xlarge".to_string(),
+                "10xl" => "10xlarge".to_string(),
+                "12xl" => "12xlarge".to_string(),
+                "16xl" => "16xlarge".to_string(),
+                "18xl" => "18xlarge".to_string(),
+                "24xl" => "24xlarge".to_string(),
+                other if other.ends_with("xlarge") => other.to_string(),
+                _ => return None,
+            };
+
+            Some(format!("{}.{}", family, size_norm))
+        }
+
+        // Label with the exact instance type (best-effort), and tag platform for the Hardware filter.
+        let lower = dir_name.to_lowercase();
+        let instance = normalize_instance_type(&dir_name).unwrap_or_else(|| dir_name.clone());
+
+        let ui_platform = if lower.contains("r8g") || lower.contains("graviton") || lower.contains("arm") {
+            "arm".to_string()
+        } else if lower.contains("r7i") || lower.contains("intel") || lower.contains("x86") {
+            "intel".to_string()
+        } else {
+            // Best-effort from instance family prefix
+            if instance.starts_with('r') && instance.contains('g') {
+                "arm".to_string()
+            } else if instance.starts_with('r') && instance.contains('i') {
+                "intel".to_string()
+            } else {
+                "unknown".to_string()
+            }
+        };
+
+        let ui_vendor = instance;
+
+        candidates.push(CustomRunArtifacts {
+            vendor,
+            ui_vendor,
+            ui_platform,
+            meta,
+            metrics_text,
+        });
+    }
+
+    if candidates.len() < 2 {
+        return Err(OtherError(format!(
+            "Expected at least 2 run folders under {}, found {}",
+            aws_tests_dir.display(),
+            candidates.len()
+        )));
+    }
+
+    // Prefer r7i* (Intel) and r8g* (Graviton) when present; otherwise take first two.
+    candidates.sort_by(|a, b| a.ui_vendor.cmp(&b.ui_vendor));
+
+    let mut picked: Vec<CustomRunArtifacts> = Vec::new();
+    for want_prefix in ["r7i", "r8g"] {
+        if let Some(idx) = candidates
+            .iter()
+            .position(|c| c.ui_vendor.to_lowercase().starts_with(want_prefix))
+        {
+            picked.push(candidates.remove(idx));
+        }
+    }
+
+    // Fill up to 2.
+    while picked.len() < 2 && !candidates.is_empty() {
+        picked.push(candidates.remove(0));
+    }
+
+    picked.truncate(2);
+
+    let mut runs = Vec::new();
+    for v in &picked {
+        runs.push(build_ui_run_custom(v)?);
+    }
+
+    let summary = UiSummary {
+        runs,
+        unrealstic: vec![],
+        platforms: vec![],
+    };
+
+    let out_path = PathBuf::from(out_path);
+    if let Some(parent) = out_path.parent() {
+        fs::create_dir_all(parent).map_err(|e| {
+            OtherError(format!(
+                "Failed creating output dir {}: {}",
+                parent.display(),
+                e
+            ))
+        })?;
+    }
+
+    write_summary(&out_path, &summary)?;
+    Ok(())
+}
+
 fn parse_size(s: &str) -> BenchmarkResult<Size> {
     match s.to_lowercase().as_str() {
         "small" => Ok(Size::Small),
@@ -278,6 +488,18 @@ fn detected_platform() -> String {
 }
 
 fn build_ui_run(v: &VendorArtifacts) -> BenchmarkResult<UiRun> {
+    let custom = CustomRunArtifacts {
+        vendor: v.vendor,
+        ui_vendor: vendor_id(v.vendor),
+        ui_platform: detected_platform(),
+        meta: v.meta.clone(),
+        metrics_text: v.metrics_text.clone(),
+    };
+
+    build_ui_run_custom(&custom)
+}
+
+fn build_ui_run_custom(v: &CustomRunArtifacts) -> BenchmarkResult<UiRun> {
     let dataset = parse_size(&v.meta.dataset)?;
     let spec = Spec::new(Name::Users, dataset, v.vendor);
 
@@ -373,10 +595,10 @@ fn build_ui_run(v: &VendorArtifacts) -> BenchmarkResult<UiRun> {
     let histogram_for_type = metrics.query_latency_histogram_ms(v.vendor);
     let telemetry_for_type = metrics.telemetry_for_type(v.vendor);
     Ok(UiRun {
-        vendor: vendor_id(v.vendor),
+        vendor: v.ui_vendor.clone(),
         read_write_ratio: 0.0,
         clients: v.meta.parallel as u64,
-        platform: detected_platform(),
+        platform: v.ui_platform.clone(),
         target_messages_per_second: v.meta.mps as u64,
         edges: spec.vertices,
         relationships: spec.edges,
