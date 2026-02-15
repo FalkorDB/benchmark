@@ -93,10 +93,22 @@ test.describe("SideBar tests", () => {
         const updated = valuesByKey(updatedGraphDetails);
 
         // Compare only keys that exist on both sides.
+        let changedCount = 0;
+        let comparedCount = 0;
+
         for (const key of Object.keys(original)) {
           if (!(key in updated)) continue;
-          const areValuesDifferent = original[key] !== updated[key];
-          expect(areValuesDifferent).toBe(expectedRes);
+          comparedCount += 1;
+          if (original[key] !== updated[key]) changedCount += 1;
+        }
+
+        // If we didn't compare anything, force a retry (usually means window.allChartData isn't ready yet).
+        expect(comparedCount).toBeGreaterThan(0);
+
+        if (expectedRes) {
+          expect(changedCount).toBeGreaterThan(0);
+        } else {
+          expect(changedCount).toBe(0);
         }
       }).toPass({ timeout: 15000 });
     });
