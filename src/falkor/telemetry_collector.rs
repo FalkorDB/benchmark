@@ -1,9 +1,7 @@
-use crate::error::BenchmarkResult;
 use crate::{
     FALKOR_TELEMETRY_EXEC_US, FALKOR_TELEMETRY_REPORT_US, FALKOR_TELEMETRY_WAIT_US,
 };
 use redis::aio::MultiplexedConnection;
-use redis::AsyncCommands;
 use redis::Value;
 use std::collections::HashMap;
 use std::time::Duration;
