@@ -36,7 +36,7 @@ const MemoryBarChart: React.FC<MemoryBarChartProps> = ({
   singleMemory,
   unit,
   ratio,
-  minValue,
+  maxValue,
   getBarColor,
 }) => {
   const chartDataForMemory = useMemo(() => {
@@ -77,8 +77,8 @@ const MemoryBarChart: React.FC<MemoryBarChartProps> = ({
       },
       datalabels: {
         display: true,
-        anchor: "start" as const,
-        align: "start" as const,
+        anchor: "end" as const,
+        align: "top" as const,
         font: {
           weight: "bold" as const,
           family: "Fira Code",
@@ -86,13 +86,12 @@ const MemoryBarChart: React.FC<MemoryBarChartProps> = ({
         },
         color: "grey",
         formatter: (value: number) => {
-          return value === minValue ? `x${ratio}` : "";
+          return value === maxValue ? `x${ratio}` : "";
         },
       },
     },
     scales: {
       x: {
-        position: "top" as const,
         grid: { display: false },
         ticks: {
           font: {
@@ -107,7 +106,6 @@ const MemoryBarChart: React.FC<MemoryBarChartProps> = ({
       y: {
         beginAtZero: true,
         grid: { display: true },
-        reverse: true,
         ticks: {
           font: {
             size: 15,
