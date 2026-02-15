@@ -240,11 +240,9 @@ const VerticalBarChart: React.FC<VerticalBarChartProps> = ({
       },
       
       
-      
     },
     scales: {
       x: {
-        position: "top" as const,
         grid: { display: false },
         ticks: {
           font: {
@@ -263,7 +261,6 @@ const VerticalBarChart: React.FC<VerticalBarChartProps> = ({
       },
       y: {
         beginAtZero: true,
-        reverse: true,
         grid: { display: true },
         ticks: {
           font: {

@@ -868,7 +868,7 @@ export default function DashBoard({
                   MEMORY USAGE
                 </h2>
                 <p className="text-gray-600 text-center font-fira">
-                  (HIGHER IS BETTER)
+                  (LOWER IS BETTER)
                 </p>
                 <p className="pt-1 text-lg font-semibold text-center font-fira pb-1">
                   <span className="text-[#FF66B3] font-bold">
