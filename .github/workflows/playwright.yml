@@ -36,9 +36,20 @@ jobs:
         env:
           NEXT_PUBLIC_HUBSPOT_PORTAL_ID: ${{ secrets.NEXT_PUBLIC_HUBSPOT_PORTAL_ID }}
           NEXT_PUBLIC_HUBSPOT_FORM_ID: ${{ secrets.NEXT_PUBLIC_HUBSPOT_FORM_ID }}
+          PORT: 3000
         run: |
           npm run build
           npm start &
+
+          echo "Waiting for Next.js to be ready on http://localhost:3000 ..."
+          for i in {1..60}; do
+            if curl -fsS http://localhost:3000/ >/dev/null; then
+              echo "Next.js is up."
+              break
+            fi
+            sleep 1
+          done
+
           npx playwright test --reporter=dot,list
 
       - name: Upload Playwright report
