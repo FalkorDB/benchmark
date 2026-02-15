@@ -115,7 +115,12 @@ fn parse_neo4j_endpoint(
     let password = if let Some(pw) = url.password() {
         pw.to_string()
     } else {
-        std::env::var("NEO4J_PASSWORD").unwrap_or_else(|_| "password".to_string())
+        std::env::var("NEO4J_PASSWORD").map_err(|_| {
+            OtherError(
+                "No Neo4j password provided (missing in endpoint URL and NEO4J_PASSWORD env var is not set)."
+                    .to_string(),
+            )
+        })?
     };
 
     // Default database name for Neo4j
@@ -613,7 +618,7 @@ async fn spawn_neo4j_worker(
                                 duration.as_micros() as u64,
                             );
                             counter += 1;
-                            if counter % 1000 == 0 {
+                            if counter.is_multiple_of(1000) {
                                 info!("worker {} processed {} queries", worker_id, counter);
                             }
                         }
@@ -845,7 +850,7 @@ async fn spawn_falkor_worker(
                                 duration.as_micros() as u64,
                             );
                             counter += 1;
-                            if counter % 1000 == 0 {
+                            if counter.is_multiple_of(1000) {
                                 info!("worker {} processed {} queries", worker_id, counter);
                             }
                         }

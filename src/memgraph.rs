@@ -36,8 +36,8 @@ impl Memgraph {
         let memgraph_home = env::var("MEMGRAPH_HOME")
             .unwrap_or_else(|_| String::from("./downloads/memgraph_local"));
         let uri = env::var("MEMGRAPH_URI").unwrap_or_else(|_| String::from("127.0.0.1:7687"));
-        let user = env::var("MEMGRAPH_USER").unwrap_or_else(|_| String::from(""));
-        let password = env::var("MEMGRAPH_PASSWORD").unwrap_or_else(|_| String::from(""));
+        let user = env::var("MEMGRAPH_USER").unwrap_or_default();
+        let password = env::var("MEMGRAPH_PASSWORD").unwrap_or_default();
         Memgraph {
             uri,
             user,

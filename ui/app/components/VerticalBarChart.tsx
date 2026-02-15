@@ -146,13 +146,13 @@ const VerticalBarChart: React.FC<VerticalBarChartProps> = ({
         },
       },
       datalabels: {
-        display: chartId === "single" ? true : true,
-         anchor: "end" as const,
-        // Avoid cases where the multi-line "max" label (e.g. `123ms\n3x`) renders into the legend
+        display: chartId === "single" ? "auto" : true,
+        anchor: "end" as const,
+        // Avoid cases where the multi-line "min" label (e.g. `12ms\n3x`) renders into the legend
         // area when the user zooms the page.
         //
-        // For the max bar of each percentile, place the label *below* the bar top (still anchored
-        // at the end), so it stays inside the plot area.
+        // For the minimum (best) bar of each percentile, place the label *below* the bar top (still
+        // anchored at the end), so it stays inside the plot area.
         align: (context: unknown) => {
           if (chartId === "single") return "top";
 
@@ -173,10 +173,10 @@ const VerticalBarChart: React.FC<VerticalBarChartProps> = ({
           else if (label.includes("P99")) percentileKey = "p99";
           else return "top";
 
-          const maxValue = latencyStats[percentileKey].maxValue;
-          const isMaxValue = Math.abs(value - maxValue) < 0.5;
+          const minValue = latencyStats[percentileKey].minValue;
+          const isMinValue = Math.abs(value - minValue) < 0.5;
 
-          return isMaxValue ? "bottom" : "top";
+          return isMinValue ? "bottom" : "top";
         },
         offset: (context: unknown) => {
           if (chartId === "single") return 0;
@@ -198,10 +198,10 @@ const VerticalBarChart: React.FC<VerticalBarChartProps> = ({
           else if (label.includes("P99")) percentileKey = "p99";
           else return 0;
 
-          const maxValue = latencyStats[percentileKey].maxValue;
-          const isMaxValue = Math.abs(value - maxValue) < 0.5;
+          const minValue = latencyStats[percentileKey].minValue;
+          const isMinValue = Math.abs(value - minValue) < 0.5;
 
-          return isMaxValue ? 4 : 0;
+          return isMinValue ? 4 : 0;
         },
         clamp: true,
         font: {
@@ -219,12 +219,11 @@ const VerticalBarChart: React.FC<VerticalBarChartProps> = ({
             return `${Math.round(value)}`;
           }
 
-          // Concurrent mode: show the bar value (ms/s), and also show the ratio on the max.
+          // Concurrent mode: show the bar value (ms/s), and also show the ratio on the minimum (best).
           const roundedValue = Math.round(value);
           const valueLabel = `${roundedValue}${unit}`;
 
-          const label = ctx.dataset?.label;
-          if (!label) return valueLabel;
+          const label = (ctx.dataset?.label ?? "").toString();
 
           let percentileKey: keyof typeof latencyStats;
           if (label.includes("P50")) percentileKey = "p50";
@@ -232,18 +231,20 @@ const VerticalBarChart: React.FC<VerticalBarChartProps> = ({
           else if (label.includes("P99")) percentileKey = "p99";
           else return valueLabel;
 
-          const maxValue = latencyStats[percentileKey].maxValue;
+          const minValue = latencyStats[percentileKey].minValue;
           const ratio = latencyStats[percentileKey].ratio;
-          const isMaxValue = Math.abs(value - maxValue) < 0.5;
+          const isMinValue = Math.abs(value - minValue) < 0.5;
 
-          return isMaxValue ? `${valueLabel}\n${Math.round(ratio)}x` : valueLabel;
+          return isMinValue ? `${valueLabel}\n${Math.round(ratio)}x` : valueLabel;
         },
       },
+      
       
       
     },
     scales: {
       x: {
+        position: "top" as const,
         grid: { display: false },
         ticks: {
           font: {
@@ -262,6 +263,7 @@ const VerticalBarChart: React.FC<VerticalBarChartProps> = ({
       },
       y: {
         beginAtZero: true,
+        reverse: true,
         grid: { display: true },
         ticks: {
           font: {
