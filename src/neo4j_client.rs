@@ -98,7 +98,7 @@ impl Neo4jClient {
             }
             Err(_) => {
                 OPERATION_COUNTER
-                    .with_label_values(&["falkor", worker_id, "timeout", q_name, "", ""])
+                    .with_label_values(&["neo4j", worker_id, "timeout", q_name, "", ""])
                     .inc();
                 return Err(OtherError("Timeout".to_string()));
             }

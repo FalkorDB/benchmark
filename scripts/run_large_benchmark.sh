@@ -35,10 +35,10 @@ set -euo pipefail
 FALKOR_ENDPOINT=${FALKOR_ENDPOINT:-"falkor://127.0.0.1:6379"}
 NEO4J_ENDPOINT=${NEO4J_ENDPOINT:-"neo4j://127.0.0.1:7687"}
 NEO4J_USER=${NEO4J_USER:-"neo4j"}
-NEO4J_PASSWORD=${NEO4J_PASSWORD:-"neo4jpass"}
+NEO4J_PASSWORD=${NEO4J_PASSWORD:-""}
 MEMGRAPH_ENDPOINT=${MEMGRAPH_ENDPOINT:-"bolt://127.0.0.1:17687"}
 MEMGRAPH_USER=${MEMGRAPH_USER:-"memgraph"}
-MEMGRAPH_PASSWORD=${MEMGRAPH_PASSWORD:-"six666six"}
+MEMGRAPH_PASSWORD=${MEMGRAPH_PASSWORD:-"${MEMGRAPH_USER:-}"}
 # Docker container running Memgraph; can be overridden via MEMGRAPH_CONTAINER_ID env var.
 MEMGRAPH_CONTAINER_ID=${MEMGRAPH_CONTAINER_ID:-"da0b0f388531"}
 
@@ -140,10 +140,19 @@ if [[ "${RUN_NEO4J}" == "1" ]]; then
   neo4j stop >/dev/null 2>&1
   
   echo "  - Removing Neo4j data directory"
-  NEO4J_DATA_DIR="/opt/homebrew/var/neo4j/data"
-  if [[ -d "$NEO4J_DATA_DIR" ]]; then
-    rm -rf "$NEO4J_DATA_DIR"/*
+  NEO4J_DATA_DIR=${NEO4J_DATA_DIR:-"/opt/homebrew/var/neo4j/data"}
+
+  if [[ -z "$NEO4J_DATA_DIR" || "$NEO4J_DATA_DIR" == "/" ]]; then
+    echo "❌ Refusing to delete Neo4j data dir: invalid NEO4J_DATA_DIR='$NEO4J_DATA_DIR'" >&2
+    exit 1
   fi
+
+  if [[ ! -d "$NEO4J_DATA_DIR" ]]; then
+    echo "❌ Neo4j data dir does not exist: $NEO4J_DATA_DIR" >&2
+    exit 1
+  fi
+
+  rm -rf -- "$NEO4J_DATA_DIR"/*
   
   echo "  - Setting initial password for Neo4j"
   neo4j-admin dbms set-initial-password "$NEO4J_PASSWORD" >/dev/null 2>&1
@@ -153,8 +162,16 @@ if [[ "${RUN_NEO4J}" == "1" ]]; then
   
   # Wait for Neo4j to be ready
   echo "  - Waiting for Neo4j to be ready..."
+  # Derive a bolt URL for cypher-shell from NEO4J_ENDPOINT (strip scheme, creds, and path).
+  NEO4J_HOSTPORT=$(echo "$NEO4J_ENDPOINT" | sed -E 's,^[a-zA-Z0-9+.-]+://,,; s,^.*@,,; s,/.*$,,' )
+  NEO4J_SCHEME="bolt"
+  if [[ "$NEO4J_ENDPOINT" == neo4j+s://* || "$NEO4J_ENDPOINT" == bolt+s://* ]]; then
+    NEO4J_SCHEME="bolt+s"
+  fi
+  NEO4J_BOLT_URL="${NEO4J_SCHEME}://${NEO4J_HOSTPORT}"
+
   for i in {1..60}; do
-    if cypher-shell -a bolt://127.0.0.1:7687 -u "$NEO4J_USER" -p "$NEO4J_PASSWORD" -d neo4j "RETURN 1 AS ok" >/dev/null 2>&1; then
+    if cypher-shell -a "$NEO4J_BOLT_URL" -u "$NEO4J_USER" -p "$NEO4J_PASSWORD" -d neo4j "RETURN 1 AS ok" >/dev/null 2>&1; then
       echo "  - Neo4j is ready"
       break
     fi

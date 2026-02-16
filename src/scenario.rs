@@ -55,6 +55,12 @@ impl Spec<'_> {
         size: Size,
         vendor: Vendor,
     ) -> Self {
+        let index_url = match vendor {
+            Vendor::Neo4j => "https://s3.eu-west-1.amazonaws.com/deps.memgraph.io/dataset/pokec/benchmark/neo4j.cypher",
+            Vendor::Falkor => "https://s3.eu-west-1.amazonaws.com/deps.memgraph.io/dataset/pokec/benchmark/falkordb.cypher",
+            Vendor::Memgraph => "https://s3.eu-west-1.amazonaws.com/deps.memgraph.io/dataset/pokec/benchmark/memgraph.cypher",
+        };
+
         match (name, size) {
             (Name::Users, Size::Small) => Spec {
                 name: Name::Users,
@@ -63,7 +69,7 @@ impl Spec<'_> {
                 edges: 121716,
                 vendor,
                 data_url: "https://s3.eu-west-1.amazonaws.com/deps.memgraph.io/dataset/pokec/benchmark/pokec_small_import.cypher",
-                index_url: "https://s3.eu-west-1.amazonaws.com/deps.memgraph.io/dataset/pokec/benchmark/memgraph.cypher",
+                index_url,
             },
             (Name::Users, Size::Medium) => Spec {
                 name: Name::Users,
@@ -72,7 +78,7 @@ impl Spec<'_> {
                 edges: 1768515,
                 vendor,
                 data_url: "https://s3.eu-west-1.amazonaws.com/deps.memgraph.io/dataset/pokec/benchmark/pokec_medium_import.cypher",
-                index_url: "https://s3.eu-west-1.amazonaws.com/deps.memgraph.io/dataset/pokec/benchmark/memgraph.cypher",
+                index_url,
             },
             (Name::Users, Size::Large) => Spec {
                 name: Name::Users,
@@ -81,7 +87,7 @@ impl Spec<'_> {
                 edges: 30622564,
                 vendor,
                 data_url: "https://s3.eu-west-1.amazonaws.com/deps.memgraph.io/dataset/pokec/benchmark/pokec_large.setup.cypher.gz",
-                index_url: "https://s3.eu-west-1.amazonaws.com/deps.memgraph.io/dataset/pokec/benchmark/memgraph.cypher",
+                index_url,
             },
         }
     }

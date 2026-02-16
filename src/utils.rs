@@ -338,14 +338,15 @@ pub fn format_number(num: u64) -> String {
     s
 }
 
-/// Collects items from a stream into batches of specified size
+/// Collects items from a stream into batches of specified size.
+///
+/// Unlike the previous implementation, this fails fast on the first stream error.
 pub async fn collect_batches<T, S, E>(
     mut stream: S,
     batch_size: usize,
-) -> Vec<Vec<T>>
+) -> Result<Vec<Vec<T>>, E>
 where
     S: StreamExt<Item = Result<T, E>> + Unpin,
-    E: std::fmt::Debug,
 {
     let mut batches = Vec::new();
     let mut current_batch = Vec::with_capacity(batch_size);
@@ -360,7 +361,7 @@ where
                 }
             }
             Err(e) => {
-                error!("Error processing stream item: {:?}", e);
+                return Err(e);
             }
         }
     }
@@ -370,7 +371,7 @@ where
         batches.push(current_batch);
     }
 
-    batches
+    Ok(batches)
 }
 
 /// Process items from a stream in batches with a callback function
@@ -428,7 +429,10 @@ where
                 }
             }
             Err(e) => {
-                error!("Error processing stream item: {:?}", e);
+                return Err(OtherError(format!(
+                    "Error processing stream item: {:?}",
+                    e
+                )));
             }
         }
     }

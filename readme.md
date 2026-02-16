@@ -192,11 +192,11 @@ For a convenience wrapper that loads data, regenerates a queries file, runs mult
 
 - `scripts/run_small_benchmark.sh`
 
-##### run simulation to see that the benchmark itself can sustain spesific mps given a fix latency on that hardware
+##### run simulation to see that the benchmark itself can sustain specific mps given a fixed latency on that hardware
 
 For example, simulate 40 clients that send at 5000 messages per seconds with latency of one millisecond per call.
 
-- `cargo run --release --bin benchmark run --vendor falkor --name small -p40 --mps 5000 --simulate 1'
+- `cargo run --release --bin benchmark run --vendor falkor --name small -p40 --mps 5000 --simulate 1`
 
 ### Data
 

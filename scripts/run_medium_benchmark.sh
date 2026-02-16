@@ -17,7 +17,7 @@ set -euo pipefail
 #   NEO4J_USER        (default: neo4j)
 #   NEO4J_PASSWORD    (no default; will prompt)
 #   MEMGRAPH_ENDPOINT (default: bolt://127.0.0.1:17687)
-#   MEMGRAPH_USER     (default: six666six)
+#   MEMGRAPH_USER     (default: memgraph)
 #   MEMGRAPH_PASSWORD (default: same as MEMGRAPH_USER)
 #
 # Workload params:
@@ -35,10 +35,10 @@ set -euo pipefail
 FALKOR_ENDPOINT=${FALKOR_ENDPOINT:-"falkor://127.0.0.1:6379"}
 NEO4J_ENDPOINT=${NEO4J_ENDPOINT:-"neo4j://127.0.0.1:7687"}
 NEO4J_USER=${NEO4J_USER:-"neo4j"}
-NEO4J_PASSWORD=${NEO4J_PASSWORD:-"six666six"}
+NEO4J_PASSWORD=${NEO4J_PASSWORD:-""}
 MEMGRAPH_ENDPOINT=${MEMGRAPH_ENDPOINT:-"bolt://127.0.0.1:17687"}
 MEMGRAPH_USER=${MEMGRAPH_USER:-"memgraph"}
-MEMGRAPH_PASSWORD=${MEMGRAPH_PASSWORD:-"six666six"}
+MEMGRAPH_PASSWORD=${MEMGRAPH_PASSWORD:-"${MEMGRAPH_USER:-}"}
 
 # Vendor toggles: set to 1 to enable, 0 to disable
 RUN_FALKOR=${RUN_FALKOR:-1}
@@ -82,16 +82,25 @@ export MEMGRAPH_PASSWORD
 export NEO4J_USER
 export MEMGRAPH_USER
 
+# Derive a bolt URL for cypher-shell from NEO4J_ENDPOINT (strip scheme, creds, and path).
+# cypher-shell does not reliably accept user:pass in the address, so we always pass creds via -u/-p.
+NEO4J_HOSTPORT=$(echo "$NEO4J_ENDPOINT" | sed -E 's,^[a-zA-Z0-9+.-]+://,,; s,^.*@,,; s,/.*$,,' )
+NEO4J_SCHEME="bolt"
+if [[ "$NEO4J_ENDPOINT" == neo4j+s://* || "$NEO4J_ENDPOINT" == bolt+s://* ]]; then
+  NEO4J_SCHEME="bolt+s"
+fi
+NEO4J_BOLT_URL="${NEO4J_SCHEME}://${NEO4J_HOSTPORT}"
+
 if [[ "${RUN_NEO4J}" == "1" ]]; then
-  echo "==> Verifying Neo4j login"
-  cypher-shell -a bolt://127.0.0.1:7687 -u "$NEO4J_USER" -p "$NEO4J_PASSWORD" -d neo4j "RETURN 1 AS ok" >/dev/null
+  echo "==> Verifying Neo4j login (${NEO4J_BOLT_URL})"
+  cypher-shell -a "$NEO4J_BOLT_URL" -u "$NEO4J_USER" -p "$NEO4J_PASSWORD" -d neo4j "RETURN 1 AS ok" >/dev/null
 
   echo "==> Clearing Neo4j database (neo4j)"
   # Drop known constraints used in earlier experiments (best-effort)
-  cypher-shell -a bolt://127.0.0.1:7687 -u "$NEO4J_USER" -p "$NEO4J_PASSWORD" -d neo4j \
+  cypher-shell -a "$NEO4J_BOLT_URL" -u "$NEO4J_USER" -p "$NEO4J_PASSWORD" -d neo4j \
     "DROP CONSTRAINT movie_title IF EXISTS; DROP CONSTRAINT person_name IF EXISTS;" >/dev/null
   # Wipe all data
-  cypher-shell -a bolt://127.0.0.1:7687 -u "$NEO4J_USER" -p "$NEO4J_PASSWORD" -d neo4j \
+  cypher-shell -a "$NEO4J_BOLT_URL" -u "$NEO4J_USER" -p "$NEO4J_PASSWORD" -d neo4j \
     "MATCH (n) DETACH DELETE n;" >/dev/null
 fi
 
