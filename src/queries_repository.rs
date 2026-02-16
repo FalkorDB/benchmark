@@ -12,7 +12,8 @@ pub enum QueryType {
 #[derive(Debug, PartialEq, Eq, Copy, Clone)]
 pub enum Flavour {
     FalkorDB,
-    _Neo4j,
+    Neo4j,
+    Memgraph,
 }
 
 struct Empty;
@@ -108,16 +109,27 @@ impl QueriesRepositoryBuilder<Flavour> {
     pub fn build(self) -> QueriesRepository {
         let mut queries_repository = QueriesRepository::new();
 
-        for (name, query_type, generator) in self.queries {
-            queries_repository.add(name, query_type, generator);
+        for (idx, (name, query_type, generator)) in self.queries.into_iter().enumerate() {
+            // Stable query ids are assigned in definition order.
+            let id = idx as u16;
+            queries_repository.add_with_id(id, name, query_type, generator);
         }
         queries_repository
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryCatalogEntry {
+    pub id: u16,
+    pub name: String,
+    pub q_type: QueryType,
+}
+
 pub struct QueriesRepository {
     read_queries: HashMap<String, QueryGenerator>,
     write_queries: HashMap<String, QueryGenerator>,
+    name_to_id: HashMap<String, u16>,
+    catalog: Vec<QueryCatalogEntry>,
 }
 
 impl QueriesRepository {
@@ -125,27 +137,42 @@ impl QueriesRepository {
         QueriesRepository {
             read_queries: HashMap::new(),
             write_queries: HashMap::new(),
+            name_to_id: HashMap::new(),
+            catalog: Vec::new(),
         }
     }
 
-    fn add<F>(
+    fn add_with_id<F>(
         &mut self,
+        id: u16,
         name: impl Into<String>,
         query_type: QueryType,
         generator: F,
     ) where
         F: Fn() -> Query + Send + Sync + 'static,
     {
+        let name = name.into();
+        self.name_to_id.insert(name.clone(), id);
+        self.catalog.push(QueryCatalogEntry {
+            id,
+            name: name.clone(),
+            q_type: query_type,
+        });
+
         match query_type {
             QueryType::Read => {
                 self.read_queries
-                    .insert(name.into(), QueryGenerator::new(query_type, generator));
+                    .insert(name, QueryGenerator::new(query_type, generator));
             }
             QueryType::Write => {
                 self.write_queries
-                    .insert(name.into(), QueryGenerator::new(query_type, generator));
+                    .insert(name, QueryGenerator::new(query_type, generator));
             }
         }
+    }
+
+    pub fn catalog(&self) -> Vec<QueryCatalogEntry> {
+        self.catalog.clone()
     }
 
     pub fn random_query(
@@ -160,7 +187,13 @@ impl QueriesRepository {
         let mut rng = rand::thread_rng();
         keys.choose(&mut rng).map(|&key| {
             let generator = queries.get(key).unwrap();
-            PreparedQuery::new(key.clone(), generator.query_type, generator.generate())
+            let q_id = *self.name_to_id.get(key).unwrap_or(&0);
+            PreparedQuery::new(
+                q_id,
+                key.clone(),
+                generator.query_type,
+                generator.generate(),
+            )
         })
     }
 }
@@ -192,6 +225,10 @@ pub struct UsersQueriesRepository {
 }
 
 impl UsersQueriesRepository {
+    pub fn catalog(&self) -> Vec<QueryCatalogEntry> {
+        self.queries_repository.catalog()
+    }
+
     pub fn random_queries(
         self,
         count: usize,
@@ -213,20 +250,22 @@ impl UsersQueriesRepository {
     pub fn new(
         vertices: i32,
         edges: i32,
+        flavour: Flavour,
     ) -> UsersQueriesRepository {
         let queries_repository = QueriesRepositoryBuilder::new(vertices, edges)
-            .flavour(Flavour::FalkorDB)
+            .flavour(flavour)
             .add_query("single_vertex_read", QueryType::Read, |random, _flavour| {
                 QueryBuilder::new()
                     .text("MATCH (n:User {id : $id}) RETURN n")
                     .param("id", random.random_vertex())
                     .build()
             })
-            // .add_query("single_vertex_write", QueryType::Write, |random, _flavour| {
-            //     QueryBuilder::new()
-            //         .text("CREATE (n:UserTemp {id : $id}) RETURN n")
-            //         .param("id", random.random_vertex())
-            //         .build()
+.add_query("single_vertex_write", QueryType::Write, |random, _flavour| {
+                QueryBuilder::new()
+                    .text("CREATE (n:User {id : $id}) RETURN n")
+                    .param("id", random.random_vertex())
+                    .build()
+            })
             .add_query("single_vertex_update", QueryType::Write, |random, _flavour| {
                 QueryBuilder::new()
                     .text("MATCH (n:User {id: $id}) SET n.rpc_social_credit = $rpc_social_credit RETURN n")
@@ -234,20 +273,20 @@ impl UsersQueriesRepository {
                     .param("rpc_social_credit", random.random_vertex())
                     .build()
             })
-            .add_query("single_edge_update", QueryType::Write, |random, _flavour| {
+.add_query("single_edge_update", QueryType::Write, |random, _flavour| {
                 QueryBuilder::new()
-                    .text("MATCH (n:User)-[e:Temp]->(m:User) WITH e ORDER BY rand() LIMIT 1 SET e.color = $color RETURN e")
+                    .text("MATCH (n:User)-[e:Friend]->(m:User) WITH e ORDER BY rand() LIMIT 1 SET e.color = $color RETURN e")
                     .param("color", random.random_vertex())
                     .build()
             })
-            // .add_query("single_edge_write", QueryType::Write, |random, _flavour| {
-            //     let (from, to) = random.random_path();
-            //     QueryBuilder::new()
-            //         .text("MATCH (n:User {id: $from}), (m:User {id: $to}) WITH n, m CREATE (n)-[e:Temp]->(m) RETURN e")
-            //         .param("from", from)
-            //         .param("to", to)
-            //         .build()
-            // })
+.add_query("single_edge_write", QueryType::Write, |random, _flavour| {
+                let (from, to) = random.random_path();
+                QueryBuilder::new()
+                    .text("MATCH (n:User {id: $from}), (m:User {id: $to}) WITH n, m CREATE (n)-[e:Friend]->(m) RETURN e")
+                    .param("from", from)
+                    .param("to", to)
+                    .build()
+            })
             .add_query("aggregate_expansion_1", QueryType::Read, |random, _flavour| {
                 QueryBuilder::new()
                     .text("MATCH (s:User {id: $id})-->(n:User) RETURN n.id")
@@ -320,6 +359,139 @@ impl UsersQueriesRepository {
                         .build()
                 },
             )
+            // Aggregation queries aligned with mgbench Pokec workload
+            .add_query("aggregate_age", QueryType::Read, |_random, _flavour| {
+                QueryBuilder::new()
+                    .text("MATCH (n:User) RETURN avg(n.age) AS avg_age")
+                    .build()
+            })
+            .add_query("aggregate_age_distinct", QueryType::Read, |_random, _flavour| {
+                QueryBuilder::new()
+                    .text("MATCH (n:User) RETURN count(DISTINCT n.age) AS distinct_ages")
+                    .build()
+            })
+            .add_query("aggregate_age_filtered", QueryType::Read, |_random, _flavour| {
+                QueryBuilder::new()
+                    .text("MATCH (n:User) WHERE n.age >= 18 RETURN avg(n.age) AS avg_age")
+                    .build()
+            })
+.add_query("aggregate_count_users", QueryType::Read, |_random, flavour| {
+                match flavour {
+                    Flavour::FalkorDB => {
+                        // Use FalkorDB's db.meta.stats() for fast global node count.
+                        QueryBuilder::new()
+                            .text("CALL db.meta.stats() YIELD nodeCount RETURN nodeCount AS cnt")
+                            .build()
+                    }
+                    _ => {
+                        QueryBuilder::new()
+                            .text("MATCH (n:User) RETURN count(n) AS cnt")
+                            .build()
+                    }
+                }
+            })
+            .add_query("aggregate_age_min_max_avg", QueryType::Read, |_random, _flavour| {
+                QueryBuilder::new()
+                    .text("MATCH (n:User) RETURN min(n.age) AS min_age, max(n.age) AS max_age, avg(n.age) AS avg_age")
+                    .build()
+            })
+            // Neighbourhood queries (2-hop)
+            .add_query("neighbours_2", QueryType::Read, |random, _flavour| {
+                QueryBuilder::new()
+                    .text("MATCH (s:User {id: $id})-->()-->(n:User) RETURN n.id")
+                    .param("id", random.random_vertex())
+                    .build()
+            })
+            .add_query("neighbours_2_with_filter", QueryType::Read, |random, _flavour| {
+                QueryBuilder::new()
+                    .text("MATCH (s:User {id: $id})-->()-->(n:User) WHERE n.age >= 18 RETURN n.id")
+                    .param("id", random.random_vertex())
+                    .build()
+            })
+            .add_query("neighbours_2_with_data", QueryType::Read, |random, _flavour| {
+                QueryBuilder::new()
+                    .text("MATCH (s:User {id: $id})-->()-->(n:User) RETURN n")
+                    .param("id", random.random_vertex())
+                    .build()
+            })
+            .add_query(
+                "neighbours_2_with_data_and_filter",
+                QueryType::Read,
+                |random, _flavour| {
+                    QueryBuilder::new()
+                        .text("MATCH (s:User {id: $id})-->()-->(n:User) WHERE n.age >= 18 RETURN n")
+                        .param("id", random.random_vertex())
+                        .build()
+                },
+            )
+            // Shortest-path style queries
+            .add_query("shortest_path", QueryType::Read, |random, flavour| {
+                let (from, to) = random.random_path();
+                let text = match flavour {
+                    Flavour::FalkorDB => "MATCH (s:User {id: $from}), (t:User {id: $to}) WITH shortestPath((s)-[*]->(t)) AS p RETURN length(p)",
+                    Flavour::Neo4j => "MATCH (s:User {id: $from}), (t:User {id: $to}) MATCH p = shortestPath((s)-[*]->(t)) RETURN length(p)",
+                    Flavour::Memgraph => "MATCH p = (:User {id: $from})-[*BFS]->(:User {id: $to}) RETURN length(p)",
+                };
+                QueryBuilder::new()
+                    .text(text)
+                    .param("from", from)
+                    .param("to", to)
+                    .build()
+            })
+            .add_query("shortest_path_with_filter", QueryType::Read, |random, flavour| {
+                let (from, to) = random.random_path();
+                let text = match flavour {
+                    Flavour::FalkorDB => "MATCH (s:User {id: $from}), (t:User {id: $to}) WITH shortestPath((s)-[*]->(t)) AS p WHERE length(p) > 0 RETURN length(p)",
+                    Flavour::Neo4j => "MATCH (s:User {id: $from}), (t:User {id: $to}) MATCH p = shortestPath((s)-[*]->(t)) WHERE length(p) > 0 RETURN length(p)",
+                    Flavour::Memgraph => "MATCH p = (:User {id: $from})-[*BFS]->(:User {id: $to}) WHERE length(p) > 0 RETURN length(p)",
+                };
+                QueryBuilder::new()
+                    .text(text)
+                    .param("from", from)
+                    .param("to", to)
+                    .build()
+            })
+            // Pattern and index-based queries
+            .add_query("pattern_cycle", QueryType::Read, |random, _flavour| {
+                QueryBuilder::new()
+                    .text("MATCH (a:User {id: $id})-->(b:User)-->(c:User)-->(a) RETURN a.id, b.id, c.id")
+                    .param("id", random.random_vertex())
+                    .build()
+            })
+            .add_query("pattern_long", QueryType::Read, |random, _flavour| {
+                QueryBuilder::new()
+                    .text("MATCH (a:User {id: $id})-->()-->()-->()-->(b:User) RETURN a.id, b.id")
+                    .param("id", random.random_vertex())
+                    .build()
+            })
+            .add_query("pattern_short", QueryType::Read, |random, _flavour| {
+                QueryBuilder::new()
+                    .text("MATCH (a:User {id: $id})-->()-->(b:User) RETURN a.id, b.id")
+                    .param("id", random.random_vertex())
+                    .build()
+            })
+            .add_query("vertex_on_label_property", QueryType::Read, |random, _flavour| {
+                QueryBuilder::new()
+                    .text("MATCH (n:User {id: $id}) RETURN n")
+                    .param("id", random.random_vertex())
+                    .build()
+            })
+            .add_query(
+                "vertex_on_label_property_index",
+                QueryType::Read,
+                |random, _flavour| {
+                    QueryBuilder::new()
+                        .text("MATCH (n:User {id: $id}) RETURN n")
+                        .param("id", random.random_vertex())
+                        .build()
+                },
+            )
+            .add_query("vertex_on_property", QueryType::Read, |random, _flavour| {
+                QueryBuilder::new()
+                    .text("MATCH (n {id: $id}) RETURN n")
+                    .param("id", random.random_vertex())
+                    .build()
+            })
             .build();
 
         UsersQueriesRepository { queries_repository }
@@ -328,6 +500,8 @@ impl UsersQueriesRepository {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PreparedQuery {
+    #[serde(default)]
+    pub q_id: u16,
     pub q_name: String,
     pub q_type: QueryType,
     pub query: Query,
@@ -337,6 +511,7 @@ pub struct PreparedQuery {
 
 impl PreparedQuery {
     pub fn new(
+        q_id: u16,
         q_name: String,
         q_type: QueryType,
         query: Query,
@@ -344,6 +519,7 @@ impl PreparedQuery {
         let cypher = query.to_cypher();
         let bolt = query.to_bolt_struct();
         Self {
+            q_id,
             q_name,
             q_type,
             query,

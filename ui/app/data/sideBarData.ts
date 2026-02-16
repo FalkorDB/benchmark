@@ -34,6 +34,17 @@ export const sidebarConfig: {
       options: [
         { id: "falkordb", label: "FalkorDB" },
         { id: "neo4j", label: "Neo4j" },
+        { id: "memgraph", label: "Memgraph" },
+      ],
+    },
+    {
+      title: "Throughput",
+      description: "Target MPS/QPS",
+      layout: "row",
+      icon: Activity,
+      // NOTE: options are dynamically overridden from the loaded results (e.g. 7500).
+      options: [
+        { id: "2500", label: "2500" },
       ],
     },
     {
@@ -70,12 +81,16 @@ export const sidebarConfig: {
         { id: "aggregate_expansion_2_with_filter", label: "Expand 2L (Filtered)" },
         { id: "aggregate_expansion_1", label: "Expand 1L" },
         { id: "aggregate_expansion_1_with_filter", label: "Expand 1L (Filtered)" },
+        { id: "aggregate_age_filtered", label: "Aggregate age (Filtered)" },
+        { id: "aggregate_count_users", label: "Count users" },
+        { id: "neighbours_2_with_data_and_filter", label: "Neighbours 2L (data+filter)" },
+        { id: "shortest_path", label: "Shortest path" },
         { id: "single_edge_write", label: "Write Edge" },
         { id: "single_vertex_write", label: "Write Vertex" },
         { id: "write", label: "Write General" },
         { id: "single_vertex_read", label: "Read Vertex" },
       ],
-    },
+    }
     // {
     //   title: "Realistic Workload",
     //   description: "",

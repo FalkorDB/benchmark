@@ -1,0 +1,82 @@
+Summary of FalkorDB query workload (read + write)
+
+There are 11 distinct logical query types used against FalkorDB when both reads and writes are enabled: 9 reads and 2 writes.
+
+READ QUERIES
+
+1. single_vertex_read (Read)
+   Purpose: Fetch a single user node by ID.
+   Cypher pattern:
+     MATCH (n:User {id : $id})
+     RETURN n
+
+2. aggregate_expansion_1 (Read)
+   Purpose: One-hop neighborhood expansion from a user to directly connected users, returning their IDs.
+   Cypher pattern:
+     MATCH (s:User {id: $id})-->(n:User)
+     RETURN n.id
+
+3. aggregate_expansion_1_with_filter (Read)
+   Purpose: One-hop expansion with an age filter on neighbors (age >= 18), returning their IDs.
+   Cypher pattern:
+     MATCH (s:User {id: $id})-->(n:User)
+     WHERE n.age >= 18
+     RETURN n.id
+
+4. aggregate_expansion_2 (Read)
+   Purpose: Two-hop expansion from a user, returning distinct IDs of users at distance 2.
+   Cypher pattern:
+     MATCH (s:User {id: $id})-->()-->(n:User)
+     RETURN DISTINCT n.id
+
+5. aggregate_expansion_2_with_filter (Read)
+   Purpose: Two-hop expansion with an age filter (age >= 18), returning distinct IDs.
+   Cypher pattern:
+     MATCH (s:User {id: $id})-->()-->(n:User)
+     WHERE n.age >= 18
+     RETURN DISTINCT n.id
+
+6. aggregate_expansion_3 (Read)
+   Purpose: Three-hop expansion from a user, returning distinct IDs of users at distance 3.
+   Cypher pattern:
+     MATCH (s:User {id: $id})-->()-->()-->(n:User)
+     RETURN DISTINCT n.id
+
+7. aggregate_expansion_3_with_filter (Read)
+   Purpose: Three-hop expansion with an age filter (age >= 18), returning distinct IDs.
+   Cypher pattern:
+     MATCH (s:User {id: $id})-->()-->()-->(n:User)
+     WHERE n.age >= 18
+     RETURN DISTINCT n.id
+
+8. aggregate_expansion_4 (Read)
+   Purpose: Four-hop expansion from a user, returning distinct IDs of users at distance 4.
+   Cypher pattern:
+     MATCH (s:User {id: $id})-->()-->()-->()-->(n:User)
+     RETURN DISTINCT n.id
+
+9. aggregate_expansion_4_with_filter (Read)
+   Purpose: Four-hop expansion with an age filter (age >= 18), returning distinct IDs.
+   Cypher pattern:
+     MATCH (s:User {id: $id})-->()-->()-->()-->(n:User)
+     WHERE n.age >= 18
+     RETURN DISTINCT n.id
+
+WRITE QUERIES
+
+1. single_vertex_update (Write)
+   Purpose: Update a property (rpc_social_credit) on a single user node by ID, then return the node.
+   Cypher pattern:
+     MATCH (n:User {id: $id})
+     SET n.rpc_social_credit = $rpc_social_credit
+     RETURN n
+
+2. single_edge_update (Write)
+   Purpose: Pick a random :Temp relationship between two users, update its color property, then return the relationship.
+   Cypher pattern:
+     MATCH (n:User)-[e:Temp]->(m:User)
+     WITH e
+     ORDER BY rand()
+     LIMIT 1
+     SET e.color = $color
+     RETURN e

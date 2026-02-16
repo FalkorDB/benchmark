@@ -6,7 +6,7 @@ export default function Home() {
   return (
     <main className="h-screen flex flex-col">
       <Header />
-      <DashBoard/>
+      <DashBoard comparisonVendors={["falkordb", "neo4j"]} />
     </main>
   );
 }

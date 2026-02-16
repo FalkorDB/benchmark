@@ -4,44 +4,100 @@ import { AppSidebar } from "@/components/ui/app-sidebar";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import FooterComponent from "./footer";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { BenchmarkData } from "../types/benchmark";
+import { BenchmarkData, Run } from "../types/benchmark";
 import { useToast } from "@/hooks/use-toast";
 import HorizontalBarChart from "./HorizontalBarChart";
 import VerticalBarChart from "./VerticalBarChart";
 import MemoryBarChart from "./MemoryBarChart";
 
-export default function DashBoard() {
+type DashboardProps = {
+  dataUrl?: string;
+  initialSelectedOptions?: Partial<Record<string, string[]>>;
+  /**
+   * If provided, the dashboard will only show these vendors in the UI (and will
+   * ignore any other vendors present in the data file).
+   */
+  comparisonVendors?: string[];
+};
+
+const DEFAULT_SELECTED_OPTIONS: Record<string, string[]> = {
+  "Workload Type": ["single"],
+  Vendors: ["falkordb", "neo4j"],
+  Clients: ["40"],
+  Throughput: ["2500"],
+  Hardware: ["arm"],
+  Queries: ["aggregate_expansion_4_with_filter"],
+};
+
+export default function DashBoard({
+  dataUrl = "/resultData.json",
+  initialSelectedOptions,
+  comparisonVendors,
+}: DashboardProps) {
   const [data, setData] = useState<BenchmarkData | null>(null);
   const { toast } = useToast();
   const [gridKey, setGridKey] = useState(0);
   const [p99SingleRatio, setP99SingleRatio] = useState<number | null>(null);
-  // eslint-disable-next-line
-  const [filteredResults, setFilteredResults] = useState<any[]>([]);
+  const [filteredResults, setFilteredResults] = useState<Run[]>([]);
   const [latencyStats, setLatencyStats] = useState({
     p50: { minValue: 0, maxValue: 0, ratio: 0 },
     p95: { minValue: 0, maxValue: 0, ratio: 0 },
     p99: { minValue: 0, maxValue: 0, ratio: 0 },
   });
   const [filteredUnrealistic, setFilteredUnrealistic] = useState<
-    { vendor: string; histogram: number[]; memory: string }[]
+    {
+      vendor: string;
+      histogram: number[];
+      memory: string;
+      baseDatasetBytes?: number;
+    }[]
   >([]);
+
+  const allowedVendors = useMemo(() => {
+    const v = (comparisonVendors ?? []).map((x) => x.toLowerCase()).filter(Boolean);
+    return v.length ? v : null;
+  }, [comparisonVendors]);
+
   const [selectedOptions, setSelectedOptions] = React.useState<
     Record<string, string[]>
-  >({
-    "Workload Type": ["single"],
-    Vendors: ["falkordb", "neo4j"],
-    Clients: ["40"],
-    Throughput: ["2500"],
-    Hardware: ["arm"],
-    Queries: ["aggregate_expansion_4_with_filter"],
+  >(() => {
+    const next: Record<string, string[]> = {
+      ...DEFAULT_SELECTED_OPTIONS,
+      ...(initialSelectedOptions ?? {}),
+    } as Record<string, string[]>;
+
+    // If this page compares a specific set of vendors, lock the vendor selection to those.
+    if (allowedVendors?.length) {
+      next["Vendors"] = allowedVendors;
+    }
+
+    return next;
   });
+
+  const [didInitFromData, setDidInitFromData] = useState(false);
 
   const fetchData = useCallback(async () => {
     try {
-      const response = await fetch("/resultData.json");
+      const response = await fetch(dataUrl);
       if (!response.ok)
         throw new Error(`HTTP error! status: ${response.status}`);
-      setData(await response.json());
+
+      const json = (await response.json()) as BenchmarkData;
+
+      if (allowedVendors?.length) {
+        const filtered: BenchmarkData = {
+          ...json,
+          runs: (json.runs ?? []).filter((r) =>
+            allowedVendors.includes(r.vendor?.toLowerCase())
+          ),
+          unrealstic: (json.unrealstic ?? []).filter((u) =>
+            allowedVendors.includes(u.vendor?.toLowerCase())
+          ),
+        };
+        setData(filtered);
+      } else {
+        setData(json);
+      }
     } catch (error) {
       toast({
         title: "Error fetching data",
@@ -49,28 +105,144 @@ export default function DashBoard() {
         variant: "destructive",
       });
     }
-  }, [toast]);
+  }, [toast, dataUrl, allowedVendors]);
 
   useEffect(() => {
     fetchData();
   }, [fetchData]);
+
+  // On first load of a summary file, auto-pick filters that match the data.
+  useEffect(() => {
+    if (didInitFromData || !data?.runs?.length) return;
+
+    const vendors = allowedVendors?.length
+      ? allowedVendors
+      : Array.from(
+          new Set(
+            data.runs
+              .map((r) => r.vendor?.toString().toLowerCase())
+              .filter(Boolean)
+          )
+        );
+    const clients = Array.from(
+      new Set(data.runs.map((r) => String(r.clients)).filter(Boolean))
+    );
+    const throughputs = Array.from(
+      new Set(
+        data.runs
+          .map((r) => String(r["target-messages-per-second"]))
+          .filter(Boolean)
+      )
+    );
+    const hardware = Array.from(
+      new Set(data.runs.map((r) => r.platform?.toLowerCase()).filter(Boolean))
+    );
+
+    // Queries: try to infer available query names from the loaded data so the "single" view
+    // can show histograms + telemetry immediately.
+    const queriesFromUnrealistic = Array.from(
+      new Set(
+        (data.unrealstic ?? [])
+          .flatMap((u) => Object.keys(u.histogram_for_type ?? {}))
+          .filter(Boolean)
+      )
+    );
+    const queriesFromRuns = Array.from(
+      new Set(
+        (data.runs ?? [])
+          .flatMap((r) => Object.keys(r.result?.histogram_for_type ?? {}))
+          .filter(Boolean)
+      )
+    );
+    const queries = (queriesFromUnrealistic.length
+      ? queriesFromUnrealistic
+      : queriesFromRuns
+    ).sort();
+
+    setSelectedOptions((prev) => {
+      const next = { ...prev };
+
+      // Only overwrite if current selection doesn't intersect available values.
+      const replaceIfNoMatch = (
+        key: string,
+        available: string[],
+        normalize?: (v: string) => string
+      ) => {
+        const current = next[key] ?? [];
+        const norm = normalize ?? ((v: string) => v);
+        const hasMatch = current.some((c) =>
+          available.some((a) => norm(a) === norm(c))
+        );
+        if (!hasMatch && available.length) {
+          next[key] = [available[0]];
+        }
+      };
+
+      // For vendor selection, default to showing *all* vendors present in the file.
+      // This is important for aws-tests comparisons (two runs) and prevents auto-picking only the first vendor.
+      if (vendors.length) {
+        const current = next["Vendors"] ?? [];
+        const hasMatch = current.some((c) => vendors.some((a) => a === c));
+        if (!hasMatch) next["Vendors"] = vendors;
+      }
+
+      // For query selection, pick something that exists in the loaded data so charts + telemetry show up.
+      replaceIfNoMatch("Queries", queries);
+
+      replaceIfNoMatch("Clients", clients);
+      replaceIfNoMatch("Throughput", throughputs);
+      replaceIfNoMatch("Hardware", hardware);
+
+      return next;
+    });
+
+    setDidInitFromData(true);
+  }, [data, didInitFromData, allowedVendors]);
 
   const handleSideBarSelection = (groupTitle: string, optionId: string) => {
     setSelectedOptions((prev) => {
       const groupSelections = prev[groupTitle] || [];
 
       if (groupTitle === "Vendors") {
-        if (optionId === "falkordb" || optionId === "neo4j") {
+        // If this page is restricted to a specific vendor pair, ignore toggles outside it.
+        if (
+          allowedVendors?.length &&
+          !allowedVendors.includes(optionId.toLowerCase())
+        ) {
           return prev;
         }
+
         const updatedSelections = groupSelections.includes(optionId)
           ? groupSelections.filter((id) => id !== optionId)
           : [...groupSelections, optionId];
+
+        // Never allow an empty vendor selection.
+        if (updatedSelections.length === 0) {
+          return prev;
+        }
+
         return {
           ...prev,
           [groupTitle]: updatedSelections,
         };
       }
+
+      if (groupTitle === "Hardware") {
+        const updatedSelections = groupSelections.includes(optionId)
+          ? groupSelections.filter((id) => id !== optionId)
+          : [...groupSelections, optionId];
+
+        // Never allow an empty hardware selection.
+        if (updatedSelections.length === 0) {
+          return prev;
+        }
+
+        return {
+          ...prev,
+          [groupTitle]: updatedSelections,
+        };
+      }
+
       return {
         ...prev,
         [groupTitle]: [optionId],
@@ -78,23 +250,46 @@ export default function DashBoard() {
     });
   };
 
-  // filter unrealstic data
+  // filter unrealistic (single-workload) data
+  // Preferred source: data.unrealstic (legacy file format)
+  // Fallback source: runs[].result.histogram_for_type (aggregated summaries)
   useEffect(() => {
-    if (!data || !data.unrealstic || !selectedOptions.Queries) {
+    if (!data || !selectedOptions.Queries?.length) {
       setFilteredUnrealistic([]);
       return;
     }
+
     const selectedQuery = selectedOptions.Queries[0];
 
-    setFilteredUnrealistic(
-      data.unrealstic
-        .map(({ vendor, histogram_for_type, memory }) => ({
-          vendor,
-          histogram: histogram_for_type[selectedQuery] || [],
-          memory,
-        }))
-        .filter((entry) => entry.histogram.length > 0)
-    );
+    if (data.unrealstic?.length) {
+      setFilteredUnrealistic(
+        data.unrealstic
+          .map(({ vendor, histogram_for_type, memory }) => ({
+            vendor,
+            histogram: histogram_for_type[selectedQuery] || [],
+            memory,
+          }))
+          .filter((entry) => entry.histogram.length > 0)
+      );
+      return;
+    }
+
+    if (data.runs?.length) {
+      // Note: aggregated summaries store the histogram on runs[].result.histogram_for_type.
+      setFilteredUnrealistic(
+        data.runs
+          .map((run: Run) => ({
+            vendor: run.vendor,
+            histogram: run?.result?.histogram_for_type?.[selectedQuery] || [],
+            memory: run?.result?.["ram-usage"] ?? "",
+            baseDatasetBytes: run?.result?.["base-dataset-bytes"],
+          }))
+          .filter((entry) => entry.histogram.length > 0)
+      );
+      return;
+    }
+
+    setFilteredUnrealistic([]);
   }, [data, selectedOptions.Queries]);
 
   // filter realstic data
@@ -105,27 +300,31 @@ export default function DashBoard() {
     }
 
     const results = data.runs.filter((run) => {
-      const isHardwareMatch =
-        run.platform &&
-        selectedOptions.Hardware.some((hardware) =>
-          run.platform.toLowerCase().includes(hardware.toLowerCase())
-        );
+      const isHardwareMatch = selectedOptions.Hardware?.length
+        ? run.platform &&
+          selectedOptions.Hardware.some((hardware) =>
+            run.platform.toLowerCase().includes(hardware.toLowerCase())
+          )
+        : true;
 
-      const isVendorMatch =
-        run.vendor &&
-        selectedOptions.Vendors.some(
-          (vendor) => vendor.toLowerCase() === run.vendor.toLowerCase()
-        );
+      const isVendorMatch = selectedOptions.Vendors?.length
+        ? run.vendor &&
+          selectedOptions.Vendors.some(
+            (vendor) => vendor.toLowerCase() === run.vendor.toLowerCase()
+          )
+        : true;
 
-      const isClientMatch =
-        run.clients !== undefined &&
-        selectedOptions.Clients.includes(String(run.clients));
+      const isClientMatch = selectedOptions.Clients?.length
+        ? run.clients !== undefined &&
+          selectedOptions.Clients.includes(String(run.clients))
+        : true;
 
-      const isThroughputMatch =
-        run["target-messages-per-second"] !== undefined &&
-        selectedOptions.Throughput.includes(
-          String(run["target-messages-per-second"])
-        );
+      const isThroughputMatch = selectedOptions.Throughput?.length
+        ? run["target-messages-per-second"] !== undefined &&
+          selectedOptions.Throughput.includes(
+            String(run["target-messages-per-second"])
+          )
+        : true;
 
       return (
         isVendorMatch && isClientMatch && isThroughputMatch && isHardwareMatch
@@ -146,14 +345,21 @@ export default function DashBoard() {
       return 0;
     };
 
-    const data = filteredResults.map((item) => ({
+    type LatencyDatum = {
+      vendor: string;
+      p50: number;
+      p95: number;
+      p99: number;
+    };
+
+    const data: LatencyDatum[] = filteredResults.map((item) => ({
       vendor: item.vendor,
       p50: convertToMilliseconds(item.result.latency.p50),
       p95: convertToMilliseconds(item.result.latency.p95),
       p99: convertToMilliseconds(item.result.latency.p99),
     }));
 
-    const computeStats = (key: keyof (typeof data)[0]) => {
+    const computeStats = (key: "p50" | "p95" | "p99") => {
       const values = data.map((d) => d[key]);
       const minValue = Math.round(Math.min(...values));
       const maxValue = Math.round(Math.max(...values));
@@ -173,9 +379,28 @@ export default function DashBoard() {
   }, [filteredResults]);
 
   const getBarColor = useCallback((vendor: string) => {
+    const key = (vendor ?? "").toString().trim().toLowerCase();
+
+    // Map vendor identifiers/names to the same CSS vars used by the MAX THROUGHPUT chart.
+    // For aws-tests, the "vendor" is the instance type (e.g. r7i.2xlarge / r8g.2xlarge).
+    const cssVar =
+      key === "falkordb" || key === "falkor"
+        ? "--FalkorDB-color"
+        : key === "neo4j"
+        ? "--Neo4j-color"
+        : key === "memgraph"
+        ? "--Memgraph-color"
+        : key === "intel" || key === "x86" || key.startsWith("r7i")
+        ? "--Intel-color"
+        : key === "graviton" || key === "arm" || key.startsWith("r8g")
+        ? "--Graviton-color"
+        : "";
+
+    if (!cssVar) return "#191919";
+
     return (
       getComputedStyle(document.documentElement)
-        .getPropertyValue(`--${vendor}-color`)
+        .getPropertyValue(cssVar)
         .trim() || "#191919"
     );
   }, []);
@@ -266,6 +491,37 @@ export default function DashBoard() {
     actualMessagesPerSecond: item.result["actual-messages-per-second"],
   }));
 
+  // Telemetry breakdown per run (single-workload per-query view)
+  const telemetryBreakdownPerRun = useMemo(() => {
+    const selectedQuery = selectedOptions.Queries?.[0];
+    if (!selectedQuery) return [];
+
+    // Use filteredResults so it respects vendor/hardware/throughput filters.
+    const runs = filteredResults.length ? filteredResults : data?.runs ?? [];
+
+    return runs
+      .map((r) => {
+        const tb = r?.result?.telemetry_for_type?.[selectedQuery];
+        if (!tb) return null;
+        return {
+          vendor: r.vendor,
+          platform: r.platform,
+          query: selectedQuery,
+          waitMs: tb["wait-ms"],
+          execMs: tb["exec-ms"],
+          reportMs: tb["report-ms"],
+        };
+      })
+      .filter(Boolean) as Array<{
+      vendor: string;
+      platform?: string;
+      query: string;
+      waitMs: number;
+      execMs: number;
+      reportMs: number;
+    }>;
+  }, [data, filteredResults, selectedOptions.Queries]);
+
   const maxThroughput = Math.max(
     ...throughputData.map((item) => item.actualMessagesPerSecond)
   );
@@ -275,24 +531,123 @@ export default function DashBoard() {
   const throughputRatio =
     minThroughput !== 0 ? Math.round(maxThroughput / minThroughput) : 0;
 
+  // Dataset & workload summary (nodes, edges, read/write queries)
+  const datasetSummary = React.useMemo(() => {
+    if (!data?.runs?.length) return null;
+
+    const baseRun = data.runs[0];
+    const nodes = baseRun.edges ?? 0;
+    const edges = baseRun.relationships ?? 0;
+
+    const opsByQuery = baseRun.result?.operations?.["by-query"] ?? {};
+    const writeQueryNames = new Set([
+      "single_vertex_update",
+      "single_edge_update",
+      "single_vertex_write",
+      "single_edge_write",
+      "write",
+    ]);
+
+    let readQueries = 0;
+    let writeQueries = 0;
+
+    for (const [name, count] of Object.entries(
+      opsByQuery as Record<string, number>
+    )) {
+      if (writeQueryNames.has(name)) {
+        writeQueries += count;
+      } else {
+        readQueries += count;
+      }
+    }
+
+    // Fallback: if we don't have per-query breakdown, treat all successful requests as reads.
+    if (readQueries === 0 && writeQueries === 0) {
+      const total = baseRun.result?.["successful-requests"] ?? 0;
+      return {
+        nodes,
+        edges,
+        readQueries: typeof total === "number" ? total : 0,
+        writeQueries: 0,
+      };
+    }
+
+    return { nodes, edges, readQueries, writeQueries };
+  }, [data]);
+
   const parseMemory = (memory: string): number => {
-    const match = memory.match(/([\d.]+)/);
-    return match ? parseFloat(match[1]) : 0;
+    if (!memory) return 0;
+
+    // Parse values like "1.37GB", "800MB", "512kb" and normalize to MB.
+    const match = memory.match(/([\d.]+)\s*([a-zA-Z]+)?/);
+    if (!match) return 0;
+
+    const value = parseFloat(match[1]);
+    if (!Number.isFinite(value)) return 0;
+
+    const unit = (match[2] || "").toLowerCase();
+
+    if (unit.startsWith("g")) {
+      // GB -> MB
+      return value * 1024;
+    }
+    if (unit.startsWith("k")) {
+      // KB -> MB
+      return value / 1024;
+    }
+
+    // Treat everything else ("m", "mb", unknown/empty) as MB
+    return value;
   };
 
-  const singleMemory = filteredUnrealistic.map(({ vendor, memory }) => ({
-    vendor,
-    memory: parseMemory(memory),
-  }));
+  const formatBytes = (bytes?: number) => {
+    if (!bytes || bytes <= 0) return "";
+    const mib = bytes / (1024 * 1024);
+    if (mib >= 1024) return `${(mib / 1024).toFixed(2)}GB`;
+    return `${mib.toFixed(1)}MB`;
+  };
+
+  const singleMemory = filteredUnrealistic.map(
+    ({ vendor, memory, baseDatasetBytes }) => {
+      const key = (vendor ?? "").toString().trim().toLowerCase();
+
+      // For Memgraph and Neo4j, prefer the "base dataset" estimate (bytes) as the bar value.
+      // This normalizes the chart to dataset footprint rather than process RSS.
+      if (
+        (key === "memgraph" || key === "neo4j") &&
+        baseDatasetBytes &&
+        baseDatasetBytes > 0
+      ) {
+        return {
+          vendor,
+          memory: baseDatasetBytes / (1024 * 1024),
+        };
+      }
+
+      return {
+        vendor,
+        memory: parseMemory(memory),
+      };
+    }
+  );
+
+  const baseDatasetByVendor = filteredUnrealistic.reduce<Record<string, number>>(
+    (acc, cur) => {
+      if (cur.baseDatasetBytes) acc[cur.vendor] = cur.baseDatasetBytes;
+      return acc;
+    },
+    {}
+  );
 
   const maxSingleMemory = Math.max(...singleMemory.map((item) => item.memory));
   const minSingleMemory = Math.min(...singleMemory.map((item) => item.memory));
   const singleMemoryRatio =
     minSingleMemory !== 0 ? Math.round(maxSingleMemory / minSingleMemory) : 0;
 
+  const workloadType = selectedOptions["Workload Type"];
   useEffect(() => {
     setGridKey((prevKey) => prevKey + 1);
-  }, [selectedOptions["Workload Type"]]);
+  }, [workloadType]);
 
   //saving data to window.allChartData
   /* eslint-disable */
@@ -316,6 +671,25 @@ export default function DashBoard() {
 
   const isConcurrent = selectedOptions["Workload Type"]?.includes("concurrent");
 
+  const formatDuration = (ms: number) => {
+    if (!Number.isFinite(ms) || ms <= 0) return "0s";
+    const totalSeconds = ms / 1000;
+    if (totalSeconds < 60) return `${totalSeconds.toFixed(1)}s`;
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = Math.round(totalSeconds % 60);
+    return `${minutes}m ${seconds}s`;
+  };
+
+  const concurrentRuns = useMemo(() => {
+    const byVendor = new Map<string, any>();
+    for (const r of filteredResults) {
+      const v = (r.vendor ?? "").toString().toLowerCase();
+      if (!v) continue;
+      if (!byVendor.has(v)) byVendor.set(v, r);
+    }
+    return Array.from(byVendor.values());
+  }, [filteredResults]);
+
   return (
     <SidebarProvider className="h-screen w-screen overflow-hidden">
       <div className="flex h-full w-full">
@@ -323,59 +697,172 @@ export default function DashBoard() {
           selectedOptions={selectedOptions}
           handleSideBarSelection={handleSideBarSelection}
           platform={data?.platforms}
+          allowedVendors={
+            data?.runs?.length
+              ? Array.from(
+                  new Set(
+                    data.runs
+                      .map((r) => r.vendor?.toString().toLowerCase())
+                      .filter(Boolean)
+                  )
+                )
+              : undefined
+          }
+          throughputOptions={
+            data?.runs?.length
+              ? Array.from(
+                  new Set(
+                    data.runs
+                      .map((r) => r["target-messages-per-second"])
+                      .filter((v) => v !== undefined && v !== null)
+                  )
+                ).sort((a, b) => Number(a) - Number(b))
+              : undefined
+          }
+          datasetSummary={datasetSummary}
         />
-        <SidebarInset className="flex-grow h-full min-h-0">
-          <div
-            key={gridKey}
-            className={`grid w-full h-full min-w-0 ${
-              isConcurrent
-                ? "grid-cols-2 grid-rows-[2fr,1.5fr,50px]"
-                : "grid-cols-[7fr_3fr] grid-rows-[2fr,50px]"
-            } gap-2 p-1`}
-          >
-            <div
-              className={`bg-muted/50 rounded-xl p-4 min-h-0 w-full flex flex-col min-w-0 items-center justify-between ${
-                isConcurrent ? "col-span-2" : ""
-              }`}
-              id="latency-chart"
-            >
-              <h2 className="text-2xl font-bold text-center font-space">
-                LATENCY
-              </h2>
-              <p className="pb-1 text-gray-600 text-center font-fira">
-                (LOWER IS BETTER)
-              </p>
-              <p className="text-lg font-semibold text-center mb-2 font-fira">
-                Superior Latency:{" "}
-                <span className="text-[#FF66B3] font-bold">
-                  {isConcurrent
-                    ? latencyStats
-                      ? `${Math.round(latencyStats.p99.ratio)}x`
-                      : ""
-                    : p99SingleRatio
-                    ? `${Math.round(p99SingleRatio)}x`
-                    : ""}
-                </span>{" "}
-                faster at P99
-              </p>
-              <div className="w-full flex-grow flex items-center justify-center min-h-0">
-                <div className="w-full h-full">
+        <SidebarInset className="flex-grow h-full min-h-0 overflow-y-auto">
+          {isConcurrent ? (
+            <div key={gridKey} className="flex flex-col w-full min-w-0 gap-2 p-1">
+              <div className="bg-muted/50 rounded-xl p-4 w-full flex flex-col items-center justify-between min-h-[420px]">
+                <h2 className="text-2xl font-bold text-center font-space">
+                  LATENCY
+                </h2>
+                <p className="pb-1 text-gray-600 text-center font-fira">
+                  (LOWER IS BETTER)
+                </p>
+                <p className="text-lg font-semibold text-center mb-2 font-fira">
+                  Superior Latency:{" "}
+                  <span className="text-[#FF66B3] font-bold">
+                    {latencyStats ? `${Math.round(latencyStats.p99.ratio)}x` : ""}
+                  </span>{" "}
+                  faster at P99
+                </p>
+                <div className="w-full flex-grow min-h-0">
                   {latencyStats.p99.ratio > 0 && (
                     <VerticalBarChart
-                      chartData={
-                        isConcurrent
-                          ? chartDataForRealistic
-                          : chartDataForUnrealistic
-                      }
-                      chartId={isConcurrent ? "concurrent" : "single"}
+                      chartData={chartDataForRealistic}
+                      chartId="concurrent"
                       unit="ms"
                       latencyStats={latencyStats}
                     />
                   )}
                 </div>
               </div>
+
+              <div className="bg-muted/50 rounded-xl p-4 w-full flex flex-col min-h-[180px]">
+                <h2 className="text-2xl font-bold text-center font-space">
+                  RUN DETAILS
+                </h2>
+                <p className="pb-2 text-gray-600 text-center font-fira">
+                  Duration, mean latency, and worker fairness
+                </p>
+                <div className="w-full overflow-x-auto">
+                  <table className="w-full text-sm font-fira">
+                    <thead>
+                      <tr className="text-left text-gray-600">
+                        <th className="py-1 pr-4">Vendor</th>
+                        <th className="py-1 pr-4">Duration</th>
+                        <th className="py-1 pr-4">Avg latency</th>
+                        <th className="py-1 pr-4">Worker imbalance</th>
+                        <th className="py-1 pr-4">Worker CV</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {concurrentRuns.map((r) => {
+                        const elapsedMs = Number(r?.result?.["elapsed-ms"] ?? 0);
+                        const avgLatency = Number(r?.result?.["avg-latency-ms"] ?? 0);
+                        const stats = r?.result?.["spawn-stats"];
+                        const ratio = Number(stats?.["max-min-ratio"] ?? 0);
+                        const cv = Number(stats?.cv ?? 0);
+
+                        return (
+                          <tr key={r.vendor} className="border-t border-gray-200/60">
+                            <td className="py-2 pr-4 font-semibold">{r.vendor}</td>
+                            <td className="py-2 pr-4">{formatDuration(elapsedMs)}</td>
+                            <td className="py-2 pr-4">{avgLatency.toFixed(2)} ms</td>
+                            <td className="py-2 pr-4">
+                              {ratio > 0 ? `${ratio.toFixed(2)}x (max/min)` : "—"}
+                            </td>
+                            <td className="py-2 pr-4">{cv > 0 ? cv.toFixed(3) : "—"}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <div
+                className="bg-muted/50 rounded-xl p-4 w-full flex flex-col items-center justify-between min-h-[420px]"
+                id="throughput-chart"
+              >
+                <h2 className="text-2xl font-bold text-center font-space">
+                  MAX THROUGHPUT
+                </h2>
+                <p className="text-gray-600 text-center font-fira">
+                  (HIGHER IS BETTER)
+                </p>
+                <p className="pt-1 text-lg font-semibold text-center font-fira">
+                  Execute{" "}
+                  <span className="text-[#FF66B3] font-bold">
+                    {throughputRatio ? throughputRatio : ""}x
+                  </span>{" "}
+                  more queries with the same hardware
+                </p>
+                <div className="w-full flex-grow min-h-0">
+                  <HorizontalBarChart
+                    data={throughputData}
+                    dataKey="actualMessagesPerSecond"
+                    chartLabel="Queries Per Second"
+                    ratio={throughputRatio}
+                    maxValue={maxThroughput}
+                    minValue={minThroughput}
+                    unit=" qps"
+                    getBarColor={getBarColor}
+                  />
+                </div>
+              </div>
+
+              <div className="bg-muted/50 rounded-xl flex items-center justify-center h-[50px]">
+                <FooterComponent />
+              </div>
             </div>
-            {!isConcurrent && (
+          ) : (
+            <div
+              key={gridKey}
+              className="grid w-full h-full min-w-0 grid-cols-[7fr_3fr] grid-rows-[2fr,50px] gap-2 p-1"
+            >
+              <div
+                className="bg-muted/50 rounded-xl p-4 min-h-0 w-full flex flex-col min-w-0 items-center justify-between"
+                id="latency-chart"
+              >
+                <h2 className="text-2xl font-bold text-center font-space">
+                  LATENCY
+                </h2>
+                <p className="pb-1 text-gray-600 text-center font-fira">
+                  (LOWER IS BETTER)
+                </p>
+                <p className="text-lg font-semibold text-center mb-2 font-fira">
+                  Superior Latency:{" "}
+                  <span className="text-[#FF66B3] font-bold">
+                    {p99SingleRatio ? `${Math.round(p99SingleRatio)}x` : ""}
+                  </span>{" "}
+                  faster at P99
+                </p>
+                <div className="w-full flex-grow flex items-center justify-center min-h-0">
+                  <div className="w-full h-full">
+                    {chartDataForUnrealistic.datasets.length > 0 && (
+                      <VerticalBarChart
+                        chartData={chartDataForUnrealistic}
+                        chartId="single"
+                        unit="ms"
+                        latencyStats={latencyStats}
+                      />
+                    )}
+                  </div>
+                </div>
+              </div>
               <div className="bg-muted/50 rounded-xl p-4 min-h-0 w-full flex flex-col min-w-0 items-center justify-between">
                 <h2 className="text-2xl font-bold text-center font-space">
                   MEMORY USAGE
@@ -389,6 +876,51 @@ export default function DashBoard() {
                   </span>{" "}
                   Better performance, lower overall costs
                 </p>
+
+                {telemetryBreakdownPerRun.length > 0 && (
+                  <div className="w-full pb-2">
+                    <p className="text-xs text-gray-600 text-center font-fira pb-1">
+                      Telemetry breakdown for {telemetryBreakdownPerRun[0].query} (wait / exec / report)
+                    </p>
+                    <div className="w-full overflow-x-auto">
+                      <table className="w-full text-xs font-fira">
+                        <thead>
+                          <tr className="text-left text-gray-600">
+                            <th className="py-1 pr-3">Run</th>
+                            <th className="py-1 pr-3">HW</th>
+                            <th className="py-1 pr-3">wait (ms)</th>
+                            <th className="py-1 pr-3">exec (ms)</th>
+                            <th className="py-1 pr-3">report (ms)</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {telemetryBreakdownPerRun.map((t) => (
+                            <tr
+                              key={`${t.vendor}-${t.platform ?? ""}`}
+                              className="border-t border-gray-200/60"
+                            >
+                              <td className="py-1 pr-3 font-semibold">{t.vendor}</td>
+                              <td className="py-1 pr-3">{t.platform ?? "—"}</td>
+                              <td className="py-1 pr-3">{t.waitMs.toFixed(1)}</td>
+                              <td className="py-1 pr-3">{t.execMs.toFixed(1)}</td>
+                              <td className="py-1 pr-3">{t.reportMs.toFixed(1)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+
+                {Object.keys(baseDatasetByVendor).length > 0 && (
+                  <div className="text-sm text-gray-600 text-center font-fira pb-2">
+                    {Object.entries(baseDatasetByVendor).map(([vendor, bytes]) => (
+                      <div key={vendor}>
+                        {vendor} base dataset estimate: {formatBytes(bytes)}
+                      </div>
+                    ))}
+                  </div>
+                )}
                 <div className="w-full flex-grow flex items-center justify-center min-h-0">
                   <div className="w-full h-full">
                     <MemoryBarChart
@@ -402,46 +934,11 @@ export default function DashBoard() {
                   </div>
                 </div>
               </div>
-            )}
-            {isConcurrent && (
-              <>
-                <div
-                  className="bg-muted/50 rounded-xl p-4 min-h-0 w-full flex flex-col items-center justify-between col-span-2"
-                  id="throughput-chart"
-                >
-                  <h2 className="text-2xl font-bold text-center font-space">
-                    MAX THROUGHPUT
-                  </h2>
-                  <p className="text-gray-600 text-center font-fira">
-                    (HIGHER IS BETTER)
-                  </p>
-                  <p className="pt-1 text-lg font-semibold text-center font-fira">
-                    Execute{" "}
-                    <span className="text-[#FF66B3] font-bold">
-                      {throughputRatio ? throughputRatio : ""}x
-                    </span>{" "}
-                    more queries with the same hardware
-                  </p>
-                  <div className="w-full flex-grow flex items-center justify-center min-h-0">
-                    <div className="w-full h-full">
-                      <HorizontalBarChart
-                        data={throughputData}
-                        dataKey="actualMessagesPerSecond"
-                        chartLabel="Messages Per Second"
-                        ratio={throughputRatio}
-                        maxValue={maxThroughput}
-                        minValue={minThroughput}
-                        unit="mb"
-                      />
-                    </div>
-                  </div>
-                </div>
-              </>
-            )}
-            <div className="col-span-2 bg-muted/50 rounded-xl flex items-center justify-center h-[50px]">
-              <FooterComponent />
+              <div className="col-span-2 bg-muted/50 rounded-xl flex items-center justify-center h-[50px]">
+                <FooterComponent />
+              </div>
             </div>
-          </div>
+          )}
         </SidebarInset>
       </div>
     </SidebarProvider>

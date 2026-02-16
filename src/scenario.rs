@@ -3,11 +3,14 @@
 use crate::error::BenchmarkResult;
 use crate::utils::{create_directory_if_not_exists, download_file, read_lines, url_file_name};
 use clap::ValueEnum;
+use flate2::read::GzDecoder;
 use futures::Stream;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
 use std::pin::Pin;
+use std::path::Path;
+use std::io::Read;
 use strum_macros::Display;
 use tracing::info;
 
@@ -32,6 +35,7 @@ pub enum Name {
 pub enum Vendor {
     Neo4j,
     Falkor,
+    Memgraph,
 }
 
 #[derive(Debug, Clone)]
@@ -51,6 +55,12 @@ impl Spec<'_> {
         size: Size,
         vendor: Vendor,
     ) -> Self {
+        let index_url = match vendor {
+            Vendor::Neo4j => "https://s3.eu-west-1.amazonaws.com/deps.memgraph.io/dataset/pokec/benchmark/neo4j.cypher",
+            Vendor::Falkor => "https://s3.eu-west-1.amazonaws.com/deps.memgraph.io/dataset/pokec/benchmark/falkordb.cypher",
+            Vendor::Memgraph => "https://s3.eu-west-1.amazonaws.com/deps.memgraph.io/dataset/pokec/benchmark/memgraph.cypher",
+        };
+
         match (name, size) {
             (Name::Users, Size::Small) => Spec {
                 name: Name::Users,
@@ -59,7 +69,7 @@ impl Spec<'_> {
                 edges: 121716,
                 vendor,
                 data_url: "https://s3.eu-west-1.amazonaws.com/deps.memgraph.io/dataset/pokec/benchmark/pokec_small_import.cypher",
-                index_url: "https://s3.eu-west-1.amazonaws.com/deps.memgraph.io/dataset/pokec/benchmark/neo4j.cypher",
+                index_url,
             },
             (Name::Users, Size::Medium) => Spec {
                 name: Name::Users,
@@ -68,7 +78,7 @@ impl Spec<'_> {
                 edges: 1768515,
                 vendor,
                 data_url: "https://s3.eu-west-1.amazonaws.com/deps.memgraph.io/dataset/pokec/benchmark/pokec_medium_import.cypher",
-                index_url: "https://s3.eu-west-1.amazonaws.com/deps.memgraph.io/dataset/pokec/benchmark/neo4j.cypher",
+                index_url,
             },
             (Name::Users, Size::Large) => Spec {
                 name: Name::Users,
@@ -77,7 +87,7 @@ impl Spec<'_> {
                 edges: 30622564,
                 vendor,
                 data_url: "https://s3.eu-west-1.amazonaws.com/deps.memgraph.io/dataset/pokec/benchmark/pokec_large.setup.cypher.gz",
-                index_url: "https://s3.eu-west-1.amazonaws.com/deps.memgraph.io/dataset/pokec/benchmark/neo4j.cypher",
+                index_url,
             },
         }
     }
@@ -117,6 +127,31 @@ impl Spec<'_> {
             );
             download_file(url, cache_file.as_str()).await?;
         }
-        Ok(cache_file)
+
+        // If the cached file is gzip-compressed, transparently decompress it once and
+        // return the path to the decompressed file. This avoids having to teach every
+        // consumer how to handle .gz files.
+        if Path::new(&cache_file)
+            .extension()
+            .and_then(|ext| ext.to_str())
+            == Some("gz")
+        {
+            let decompressed_path = cache_file.trim_end_matches(".gz").to_string();
+            if fs::metadata(&decompressed_path).is_err() {
+                info!(
+                    "Decompressing gzip cache {} to {}",
+                    cache_file,
+                    decompressed_path
+                );
+                let compressed = fs::read(&cache_file)?;
+                let mut decoder = GzDecoder::new(&compressed[..]);
+                let mut out = Vec::new();
+                decoder.read_to_end(&mut out)?;
+                fs::write(&decompressed_path, &out)?;
+            }
+            Ok(decompressed_path)
+        } else {
+            Ok(cache_file)
+        }
     }
 }

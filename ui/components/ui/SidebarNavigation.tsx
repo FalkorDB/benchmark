@@ -12,6 +12,7 @@ import {
   HoverCardTrigger,
 } from "@/components/ui/hover-card";
 import { HardwareInfo } from "@/app/components/HardwareInfo";
+import { Layers } from "lucide-react";
 
 type Platforms = Record<
   string,
@@ -27,6 +28,7 @@ export function NavMain({
   selectedOptions,
   handleSideBarSelection,
   platform,
+  datasetSummary,
 }: {
   items: {
     title: string;
@@ -38,15 +40,25 @@ export function NavMain({
   selectedOptions: Record<string, string[]>;
   handleSideBarSelection: (groupTitle: string, optionId: string) => void;
   platform?: Platforms;
+  datasetSummary?: {
+    nodes: number;
+    edges: number;
+    readQueries: number;
+    writeQueries: number;
+  } | null;
 }) {
   const { state } = useSidebar();
+
   const isRealisticWorkloadOn =
     selectedOptions["Workload Type"]?.includes("concurrent");
 
   const filteredItems = items.filter((group) => {
     if (group.title === "Queries" && isRealisticWorkloadOn) return false;
     if (
-      (group.title === "Clients" || group.title === "Realistic Workload" || group.title === "Hardware") &&
+      (group.title === "Clients" ||
+        group.title === "Throughput" ||
+        group.title === "Realistic Workload" ||
+        group.title === "Hardware") &&
       !isRealisticWorkloadOn
     )
       return false;
@@ -55,6 +67,55 @@ export function NavMain({
 
   return (
     <SidebarMenu>
+      {datasetSummary && (
+        <SidebarMenuItem
+          className={`font-space mt-2 mb-4${
+            state === "collapsed" ? " flex justify-center" : ""
+          }`}
+        >
+          <SidebarMenuButton
+            size="lg"
+            className={`flex items-start gap-3 pl-4 h-auto cursor-default ${
+              state === "collapsed" ? "justify-center" : ""
+            }`}
+          >
+            <Layers
+              className={`w-6 h-6 ${state === "collapsed" ? "mx-auto" : ""}`}
+            />
+            {state !== "collapsed" && (
+              <div className="flex flex-col">
+                <h2 className="text-lg font-semibold mb-1">Dataset &amp; workload</h2>
+                <div className="mt-0.5 flex flex-col gap-0.5 text-xs text-gray-700 font-medium">
+                  <div className="flex justify-between gap-4">
+                    <span className="text-gray-500">Nodes</span>
+                    <span className="tabular-nums">
+                      {datasetSummary.nodes.toLocaleString()}
+                    </span>
+                  </div>
+                  <div className="flex justify-between gap-4">
+                    <span className="text-gray-500">Edges</span>
+                    <span className="tabular-nums">
+                      {datasetSummary.edges.toLocaleString()}
+                    </span>
+                  </div>
+                  <div className="flex justify-between gap-4 pt-1">
+                    <span className="text-gray-500">Queries</span>
+                    <span className="tabular-nums">
+                      {(datasetSummary.readQueries + datasetSummary.writeQueries).toLocaleString()}
+                    </span>
+                  </div>
+                  <div className="flex justify-between gap-4">
+                    <span className="text-gray-500">Read / write</span>
+                    <span className="tabular-nums">
+                      {datasetSummary.readQueries.toLocaleString()} / {datasetSummary.writeQueries.toLocaleString()}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            )}
+          </SidebarMenuButton>
+        </SidebarMenuItem>
+      )}
       {filteredItems.map((group) => (
         <SidebarMenuItem
           key={group.title}
@@ -134,6 +195,8 @@ export function NavMain({
                         return "bg-[#F5F4FF] text-FalkorDB border-FalkorDB";
                       if (option.id === "neo4j")
                         return "bg-[#F5F4FF] text-Neo4j border-Neo4j";
+                      if (option.id === "memgraph")
+                        return "bg-[#F5F4FF] text-Memgraph border-Memgraph";
                       return "bg-[#F5F4FF] text-[#7466FF] border-[#7466FF]";
                     }
                     return "bg-gray-100 text-gray-800 border-transparent";

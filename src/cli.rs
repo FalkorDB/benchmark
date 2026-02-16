@@ -38,11 +38,28 @@ pub enum Commands {
             help = "only load the data from the cache and iterate over it, show how much time it takes, do not send it to the server"
         )]
         dry_run: bool,
+        #[arg(
+            short,
+            long,
+            required = false,
+            default_value_t = 1000,
+            help = "number of cypher commands to execute in a single batch"
+        )]
+        batch_size: usize,
+        #[arg(
+            short,
+            long,
+            required = false,
+            help = "endpoint for external database connection (e.g., falkor://127.0.0.1:6379)"
+        )]
+        endpoint: Option<String>,
     },
     #[command(
         about = "generate a set of queries and store them in a file to be used with the run command"
     )]
     GenerateQueries {
+        #[arg(short, long, value_enum)]
+        vendor: Vendor,
         #[arg(short, long, value_enum)]
         size: usize,
         #[arg(short, long, value_enum)]
@@ -102,6 +119,77 @@ pub enum Commands {
             help = "simulate the benchmark without sending the messages to the server, the value the process time in milliseconds"
         )]
         simulate: Option<usize>,
+        #[arg(
+            short,
+            long,
+            required = false,
+            help = "endpoint for external database connection (e.g., falkor://127.0.0.1:6379)"
+        )]
+        endpoint: Option<String>,
+        #[arg(
+            long,
+            required = false,
+            help = "base directory to write detailed per-vendor run results (will create <results-dir>/<vendor>/...). Defaults to Results-YYMMDD-HH:MM"
+        )]
+        results_dir: Option<String>,
+    },
+    #[command(about = "aggregate per-vendor run results into UI summary JSON files")]
+    Aggregate {
+        #[arg(
+            long,
+            required = true,
+            help = "run results directory (contains subfolders: falkor/ neo4j/ memgraph/)"
+        )]
+        results_dir: String,
+        #[arg(
+            long,
+            required = false,
+            default_value = "ui/public/summaries",
+            help = "directory to write UI summary JSON files"
+        )]
+        out_dir: String,
+    },
+
+    #[command(
+        about = "aggregate aws-tests/ FalkorDB runs (e.g. graviton vs intel) into a UI summary JSON file"
+    )]
+    AggregateAwsTests {
+        #[arg(
+            long,
+            required = false,
+            default_value = "aws-tests",
+            help = "directory containing subfolders with {meta.json,metrics.prom} (e.g. aws-tests/falkor-r8g-2xl/)"
+        )]
+        aws_tests_dir: String,
+        #[arg(
+            long,
+            required = false,
+            default_value = "ui/public/summaries/aws_tests_falkor_graviton_vs_intel.json",
+            help = "output path for the UI summary JSON file"
+        )]
+        out_path: String,
+    },
+
+    #[command(
+        about = "Run each generated Memgraph query type once against a Memgraph endpoint to detect failing queries"
+    )]
+    DebugMemgraphQueries {
+        #[arg(short, long, value_enum)]
+        dataset: crate::scenario::Size,
+        #[arg(
+            short,
+            long,
+            help = "endpoint for external Memgraph (e.g., bolt://127.0.0.1:7687)",
+            required = true,
+        )]
+        endpoint: String,
+        #[arg(
+            short,
+            long,
+            default_value = "small-readonly-memgraph",
+            help = "name of json file to load the generated Memgraph queries from",
+        )]
+        name: String,
     },
 }
 

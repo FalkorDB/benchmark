@@ -4,20 +4,55 @@ export interface Latency {
   p99: string;
 }
 
+export interface LatencyHistogram {
+  "buckets-ms": number[];
+  "cumulative-counts": number[];
+  count: number;
+}
+
+export interface OpsBreakdown {
+  "by-query": Record<string, number>;
+  "by-spawn": Record<string, number>;
+}
+
+export interface SpawnStats {
+  min: number;
+  max: number;
+  p50: number;
+  p95: number;
+  "max-min-ratio": number;
+  cv: number;
+}
+
+export interface TelemetryBreakdown {
+  "wait-ms": number;
+  "exec-ms": number;
+  "report-ms": number;
+}
+
 export interface Result {
   "deadline-offset": string;
   "actual-messages-per-second": number;
   latency: Latency;
+  "avg-latency-ms"?: number;
+  "latency-histogram"?: LatencyHistogram;
+  "elapsed-ms"?: number;
   "cpu-usage": number;
-  "ram-usage": number;
+  "ram-usage": string;
+  "base-dataset-bytes"?: number;
   errors: number;
   "successful-requests": number;
+  operations?: OpsBreakdown;
+  "spawn-stats"?: SpawnStats;
+  // Present in aggregated summaries / newer result formats
+  histogram_for_type?: Record<string, number[]>;
+  telemetry_for_type?: Record<string, TelemetryBreakdown>;
 }
 
 export interface Run {
   vendor: string;
   "read-write-ratio": number;
-  "clients": number;
+  clients: number;
   platform: string;
   "target-messages-per-second": number;
   edges: number;
@@ -25,7 +60,7 @@ export interface Run {
   result: Result;
 }
 
-interface UnrealisticData {
+export interface UnrealisticData {
   vendor: string;
   histogram_for_type: Record<string, number[]>;
   memory: string;
@@ -43,17 +78,14 @@ export interface Platforms {
 
 export interface BenchmarkData {
   runs: Run[];
-  platforms: Platforms;
+  unrealstic?: UnrealisticData[];
+  // Historical files used different shapes here (array vs map), and summaries omit it.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  platforms?: any;
 }
 
 export interface ApiResponse {
   result: {
     data: BenchmarkData;
   };
-}
-
-export interface BenchmarkData {
-  runs: Run[];
-  unrealstic: UnrealisticData[];
-  platforms: Platforms;
 }

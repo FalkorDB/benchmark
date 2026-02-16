@@ -49,8 +49,33 @@ body {
     --chart-4: 43 74% 66%;
     --chart-5: 27 87% 67%;
     --radius: 0.5rem;
+
+    /* Solid accents (used for text/borders) */
     --FalkorDB-color: #7568F2;
-    --Neo4j-color: #a6a6a6;
+    --Neo4j-color: #0A6190;
+    --Memgraph-color: #ff2b4a;
+
+    /* AWS instance comparison colors */
+    --Intel-color: #1f77b4;
+    --Graviton-color: #2ca02c;
+
+    /* Chart gradients */
+    --FalkorDB-gradient-start: #ff66b3;
+    --FalkorDB-gradient-end: #7568F2;
+
+    /* Neo4j "Baltic" palette (Dark/Mid/Baltic/Light) */
+    --Neo4j-gradient-dark-baltic: #014063;
+    --Neo4j-gradient-mid-baltic: #0A6190;
+    --Neo4j-gradient-baltic: #4C99A4;
+    --Neo4j-gradient-light-baltic: #8FE3E8;
+
+    /* Back-compat: some callers may still read start/end */
+    --Neo4j-gradient-start: var(--Neo4j-gradient-dark-baltic);
+    --Neo4j-gradient-end: var(--Neo4j-gradient-light-baltic);
+
+    --Memgraph-gradient-start: #ff2b4a;
+    --Memgraph-gradient-mid: #ff7a00;
+    --Memgraph-gradient-end: #ffd000;
   }
 
   .dark {

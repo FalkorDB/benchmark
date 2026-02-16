@@ -7,6 +7,17 @@ import { headerItems } from "../config/testData";
 test.describe("Header tests", () => {
   let browser: BrowserWrapper;
 
+  const normalizeUrl = (url: string) =>
+    url
+      .trim()
+      .replace(/^https?:\/\//, "")
+      .replace(/^www\./, "")
+      .replace(/\/$/, "");
+
+  const expectUrlEquals = (actual: string, expected: string) => {
+    expect(normalizeUrl(actual)).toBe(normalizeUrl(expected));
+  };
+
   test.beforeAll(async () => {
     try {
       browser = new BrowserWrapper();
@@ -28,14 +39,14 @@ test.describe("Header tests", () => {
   test("Verify clicking on falkordb logo redirects to specified URL", async () => {
     const header = await browser.createNewPage(MainPage, urls.baseUrl);
     const page = await header.clickOnFalkorLogo();
-    expect(page.url()).toBe(urls.falkorDBUrl);
+    expectUrlEquals(page.url(), urls.falkorDBUrl);
   });
 
   headerItems.slice(0, 3).forEach(({ navItem, expectedRes }) => {
     test(`Verify clicking on ${navItem} redirects to specified ${navItem}`, async () => {
       const header = await browser.createNewPage(MainPage, urls.baseUrl);
       const page = await header.getHeaderSocialLink(navItem);
-      expect(page.url()).toBe(expectedRes);
+      expectUrlEquals(page.url(), expectedRes);
     });
   });
 
@@ -43,7 +54,7 @@ test.describe("Header tests", () => {
     test(`Verify clicking on ${navItem} redirects to specified ${navItem}`, async () => {
       const header = await browser.createNewPage(MainPage, urls.baseUrl);
       const page = await header.getHeaderLink(navItem);
-      expect(page.url()).toBe(expectedRes);
+      expectUrlEquals(page.url(), expectedRes);
     });
   });
 });

@@ -2,6 +2,7 @@
 
 import React, { useRef } from "react";
 import { Bar } from "react-chartjs-2";
+import { normalizeVendor, vendorGradient } from "../lib/vendorColors";
 import {
   Chart as ChartJS,
   BarElement,
@@ -34,6 +35,7 @@ interface HorizontalBarChartProps {
   ratio: number;
   maxValue: number;
   minValue: number;
+  getBarColor?: (vendor: string) => string;
 }
 
 const HorizontalBarChart: React.FC<HorizontalBarChartProps> = ({
@@ -43,16 +45,11 @@ const HorizontalBarChart: React.FC<HorizontalBarChartProps> = ({
   unit,
   ratio,
   maxValue,
-  minValue
+  minValue,
+  getBarColor,
 }) => {
   const containerRef = useRef<null | HTMLDivElement>(null);
   const chartRef = useRef<Chart | null>(null);
-  const backgroundColors = typeof window !== "undefined"
-  ? [
-      getComputedStyle(document.documentElement).getPropertyValue("--FalkorDB-color").trim(),
-      getComputedStyle(document.documentElement).getPropertyValue("--Neo4j-color").trim(),
-    ]
-  : ["#FF66B3", "#0B6190"];
 
   const chartData = {
     labels: data.map((item) => item.vendor),
@@ -60,8 +57,26 @@ const HorizontalBarChart: React.FC<HorizontalBarChartProps> = ({
       {
         label: chartLabel,
         data: data.map((item) => item[dataKey]),
-        backgroundColor: backgroundColors,
-        hoverBackgroundColor: backgroundColors,
+        // eslint-disable-next-line
+        backgroundColor: (context: any) => {
+          const i = context?.dataIndex ?? 0;
+          const vendor = (data[i]?.vendor ?? "").toString();
+          if (normalizeVendor(vendor) === "unknown" && getBarColor) {
+            return getBarColor(vendor);
+          }
+          const w = context?.chart?.chartArea?.width;
+          return vendorGradient(context.chart.ctx, vendor, "horizontal", w);
+        },
+        // eslint-disable-next-line
+        hoverBackgroundColor: (context: any) => {
+          const i = context?.dataIndex ?? 0;
+          const vendor = (data[i]?.vendor ?? "").toString();
+          if (normalizeVendor(vendor) === "unknown" && getBarColor) {
+            return getBarColor(vendor);
+          }
+          const w = context?.chart?.chartArea?.width;
+          return vendorGradient(context.chart.ctx, vendor, "horizontal", w);
+        },
         borderRadius: 8,
         barThickness: "flex" as const,
         categoryPercentage: 1.1,

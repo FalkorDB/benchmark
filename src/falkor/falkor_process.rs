@@ -31,6 +31,20 @@ pub struct FalkorProcess {
 }
 
 impl FalkorProcess {
+    pub fn external() -> Self {
+        // Create a FalkorProcess that doesn't manage any actual process
+        // This is used for external endpoints
+        Self {
+            shutdown_tx: None,
+            process_handle: None,
+            prom_shutdown_tx: None,
+            prom_process_handle: None,
+            ping_server_shutdown_tx: None,
+            ping_server_handle: None,
+            dropped: true, // Mark as dropped so Drop doesn't try to terminate
+        }
+    }
+
     pub async fn new() -> BenchmarkResult<Self> {
         redis_shutdown().await?; // if redis run on this machine, use redis-cli to shut it down
 
