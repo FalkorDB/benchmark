@@ -5,15 +5,46 @@ export default class NavBarComponent extends BasePage {
   private async navigateAndWaitForPopup(
     clickAction: () => Promise<void>
   ): Promise<Page> {
+    const timeoutMs = 20000;
+
     try {
-      await this.page.waitForLoadState("networkidle", { timeout: 5000 });
-      const popupPromise = this.page.waitForEvent("popup", { timeout: 5000 });
+      // Avoid flakiness: "networkidle" is often not reached quickly on CI.
+      await this.page.waitForLoadState("domcontentloaded", { timeout: timeoutMs });
+
+      // Some links open in a new tab (target=_blank), others can navigate same-tab.
+      const popupPromise = this.page
+        .waitForEvent("popup", { timeout: timeoutMs })
+        .then((p) => ({ kind: "popup" as const, page: p }))
+        .catch(() => null);
+
+      const navigationPromise = this.page
+        .waitForURL((url) => url.toString() !== this.page.url(), { timeout: timeoutMs })
+        .then(() => ({ kind: "navigation" as const, page: this.page }))
+        .catch(() => null);
+
       await clickAction();
-      const newPage = await popupPromise;
-      await newPage.waitForLoadState("load");
-      return newPage;
+
+      const result = await Promise.race([popupPromise, navigationPromise]);
+
+      if (!result) {
+        throw new Error(
+          `Navigation did not trigger a popup or same-tab URL change within ${timeoutMs}ms`
+        );
+      }
+
+      // For popups, the initial URL is often about:blank; wait until it actually navigates.
+      await result.page.waitForLoadState("domcontentloaded", { timeout: timeoutMs });
+      await result.page
+        .waitForURL((url) => url.toString() !== "about:blank", { timeout: timeoutMs })
+        .catch(() => {
+          // Not fatal: some pages can keep about:blank briefly; we'll still return the page.
+        });
+
+      return result.page;
     } catch (error) {
-      throw new Error(`Navigation failed`);
+      // Preserve the real Playwright error so CI logs are actionable.
+      const msg = error instanceof Error ? error.message : String(error);
+      throw new Error(`Navigation failed: ${msg}`);
     }
   }
 

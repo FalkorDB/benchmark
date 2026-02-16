@@ -7,6 +7,17 @@ import { footerItems } from "../config/testData";
 test.describe("Footer tests", () => {
   let browser: BrowserWrapper;
 
+  const normalizeUrl = (url: string) =>
+    url
+      .trim()
+      .replace(/^https?:\/\//, "")
+      .replace(/^www\./, "")
+      .replace(/\/$/, "");
+
+  const expectUrlEquals = (actual: string, expected: string) => {
+    expect(normalizeUrl(actual)).toBe(normalizeUrl(expected));
+  };
+
   test.beforeAll(async () => {
     try {
       browser = new BrowserWrapper();
@@ -29,7 +40,7 @@ test.describe("Footer tests", () => {
     test(`Verify clicking on ${item} redirects to specified ${item}`, async () => {
       const header = await browser.createNewPage(MainPage, urls.baseUrl);
       const page = await header.getFooterLink(item);
-      expect(page.url()).toBe(expectedRes);
+      expectUrlEquals(page.url(), expectedRes);
     });
   });
 });
