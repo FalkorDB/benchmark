@@ -17,8 +17,9 @@ export default class NavBarComponent extends BasePage {
         .then((p) => ({ kind: "popup" as const, page: p }))
         .catch(() => null);
 
+      const initialUrl = this.page.url();
       const navigationPromise = this.page
-        .waitForURL((url) => url.toString() !== this.page.url(), { timeout: timeoutMs })
+        .waitForURL((url) => url.toString() !== initialUrl, { timeout: timeoutMs })
         .then(() => ({ kind: "navigation" as const, page: this.page }))
         .catch(() => null);
 
