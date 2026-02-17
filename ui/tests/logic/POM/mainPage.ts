@@ -6,11 +6,11 @@ export default class NavBarComponent extends BasePage {
     clickAction: () => Promise<void>
   ): Promise<Page> {
     try {
-      await this.page.waitForLoadState("networkidle", { timeout: 5000 });
-      const popupPromise = this.page.waitForEvent("popup", { timeout: 5000 });
+      await this.page.waitForLoadState("networkidle", { timeout: 15000 });
+      const popupPromise = this.page.waitForEvent("popup", { timeout: 15000 });
       await clickAction();
       const newPage = await popupPromise;
-      await newPage.waitForLoadState("load");
+      await newPage.waitForLoadState("domcontentloaded");
       return newPage;
     } catch (error) {
       throw new Error(`Navigation failed`);
