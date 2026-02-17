@@ -25,7 +25,7 @@ rand = "0.8.5"
 histogram = { version = "0.11", features = ["serde"] }
 reqwest = { version = "0.12.9", features = ["gzip"] }
 strum = { version = "0.26.3", features = ["derive"] }
-strum_macros = "0.26.4"
+strum_macros = "0.27.2"
 tokio-stream = { version = "0.1.17", features = ["io-util"] }
 clap = { version = "4.5.23", features = ["cargo", "derive", "env"] }
 clap_complete = "4.5.36"
