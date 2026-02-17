@@ -4,9 +4,11 @@ on:
   push:
     branches:
       - master
+      - staging
   pull_request:
     branches:
       - master
+      - staging
   workflow_dispatch:
 
 concurrency:
@@ -31,6 +33,9 @@ jobs:
 
       - name: Set up Rust
         run: rustup update ${{ matrix.toolchain }} && rustup default ${{ matrix.toolchain }}
+
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
       - name: Build
         run: cargo build --verbose --all-targets --all-features
