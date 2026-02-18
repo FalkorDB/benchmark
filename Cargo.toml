@@ -21,7 +21,7 @@ neo4rs = "0.8.0"
 thiserror = "2.0.6"
 tokio = { version = "1.42.0", features = ["full", "tracing"] }
 futures = "0.3.31"
-rand = "0.8.5"
+rand = "0.9.2"
 histogram = { version = "0.11", features = ["serde"] }
 reqwest = { version = "0.12.9", features = ["gzip"] }
 strum = { version = "0.26.3", features = ["derive"] }
