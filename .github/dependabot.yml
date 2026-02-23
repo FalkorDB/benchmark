@@ -10,6 +10,10 @@ updates:
     schedule:
       interval: "weekly"
     target-branch: "staging"
+    groups:
+      npm-minor-patch:
+        update-types:
+          - "patch"
 
   # This is mostly for actions/checkout
   - package-ecosystem: "github-actions"
