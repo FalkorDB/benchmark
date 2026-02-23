@@ -129,7 +129,7 @@ impl Neo4jClient {
             }
 
             count += 1;
-            if count % 10000 == 0 {
+            if count.is_multiple_of(10000) {
                 info!("Executed {} queries", count);
             }
         }
@@ -174,7 +174,7 @@ impl Neo4jClient {
                     }
                     let duration = start.elapsed();
                     count += 1;
-                    if count % 1000 == 0 {
+                    if count.is_multiple_of(1000) {
                         info!("{} lines processed", count);
                     }
                     histogram.increment(duration.as_micros() as u64)?;
