@@ -198,7 +198,7 @@ async fn spawn_neo4j_worker(
                             NEO4J_SUCCESS_REQUESTS_DURATION_HISTOGRAM
                                 .observe(duration.as_secs_f64());
                             counter += 1;
-                            if counter % 1000 == 0 {
+                            if counter.is_multiple_of(1000) {
                                 info!("worker {} processed {} queries", worker_id, counter);
                             }
                         }
@@ -327,7 +327,7 @@ async fn spawn_falkor_worker(
                             FALKOR_SUCCESS_REQUESTS_DURATION_HISTOGRAM
                                 .observe(duration.as_secs_f64());
                             counter += 1;
-                            if counter % 1000 == 0 {
+                            if counter.is_multiple_of(1000) {
                                 info!("worker {} processed {} queries", worker_id, counter);
                             }
                         }
