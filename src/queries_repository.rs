@@ -1,5 +1,5 @@
 use crate::query::{Bolt, Query, QueryBuilder};
-use rand::seq::SliceRandom;
+use rand::prelude::IndexedRandom;
 use rand::{random, Rng};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -157,7 +157,7 @@ impl QueriesRepository {
             QueryType::Write => &self.write_queries,
         };
         let keys: Vec<&String> = queries.keys().collect();
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         keys.choose(&mut rng).map(|&key| {
             let generator = queries.get(key).unwrap();
             PreparedQuery::new(key.clone(), generator.query_type, generator.generate())
@@ -172,8 +172,8 @@ struct RandomUtil {
 
 impl RandomUtil {
     fn random_vertex(&self) -> i32 {
-        let mut rng = rand::thread_rng();
-        rng.gen_range(1..=self.vertices)
+        let mut rng = rand::rng();
+        rng.random_range(1..=self.vertices)
     }
     #[allow(dead_code)]
     fn random_path(&self) -> (i32, i32) {
