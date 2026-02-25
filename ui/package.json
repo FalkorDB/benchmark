@@ -20,7 +20,7 @@
     "@radix-ui/react-toast": "^1.2.15",
     "@radix-ui/react-toggle": "^1.1.10",
     "@radix-ui/react-toggle-group": "^1.1.11",
-    "@radix-ui/react-tooltip": "^1.1.6",
+    "@radix-ui/react-tooltip": "^1.2.8",
     "@shadcn/ui": "^0.0.4",
     "autoprefixer": "^10.4.24",
     "chart.js": "^4.4.7",
