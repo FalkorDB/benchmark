@@ -19,7 +19,7 @@ result_large_err = "allow"
 [dependencies]
 neo4rs = "0.8.0"
 thiserror = "2.0.6"
-tokio = { version = "1.42.0", features = ["full", "tracing"] }
+tokio = { version = "1.43.1", features = ["full", "tracing"] }
 futures = "0.3.31"
 rand = "0.8.5"
 histogram = { version = "0.11", features = ["serde"] }
@@ -38,7 +38,7 @@ serde_json = "1.0.133"
 
 
 tracing = "0.1.41"
-tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
 prometheus = { version = "0.13.4", features = ["gen"] }
 lazy_static = "1.5"
 hyper = { version = "0.14.31", features = ["server", "runtime", "http1", "tcp"] }
