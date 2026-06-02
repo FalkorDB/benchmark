@@ -39,6 +39,7 @@ export function AppSidebar({
     edges: number;
     readQueries: number;
     writeQueries: number;
+    startedAtEpochSecs?: number;
   } | null;
 }) {
   const filteredSidebarItems = React.useMemo(() => {
@@ -49,6 +50,8 @@ export function AppSidebar({
       const k = (id ?? "").toString();
       const lower = k.toLowerCase();
       if (lower === "falkordb" || lower === "falkor") return "FalkorDB";
+      if (lower === "falkordb1" || lower === "falkordb-c") return "FalkorDB (Standard)";
+      if (lower === "falkordb2" || lower === "falkordb-rs") return "FalkorDB (Rust)";
       if (lower === "neo4j") return "Neo4j";
       if (lower === "memgraph") return "Memgraph";
       if (lower === "intel") return "Intel";

@@ -455,7 +455,8 @@
             23.935
           ]
         }
-      }
+      },
+      "started-at-epoch-secs": 1767007093
     },
     {
       "vendor": "memgraph",
@@ -913,7 +914,8 @@
             3031.039
           ]
         }
-      }
+      },
+      "started-at-epoch-secs": 1767007093
     }
   ]
 }

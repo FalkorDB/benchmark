@@ -122,6 +122,8 @@ struct UiRun {
     target_messages_per_second: u64,
     edges: u64,
     relationships: u64,
+    #[serde(rename = "started-at-epoch-secs")]
+    started_at_epoch_secs: u64,
     result: UiResult,
 }
 
@@ -390,19 +392,17 @@ pub fn aggregate_aws_tests(aws_tests_dir: &str, out_path: &str) -> BenchmarkResu
         let lower = dir_name.to_lowercase();
         let instance = normalize_instance_type(&dir_name).unwrap_or_else(|| dir_name.clone());
 
-        let ui_platform = if lower.contains("r8g") || lower.contains("graviton") || lower.contains("arm") {
+        let ui_platform = if lower.contains("falkordb1") {
+            "falkordb1".to_string()
+        } else if lower.contains("falkordb2") {
+            "falkordb2".to_string()
+        } else if lower.contains("r8g") || lower.contains("graviton") || lower.contains("arm") {
             "arm".to_string()
         } else if lower.contains("r7i") || lower.contains("intel") || lower.contains("x86") {
             "intel".to_string()
         } else {
-            // Best-effort from instance family prefix
-            if instance.starts_with('r') && instance.contains('g') {
-                "arm".to_string()
-            } else if instance.starts_with('r') && instance.contains('i') {
-                "intel".to_string()
-            } else {
-                "unknown".to_string()
-            }
+            // Fallback: use the raw directory name as the platform/hardware identifier
+            dir_name.clone()
         };
 
         let ui_vendor = instance;
@@ -428,7 +428,7 @@ pub fn aggregate_aws_tests(aws_tests_dir: &str, out_path: &str) -> BenchmarkResu
     candidates.sort_by(|a, b| a.ui_vendor.cmp(&b.ui_vendor));
 
     let mut picked: Vec<CustomRunArtifacts> = Vec::new();
-    for want_prefix in ["r7i", "r8g"] {
+    for want_prefix in ["falkordb1", "falkordb2", "r7i", "r8g"] {
         if let Some(idx) = candidates
             .iter()
             .position(|c| c.ui_vendor.to_lowercase().starts_with(want_prefix))
@@ -602,6 +602,7 @@ fn build_ui_run_custom(v: &CustomRunArtifacts) -> BenchmarkResult<UiRun> {
         target_messages_per_second: v.meta.mps as u64,
         edges: spec.vertices,
         relationships: spec.edges,
+        started_at_epoch_secs: v.meta.started_at_epoch_secs,
         result: UiResult {
             deadline_offset: "0ms".to_string(),
             actual_messages_per_second: actual_mps,

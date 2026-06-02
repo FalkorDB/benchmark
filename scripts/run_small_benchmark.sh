@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
+
 # Small dataset benchmark runner.
 #
 # This script never prints passwords. Provide credentials via env vars or it will prompt
@@ -12,12 +14,22 @@ set -euo pipefail
 # - redis-cli (for FalkorDB graph wipe)
 #
 # Env vars (optional; defaults shown):
-#   FALKOR_ENDPOINT   (default: falkor://127.0.0.1:6379)
+#   FALKOR_ENDPOINT          (default: falkor://127.0.0.1:6379)
+#
+# FalkorDB Sentinel HA mode (set FALKOR_SENTINEL_MODE=1 to activate):
+#   FALKOR_SENTINEL_MODE         (default: 0 — single-node; set to 1 for HA)
+#   FALKOR_SENTINEL_ADDRS        (default: 127.0.0.1:6789 — sentinel address(es), comma-separated)
+#   FALKOR_SENTINEL_MASTER_NAME  (default: mymaster)
+#
+#   In sentinel mode the benchmark discovers master/replica via sentinel and routes
+#   writes to master and reads to replica automatically.
+#   Data loading and graph wipe still use FALKOR_ENDPOINT (direct master address).
+#
 #   NEO4J_ENDPOINT    (default: neo4j://127.0.0.1:7687)
 #   NEO4J_USER        (default: neo4j)
 #   NEO4J_PASSWORD    (no default; will prompt)
 #   MEMGRAPH_ENDPOINT (default: bolt://127.0.0.1:17687)
-#   MEMGRAPH_USER     (default: memgraph)
+#   MEMGRAPH_USER     (default: six666six)
 #   MEMGRAPH_PASSWORD (default: same as MEMGRAPH_USER)
 #
 # Workload params:
@@ -33,24 +45,36 @@ set -euo pipefail
 #    Passed to `benchmark run --results-dir` so all engines write into the same run folder.
 
 FALKOR_ENDPOINT=${FALKOR_ENDPOINT:-"falkor://127.0.0.1:6379"}
+# Secondary FalkorDB endpoint for version comparison (e.g. rust-based)
+FALKOR_ENDPOINT_2=${FALKOR_ENDPOINT_2:-"falkor://127.0.0.1:6800"}
+# Suffix/name for version comparison results folders (metadata)
+FALKOR_NAME=${FALKOR_NAME:-"falkordb-c"}
+FALKOR_2_NAME=${FALKOR_2_NAME:-"falkordb-rs"}
+
+# FalkorDB Sentinel HA mode
+FALKOR_SENTINEL_MODE=${FALKOR_SENTINEL_MODE:-0}
+FALKOR_SENTINEL_ADDRS=${FALKOR_SENTINEL_ADDRS:-"127.0.0.1:6789"}
+FALKOR_SENTINEL_MASTER_NAME=${FALKOR_SENTINEL_MASTER_NAME:-"mymaster"}
 NEO4J_ENDPOINT=${NEO4J_ENDPOINT:-"neo4j://127.0.0.1:7687"}
 NEO4J_USER=${NEO4J_USER:-"neo4j"}
-NEO4J_PASSWORD=${NEO4J_PASSWORD:-""}
+NEO4J_PASSWORD=${NEO4J_PASSWORD:-"six666six"}
 MEMGRAPH_ENDPOINT=${MEMGRAPH_ENDPOINT:-"bolt://127.0.0.1:17687"}
 MEMGRAPH_USER=${MEMGRAPH_USER:-"memgraph"}
-MEMGRAPH_PASSWORD=${MEMGRAPH_PASSWORD:-"${MEMGRAPH_USER:-}"}
+MEMGRAPH_PASSWORD=${MEMGRAPH_PASSWORD:-"six666six"}
 
 # Vendor toggles: set to 1 to enable, 0 to disable
 RUN_FALKOR=${RUN_FALKOR:-1}
-RUN_NEO4J=${RUN_NEO4J:-1}
+# Set to 1 to run comparison against the secondary FalkorDB version
+RUN_FALKOR_2=${RUN_FALKOR_2:-1}
+RUN_NEO4J=${RUN_NEO4J:-0}
 RUN_MEMGRAPH=${RUN_MEMGRAPH:-0}
 
 BATCH_SIZE=${BATCH_SIZE:-5000}
 PARALLEL=${PARALLEL:-20}
 MPS=${MPS:-7500}
 QUERIES_FILE=${QUERIES_FILE:-"small-readonly"}
-QUERIES_COUNT=${QUERIES_COUNT:-60000}
-WRITE_RATIO=${WRITE_RATIO:-0.03}
+QUERIES_COUNT=${QUERIES_COUNT:-200000}
+WRITE_RATIO=${WRITE_RATIO:-0.00}
 
 # Derive per-vendor query file names so each engine can use vendor-optimized queries.
 QUERIES_FILE_BASE="${QUERIES_FILE}"
@@ -82,29 +106,20 @@ export MEMGRAPH_PASSWORD
 export NEO4J_USER
 export MEMGRAPH_USER
 
-# Derive a bolt URL for cypher-shell from NEO4J_ENDPOINT (strip scheme, creds, and path).
-# cypher-shell does not reliably accept user:pass in the address, so we always pass creds via -u/-p.
-NEO4J_HOSTPORT=$(echo "$NEO4J_ENDPOINT" | sed -E 's,^[a-zA-Z0-9+.-]+://,,; s,^.*@,,; s,/.*$,,' )
-NEO4J_SCHEME="bolt"
-if [[ "$NEO4J_ENDPOINT" == neo4j+s://* || "$NEO4J_ENDPOINT" == bolt+s://* ]]; then
-  NEO4J_SCHEME="bolt+s"
-fi
-NEO4J_BOLT_URL="${NEO4J_SCHEME}://${NEO4J_HOSTPORT}"
-
 if [[ "${RUN_NEO4J}" == "1" ]]; then
-  echo "==> Verifying Neo4j login (${NEO4J_BOLT_URL})"
-  cypher-shell -a "$NEO4J_BOLT_URL" -u "$NEO4J_USER" -p "$NEO4J_PASSWORD" -d neo4j "RETURN 1 AS ok" >/dev/null
+  echo "==> Verifying Neo4j login"
+  cypher-shell -a bolt://127.0.0.1:7687 -u "$NEO4J_USER" -p "$NEO4J_PASSWORD" -d neo4j "RETURN 1 AS ok" >/dev/null
 
   echo "==> Clearing Neo4j database (neo4j)"
   # Drop known constraints used in earlier experiments (best-effort)
-  cypher-shell -a "$NEO4J_BOLT_URL" -u "$NEO4J_USER" -p "$NEO4J_PASSWORD" -d neo4j \
+  cypher-shell -a bolt://127.0.0.1:7687 -u "$NEO4J_USER" -p "$NEO4J_PASSWORD" -d neo4j \
     "DROP CONSTRAINT movie_title IF EXISTS; DROP CONSTRAINT person_name IF EXISTS;" >/dev/null
   # Wipe all data
-  cypher-shell -a "$NEO4J_BOLT_URL" -u "$NEO4J_USER" -p "$NEO4J_PASSWORD" -d neo4j \
+  cypher-shell -a bolt://127.0.0.1:7687 -u "$NEO4J_USER" -p "$NEO4J_PASSWORD" -d neo4j \
     "MATCH (n) DETACH DELETE n;" >/dev/null
 fi
 
-if [[ "${RUN_FALKOR}" == "1" ]]; then
+if [[ "${RUN_FALKOR}" == "1" || "${RUN_FALKOR_2}" == "1" ]]; then
   echo "==> Clearing FalkorDB graph (falkor)"
   if ! command -v redis-cli >/dev/null 2>&1; then
     echo "redis-cli not found (required to wipe FalkorDB graph)." >&2
@@ -122,11 +137,29 @@ else
   FALKOR_PORT=6379
 fi
 
+if [[ "${RUN_FALKOR_2}" == "1" ]]; then
+  FALKOR_2_HOSTPORT="${FALKOR_ENDPOINT_2#falkor://}"
+  if [[ "$FALKOR_2_HOSTPORT" == *:* ]]; then
+    FALKOR_2_HOST="${FALKOR_2_HOSTPORT%%:*}"
+    FALKOR_2_PORT="${FALKOR_2_HOSTPORT##*:}"
+  else
+    FALKOR_2_HOST="$FALKOR_2_HOSTPORT"
+    FALKOR_2_PORT=3800
+  fi
+fi
+
 # Delete the entire FalkorDB graph key; ignore failures if the graph doesn't exist yet
 if [[ "${RUN_FALKOR}" == "1" ]]; then
+  echo "==> Clearing FalkorDB graph (falkor) on port $FALKOR_PORT"
   redis-cli -h "$FALKOR_HOST" -p "$FALKOR_PORT" GRAPH.DELETE falkor >/dev/null 2>&1 || true
   # Also ensure no leftover non-graph key with the same name remains
   redis-cli -h "$FALKOR_HOST" -p "$FALKOR_PORT" DEL falkor >/dev/null 2>&1 || true
+fi
+
+if [[ "${RUN_FALKOR_2}" == "1" ]]; then
+  echo "==> Clearing FalkorDB (secondary) graph on port $FALKOR_2_PORT"
+  redis-cli -h "$FALKOR_2_HOST" -p "$FALKOR_2_PORT" GRAPH.DELETE falkor >/dev/null 2>&1 || true
+  redis-cli -h "$FALKOR_2_HOST" -p "$FALKOR_2_PORT" DEL falkor >/dev/null 2>&1 || true
 fi
 
 # NOTE: Newer Neo4j cypher-shell versions send `CALL db.ping()` on connect.
@@ -136,6 +169,10 @@ fi
 if [[ "${RUN_FALKOR}" == "1" ]]; then
   echo "==> Loading small dataset into FalkorDB"
   cargo run --release --bin benchmark -- load --vendor falkor --size small --endpoint "$FALKOR_ENDPOINT" -b "$BATCH_SIZE"
+fi
+if [[ "${RUN_FALKOR_2}" == "1" ]]; then
+  echo "==> Loading small dataset into FalkorDB (secondary)"
+  cargo run --release --bin benchmark -- load --vendor falkor --size small --endpoint "$FALKOR_ENDPOINT_2" -b "$BATCH_SIZE"
 fi
 if [[ "${RUN_NEO4J}" == "1" ]]; then
   echo "==> Loading small dataset into Neo4j"
@@ -149,7 +186,7 @@ fi
 
 echo "==> Generating vendor-specific query files (base=${QUERIES_FILE_BASE}, dataset=small, count=${QUERIES_COUNT}, write_ratio=${WRITE_RATIO})"
 # Always regenerate so each vendor gets the latest query catalog + stable q_id fields.
-if [[ "${RUN_FALKOR}" == "1" ]]; then
+if [[ "${RUN_FALKOR}" == "1" || "${RUN_FALKOR_2}" == "1" ]]; then
   cargo run --release --bin benchmark -- generate-queries --vendor falkor   --dataset small --size "$QUERIES_COUNT" --name "$FALKOR_QUERIES_FILE"   --write-ratio "$WRITE_RATIO"
 fi
 if [[ "${RUN_NEO4J}" == "1" ]]; then
@@ -163,8 +200,42 @@ echo "==> Running ${QUERIES_FILE} workload (parallel=${PARALLEL}, mps=${MPS})"
 echo "==> Writing detailed run results to: ${RESULTS_DIR}/<vendor>/"
 
 if [[ "${RUN_FALKOR}" == "1" ]]; then
-  cargo run --release --bin benchmark -- run --vendor falkor   --name "$FALKOR_QUERIES_FILE"   --parallel "$PARALLEL" --mps "$MPS" --endpoint "$FALKOR_ENDPOINT"   --results-dir "$RESULTS_DIR"
+  if [[ "${FALKOR_SENTINEL_MODE}" == "1" ]]; then
+    echo "  (sentinel mode: sentinels=${FALKOR_SENTINEL_ADDRS}, master-name=${FALKOR_SENTINEL_MASTER_NAME})"
+    cargo run --release --bin benchmark -- run --vendor falkor \
+      --name "$FALKOR_QUERIES_FILE" \
+      --parallel "$PARALLEL" --mps "$MPS" \
+      --sentinel "$FALKOR_SENTINEL_ADDRS" \
+      --sentinel-master-name "$FALKOR_SENTINEL_MASTER_NAME" \
+      --results-dir "$RESULTS_DIR"
+  else
+    cargo run --release --bin benchmark -- run --vendor falkor \
+      --name "$FALKOR_QUERIES_FILE" \
+      --parallel "$PARALLEL" --mps "$MPS" \
+      --endpoint "$FALKOR_ENDPOINT" \
+      --results-dir "$RESULTS_DIR"
+  fi
+
+  # Store first falkor results in a subfolder using custom metadata name
+  mkdir -p "$RESULTS_DIR/$FALKOR_NAME"
+  mv "$RESULTS_DIR/falkor"/* "$RESULTS_DIR/$FALKOR_NAME/"
+  rmdir "$RESULTS_DIR/falkor"
 fi
+
+if [[ "${RUN_FALKOR_2}" == "1" ]]; then
+  echo "==> Running workload against FalkorDB (secondary) on $FALKOR_ENDPOINT_2"
+  cargo run --release --bin benchmark -- run --vendor falkor \
+    --name "$FALKOR_QUERIES_FILE" \
+    --parallel "$PARALLEL" --mps "$MPS" \
+    --endpoint "$FALKOR_ENDPOINT_2" \
+    --results-dir "$RESULTS_DIR"
+
+  # Store secondary falkor results in a subfolder using custom metadata name
+  mkdir -p "$RESULTS_DIR/$FALKOR_2_NAME"
+  mv "$RESULTS_DIR/falkor"/* "$RESULTS_DIR/$FALKOR_2_NAME/"
+  rmdir "$RESULTS_DIR/falkor"
+fi
+
 if [[ "${RUN_NEO4J}" == "1" ]]; then
   cargo run --release --bin benchmark -- run --vendor neo4j   --name "$NEO4J_QUERIES_FILE"   --parallel "$PARALLEL" --mps "$MPS" --endpoint "$NEO4J_ENDPOINT"   --results-dir "$RESULTS_DIR"
 fi
@@ -172,7 +243,18 @@ if [[ "${RUN_MEMGRAPH}" == "1" ]]; then
   cargo run --release --bin benchmark -- run --vendor memgraph --name "$MEMGRAPH_QUERIES_FILE" --parallel "$PARALLEL" --mps "$MPS" --endpoint "$MEMGRAPH_ENDPOINT" --results-dir "$RESULTS_DIR"
 fi
 
-echo "==> Aggregating UI summaries to ui/public/summaries"
-cargo run --release --bin benchmark -- aggregate --results-dir "$RESULTS_DIR"
+if [[ "${RUN_FALKOR_2}" == "1" ]]; then
+  echo "==> Aggregating comparison run into UI summary: $SCRIPT_DIR/../ui/public/summaries/falkordb_vs_falkordb.json"
+  cargo run --release --bin benchmark -- aggregate-aws-tests --aws-tests-dir "$RESULTS_DIR" --out-path "$SCRIPT_DIR/../ui/public/summaries/falkordb_vs_falkordb.json"
+else
+  # If secondary run is not enabled, restore standard structure before normal aggregation
+  if [[ "${RUN_FALKOR}" == "1" ]]; then
+    mkdir -p "$RESULTS_DIR/falkor"
+    mv "$RESULTS_DIR/$FALKOR_NAME"/* "$RESULTS_DIR/falkor/"
+    rmdir "$RESULTS_DIR/$FALKOR_NAME"
+  fi
+  echo "==> Aggregating UI summaries to $SCRIPT_DIR/../ui/public/summaries"
+  cargo run --release --bin benchmark -- aggregate --results-dir "$RESULTS_DIR" --out-dir "$SCRIPT_DIR/../ui/public/summaries"
+fi
 
 echo "==> Done"

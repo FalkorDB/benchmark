@@ -57,6 +57,7 @@ export interface Run {
   "target-messages-per-second": number;
   edges: number;
   relationships: number;
+  "started-at-epoch-secs"?: number;
   result: Result;
 }
 

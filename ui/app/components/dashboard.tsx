@@ -21,7 +21,7 @@ type DashboardProps = {
 };
 
 const DEFAULT_SELECTED_OPTIONS: Record<string, string[]> = {
-  "Workload Type": ["single"],
+  "Workload Type": ["concurrent"],
   Vendors: ["falkordb", "neo4j"],
   Clients: ["40"],
   Throughput: ["2500"],
@@ -186,12 +186,21 @@ export default function DashBoard({
         if (!hasMatch) next["Vendors"] = vendors;
       }
 
-      // For query selection, pick something that exists in the loaded data so charts + telemetry show up.
       replaceIfNoMatch("Queries", queries);
 
       replaceIfNoMatch("Clients", clients);
       replaceIfNoMatch("Throughput", throughputs);
-      replaceIfNoMatch("Hardware", hardware);
+      
+      // For hardware selection, default to showing *all* hardwares present in the file if no match.
+      if (hardware.length) {
+        const current = next["Hardware"] ?? [];
+        const hasMatch = current.some((c) => hardware.some((a) => a === c));
+        if (!hasMatch) {
+          next["Hardware"] = hardware;
+        }
+      } else {
+        replaceIfNoMatch("Hardware", hardware);
+      }
 
       return next;
     });
@@ -384,8 +393,10 @@ export default function DashBoard({
     // Map vendor identifiers/names to the same CSS vars used by the MAX THROUGHPUT chart.
     // For aws-tests, the "vendor" is the instance type (e.g. r7i.2xlarge / r8g.2xlarge).
     const cssVar =
-      key === "falkordb" || key === "falkor"
+      key === "falkordb" || key === "falkor" || key === "falkordb1" || key.includes("falkordb1") || key.includes("standard") || key.includes("falkordb-c")
         ? "--FalkorDB-color"
+        : key === "falkordb2" || key === "falkordb2" || key.includes("falkordb2") || key.includes("secondary") || key.includes("rust") || key.includes("falkordb-rs")
+        ? "--FalkorDB2-color"
         : key === "neo4j"
         ? "--Neo4j-color"
         : key === "memgraph"
@@ -569,10 +580,11 @@ export default function DashBoard({
         edges,
         readQueries: typeof total === "number" ? total : 0,
         writeQueries: 0,
+        startedAtEpochSecs: baseRun["started-at-epoch-secs"],
       };
     }
 
-    return { nodes, edges, readQueries, writeQueries };
+    return { nodes, edges, readQueries, writeQueries, startedAtEpochSecs: baseRun["started-at-epoch-secs"] };
   }, [data]);
 
   const parseMemory = (memory: string): number => {
