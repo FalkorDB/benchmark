@@ -243,8 +243,78 @@ fn write_summary(
 ) -> BenchmarkResult<()> {
     let json = serde_json::to_string_pretty(summary)
         .map_err(|e| OtherError(format!("Failed serializing summary: {}", e)))?;
-    fs::write(path, json)
+    fs::write(path, &json)
         .map_err(|e| OtherError(format!("Failed writing {}: {}", path.display(), e)))?;
+
+    // Create timestamped copy of this run and record it in summaries/manifest.json
+    if let (Some(parent), Some(file_name_os)) = (path.parent(), path.file_name()) {
+        if let Some(file_name_str) = file_name_os.to_str() {
+            if file_name_str.ends_with(".json") && file_name_str != "manifest.json" {
+                let base_name = file_name_str.trim_end_matches(".json");
+                let timestamp = summary.runs.first()
+                    .map(|r| r.started_at_epoch_secs)
+                    .unwrap_or_else(|| {
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0)
+                    });
+
+                if timestamp > 0 {
+                    let hist_file_name = format!("{}_{}.json", base_name, timestamp);
+                    let hist_path = parent.join(&hist_file_name);
+                    fs::write(&hist_path, &json)
+                        .map_err(|e| OtherError(format!("Failed writing historical copy {}: {}", hist_path.display(), e)))?;
+
+                    let manifest_path = parent.join("manifest.json");
+                    let mut manifest_val = if manifest_path.exists() {
+                        let manifest_raw = fs::read_to_string(&manifest_path).unwrap_or_else(|_| "{}".to_string());
+                        serde_json::from_str::<serde_json::Value>(&manifest_raw).unwrap_or_else(|_| serde_json::json!({}))
+                    } else {
+                        serde_json::json!({})
+                    };
+
+                    if !manifest_val.is_object() {
+                        manifest_val = serde_json::json!({});
+                    }
+
+                    let manifest_obj = manifest_val.as_object_mut().unwrap();
+                    let page_runs_arr = manifest_obj
+                        .entry(file_name_str.to_string())
+                        .or_insert_with(|| serde_json::Value::Array(vec![]));
+
+                    if let Some(arr) = page_runs_arr.as_array_mut() {
+                        let already_exists = arr.iter().any(|item| {
+                            item.get("timestamp")
+                                .and_then(|t| t.as_u64())
+                                .map(|t| t == timestamp)
+                                .unwrap_or(false)
+                        });
+
+                        if !already_exists {
+                            let new_entry = serde_json::json!({
+                                "filename": hist_file_name,
+                                "timestamp": timestamp
+                            });
+                            arr.push(new_entry);
+                        }
+
+                        arr.sort_by(|a, b| {
+                            let t_a = a.get("timestamp").and_then(|t| t.as_u64()).unwrap_or(0);
+                            let t_b = b.get("timestamp").and_then(|t| t.as_u64()).unwrap_or(0);
+                            t_b.cmp(&t_a)
+                        });
+                    }
+
+                    let manifest_json = serde_json::to_string_pretty(&manifest_val)
+                        .map_err(|e| OtherError(format!("Failed serializing manifest: {}", e)))?;
+                    fs::write(&manifest_path, manifest_json)
+                        .map_err(|e| OtherError(format!("Failed writing manifest {}: {}", manifest_path.display(), e)))?;
+                }
+            }
+        }
+    }
+
     Ok(())
 }
 

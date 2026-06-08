@@ -34,6 +34,7 @@ export default function DashBoard({
   initialSelectedOptions,
   comparisonVendors,
 }: DashboardProps) {
+  const [activeUrl, setActiveUrl] = useState(dataUrl);
   const [data, setData] = useState<BenchmarkData | null>(null);
   const { toast } = useToast();
   const [gridKey, setGridKey] = useState(0);
@@ -52,6 +53,38 @@ export default function DashBoard({
       baseDatasetBytes?: number;
     }[]
   >([]);
+
+  const [manifest, setManifest] = useState<Record<string, { filename: string; timestamp: number }[]>>({});
+
+  useEffect(() => {
+    const fetchManifest = async () => {
+      try {
+        const response = await fetch("/summaries/manifest.json");
+        if (response.ok) {
+          const json = await response.json();
+          setManifest(json);
+        }
+      } catch (e) {
+        console.error("Failed to load past runs manifest", e);
+      }
+    };
+    fetchManifest();
+  }, []);
+
+  useEffect(() => {
+    setActiveUrl(dataUrl);
+    setDidInitFromData(false);
+  }, [dataUrl]);
+
+  const baseFileName = useMemo(() => {
+    if (!dataUrl) return "";
+    const parts = dataUrl.split("/");
+    return parts[parts.length - 1];
+  }, [dataUrl]);
+
+  const pastRuns = useMemo(() => {
+    return manifest[baseFileName] || [];
+  }, [manifest, baseFileName]);
 
   const allowedVendors = useMemo(() => {
     const v = (comparisonVendors ?? []).map((x) => x.toLowerCase()).filter(Boolean);
@@ -78,7 +111,7 @@ export default function DashBoard({
 
   const fetchData = useCallback(async () => {
     try {
-      const response = await fetch(dataUrl);
+      const response = await fetch(activeUrl);
       if (!response.ok)
         throw new Error(`HTTP error! status: ${response.status}`);
 
@@ -105,7 +138,7 @@ export default function DashBoard({
         variant: "destructive",
       });
     }
-  }, [toast, dataUrl, allowedVendors]);
+  }, [toast, activeUrl, allowedVendors]);
 
   useEffect(() => {
     fetchData();
@@ -734,6 +767,50 @@ export default function DashBoard({
           datasetSummary={datasetSummary}
         />
         <SidebarInset className="flex-grow h-full min-h-0 overflow-y-auto">
+          {pastRuns.length > 0 && (
+            <div className="bg-muted/30 border-b border-gray-200/40 p-4 flex flex-wrap items-center justify-between gap-4 font-space">
+              <div className="flex flex-col">
+                <span className="text-xs text-gray-500 font-medium">Select Run History</span>
+                <h1 className="text-sm font-semibold text-gray-800">Viewing Benchmark Run</h1>
+              </div>
+              <div className="flex items-center gap-3">
+                <select
+                  value={activeUrl.replace("/summaries/", "")}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    if (val === baseFileName) {
+                      setActiveUrl(dataUrl);
+                    } else {
+                      setActiveUrl(`/summaries/${val}`);
+                    }
+                    setDidInitFromData(false);
+                  }}
+                  className="bg-white border border-gray-200/80 text-gray-800 text-sm rounded-lg px-3 py-2 font-fira shadow-sm focus:outline-none focus:ring-1 focus:ring-primary focus:border-primary cursor-pointer min-w-[280px]"
+                >
+                  <option value={baseFileName}>Latest Run (Default)</option>
+                  {pastRuns.map((run) => {
+                    const date = new Date(run.timestamp * 1000);
+                    const formatted = date.toLocaleString("en-US", {
+                      timeZone: "UTC",
+                      year: "numeric",
+                      month: "short",
+                      day: "2-digit",
+                      hour: "2-digit",
+                      minute: "2-digit",
+                      second: "2-digit",
+                      hour12: false,
+                    }) + " UTC";
+                    
+                    return (
+                      <option key={run.filename} value={run.filename}>
+                        {formatted}
+                      </option>
+                    );
+                  })}
+                </select>
+              </div>
+            </div>
+          )}
           {isConcurrent ? (
             <div key={gridKey} className="flex flex-col w-full min-w-0 gap-2 p-1">
               <div className="bg-muted/50 rounded-xl p-4 w-full flex flex-col items-center justify-between min-h-[420px]">
