@@ -1,5 +1,15 @@
 {
+  "aws_tests_falkor_graviton_vs_intel.json": [
+    {
+      "filename": "aws_tests_falkor_graviton_vs_intel_1767772481.json",
+      "timestamp": 1767772481
+    }
+  ],
   "falkordb_vs_falkordb.json": [
+    {
+      "filename": "falkordb_vs_falkordb_1780999814.json",
+      "timestamp": 1780999814
+    },
     {
       "filename": "falkordb_vs_falkordb_1780894469.json",
       "timestamp": 1780894469
@@ -63,12 +73,6 @@
     {
       "filename": "neo4j_vs_falkordb_1765884076.json",
       "timestamp": 1765884076
-    }
-  ],
-  "aws_tests_falkor_graviton_vs_intel.json": [
-    {
-      "filename": "aws_tests_falkor_graviton_vs_intel_1767772481.json",
-      "timestamp": 1767772481
     }
   ]
 }

@@ -23,6 +23,105 @@ type Platforms = Record<
   }
 >;
 
+const QUERY_DESCRIPTIONS = [
+  {
+    name: "Expand 4L",
+    id: "aggregate_expansion_4",
+    description: "Expands 4 levels deep in the graph and returns distinct user IDs.",
+    cypher: "MATCH (s:User {id: $id})-->()-->()-->()-->(n:User)\nRETURN DISTINCT n.id"
+  },
+  {
+    name: "Expand 4L (Filtered)",
+    id: "aggregate_expansion_4_with_filter",
+    description: "Expands 4 levels deep in the graph with an age filter (age >= 18) on the destination nodes.",
+    cypher: "MATCH (s:User {id: $id})-->()-->()-->()-->(n:User)\nWHERE n.age >= 18\nRETURN DISTINCT n.id"
+  },
+  {
+    name: "Expand 3L",
+    id: "aggregate_expansion_3",
+    description: "Expands 3 levels deep in the graph and returns distinct user IDs.",
+    cypher: "MATCH (s:User {id: $id})-->()-->()-->(n:User)\nRETURN DISTINCT n.id"
+  },
+  {
+    name: "Expand 3L (Filtered)",
+    id: "aggregate_expansion_3_with_filter",
+    description: "Expands 3 levels deep in the graph with an age filter (age >= 18) on the destination nodes.",
+    cypher: "MATCH (s:User {id: $id})-->()-->()-->(n:User)\nWHERE n.age >= 18\nRETURN DISTINCT n.id"
+  },
+  {
+    name: "Expand 2L",
+    id: "aggregate_expansion_2",
+    description: "Expands 2 levels deep in the graph and returns distinct user IDs.",
+    cypher: "MATCH (s:User {id: $id})-->()-->(n:User)\nRETURN DISTINCT n.id"
+  },
+  {
+    name: "Expand 2L (Filtered)",
+    id: "aggregate_expansion_2_with_filter",
+    description: "Expands 2 levels deep in the graph with an age filter (age >= 18) on the destination nodes.",
+    cypher: "MATCH (s:User {id: $id})-->()-->(n:User)\nWHERE n.age >= 18\nRETURN DISTINCT n.id"
+  },
+  {
+    name: "Expand 1L",
+    id: "aggregate_expansion_1",
+    description: "Expands 1 level deep in the graph and returns connected user IDs.",
+    cypher: "MATCH (s:User {id: $id})-->(n:User)\nRETURN n.id"
+  },
+  {
+    name: "Expand 1L (Filtered)",
+    id: "aggregate_expansion_1_with_filter",
+    description: "Expands 1 level deep in the graph with an age filter (age >= 18) on connected user nodes.",
+    cypher: "MATCH (s:User {id: $id})-->(n:User)\nWHERE n.age >= 18\nRETURN n.id"
+  },
+  {
+    name: "Aggregate age (Filtered)",
+    id: "aggregate_age_filtered",
+    description: "Calculates the average age of all users aged 18 or older.",
+    cypher: "MATCH (n:User)\nWHERE n.age >= 18\nRETURN avg(n.age) AS avg_age"
+  },
+  {
+    name: "Count users",
+    id: "aggregate_count_users",
+    description: "Retrieves the total count of user nodes. Uses optimized stats in FalkorDB.",
+    cypher: "// FalkorDB:\nCALL db.meta.stats() YIELD nodeCount RETURN nodeCount AS cnt\n\n// Neo4j/Memgraph:\nMATCH (n:User) RETURN count(n) AS cnt"
+  },
+  {
+    name: "Neighbours 2L (data+filter)",
+    id: "neighbours_2_with_data_and_filter",
+    description: "Retrieves 2-hop neighbor nodes (with age >= 18) and returns full properties.",
+    cypher: "MATCH (s:User {id: $id})-->()-->(n:User)\nWHERE n.age >= 18\nRETURN n"
+  },
+  {
+    name: "Shortest path",
+    id: "shortest_path",
+    description: "Finds the shortest path between two users and returns its length.",
+    cypher: "// FalkorDB:\nMATCH (s:User {id: $from}), (t:User {id: $to}) WITH shortestPath((s)-[*]->(t)) AS p RETURN length(p)\n\n// Neo4j:\nMATCH (s:User {id: $from}), (t:User {id: $to}) MATCH p = shortestPath((s)-[*]->(t)) RETURN length(p)\n\n// Memgraph:\nMATCH p = (:User {id: $from})-[*BFS]->(:User {id: $to}) RETURN length(p)"
+  },
+  {
+    name: "Write Edge",
+    id: "single_edge_write",
+    description: "Matches two users by ID and creates a Friend relationship between them.",
+    cypher: "MATCH (n:User {id: $from}), (m:User {id: $to})\nWITH n, m\nCREATE (n)-[e:Friend]->(m)\nRETURN e"
+  },
+  {
+    name: "Write Vertex",
+    id: "single_vertex_write",
+    description: "Creates a new User vertex with a specific ID.",
+    cypher: "CREATE (n:User {id: $id})\nRETURN n"
+  },
+  {
+    name: "Write General",
+    id: "write",
+    description: "Updates attributes of a User node.",
+    cypher: "MATCH (n:User {id: $id})\nSET n.rpc_social_credit = $rpc_social_credit\nRETURN n"
+  },
+  {
+    name: "Read Vertex",
+    id: "single_vertex_read",
+    description: "Retrieves a single User vertex by ID.",
+    cypher: "MATCH (n:User {id: $id})\nRETURN n"
+  }
+];
+
 export function NavMain({
   items,
   selectedOptions,
@@ -162,29 +261,24 @@ export function NavMain({
                         i
                       </span>
                     </HoverCardTrigger>
-                    <HoverCardContent className="bg-gray-100 text-gray-800 p-4 rounded-md shadow-lg max-w-sm">
-                      <p className="text-sm font-medium">
-                        <strong>Query Operations</strong>:
-                        <br />
-                        <strong>4L</strong> → Expands 4 levels deep in the
-                        graph.
-                        <br />
-                        <strong>3L</strong> → Expands 3 levels deep.
-                        <br />
-                        <strong>2L</strong> → Expands 2 levels deep.
-                        <br />
-                        <strong>1L</strong> → Expands 1 level deep.
-                        <br />
-                        <strong>(Filtered)</strong> → Applies filters to limit
-                        results.
-                        <br />
-                        <strong>Write Edge</strong> → Adds a relationship
-                        between nodes.
-                        <br />
-                        <strong>Write Vertex</strong> → Adds a new node.
-                        <br />
-                        <strong>Read Vertex</strong> → Retrieves a single node.
-                      </p>
+                    <HoverCardContent className="bg-gray-100 text-gray-800 p-4 rounded-md shadow-xl w-[480px] max-w-[90vw] max-h-[450px] overflow-y-auto font-space">
+                      <h3 className="text-sm font-bold border-b border-gray-200 pb-2 mb-3 text-gray-900">
+                        Query Explanations &amp; Samples
+                      </h3>
+                      <div className="flex flex-col gap-4">
+                        {QUERY_DESCRIPTIONS.map((q) => (
+                          <div key={q.id} className="text-xs border-b border-gray-200/60 pb-3 last:border-0 last:pb-0 text-left">
+                            <div className="flex items-center justify-between mb-1 gap-2">
+                              <span className="font-bold text-gray-900">{q.name}</span>
+                              <span className="font-mono text-[10px] text-gray-500 bg-gray-200/50 px-1.5 py-0.5 rounded shrink-0">{q.id}</span>
+                            </div>
+                            <p className="text-gray-600 mb-1.5 leading-relaxed">{q.description}</p>
+                            <pre className="bg-gray-900 text-gray-100 p-2 rounded text-[10px] font-mono overflow-x-auto whitespace-pre leading-normal">
+                              {q.cypher}
+                            </pre>
+                          </div>
+                        ))}
+                      </div>
                     </HoverCardContent>
                   </HoverCard>
                 )}
