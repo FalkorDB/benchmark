@@ -38,8 +38,8 @@ FALKOR_ENDPOINT=${FALKOR_ENDPOINT:-falkor://127.0.0.1:6379}
 # Secondary FalkorDB endpoint for version comparison (e.g. rust-based)
 FALKOR_ENDPOINT_2=${FALKOR_ENDPOINT_2:-falkor://127.0.0.1:3800}
 # Suffix/name for version comparison results folders (metadata)
-FALKOR_NAME=${FALKOR_NAME:-falkordb1}
-FALKOR_2_NAME=${FALKOR_2_NAME:-falkordb2}
+FALKOR_NAME=${FALKOR_NAME:-"falkordb-c"}
+FALKOR_2_NAME=${FALKOR_2_NAME:-"falkordb-rs"}
 NEO4J_ENDPOINT=${NEO4J_ENDPOINT:-neo4j://127.0.0.1:7687}
 NEO4J_USER=${NEO4J_USER:-"neo4j"}
 NEO4J_PASSWORD=${NEO4J_PASSWORD:-"neo4jpass"}
