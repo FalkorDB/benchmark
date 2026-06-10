@@ -34,13 +34,13 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 #  RESULTS_DIR (default: Results-YYMMDD-HH:MM)
 #    Passed to `benchmark run --results-dir` so all engines write into the same run folder.
 
-FALKOR_ENDPOINT=${FALKOR_ENDPOINT:-\"falkor://127.0.0.1:6379\"}
+FALKOR_ENDPOINT=${FALKOR_ENDPOINT:-"falkor://127.0.0.1:6379"}
 # Secondary FalkorDB endpoint for version comparison (e.g. rust-based)
-FALKOR_ENDPOINT_2=${FALKOR_ENDPOINT_2:-\"falkor://127.0.0.1:3800\"}
+FALKOR_ENDPOINT_2=${FALKOR_ENDPOINT_2:-"falkor://127.0.0.1:3800"}
 # Suffix/name for version comparison results folders (metadata)
-FALKOR_NAME=${FALKOR_NAME:-\"falkordb1\"}
-FALKOR_2_NAME=${FALKOR_2_NAME:-\"falkordb2\"}
-NEO4J_ENDPOINT=${NEO4J_ENDPOINT:-\"neo4j://127.0.0.1:7687\"}
+FALKOR_NAME=${FALKOR_NAME:-"falkordb1"}
+FALKOR_2_NAME=${FALKOR_2_NAME:-"falkordb2"}
+NEO4J_ENDPOINT=${NEO4J_ENDPOINT:-"neo4j://127.0.0.1:7687"}
 NEO4J_USER=${NEO4J_USER:-"neo4j"}
 NEO4J_PASSWORD=${NEO4J_PASSWORD:-"six666six"}
 MEMGRAPH_ENDPOINT=${MEMGRAPH_ENDPOINT:-"bolt://127.0.0.1:17687"}
@@ -50,15 +50,15 @@ MEMGRAPH_PASSWORD=${MEMGRAPH_PASSWORD:-"six666six"}
 # Vendor toggles: set to 1 to enable, 0 to disable
 RUN_FALKOR=${RUN_FALKOR:-1}
 # Set to 1 to run comparison against the secondary FalkorDB version
-RUN_FALKOR_2=${RUN_FALKOR_2:-0}
+RUN_FALKOR_2=${RUN_FALKOR_2:-1}
 RUN_NEO4J=${RUN_NEO4J:-0}
-RUN_MEMGRAPH=${RUN_MEMGRAPH:-1}
+RUN_MEMGRAPH=${RUN_MEMGRAPH:-0}
 
 BATCH_SIZE=${BATCH_SIZE:-5000}
 PARALLEL=${PARALLEL:-10}
 MPS=${MPS:-5000}
 QUERIES_FILE=${QUERIES_FILE:-"medium-readonly"}
-QUERIES_COUNT=${QUERIES_COUNT:-100000}
+QUERIES_COUNT=${QUERIES_COUNT:-200000}
 WRITE_RATIO=${WRITE_RATIO:-0.0}
 
 # Derive per-vendor query file names so each engine can use vendor-optimized queries.
