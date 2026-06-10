@@ -36,7 +36,7 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 
 FALKOR_ENDPOINT=${FALKOR_ENDPOINT:-"falkor://127.0.0.1:6379"}
 # Secondary FalkorDB endpoint for version comparison (e.g. rust-based)
-FALKOR_ENDPOINT_2=${FALKOR_ENDPOINT_2:-"falkor://127.0.0.1:3800"}
+FALKOR_ENDPOINT_2=${FALKOR_ENDPOINT_2:-"falkor://127.0.0.1:6800"}
 # Suffix/name for version comparison results folders (metadata)
 FALKOR_NAME=${FALKOR_NAME:-"falkordb1"}
 FALKOR_2_NAME=${FALKOR_2_NAME:-"falkordb2"}
@@ -55,8 +55,8 @@ RUN_NEO4J=${RUN_NEO4J:-0}
 RUN_MEMGRAPH=${RUN_MEMGRAPH:-0}
 
 BATCH_SIZE=${BATCH_SIZE:-5000}
-PARALLEL=${PARALLEL:-10}
-MPS=${MPS:-5000}
+PARALLEL=${PARALLEL:-20}
+MPS=${MPS:-7500}
 QUERIES_FILE=${QUERIES_FILE:-"medium-readonly"}
 QUERIES_COUNT=${QUERIES_COUNT:-200000}
 WRITE_RATIO=${WRITE_RATIO:-0.0}
@@ -174,7 +174,7 @@ if [[ "${RUN_FALKOR}" == "1" || "${RUN_FALKOR_2}" == "1" ]]; then
     echo "  - Generating User.csv from $(basename "$PCH_FILE")"
     (cd "$CSV_DIR" && {
       echo 'id,completion_percentage,gender,age'
-      perl -ne 'if (/^CREATE \(:User \{(.*)\}\);\$/) { my $s=$1; my %f; for my $p (split /,\s*/, $s) { my ($k,$v)=split /:\s*/, $p,2; $v =~ s/^"//; $v =~ s/"\$//; $f{$k}=$v; } print "$f{id},$f{completion_percentage},$f{gender},$f{age}\n" if defined $f{id}; }' "$(basename "$PCH_FILE")"
+      perl -ne 'if (/^CREATE \(:User \{(.*)\}\);$/) { my $s=$1; my %f; for my $p (split /,\s*/, $s) { my ($k,$v)=split /:\s*/, $p,2; $v =~ s/^"//; $v =~ s/"$//; $f{$k}=$v; } print "$f{id},$f{completion_percentage},$f{gender},$f{age}\n" if defined $f{id}; }' "$(basename "$PCH_FILE")"
     } > User.csv)
   fi
 
@@ -183,7 +183,7 @@ if [[ "${RUN_FALKOR}" == "1" || "${RUN_FALKOR_2}" == "1" ]]; then
     echo "  - Generating FRIEND.csv from $(basename "$PCH_FILE")"
     (cd "$CSV_DIR" && {
       echo 'src_id,dst_id'
-      perl -ne 'if (/^MATCH \(n:User {id: (\d+)}\), \(m:User {id: (\d+)}\) CREATE \(n\)-\[e: Friend\]->\(m\);\$/) { print "$1,$2\n"; }' "$(basename "$PCH_FILE")"
+      perl -ne 'if (/^MATCH \(n:User {id: (\d+)}\), \(m:User {id: (\d+)}\) CREATE \(n\)-\[e: Friend\]->\(m\);$/) { print "$1,$2\n"; }' "$(basename "$PCH_FILE")"
     } > FRIEND.csv)
   fi
 fi

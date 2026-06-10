@@ -1,23 +1,23 @@
 {
   "runs": [
     {
-      "vendor": "falkordb-c",
+      "vendor": "falkordb1",
       "read-write-ratio": 0.0,
       "clients": 20,
-      "platform": "falkordb-c",
+      "platform": "falkordb1",
       "target-messages-per-second": 7500,
-      "edges": 10000,
-      "relationships": 121716,
-      "started-at-epoch-secs": 1781113555,
+      "edges": 100000,
+      "relationships": 1768515,
+      "started-at-epoch-secs": 1781114805,
       "result": {
         "deadline-offset": "0ms",
-        "actual-messages-per-second": 6596.523632045912,
+        "actual-messages-per-second": 7444.353457902182,
         "latency": {
-          "p50": "2.655ms",
-          "p95": "5.887ms",
-          "p99": "7.935ms"
+          "p50": "2.895ms",
+          "p95": "4.351ms",
+          "p99": "4.991ms"
         },
-        "avg-latency-ms": 3.0026135783549575,
+        "avg-latency-ms": 2.672180019964968,
         "latency-histogram": {
           "buckets-ms": [
             1,
@@ -35,13 +35,13 @@
             10000
           ],
           "cumulative-counts": [
-            0,
-            2036,
-            181346,
-            199420,
-            199906,
-            199952,
-            199991,
+            11,
+            40658,
+            198045,
+            199905,
+            199982,
+            199984,
+            199989,
             200000,
             200000,
             200000,
@@ -51,578 +51,578 @@
           ],
           "count": 200000
         },
-        "elapsed-ms": 30319,
+        "elapsed-ms": 26866,
         "cpu-usage": 0.0,
-        "ram-usage": "4.0MB",
+        "ram-usage": "0MB",
         "errors": 0,
         "successful-requests": 200000,
         "operations": {
           "by-query": {
-            "aggregate_age": 7715,
-            "aggregate_age_distinct": 7564,
-            "aggregate_age_filtered": 7640,
-            "aggregate_age_min_max_avg": 7646,
-            "aggregate_count_users": 7622,
-            "aggregate_expansion_1": 7733,
-            "aggregate_expansion_1_with_filter": 7788,
-            "aggregate_expansion_2": 7757,
-            "aggregate_expansion_2_with_filter": 7712,
-            "aggregate_expansion_3": 7675,
-            "aggregate_expansion_3_with_filter": 7701,
-            "aggregate_expansion_4": 7757,
-            "aggregate_expansion_4_with_filter": 7599,
-            "neighbours_2": 7809,
-            "neighbours_2_with_data": 7798,
-            "neighbours_2_with_data_and_filter": 7653,
-            "neighbours_2_with_filter": 7658,
-            "pattern_cycle": 7716,
-            "pattern_long": 7777,
-            "pattern_short": 7765,
-            "shortest_path": 7713,
-            "shortest_path_with_filter": 7756,
-            "single_vertex_read": 7696,
-            "vertex_on_label_property": 7532,
-            "vertex_on_label_property_index": 7683,
-            "vertex_on_property": 7535
+            "aggregate_age": 7620,
+            "aggregate_age_distinct": 7797,
+            "aggregate_age_filtered": 7660,
+            "aggregate_age_min_max_avg": 7777,
+            "aggregate_count_users": 7608,
+            "aggregate_expansion_1": 7718,
+            "aggregate_expansion_1_with_filter": 7685,
+            "aggregate_expansion_2": 7884,
+            "aggregate_expansion_2_with_filter": 7549,
+            "aggregate_expansion_3": 7654,
+            "aggregate_expansion_3_with_filter": 7697,
+            "aggregate_expansion_4": 7529,
+            "aggregate_expansion_4_with_filter": 7753,
+            "neighbours_2": 7554,
+            "neighbours_2_with_data": 7679,
+            "neighbours_2_with_data_and_filter": 7600,
+            "neighbours_2_with_filter": 7820,
+            "pattern_cycle": 7768,
+            "pattern_long": 7776,
+            "pattern_short": 7615,
+            "shortest_path": 7658,
+            "shortest_path_with_filter": 7638,
+            "single_vertex_read": 7752,
+            "vertex_on_label_property": 7747,
+            "vertex_on_label_property_index": 7700,
+            "vertex_on_property": 7762
           },
           "by-spawn": {
-            "0": 10438,
-            "1": 10432,
-            "10": 9989,
-            "11": 9838,
-            "12": 9847,
-            "13": 9850,
-            "14": 9746,
-            "15": 9725,
-            "16": 9719,
-            "17": 9697,
-            "18": 9780,
-            "19": 9708,
-            "2": 10344,
-            "3": 10226,
-            "4": 10255,
-            "5": 10193,
-            "6": 10153,
-            "7": 10005,
-            "8": 10032,
-            "9": 10023
+            "0": 11158,
+            "1": 11300,
+            "10": 9701,
+            "11": 9624,
+            "12": 9641,
+            "13": 9432,
+            "14": 9335,
+            "15": 9287,
+            "16": 9260,
+            "17": 9282,
+            "18": 9372,
+            "19": 9732,
+            "2": 11076,
+            "3": 10717,
+            "4": 10502,
+            "5": 10350,
+            "6": 10269,
+            "7": 10086,
+            "8": 9956,
+            "9": 9920
           }
         },
         "spawn-stats": {
-          "min": 9697,
-          "max": 10438,
-          "p50": 10005,
-          "p95": 10432,
-          "max-min-ratio": 1.0764153862019181,
-          "cv": 0.024413008827262567
+          "min": 9260,
+          "max": 11300,
+          "p50": 9920,
+          "p95": 11158,
+          "max-min-ratio": 1.2203023758099352,
+          "cv": 0.06452764523830078
         },
         "histogram_for_type": {
           "aggregate_age": [
-            1.927,
-            2.143,
-            2.319,
-            2.527,
-            2.703,
-            2.943,
-            3.199,
-            3.583,
-            4.159,
-            4.703,
-            6.015
+            0.799,
+            0.995,
+            2.159,
+            2.639,
+            2.895,
+            3.183,
+            3.423,
+            3.727,
+            4.095,
+            4.383,
+            4.959
           ],
           "aggregate_age_distinct": [
-            2.095,
-            2.303,
-            2.495,
-            2.687,
-            2.879,
-            3.103,
-            3.391,
-            3.743,
-            4.319,
-            4.831,
-            6.399
+            0.791,
+            0.995,
+            2.143,
+            2.623,
+            2.895,
+            3.151,
+            3.407,
+            3.695,
+            4.047,
+            4.351,
+            4.959
           ],
           "aggregate_age_filtered": [
-            1.871,
-            2.079,
-            2.271,
-            2.463,
-            2.671,
-            2.911,
+            0.799,
+            0.995,
+            2.159,
+            2.639,
+            2.895,
             3.167,
-            3.519,
-            4.095,
-            4.671,
-            6.111
+            3.423,
+            3.711,
+            4.063,
+            4.383,
+            5.023
           ],
           "aggregate_age_min_max_avg": [
-            2.655,
-            2.895,
-            3.087,
-            3.295,
-            3.503,
-            3.743,
-            4.015,
-            4.383,
-            4.991,
-            5.599,
-            7.135
+            0.799,
+            0.971,
+            2.127,
+            2.607,
+            2.879,
+            3.135,
+            3.391,
+            3.695,
+            4.063,
+            4.351,
+            5.023
           ],
           "aggregate_count_users": [
-            1.151,
-            1.359,
-            1.535,
-            1.719,
-            1.911,
+            0.795,
+            0.991,
             2.143,
-            2.415,
-            2.783,
-            3.359,
-            3.823,
-            5.087
+            2.639,
+            2.895,
+            3.135,
+            3.391,
+            3.679,
+            4.063,
+            4.319,
+            4.991
           ],
           "aggregate_expansion_1": [
-            1.255,
-            1.463,
-            1.639,
-            1.823,
-            2.015,
-            2.239,
-            2.511,
-            2.863,
-            3.423,
-            3.903,
-            5.087
+            0.791,
+            0.999,
+            2.159,
+            2.639,
+            2.895,
+            3.167,
+            3.439,
+            3.727,
+            4.095,
+            4.383,
+            5.023
           ],
           "aggregate_expansion_1_with_filter": [
-            1.239,
-            1.447,
-            1.623,
-            1.799,
-            1.999,
-            2.223,
-            2.511,
-            2.847,
-            3.423,
-            3.903,
-            5.119
+            0.787,
+            0.971,
+            2.127,
+            2.639,
+            2.895,
+            3.183,
+            3.455,
+            3.743,
+            4.095,
+            4.351,
+            4.959
           ],
           "aggregate_expansion_2": [
-            1.375,
-            1.583,
-            1.767,
-            1.959,
+            0.791,
+            0.987,
             2.159,
-            2.399,
-            2.671,
-            3.039,
-            3.631,
-            4.159,
-            5.599
+            2.623,
+            2.895,
+            3.167,
+            3.423,
+            3.711,
+            4.063,
+            4.351,
+            4.991
           ],
           "aggregate_expansion_2_with_filter": [
-            1.367,
-            1.591,
-            1.767,
-            1.967,
-            2.175,
-            2.399,
-            2.655,
-            3.023,
-            3.615,
-            4.159,
-            5.535
-          ],
-          "aggregate_expansion_3": [
-            1.855,
-            2.255,
-            2.543,
-            2.831,
-            3.135,
-            3.455,
-            3.775,
-            4.191,
-            4.831,
-            5.407,
-            7.167
-          ],
-          "aggregate_expansion_3_with_filter": [
-            1.775,
-            2.127,
-            2.415,
-            2.671,
-            2.927,
-            3.183,
-            3.487,
-            3.887,
-            4.511,
-            5.055,
-            6.495
-          ],
-          "aggregate_expansion_4": [
-            2.799,
-            3.631,
-            4.191,
-            4.671,
-            5.023,
-            5.375,
-            5.759,
-            6.271,
-            6.975,
-            7.615,
-            9.663
-          ],
-          "aggregate_expansion_4_with_filter": [
-            2.607,
-            3.295,
-            3.775,
-            4.127,
-            4.383,
-            4.703,
-            5.055,
-            5.503,
-            6.207,
-            6.911,
-            8.767
-          ],
-          "neighbours_2": [
-            1.375,
-            1.583,
-            1.783,
-            1.975,
-            2.191,
-            2.415,
-            2.687,
-            3.055,
-            3.631,
-            4.159,
-            5.471
-          ],
-          "neighbours_2_with_data": [
-            1.639,
-            1.951,
-            2.223,
-            2.463,
-            2.719,
-            2.991,
-            3.343,
-            3.775,
-            4.415,
-            5.023,
-            6.559
-          ],
-          "neighbours_2_with_data_and_filter": [
-            1.591,
-            1.871,
-            2.111,
-            2.319,
-            2.575,
-            2.815,
-            3.119,
-            3.519,
-            4.127,
-            4.703,
-            6.111
-          ],
-          "neighbours_2_with_filter": [
-            1.351,
-            1.567,
-            1.751,
-            1.935,
-            2.143,
-            2.367,
-            2.639,
-            2.991,
-            3.535,
-            4.015,
-            5.343
-          ],
-          "pattern_cycle": [
-            1.391,
-            1.623,
-            1.831,
-            2.039,
-            2.271,
-            2.543,
-            2.847,
-            3.279,
-            3.919,
-            4.607,
-            7.071
-          ],
-          "pattern_long": [
-            3.039,
-            4.127,
-            4.927,
-            5.503,
-            5.951,
-            6.399,
-            6.847,
-            7.359,
-            8.127,
-            8.831,
-            11.135
-          ],
-          "pattern_short": [
-            1.431,
-            1.671,
-            1.871,
-            2.063,
-            2.287,
-            2.543,
-            2.831,
-            3.167,
-            3.727,
-            4.287,
-            5.663
-          ],
-          "shortest_path": [
-            2.335,
-            2.671,
-            2.927,
-            3.183,
-            3.471,
-            3.759,
-            4.127,
-            4.607,
-            5.375,
-            6.207,
-            8.127
-          ],
-          "shortest_path_with_filter": [
-            2.319,
-            2.671,
-            2.959,
-            3.231,
-            3.503,
-            3.807,
-            4.159,
-            4.639,
-            5.343,
-            6.111,
-            7.999
-          ],
-          "single_vertex_read": [
-            1.207,
-            1.415,
-            1.591,
-            1.767,
-            1.951,
-            2.191,
-            2.463,
-            2.815,
-            3.391,
-            3.919,
-            5.279
-          ],
-          "vertex_on_label_property": [
-            1.207,
-            1.407,
-            1.591,
-            1.767,
-            1.959,
-            2.175,
-            2.463,
-            2.799,
-            3.343,
-            3.839,
-            5.151
-          ],
-          "vertex_on_label_property_index": [
-            1.199,
-            1.415,
-            1.591,
-            1.791,
-            1.983,
-            2.207,
-            2.479,
-            2.831,
-            3.391,
-            3.935,
-            5.151
-          ],
-          "vertex_on_property": [
-            1.639,
-            1.847,
-            2.039,
-            2.223,
-            2.431,
+            0.803,
+            1.019,
+            2.159,
             2.655,
             2.911,
-            3.279,
-            3.887,
-            4.415,
-            5.663
+            3.183,
+            3.423,
+            3.711,
+            4.063,
+            4.351,
+            5.087
+          ],
+          "aggregate_expansion_3": [
+            0.799,
+            1.003,
+            2.143,
+            2.623,
+            2.863,
+            3.151,
+            3.407,
+            3.695,
+            4.063,
+            4.351,
+            5.023
+          ],
+          "aggregate_expansion_3_with_filter": [
+            0.807,
+            1.011,
+            2.175,
+            2.639,
+            2.911,
+            3.183,
+            3.455,
+            3.727,
+            4.079,
+            4.351,
+            5.023
+          ],
+          "aggregate_expansion_4": [
+            0.791,
+            0.967,
+            2.143,
+            2.623,
+            2.895,
+            3.167,
+            3.439,
+            3.727,
+            4.095,
+            4.383,
+            5.055
+          ],
+          "aggregate_expansion_4_with_filter": [
+            0.783,
+            0.963,
+            2.095,
+            2.575,
+            2.863,
+            3.151,
+            3.423,
+            3.711,
+            4.047,
+            4.351,
+            4.959
+          ],
+          "neighbours_2": [
+            0.795,
+            0.991,
+            2.159,
+            2.655,
+            2.895,
+            3.151,
+            3.423,
+            3.711,
+            4.079,
+            4.351,
+            4.991
+          ],
+          "neighbours_2_with_data": [
+            0.787,
+            0.979,
+            2.143,
+            2.607,
+            2.879,
+            3.151,
+            3.423,
+            3.711,
+            4.063,
+            4.351,
+            4.959
+          ],
+          "neighbours_2_with_data_and_filter": [
+            0.795,
+            0.983,
+            2.143,
+            2.639,
+            2.895,
+            3.151,
+            3.407,
+            3.695,
+            4.063,
+            4.351,
+            4.991
+          ],
+          "neighbours_2_with_filter": [
+            0.795,
+            0.979,
+            2.127,
+            2.639,
+            2.895,
+            3.183,
+            3.439,
+            3.727,
+            4.079,
+            4.351,
+            4.959
+          ],
+          "pattern_cycle": [
+            0.799,
+            1.015,
+            2.159,
+            2.623,
+            2.895,
+            3.167,
+            3.423,
+            3.711,
+            4.047,
+            4.319,
+            4.959
+          ],
+          "pattern_long": [
+            0.799,
+            1.007,
+            2.159,
+            2.655,
+            2.911,
+            3.183,
+            3.439,
+            3.711,
+            4.095,
+            4.383,
+            4.959
+          ],
+          "pattern_short": [
+            0.783,
+            0.995,
+            2.143,
+            2.639,
+            2.895,
+            3.167,
+            3.423,
+            3.727,
+            4.095,
+            4.383,
+            5.023
+          ],
+          "shortest_path": [
+            0.787,
+            0.979,
+            2.143,
+            2.639,
+            2.895,
+            3.151,
+            3.407,
+            3.711,
+            4.079,
+            4.351,
+            5.023
+          ],
+          "shortest_path_with_filter": [
+            0.795,
+            0.995,
+            2.127,
+            2.623,
+            2.879,
+            3.167,
+            3.423,
+            3.711,
+            4.063,
+            4.351,
+            5.023
+          ],
+          "single_vertex_read": [
+            0.783,
+            0.991,
+            2.143,
+            2.623,
+            2.895,
+            3.151,
+            3.407,
+            3.711,
+            4.063,
+            4.319,
+            5.023
+          ],
+          "vertex_on_label_property": [
+            0.787,
+            0.951,
+            2.143,
+            2.639,
+            2.911,
+            3.167,
+            3.439,
+            3.743,
+            4.079,
+            4.351,
+            4.991
+          ],
+          "vertex_on_label_property_index": [
+            0.787,
+            0.967,
+            2.159,
+            2.655,
+            2.911,
+            3.183,
+            3.439,
+            3.711,
+            4.079,
+            4.351,
+            5.055
+          ],
+          "vertex_on_property": [
+            0.803,
+            1.031,
+            2.175,
+            2.655,
+            2.911,
+            3.183,
+            3.439,
+            3.727,
+            4.095,
+            4.383,
+            5.055
           ]
         },
         "telemetry_for_type": {
-          "CALL DB.LABELS()": {
-            "wait-ms": 115.218,
-            "exec-ms": 331.53,
-            "report-ms": 1.826
-          },
-          "CALL DB.PROPERTYKEYS()": {
-            "wait-ms": 43.706,
-            "exec-ms": 316.503,
-            "report-ms": 2.234
-          },
           "CALL db.indexes()": {
-            "wait-ms": 41.209,
-            "exec-ms": 1660.834,
-            "report-ms": 12.584
+            "wait-ms": 38.708,
+            "exec-ms": 322.75,
+            "report-ms": 12.792
           },
           "CALL db.meta.stats()": {
-            "wait-ms": 57.333,
-            "exec-ms": 223.75,
-            "report-ms": 24.042
+            "wait-ms": 45.209,
+            "exec-ms": 340.875,
+            "report-ms": 6.334
+          },
+          "CREATE INDEX FOR (e:User) ON (e.age)": {
+            "wait-ms": 26.542,
+            "exec-ms": 443.917,
+            "report-ms": 4.375
+          },
+          "CREATE INDEX FOR (e:User) ON (e.id)": {
+            "wait-ms": 620.208,
+            "exec-ms": 517.292,
+            "report-ms": 21.791
           },
           "aggregate_age": {
-            "wait-ms": 169.445,
-            "exec-ms": 859.954,
-            "report-ms": 2.265
+            "wait-ms": 55.784,
+            "exec-ms": 35.779,
+            "report-ms": 1.21
           },
           "aggregate_age_distinct": {
-            "wait-ms": 186.402,
-            "exec-ms": 1043.582,
-            "report-ms": 1.293
+            "wait-ms": 58.779,
+            "exec-ms": 36.227,
+            "report-ms": 1.241
           },
           "aggregate_age_filtered": {
-            "wait-ms": 180.347,
-            "exec-ms": 818.042,
-            "report-ms": 2.118
+            "wait-ms": 56.774,
+            "exec-ms": 35.853,
+            "report-ms": 0.893
           },
           "aggregate_age_min_max_avg": {
-            "wait-ms": 189.43,
-            "exec-ms": 1603.222,
-            "report-ms": 2.276
+            "wait-ms": 56.607,
+            "exec-ms": 35.722,
+            "report-ms": 1.283
           },
           "aggregate_count_users": {
-            "wait-ms": 192.191,
-            "exec-ms": 52.204,
-            "report-ms": 1.6
+            "wait-ms": 58.192,
+            "exec-ms": 24.198,
+            "report-ms": 1.64
           },
           "aggregate_expansion_1": {
-            "wait-ms": 181.404,
-            "exec-ms": 96.186,
-            "report-ms": 1.816
+            "wait-ms": 56.227,
+            "exec-ms": 34.518,
+            "report-ms": 0.859
           },
           "aggregate_expansion_1_with_filter": {
-            "wait-ms": 193.385,
-            "exec-ms": 91.874,
-            "report-ms": 1.432
+            "wait-ms": 58.935,
+            "exec-ms": 30.365,
+            "report-ms": 0.788
           },
           "aggregate_expansion_2": {
-            "wait-ms": 177.848,
-            "exec-ms": 184.235,
-            "report-ms": 10.001
+            "wait-ms": 61.639,
+            "exec-ms": 30.838,
+            "report-ms": 0.775
           },
           "aggregate_expansion_2_with_filter": {
-            "wait-ms": 172.723,
-            "exec-ms": 186.966,
-            "report-ms": 7.635
+            "wait-ms": 60.429,
+            "exec-ms": 34.063,
+            "report-ms": 0.936
           },
           "aggregate_expansion_3": {
-            "wait-ms": 176.999,
-            "exec-ms": 518.014,
-            "report-ms": 65.874
+            "wait-ms": 55.122,
+            "exec-ms": 32.969,
+            "report-ms": 0.777
           },
           "aggregate_expansion_3_with_filter": {
-            "wait-ms": 189.841,
-            "exec-ms": 529.255,
-            "report-ms": 48.016
+            "wait-ms": 60.514,
+            "exec-ms": 34.579,
+            "report-ms": 0.805
           },
           "aggregate_expansion_4": {
-            "wait-ms": 194.349,
-            "exec-ms": 1199.281,
-            "report-ms": 201.562
+            "wait-ms": 61.442,
+            "exec-ms": 33.859,
+            "report-ms": 0.791
           },
           "aggregate_expansion_4_with_filter": {
-            "wait-ms": 173.956,
-            "exec-ms": 1153.284,
-            "report-ms": 125.451
+            "wait-ms": 54.839,
+            "exec-ms": 31.536,
+            "report-ms": 0.753
           },
           "neighbours_2": {
-            "wait-ms": 156.517,
-            "exec-ms": 167.337,
-            "report-ms": 9.598
+            "wait-ms": 52.961,
+            "exec-ms": 33.407,
+            "report-ms": 0.768
           },
           "neighbours_2_with_data": {
-            "wait-ms": 186.944,
-            "exec-ms": 132.529,
-            "report-ms": 109.145
+            "wait-ms": 58.99,
+            "exec-ms": 28.354,
+            "report-ms": 0.784
           },
           "neighbours_2_with_data_and_filter": {
-            "wait-ms": 194.731,
-            "exec-ms": 177.293,
-            "report-ms": 84.927
+            "wait-ms": 54.746,
+            "exec-ms": 29.235,
+            "report-ms": 0.925
           },
           "neighbours_2_with_filter": {
-            "wait-ms": 221.038,
-            "exec-ms": 186.84,
-            "report-ms": 7.311
+            "wait-ms": 57.89,
+            "exec-ms": 32.587,
+            "report-ms": 0.903
           },
           "pattern_cycle": {
-            "wait-ms": 156.183,
-            "exec-ms": 379.177,
-            "report-ms": 4.477
+            "wait-ms": 55.968,
+            "exec-ms": 42.058,
+            "report-ms": 0.882
           },
           "pattern_long": {
-            "wait-ms": 172.937,
-            "exec-ms": 994.201,
-            "report-ms": 375.256
+            "wait-ms": 62.677,
+            "exec-ms": 36.641,
+            "report-ms": 0.876
           },
           "pattern_short": {
-            "wait-ms": 181.761,
-            "exec-ms": 192.972,
-            "report-ms": 17.986
+            "wait-ms": 57.87,
+            "exec-ms": 32.614,
+            "report-ms": 0.909
           },
           "shortest_path": {
-            "wait-ms": 192.273,
-            "exec-ms": 1622.756,
-            "report-ms": 1.601
+            "wait-ms": 54.44,
+            "exec-ms": 31.188,
+            "report-ms": 0.814
           },
           "shortest_path_with_filter": {
-            "wait-ms": 155.871,
-            "exec-ms": 1542.51,
-            "report-ms": 1.542
+            "wait-ms": 52.415,
+            "exec-ms": 35.284,
+            "report-ms": 0.85
           },
           "single_vertex_read": {
-            "wait-ms": 201.744,
-            "exec-ms": 72.779,
-            "report-ms": 3.068
+            "wait-ms": 56.578,
+            "exec-ms": 27.778,
+            "report-ms": 0.778
           },
-          "vertex_on_label_property_index": {
-            "wait-ms": 181.667,
-            "exec-ms": 69.158,
-            "report-ms": 3.137
+          "vertex_on_label_property": {
+            "wait-ms": 57.848,
+            "exec-ms": 27.783,
+            "report-ms": 0.816
           },
           "vertex_on_property": {
-            "wait-ms": 157.933,
-            "exec-ms": 566.04,
-            "report-ms": 3.079
+            "wait-ms": 56.007,
+            "exec-ms": 21.002,
+            "report-ms": 0.924
           }
         }
       }
     },
     {
-      "vendor": "falkordb-rs",
+      "vendor": "falkordb2",
       "read-write-ratio": 0.0,
       "clients": 20,
-      "platform": "falkordb-rs",
+      "platform": "falkordb2",
       "target-messages-per-second": 7500,
-      "edges": 10000,
-      "relationships": 121716,
-      "started-at-epoch-secs": 1781113587,
+      "edges": 100000,
+      "relationships": 1768515,
+      "started-at-epoch-secs": 1781114833,
       "result": {
         "deadline-offset": "0ms",
-        "actual-messages-per-second": 4103.153273290523,
+        "actual-messages-per-second": 7443.24525493115,
         "latency": {
-          "p50": "4.159ms",
-          "p95": "10.11ms",
-          "p99": "14.78ms"
+          "p50": "2.831ms",
+          "p95": "3.871ms",
+          "p99": "4.351ms"
         },
-        "avg-latency-ms": 4.860166242939998,
+        "avg-latency-ms": 2.6585911764999577,
         "latency-histogram": {
           "buckets-ms": [
             1,
@@ -640,14 +640,14 @@
             10000
           ],
           "cumulative-counts": [
-            0,
-            218,
-            127048,
-            189583,
-            199812,
-            199964,
-            199980,
-            199999,
+            13,
+            17175,
+            199393,
+            199881,
+            199970,
+            199994,
+            199996,
+            200000,
             200000,
             200000,
             200000,
@@ -656,556 +656,546 @@
           ],
           "count": 200000
         },
-        "elapsed-ms": 48743,
+        "elapsed-ms": 26870,
         "cpu-usage": 0.0,
-        "ram-usage": "7.0MB",
+        "ram-usage": "0MB",
         "errors": 0,
         "successful-requests": 200000,
         "operations": {
           "by-query": {
-            "aggregate_age": 7715,
-            "aggregate_age_distinct": 7564,
-            "aggregate_age_filtered": 7640,
-            "aggregate_age_min_max_avg": 7646,
-            "aggregate_count_users": 7622,
-            "aggregate_expansion_1": 7733,
-            "aggregate_expansion_1_with_filter": 7788,
-            "aggregate_expansion_2": 7757,
-            "aggregate_expansion_2_with_filter": 7712,
-            "aggregate_expansion_3": 7675,
-            "aggregate_expansion_3_with_filter": 7701,
-            "aggregate_expansion_4": 7757,
-            "aggregate_expansion_4_with_filter": 7599,
-            "neighbours_2": 7809,
-            "neighbours_2_with_data": 7798,
-            "neighbours_2_with_data_and_filter": 7653,
-            "neighbours_2_with_filter": 7658,
-            "pattern_cycle": 7716,
-            "pattern_long": 7777,
-            "pattern_short": 7765,
-            "shortest_path": 7713,
-            "shortest_path_with_filter": 7756,
-            "single_vertex_read": 7696,
-            "vertex_on_label_property": 7532,
-            "vertex_on_label_property_index": 7683,
-            "vertex_on_property": 7535
+            "aggregate_age": 7620,
+            "aggregate_age_distinct": 7797,
+            "aggregate_age_filtered": 7660,
+            "aggregate_age_min_max_avg": 7777,
+            "aggregate_count_users": 7608,
+            "aggregate_expansion_1": 7718,
+            "aggregate_expansion_1_with_filter": 7685,
+            "aggregate_expansion_2": 7884,
+            "aggregate_expansion_2_with_filter": 7549,
+            "aggregate_expansion_3": 7654,
+            "aggregate_expansion_3_with_filter": 7697,
+            "aggregate_expansion_4": 7529,
+            "aggregate_expansion_4_with_filter": 7753,
+            "neighbours_2": 7554,
+            "neighbours_2_with_data": 7679,
+            "neighbours_2_with_data_and_filter": 7600,
+            "neighbours_2_with_filter": 7820,
+            "pattern_cycle": 7768,
+            "pattern_long": 7776,
+            "pattern_short": 7615,
+            "shortest_path": 7658,
+            "shortest_path_with_filter": 7638,
+            "single_vertex_read": 7752,
+            "vertex_on_label_property": 7747,
+            "vertex_on_label_property_index": 7700,
+            "vertex_on_property": 7762
           },
           "by-spawn": {
-            "0": 10382,
-            "1": 10274,
-            "10": 10029,
-            "11": 9916,
-            "12": 9898,
-            "13": 9864,
-            "14": 9821,
-            "15": 9841,
-            "16": 9805,
-            "17": 9797,
-            "18": 9828,
-            "19": 9862,
-            "2": 10196,
-            "3": 10184,
-            "4": 10117,
-            "5": 10065,
-            "6": 10111,
-            "7": 10012,
-            "8": 10028,
-            "9": 9970
+            "0": 10267,
+            "1": 10341,
+            "10": 9887,
+            "11": 9882,
+            "12": 9851,
+            "13": 9815,
+            "14": 9785,
+            "15": 9764,
+            "16": 9784,
+            "17": 9834,
+            "18": 9888,
+            "19": 10093,
+            "2": 10252,
+            "3": 10197,
+            "4": 10144,
+            "5": 10099,
+            "6": 10073,
+            "7": 10105,
+            "8": 9961,
+            "9": 9978
           }
         },
         "spawn-stats": {
-          "min": 9797,
-          "max": 10382,
-          "p50": 10012,
-          "p95": 10274,
-          "max-min-ratio": 1.0597121567826886,
-          "cv": 0.016542611643872922
+          "min": 9764,
+          "max": 10341,
+          "p50": 9978,
+          "p95": 10267,
+          "max-min-ratio": 1.0590946333469888,
+          "cv": 0.017595794952203783
         },
         "histogram_for_type": {
           "aggregate_age": [
-            2.127,
-            2.511,
-            2.863,
-            3.199,
-            3.567,
-            3.967,
-            4.511,
-            5.183,
-            6.271,
-            7.231,
-            10.239
-          ],
-          "aggregate_age_distinct": [
-            2.031,
-            2.431,
-            2.751,
-            3.103,
-            3.471,
-            3.871,
-            4.383,
-            5.023,
-            6.111,
-            7.103,
-            9.791
-          ],
-          "aggregate_age_filtered": [
-            2.319,
-            2.767,
-            3.151,
-            3.551,
-            3.983,
-            4.511,
-            5.055,
-            5.887,
-            7.295,
-            8.767,
-            13.823
-          ],
-          "aggregate_age_min_max_avg": [
-            2.687,
-            3.135,
-            3.503,
-            3.871,
-            4.255,
-            4.703,
-            5.215,
-            5.951,
-            7.071,
-            8.319,
-            11.455
-          ],
-          "aggregate_count_users": [
-            1.607,
-            1.967,
-            2.271,
-            2.575,
-            2.911,
-            3.295,
-            3.775,
-            4.383,
-            5.407,
-            6.303,
-            9.023
-          ],
-          "aggregate_expansion_1": [
-            1.871,
-            2.335,
-            2.703,
-            3.119,
-            3.551,
-            4.031,
-            4.671,
-            5.503,
-            6.943,
-            8.767,
-            13.183
-          ],
-          "aggregate_expansion_1_with_filter": [
-            1.855,
-            2.303,
-            2.687,
-            3.087,
-            3.551,
-            4.047,
-            4.703,
-            5.567,
-            7.071,
-            8.639,
-            12.991
-          ],
-          "aggregate_expansion_2": [
-            2.095,
-            2.543,
-            2.959,
-            3.343,
-            3.775,
-            4.255,
-            4.895,
-            5.695,
-            7.071,
-            8.703,
-            13.695
-          ],
-          "aggregate_expansion_2_with_filter": [
-            2.031,
-            2.495,
-            2.895,
-            3.263,
-            3.711,
-            4.223,
-            4.799,
-            5.663,
-            7.071,
-            8.831,
-            13.119
-          ],
-          "aggregate_expansion_3": [
-            2.751,
-            3.407,
-            3.903,
-            4.415,
-            4.927,
-            5.535,
-            6.239,
-            7.103,
-            8.639,
-            10.367,
-            14.911
-          ],
-          "aggregate_expansion_3_with_filter": [
-            2.671,
-            3.215,
-            3.711,
-            4.159,
-            4.607,
-            5.151,
-            5.791,
-            6.623,
-            8.095,
-            9.791,
-            15.039
-          ],
-          "aggregate_expansion_4": [
-            4.159,
-            5.183,
-            5.887,
-            6.495,
-            7.103,
-            7.775,
-            8.575,
-            9.663,
-            11.391,
-            13.119,
-            17.791
-          ],
-          "aggregate_expansion_4_with_filter": [
-            3.775,
-            4.639,
-            5.247,
-            5.823,
-            6.367,
-            7.007,
-            7.775,
-            8.703,
-            10.367,
-            12.159,
-            17.151
-          ],
-          "neighbours_2": [
-            2.079,
-            2.543,
-            2.927,
-            3.327,
-            3.759,
-            4.287,
-            4.895,
-            5.759,
-            7.199,
-            8.767,
-            13.503
-          ],
-          "neighbours_2_with_data": [
+            1.103,
+            1.991,
+            2.255,
             2.607,
-            3.183,
-            3.679,
-            4.127,
-            4.671,
-            5.183,
-            5.855,
-            6.751,
-            8.447,
-            10.175,
-            14.271
-          ],
-          "neighbours_2_with_data_and_filter": [
-            2.463,
-            2.991,
-            3.471,
-            3.967,
-            4.447,
-            4.927,
-            5.567,
-            6.431,
-            7.935,
-            9.535,
-            14.463
-          ],
-          "neighbours_2_with_filter": [
-            2.047,
-            2.495,
-            2.879,
-            3.279,
-            3.727,
-            4.255,
-            4.863,
-            5.695,
-            7.167,
-            8.831,
-            14.079
-          ],
-          "pattern_cycle": [
-            2.127,
-            2.559,
-            2.959,
+            2.783,
+            2.911,
+            3.007,
+            3.119,
             3.375,
             3.791,
-            4.287,
-            4.927,
-            5.855,
-            7.295,
-            8.895,
-            13.119
+            4.287
+          ],
+          "aggregate_age_distinct": [
+            0.963,
+            1.975,
+            2.223,
+            2.591,
+            2.767,
+            2.895,
+            2.991,
+            3.103,
+            3.343,
+            3.743,
+            4.223
+          ],
+          "aggregate_age_filtered": [
+            1.559,
+            2.079,
+            2.383,
+            2.703,
+            2.863,
+            2.975,
+            3.087,
+            3.231,
+            3.503,
+            3.871,
+            4.319
+          ],
+          "aggregate_age_min_max_avg": [
+            1.127,
+            1.999,
+            2.255,
+            2.607,
+            2.783,
+            2.895,
+            3.007,
+            3.119,
+            3.359,
+            3.759,
+            4.223
+          ],
+          "aggregate_count_users": [
+            0.995,
+            1.983,
+            2.223,
+            2.591,
+            2.767,
+            2.895,
+            2.991,
+            3.119,
+            3.375,
+            3.775,
+            4.255
+          ],
+          "aggregate_expansion_1": [
+            1.151,
+            2.063,
+            2.351,
+            2.671,
+            2.847,
+            2.975,
+            3.087,
+            3.231,
+            3.487,
+            3.855,
+            4.351
+          ],
+          "aggregate_expansion_1_with_filter": [
+            1.727,
+            2.079,
+            2.351,
+            2.687,
+            2.847,
+            2.975,
+            3.103,
+            3.231,
+            3.519,
+            3.903,
+            4.351
+          ],
+          "aggregate_expansion_2": [
+            1.431,
+            2.095,
+            2.367,
+            2.703,
+            2.863,
+            2.975,
+            3.087,
+            3.231,
+            3.519,
+            3.887,
+            4.351
+          ],
+          "aggregate_expansion_2_with_filter": [
+            1.231,
+            2.063,
+            2.351,
+            2.671,
+            2.863,
+            2.975,
+            3.103,
+            3.247,
+            3.519,
+            3.887,
+            4.415
+          ],
+          "aggregate_expansion_3": [
+            1.215,
+            2.063,
+            2.335,
+            2.687,
+            2.847,
+            2.975,
+            3.071,
+            3.215,
+            3.471,
+            3.871,
+            4.351
+          ],
+          "aggregate_expansion_3_with_filter": [
+            1.223,
+            2.079,
+            2.351,
+            2.671,
+            2.847,
+            2.975,
+            3.087,
+            3.231,
+            3.487,
+            3.887,
+            4.351
+          ],
+          "aggregate_expansion_4": [
+            1.191,
+            2.063,
+            2.319,
+            2.655,
+            2.847,
+            2.975,
+            3.087,
+            3.231,
+            3.519,
+            3.903,
+            4.383
+          ],
+          "aggregate_expansion_4_with_filter": [
+            1.167,
+            2.079,
+            2.351,
+            2.671,
+            2.847,
+            2.975,
+            3.087,
+            3.231,
+            3.487,
+            3.887,
+            4.447
+          ],
+          "neighbours_2": [
+            1.143,
+            2.047,
+            2.287,
+            2.655,
+            2.831,
+            2.959,
+            3.087,
+            3.231,
+            3.487,
+            3.887,
+            4.383
+          ],
+          "neighbours_2_with_data": [
+            1.583,
+            2.079,
+            2.367,
+            2.687,
+            2.863,
+            2.975,
+            3.103,
+            3.247,
+            3.519,
+            3.903,
+            4.351
+          ],
+          "neighbours_2_with_data_and_filter": [
+            1.679,
+            2.079,
+            2.351,
+            2.671,
+            2.847,
+            2.975,
+            3.087,
+            3.215,
+            3.487,
+            3.903,
+            4.415
+          ],
+          "neighbours_2_with_filter": [
+            1.503,
+            2.079,
+            2.367,
+            2.671,
+            2.847,
+            2.975,
+            3.087,
+            3.247,
+            3.535,
+            3.919,
+            4.511
+          ],
+          "pattern_cycle": [
+            1.375,
+            2.079,
+            2.351,
+            2.687,
+            2.863,
+            2.991,
+            3.103,
+            3.247,
+            3.519,
+            3.903,
+            4.383
           ],
           "pattern_long": [
-            4.607,
-            5.951,
-            6.847,
-            7.615,
-            8.255,
-            9.023,
-            9.855,
-            11.007,
-            12.863,
-            14.655,
-            19.583
+            1.647,
+            2.079,
+            2.351,
+            2.671,
+            2.847,
+            2.975,
+            3.087,
+            3.215,
+            3.487,
+            3.887,
+            4.383
           ],
           "pattern_short": [
-            2.159,
-            2.623,
-            3.023,
-            3.455,
-            3.855,
-            4.383,
-            4.991,
-            5.855,
-            7.295,
-            8.959,
-            13.695
+            1.159,
+            2.063,
+            2.335,
+            2.687,
+            2.863,
+            2.975,
+            3.087,
+            3.215,
+            3.487,
+            3.871,
+            4.383
           ],
           "shortest_path": [
-            2.687,
-            3.295,
-            3.839,
-            4.415,
-            4.991,
-            5.695,
-            6.463,
-            7.615,
-            9.599,
-            11.583,
-            16.639
+            1.247,
+            2.063,
+            2.319,
+            2.655,
+            2.847,
+            2.975,
+            3.087,
+            3.231,
+            3.503,
+            3.887,
+            4.383
           ],
           "shortest_path_with_filter": [
-            2.751,
-            3.343,
-            3.855,
-            4.415,
-            4.991,
-            5.695,
-            6.495,
-            7.583,
-            9.535,
-            11.455,
-            17.151
+            1.743,
+            2.079,
+            2.351,
+            2.687,
+            2.863,
+            2.975,
+            3.103,
+            3.231,
+            3.519,
+            3.935,
+            4.447
           ],
           "single_vertex_read": [
-            1.871,
-            2.303,
-            2.703,
-            3.119,
-            3.551,
-            4.031,
-            4.639,
-            5.471,
-            6.879,
-            8.575,
-            12.799
+            1.111,
+            2.063,
+            2.335,
+            2.671,
+            2.863,
+            2.975,
+            3.087,
+            3.231,
+            3.519,
+            3.903,
+            4.351
           ],
           "vertex_on_label_property": [
-            1.855,
-            2.303,
-            2.687,
-            3.071,
-            3.535,
-            4.015,
-            4.639,
-            5.471,
-            6.879,
-            8.447,
-            12.991
+            1.303,
+            2.063,
+            2.335,
+            2.671,
+            2.847,
+            2.975,
+            3.087,
+            3.231,
+            3.487,
+            3.887,
+            4.383
           ],
           "vertex_on_label_property_index": [
-            1.839,
-            2.319,
-            2.703,
-            3.103,
-            3.535,
-            4.047,
-            4.671,
-            5.471,
-            6.911,
-            8.639,
-            13.247
+            1.319,
+            2.079,
+            2.367,
+            2.671,
+            2.847,
+            2.975,
+            3.087,
+            3.231,
+            3.503,
+            3.919,
+            4.383
           ],
           "vertex_on_property": [
-            1.791,
-            2.175,
-            2.463,
-            2.799,
-            3.151,
-            3.551,
-            4.015,
-            4.639,
-            5.663,
-            6.623,
-            9.087
+            1.087,
+            1.983,
+            2.239,
+            2.607,
+            2.767,
+            2.895,
+            3.007,
+            3.135,
+            3.375,
+            3.775,
+            4.223
           ]
         },
         "telemetry_for_type": {
-          "CALL DB.LABELS()": {
-            "wait-ms": 8421.485,
-            "exec-ms": 4.119,
-            "report-ms": 2246.675
-          },
-          "CALL DB.PROPERTYKEYS()": {
-            "wait-ms": 916.79,
-            "exec-ms": 7.644,
-            "report-ms": 2295.696
-          },
           "CALL db.indexes()": {
-            "wait-ms": 59.25,
-            "exec-ms": 430.375,
-            "report-ms": 3770.75
+            "wait-ms": 70.792,
+            "exec-ms": 106.75,
+            "report-ms": 163.291
           },
           "CALL db.meta.stats()": {
-            "wait-ms": 115.25,
-            "exec-ms": 460.625,
-            "report-ms": 551.167
+            "wait-ms": 110.791,
+            "exec-ms": 427.416,
+            "report-ms": 834.668
           },
           "aggregate_age": {
-            "wait-ms": 746.345,
-            "exec-ms": 629.276,
-            "report-ms": 20.765
+            "wait-ms": 21.417,
+            "exec-ms": 4.358,
+            "report-ms": 6.708
           },
           "aggregate_age_distinct": {
-            "wait-ms": 735.937,
-            "exec-ms": 540.88,
-            "report-ms": 16.035
+            "wait-ms": 21.154,
+            "exec-ms": 4.03,
+            "report-ms": 6.901
           },
           "aggregate_age_filtered": {
-            "wait-ms": 751.447,
-            "exec-ms": 1170.383,
-            "report-ms": 27.119
+            "wait-ms": 21.023,
+            "exec-ms": 87.23,
+            "report-ms": 9.266
           },
           "aggregate_age_min_max_avg": {
-            "wait-ms": 765.466,
-            "exec-ms": 1417.439,
-            "report-ms": 17.024
+            "wait-ms": 21.0,
+            "exec-ms": 4.923,
+            "report-ms": 7.056
           },
           "aggregate_count_users": {
-            "wait-ms": 757.706,
-            "exec-ms": 11.866,
-            "report-ms": 22.049
+            "wait-ms": 20.954,
+            "exec-ms": 5.502,
+            "report-ms": 6.841
           },
           "aggregate_expansion_1": {
-            "wait-ms": 746.758,
-            "exec-ms": 687.847,
-            "report-ms": 34.516
+            "wait-ms": 21.235,
+            "exec-ms": 82.322,
+            "report-ms": 18.144
           },
           "aggregate_expansion_1_with_filter": {
-            "wait-ms": 752.704,
-            "exec-ms": 701.082,
-            "report-ms": 45.633
+            "wait-ms": 21.596,
+            "exec-ms": 79.811,
+            "report-ms": 22.981
           },
           "aggregate_expansion_2": {
-            "wait-ms": 752.598,
-            "exec-ms": 783.695,
-            "report-ms": 47.089
+            "wait-ms": 20.687,
+            "exec-ms": 78.383,
+            "report-ms": 20.32
           },
           "aggregate_expansion_2_with_filter": {
-            "wait-ms": 759.775,
-            "exec-ms": 763.531,
-            "report-ms": 53.911
+            "wait-ms": 21.487,
+            "exec-ms": 79.088,
+            "report-ms": 24.414
           },
           "aggregate_expansion_3": {
-            "wait-ms": 755.776,
-            "exec-ms": 1182.055,
-            "report-ms": 117.173
+            "wait-ms": 20.78,
+            "exec-ms": 79.498,
+            "report-ms": 21.765
           },
           "aggregate_expansion_3_with_filter": {
-            "wait-ms": 751.331,
-            "exec-ms": 1138.427,
-            "report-ms": 104.972
+            "wait-ms": 21.346,
+            "exec-ms": 75.542,
+            "report-ms": 26.195
           },
           "aggregate_expansion_4": {
-            "wait-ms": 761.199,
-            "exec-ms": 2010.708,
-            "report-ms": 274.551
+            "wait-ms": 21.473,
+            "exec-ms": 79.453,
+            "report-ms": 23.535
           },
           "aggregate_expansion_4_with_filter": {
-            "wait-ms": 785.809,
-            "exec-ms": 1901.209,
-            "report-ms": 210.733
+            "wait-ms": 21.255,
+            "exec-ms": 76.633,
+            "report-ms": 28.966
           },
           "neighbours_2": {
-            "wait-ms": 740.439,
-            "exec-ms": 756.882,
-            "report-ms": 48.219
+            "wait-ms": 20.722,
+            "exec-ms": 79.906,
+            "report-ms": 19.375
           },
           "neighbours_2_with_data": {
-            "wait-ms": 759.187,
-            "exec-ms": 770.213,
-            "report-ms": 282.989
+            "wait-ms": 21.37,
+            "exec-ms": 83.603,
+            "report-ms": 19.283
           },
           "neighbours_2_with_data_and_filter": {
-            "wait-ms": 758.814,
-            "exec-ms": 768.265,
-            "report-ms": 221.855
+            "wait-ms": 20.911,
+            "exec-ms": 76.373,
+            "report-ms": 23.625
           },
           "neighbours_2_with_filter": {
-            "wait-ms": 773.325,
-            "exec-ms": 788.994,
-            "report-ms": 58.882
+            "wait-ms": 21.35,
+            "exec-ms": 78.595,
+            "report-ms": 23.292
           },
           "pattern_cycle": {
-            "wait-ms": 734.64,
-            "exec-ms": 981.057,
-            "report-ms": 54.997
+            "wait-ms": 21.168,
+            "exec-ms": 77.248,
+            "report-ms": 29.526
           },
           "pattern_long": {
-            "wait-ms": 750.703,
-            "exec-ms": 1974.385,
-            "report-ms": 457.947
+            "wait-ms": 21.324,
+            "exec-ms": 79.978,
+            "report-ms": 22.752
           },
           "pattern_short": {
-            "wait-ms": 748.471,
-            "exec-ms": 779.038,
-            "report-ms": 66.919
+            "wait-ms": 21.153,
+            "exec-ms": 81.453,
+            "report-ms": 19.287
           },
           "shortest_path": {
-            "wait-ms": 754.745,
-            "exec-ms": 2384.42,
-            "report-ms": 33.989
+            "wait-ms": 21.253,
+            "exec-ms": 84.857,
+            "report-ms": 17.581
           },
           "shortest_path_with_filter": {
-            "wait-ms": 740.6,
-            "exec-ms": 2405.819,
-            "report-ms": 31.261
+            "wait-ms": 21.631,
+            "exec-ms": 84.75,
+            "report-ms": 18.937
           },
           "single_vertex_read": {
-            "wait-ms": 756.892,
-            "exec-ms": 648.095,
-            "report-ms": 37.046
+            "wait-ms": 20.968,
+            "exec-ms": 85.877,
+            "report-ms": 10.972
           },
-          "vertex_on_label_property_index": {
-            "wait-ms": 743.197,
-            "exec-ms": 688.302,
-            "report-ms": 30.61
+          "vertex_on_label_property": {
+            "wait-ms": 21.403,
+            "exec-ms": 86.166,
+            "report-ms": 10.851
           },
           "vertex_on_property": {
-            "wait-ms": 759.525,
-            "exec-ms": 178.603,
-            "report-ms": 26.851
+            "wait-ms": 20.65,
+            "exec-ms": 2.048,
+            "report-ms": 9.169
           }
         }
       }
