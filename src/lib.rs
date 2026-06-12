@@ -11,6 +11,7 @@ use prometheus::IntGauge;
 use prometheus::IntGaugeVec;
 
 pub mod cli;
+pub mod data_prep;
 pub mod error;
 pub mod falkor;
 pub mod memgraph;

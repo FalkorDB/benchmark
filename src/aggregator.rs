@@ -100,7 +100,8 @@ struct UiResult {
     #[serde(rename = "spawn-stats")]
     spawn_stats: UiSpawnStats,
     // "single"-workload style latency percentiles (P10..P99) per query type.
-    #[serde(rename = "histogram_for_type",
+    #[serde(
+        rename = "histogram_for_type",
         skip_serializing_if = "BTreeMap::is_empty"
     )]
     histogram_for_type: BTreeMap<String, Vec<f64>>,
@@ -251,7 +252,9 @@ fn write_summary(
         if let Some(file_name_str) = file_name_os.to_str() {
             if file_name_str.ends_with(".json") && file_name_str != "manifest.json" {
                 let base_name = file_name_str.trim_end_matches(".json");
-                let timestamp = summary.runs.first()
+                let timestamp = summary
+                    .runs
+                    .first()
                     .map(|r| r.started_at_epoch_secs)
                     .unwrap_or_else(|| {
                         std::time::SystemTime::now()
@@ -263,13 +266,20 @@ fn write_summary(
                 if timestamp > 0 {
                     let hist_file_name = format!("{}_{}.json", base_name, timestamp);
                     let hist_path = parent.join(&hist_file_name);
-                    fs::write(&hist_path, &json)
-                        .map_err(|e| OtherError(format!("Failed writing historical copy {}: {}", hist_path.display(), e)))?;
+                    fs::write(&hist_path, &json).map_err(|e| {
+                        OtherError(format!(
+                            "Failed writing historical copy {}: {}",
+                            hist_path.display(),
+                            e
+                        ))
+                    })?;
 
                     let manifest_path = parent.join("manifest.json");
                     let mut manifest_val = if manifest_path.exists() {
-                        let manifest_raw = fs::read_to_string(&manifest_path).unwrap_or_else(|_| "{}".to_string());
-                        serde_json::from_str::<serde_json::Value>(&manifest_raw).unwrap_or_else(|_| serde_json::json!({}))
+                        let manifest_raw =
+                            fs::read_to_string(&manifest_path).unwrap_or_else(|_| "{}".to_string());
+                        serde_json::from_str::<serde_json::Value>(&manifest_raw)
+                            .unwrap_or_else(|_| serde_json::json!({}))
                     } else {
                         serde_json::json!({})
                     };
@@ -308,8 +318,13 @@ fn write_summary(
 
                     let manifest_json = serde_json::to_string_pretty(&manifest_val)
                         .map_err(|e| OtherError(format!("Failed serializing manifest: {}", e)))?;
-                    fs::write(&manifest_path, manifest_json)
-                        .map_err(|e| OtherError(format!("Failed writing manifest {}: {}", manifest_path.display(), e)))?;
+                    fs::write(&manifest_path, manifest_json).map_err(|e| {
+                        OtherError(format!(
+                            "Failed writing manifest {}: {}",
+                            manifest_path.display(),
+                            e
+                        ))
+                    })?;
                 }
             }
         }
@@ -348,7 +363,10 @@ struct CustomRunArtifacts {
 ///
 /// This is meant for comparing two FalkorDB runs on different AWS instance families
 /// (e.g. Graviton vs Intel) side-by-side in the UI.
-pub fn aggregate_aws_tests(aws_tests_dir: &str, out_path: &str) -> BenchmarkResult<()> {
+pub fn aggregate_aws_tests(
+    aws_tests_dir: &str,
+    out_path: &str,
+) -> BenchmarkResult<()> {
     let aws_tests_dir = PathBuf::from(aws_tests_dir);
     if !aws_tests_dir.exists() {
         return Err(OtherError(format!(
@@ -388,13 +406,8 @@ pub fn aggregate_aws_tests(aws_tests_dir: &str, out_path: &str) -> BenchmarkResu
         // We're intentionally aggregating Falkor runs.
         let vendor = Vendor::Falkor;
 
-        let metrics_text = fs::read_to_string(&metrics_path).map_err(|e| {
-            OtherError(format!(
-                "Failed reading {}: {}",
-                metrics_path.display(),
-                e
-            ))
-        })?;
+        let metrics_text = fs::read_to_string(&metrics_path)
+            .map_err(|e| OtherError(format!("Failed reading {}: {}", metrics_path.display(), e)))?;
 
         let dir_name = path
             .file_name()
@@ -412,7 +425,10 @@ pub fn aggregate_aws_tests(aws_tests_dir: &str, out_path: &str) -> BenchmarkResu
             // Common shorthand seen in this repo: r7i-2xl, r8g-2xl, etc.
             // Convert to AWS-like instance type: r7i.2xlarge
             let lower = n.to_lowercase();
-            let parts: Vec<&str> = lower.split(|c| c == '-' || c == '_' || c == ' ').filter(|p| !p.is_empty()).collect();
+            let parts: Vec<&str> = lower
+                .split(|c| c == '-' || c == '_' || c == ' ')
+                .filter(|p| !p.is_empty())
+                .collect();
             if parts.is_empty() {
                 return None;
             }
@@ -466,10 +482,21 @@ pub fn aggregate_aws_tests(aws_tests_dir: &str, out_path: &str) -> BenchmarkResu
             "falkordb1".to_string()
         } else if lower.contains("falkordb2") {
             "falkordb2".to_string()
-        } else if lower.contains("r8g") || lower.contains("graviton") || lower.contains("arm") {
+        } else if lower.contains("r8g")
+            || lower.contains("r7g")
+            || lower.contains("r6g")
+            || lower.contains("graviton")
+            || lower.contains("arm")
+        {
             "arm".to_string()
-        } else if lower.contains("r7i") || lower.contains("intel") || lower.contains("x86") {
+        } else if lower.contains("r7i")
+            || lower.contains("r6i")
+            || lower.contains("intel")
+            || lower.contains("x86")
+        {
             "intel".to_string()
+        } else if lower.contains("falkordb-c") || lower.contains("falkordb-rs") {
+            detected_platform()
         } else {
             // Fallback: use the raw directory name as the platform/hardware identifier
             dir_name.clone()
@@ -889,21 +916,9 @@ impl MetricsIndex {
             _ => return BTreeMap::new(),
         };
 
-        let waits = self
-            .samples
-            .get(wait_metric)
-            .cloned()
-            .unwrap_or_default();
-        let execs = self
-            .samples
-            .get(exec_metric)
-            .cloned()
-            .unwrap_or_default();
-        let reports = self
-            .samples
-            .get(report_metric)
-            .cloned()
-            .unwrap_or_default();
+        let waits = self.samples.get(wait_metric).cloned().unwrap_or_default();
+        let execs = self.samples.get(exec_metric).cloned().unwrap_or_default();
+        let reports = self.samples.get(report_metric).cloned().unwrap_or_default();
 
         fn by_query(samples: Vec<(BTreeMap<String, String>, f64)>) -> BTreeMap<String, f64> {
             let mut out = BTreeMap::new();

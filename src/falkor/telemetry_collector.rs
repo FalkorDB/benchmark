@@ -1,6 +1,4 @@
-use crate::{
-    FALKOR_TELEMETRY_EXEC_US, FALKOR_TELEMETRY_REPORT_US, FALKOR_TELEMETRY_WAIT_US,
-};
+use crate::{FALKOR_TELEMETRY_EXEC_US, FALKOR_TELEMETRY_REPORT_US, FALKOR_TELEMETRY_WAIT_US};
 use redis::aio::MultiplexedConnection;
 use redis::Value;
 use std::collections::HashMap;
@@ -147,15 +145,21 @@ pub fn spawn_falkor_telemetry_collector(
                 Ok(Value::Array(streams)) if !streams.is_empty() => {
                     for stream in streams {
                         // Each stream is: [ key, [ [id, [field, value, ...]], ... ] ]
-                        let Value::Array(stream_parts) = stream else { continue };
+                        let Value::Array(stream_parts) = stream else {
+                            continue;
+                        };
                         if stream_parts.len() != 2 {
                             continue;
                         }
                         let entries_val = &stream_parts[1];
-                        let Value::Array(entries) = entries_val else { continue };
+                        let Value::Array(entries) = entries_val else {
+                            continue;
+                        };
 
                         for entry in entries {
-                            let Value::Array(entry_parts) = entry else { continue };
+                            let Value::Array(entry_parts) = entry else {
+                                continue;
+                            };
                             if entry_parts.len() != 2 {
                                 continue;
                             }

@@ -29,6 +29,10 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 #  QUERIES_FILE  (default: large-readonly)
 #  QUERIES_COUNT (default: 1000000)
 #  WRITE_RATIO   (default: 0.03)
+#  ENABLE_ALGO_PAGERANK (default: 1)
+#  ENABLE_ALGO_MAX_FLOW (default: 0)
+#  ENABLE_ALGO_MSF (default: 0)
+#  ENABLE_ALGO_HARMONIC (default: 0)
 #
 # Results:
 #  RESULTS_DIR (default: Results-YYMMDD-HH:MM)
@@ -36,7 +40,7 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 
 FALKOR_ENDPOINT=${FALKOR_ENDPOINT:-falkor://127.0.0.1:6379}
 # Secondary FalkorDB endpoint for version comparison (e.g. rust-based)
-FALKOR_ENDPOINT_2=${FALKOR_ENDPOINT_2:-falkor://127.0.0.1:3800}
+FALKOR_ENDPOINT_2=${FALKOR_ENDPOINT_2:-falkor://127.0.0.1:6800}
 # Suffix/name for version comparison results folders (metadata)
 FALKOR_NAME=${FALKOR_NAME:-"falkordb-c"}
 FALKOR_2_NAME=${FALKOR_2_NAME:-"falkordb-rs"}
@@ -52,8 +56,8 @@ MEMGRAPH_CONTAINER_ID=${MEMGRAPH_CONTAINER_ID:-"da0b0f388531"}
 # Vendor toggles: set to 1 to enable, 0 to disable
 RUN_FALKOR=${RUN_FALKOR:-1}
 # Set to 1 to run comparison against the secondary FalkorDB version
-RUN_FALKOR_2=${RUN_FALKOR_2:-0}
-RUN_NEO4J=${RUN_NEO4J:-1}
+RUN_FALKOR_2=${RUN_FALKOR_2:-1}
+RUN_NEO4J=${RUN_NEO4J:-0}
 # Enable Memgraph by default for large benchmark comparisons (can be overridden via env).
 RUN_MEMGRAPH=${RUN_MEMGRAPH:-0}
 
@@ -61,8 +65,12 @@ BATCH_SIZE=${BATCH_SIZE:-10000}
 PARALLEL=${PARALLEL:-10}
 MPS=${MPS:-200}
 QUERIES_FILE=${QUERIES_FILE:-"large-readonly"}
-QUERIES_COUNT=${QUERIES_COUNT:-15000}
+QUERIES_COUNT=${QUERIES_COUNT:-100000}
 WRITE_RATIO=${WRITE_RATIO:-0.0}
+ENABLE_ALGO_PAGERANK=${ENABLE_ALGO_PAGERANK:-1}
+ENABLE_ALGO_MAX_FLOW=${ENABLE_ALGO_MAX_FLOW:-0}
+ENABLE_ALGO_MSF=${ENABLE_ALGO_MSF:-0}
+ENABLE_ALGO_HARMONIC=${ENABLE_ALGO_HARMONIC:-0}
 
 # Derive per-vendor query file names so each engine can use vendor-optimized queries.
 QUERIES_FILE_BASE="${QUERIES_FILE}"
@@ -73,6 +81,28 @@ MEMGRAPH_QUERIES_FILE="${QUERIES_FILE_BASE}-memgraph"
 # Use a single shared results directory for all vendors so `benchmark aggregate` can
 # generate neo4j-vs-falkordb and memgraph-vs-falkordb UI summaries from one run.
 RESULTS_DIR=${RESULTS_DIR:-"Results-$(date +%y%m%d-%H:%M)"}
+
+normalize_bool() {
+  case "$1" in
+    1|true|TRUE|True|yes|YES|Yes|on|ON|On) echo "true" ;;
+    0|false|FALSE|False|no|NO|No|off|OFF|Off) echo "false" ;;
+    *)
+      echo "Invalid boolean value '$1' for $2 (expected 1/0 or true/false)" >&2
+      exit 1
+      ;;
+  esac
+}
+
+ENABLE_ALGO_PAGERANK_BOOL=$(normalize_bool "$ENABLE_ALGO_PAGERANK" "ENABLE_ALGO_PAGERANK")
+ENABLE_ALGO_MAX_FLOW_BOOL=$(normalize_bool "$ENABLE_ALGO_MAX_FLOW" "ENABLE_ALGO_MAX_FLOW")
+ENABLE_ALGO_MSF_BOOL=$(normalize_bool "$ENABLE_ALGO_MSF" "ENABLE_ALGO_MSF")
+ENABLE_ALGO_HARMONIC_BOOL=$(normalize_bool "$ENABLE_ALGO_HARMONIC" "ENABLE_ALGO_HARMONIC")
+ALGO_QUERY_ARGS=(
+  --enable-algo-pagerank "$ENABLE_ALGO_PAGERANK_BOOL"
+  --enable-algo-max-flow "$ENABLE_ALGO_MAX_FLOW_BOOL"
+  --enable-algo-msf "$ENABLE_ALGO_MSF_BOOL"
+  --enable-algo-harmonic "$ENABLE_ALGO_HARMONIC_BOOL"
+)
 
 # Maximum number of data rows per Memgraph LOAD CSV chunk (header row not counted).
 MEMGRAPH_CHUNK_SIZE=${MEMGRAPH_CHUNK_SIZE:-1000000}
@@ -242,12 +272,12 @@ if [[ "${RUN_FALKOR}" == "1" || "${RUN_FALKOR_2}" == "1" || "${RUN_MEMGRAPH}" ==
     } > User.csv)
   fi
 
-  # Generate FRIEND.csv (edges) if missing
-  if [[ ! -f "$CSV_DIR/FRIEND.csv" ]]; then
-    echo "  - Generating FRIEND.csv from pokec_large.setup.cypher"
+  # Generate FRIEND.csv (edges) if missing or if it is in the legacy 2-column format.
+  if [[ ! -f "$CSV_DIR/FRIEND.csv" ]] || [[ "$(head -n 1 "$CSV_DIR/FRIEND.csv" 2>/dev/null)" != "src_id,dst_id,bench_capacity" ]]; then
+    echo "  - Generating FRIEND.csv (with bench_capacity) from pokec_large.setup.cypher"
     (cd "$CSV_DIR" && {
-      echo 'src_id,dst_id'
-      perl -ne 'if (/^MATCH \(n:User {id: (\d+)}\), \(m:User {id: (\d+)}\) CREATE \(n\)-\[e: Friend\]->\(m\);$/) { print "$1,$2\n"; }' "$(basename "$PCH_FILE")"
+      echo 'src_id,dst_id,bench_capacity'
+      perl -ne 'if (/^MATCH \(n:User {id: (\d+)}\), \(m:User {id: (\d+)}\) CREATE \(n\)-\[e: Friend\]->\(m\);$/) { my ($src, $dst) = ($1, $2); my $cap = 1 + (($src * 31 + $dst * 17) % 20); print "$src,$dst,$cap\n"; }' "$(basename "$PCH_FILE")"
     } > FRIEND.csv)
   fi
 fi
@@ -453,15 +483,16 @@ if [[ "${RUN_MEMGRAPH}" == "1" ]]; then
 fi
 
 echo "==> Generating vendor-specific query files (base=${QUERIES_FILE_BASE}, dataset=large, count=${QUERIES_COUNT}, write_ratio=${WRITE_RATIO})"
+echo "==> Algorithm query toggles (pagerank=${ENABLE_ALGO_PAGERANK_BOOL}, max_flow=${ENABLE_ALGO_MAX_FLOW_BOOL}, msf=${ENABLE_ALGO_MSF_BOOL}, harmonic=${ENABLE_ALGO_HARMONIC_BOOL})"
 # Always regenerate so each selected vendor gets the latest query catalog + stable q_id fields.
 if [[ "${RUN_FALKOR}" == "1" || "${RUN_FALKOR_2}" == "1" ]]; then
-  cargo run --release --bin benchmark -- generate-queries --vendor falkor   --dataset large --size "$QUERIES_COUNT" --name "$FALKOR_QUERIES_FILE"   --write-ratio "$WRITE_RATIO"
+  cargo run --release --bin benchmark -- generate-queries --vendor falkor   --dataset large --size "$QUERIES_COUNT" --name "$FALKOR_QUERIES_FILE"   --write-ratio "$WRITE_RATIO" "${ALGO_QUERY_ARGS[@]}"
 fi
 if [[ "${RUN_NEO4J}" == "1" ]]; then
-  cargo run --release --bin benchmark -- generate-queries --vendor neo4j   --dataset large --size "$QUERIES_COUNT" --name "$NEO4J_QUERIES_FILE"   --write-ratio "$WRITE_RATIO"
+  cargo run --release --bin benchmark -- generate-queries --vendor neo4j   --dataset large --size "$QUERIES_COUNT" --name "$NEO4J_QUERIES_FILE"   --write-ratio "$WRITE_RATIO" "${ALGO_QUERY_ARGS[@]}"
 fi
 if [[ "${RUN_MEMGRAPH}" == "1" ]]; then
-  cargo run --release --bin benchmark -- generate-queries --vendor memgraph --dataset large --size "$QUERIES_COUNT" --name "$MEMGRAPH_QUERIES_FILE" --write-ratio "$WRITE_RATIO"
+  cargo run --release --bin benchmark -- generate-queries --vendor memgraph --dataset large --size "$QUERIES_COUNT" --name "$MEMGRAPH_QUERIES_FILE" --write-ratio "$WRITE_RATIO" "${ALGO_QUERY_ARGS[@]}"
 fi
 
 echo "==> Running ${QUERIES_FILE} workload (parallel=${PARALLEL}, mps=${MPS})"

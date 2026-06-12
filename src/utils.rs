@@ -429,10 +429,7 @@ where
                 }
             }
             Err(e) => {
-                return Err(OtherError(format!(
-                    "Error processing stream item: {:?}",
-                    e
-                )));
+                return Err(OtherError(format!("Error processing stream item: {:?}", e)));
             }
         }
     }

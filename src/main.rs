@@ -3,10 +3,12 @@ use benchmark::cli::Commands;
 use benchmark::cli::Commands::GenerateAutoComplete;
 use benchmark::error::BenchmarkError::OtherError;
 use benchmark::error::BenchmarkResult;
-use benchmark::falkor::{Falkor, Started, Stopped};
-use benchmark::memgraph_client::MemgraphClient;
-use benchmark::neo4j_client::Neo4jClient;
-use benchmark::queries_repository::{Flavour, PreparedQuery, QueryCatalogEntry};
+use benchmark::falkor::{Falkor, FalkorAlgorithmCapabilities, Started, Stopped};
+use benchmark::memgraph_client::{MemgraphAlgorithmCapabilities, MemgraphClient};
+use benchmark::neo4j_client::{Neo4jAlgorithmCapabilities, Neo4jClient};
+use benchmark::queries_repository::{
+    AlgorithmQuerySelection, Flavour, PreparedQuery, QueryCatalogEntry, NEO4J_ALGORITHM_GRAPH_NAME,
+};
 use benchmark::scenario::Name::Users;
 use benchmark::scenario::{Size, Spec, Vendor};
 use benchmark::scheduler::Msg;
@@ -19,10 +21,9 @@ use benchmark::{
     FALKOR_SUCCESS_REQUESTS_DURATION_HISTOGRAM, MEMGRAPH_ERROR_REQUESTS_DURATION_HISTOGRAM,
     MEMGRAPH_LATENCY_P50_US, MEMGRAPH_LATENCY_P95_US, MEMGRAPH_LATENCY_P99_US,
     MEMGRAPH_QUERY_LATENCY_PCT_US, MEMGRAPH_STORAGE_BASE_DATASET_BYTES,
-    MEMGRAPH_SUCCESS_REQUESTS_DURATION_HISTOGRAM,
-    NEO4J_ERROR_REQUESTS_DURATION_HISTOGRAM, NEO4J_LATENCY_P50_US, NEO4J_LATENCY_P95_US,
-    NEO4J_LATENCY_P99_US, NEO4J_QUERY_LATENCY_PCT_US, NEO4J_SUCCESS_REQUESTS_DURATION_HISTOGRAM,
-    NEO4J_STORE_SIZE_BYTES,
+    MEMGRAPH_SUCCESS_REQUESTS_DURATION_HISTOGRAM, NEO4J_ERROR_REQUESTS_DURATION_HISTOGRAM,
+    NEO4J_LATENCY_P50_US, NEO4J_LATENCY_P95_US, NEO4J_LATENCY_P99_US, NEO4J_QUERY_LATENCY_PCT_US,
+    NEO4J_STORE_SIZE_BYTES, NEO4J_SUCCESS_REQUESTS_DURATION_HISTOGRAM,
 };
 use clap::{Command, CommandFactory, Parser};
 use clap_complete::{generate, Generator};
@@ -277,8 +278,26 @@ async fn main() -> BenchmarkResult<()> {
             dataset,
             name,
             write_ratio,
+            enable_algo_pagerank,
+            enable_algo_max_flow,
+            enable_algo_msf,
+            enable_algo_harmonic,
         } => {
-            prepare_queries(vendor, dataset, size, name, write_ratio).await?;
+            let algorithm_selection = AlgorithmQuerySelection {
+                pagerank: enable_algo_pagerank,
+                max_flow: enable_algo_max_flow,
+                msf: enable_algo_msf,
+                harmonic: enable_algo_harmonic,
+            };
+            prepare_queries(
+                vendor,
+                dataset,
+                size,
+                name,
+                write_ratio,
+                algorithm_selection,
+            )
+            .await?;
         }
         Commands::Aggregate {
             results_dir,
@@ -320,6 +339,141 @@ fn percentile_us(
 const QUERY_HIST_PCTS: [f64; 11] = [
     10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 95.0, 99.0,
 ];
+
+const ALGO_PAGERANK_QUERY_NAME: &str = "algo_pagerank_summary";
+const ALGO_MAX_FLOW_QUERY_NAME: &str = "algo_max_flow_single_pair";
+const ALGO_MSF_QUERY_NAME: &str = "algo_msf_summary";
+const ALGO_HARMONIC_QUERY_NAME: &str = "algo_harmonic_summary";
+
+#[derive(Debug, Clone, Copy, Default)]
+struct AlgorithmQueryPresence {
+    pagerank: bool,
+    max_flow: bool,
+    msf: bool,
+    harmonic: bool,
+}
+
+impl AlgorithmQueryPresence {
+    fn from_queries(queries: &[PreparedQuery]) -> Self {
+        let mut presence = Self::default();
+        for query in queries {
+            match query.q_name.as_str() {
+                ALGO_PAGERANK_QUERY_NAME => presence.pagerank = true,
+                ALGO_MAX_FLOW_QUERY_NAME => presence.max_flow = true,
+                ALGO_MSF_QUERY_NAME => presence.msf = true,
+                ALGO_HARMONIC_QUERY_NAME => presence.harmonic = true,
+                _ => {}
+            }
+        }
+        presence
+    }
+
+    fn has_any_algorithm(self) -> bool {
+        self.has_phase1() || self.harmonic
+    }
+
+    fn has_phase1(self) -> bool {
+        self.pagerank || self.max_flow || self.msf
+    }
+}
+
+fn remove_query_by_name(
+    queries: &mut Vec<PreparedQuery>,
+    query_name: &str,
+) -> usize {
+    let before = queries.len();
+    queries.retain(|query| query.q_name != query_name);
+    before.saturating_sub(queries.len())
+}
+
+fn validate_neo4j_phase1_capabilities(
+    presence: AlgorithmQueryPresence,
+    capabilities: Neo4jAlgorithmCapabilities,
+) -> BenchmarkResult<()> {
+    let mut missing = Vec::new();
+
+    if presence.has_phase1() {
+        if !capabilities.has_graph_project {
+            missing.push("gds.graph.project");
+        }
+        if !capabilities.has_graph_exists {
+            missing.push("gds.graph.exists");
+        }
+        if !capabilities.has_graph_drop {
+            missing.push("gds.graph.drop");
+        }
+    }
+    if presence.pagerank && !capabilities.has_pagerank_stream {
+        missing.push("gds.pageRank.stream");
+    }
+    if presence.max_flow && !capabilities.has_max_flow_stats {
+        missing.push("gds.maxFlow.stats");
+    }
+    if presence.msf && !capabilities.has_spanning_tree_stats {
+        missing.push("gds.spanningTree.stats");
+    }
+
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    Err(OtherError(format!(
+        "Neo4j is missing required algorithm capabilities for selected queries: {}",
+        missing.join(", ")
+    )))
+}
+
+fn validate_memgraph_phase1_capabilities(
+    presence: AlgorithmQueryPresence,
+    capabilities: MemgraphAlgorithmCapabilities,
+) -> BenchmarkResult<()> {
+    let mut missing = Vec::new();
+
+    if presence.pagerank && !capabilities.has_pagerank_get {
+        missing.push("pagerank.get");
+    }
+    if presence.max_flow && !capabilities.has_max_flow_get_flow {
+        missing.push("max_flow.get_flow");
+    }
+    if presence.msf && !capabilities.has_spanning_tree {
+        missing.push("igraphalg.spanning_tree");
+    }
+
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    Err(OtherError(format!(
+        "Memgraph is missing required algorithm capabilities for selected queries: {}",
+        missing.join(", ")
+    )))
+}
+
+fn validate_falkor_phase1_capabilities(
+    presence: AlgorithmQueryPresence,
+    capabilities: FalkorAlgorithmCapabilities,
+) -> BenchmarkResult<()> {
+    let mut missing = Vec::new();
+
+    if presence.pagerank && !capabilities.has_pagerank {
+        missing.push("algo.pageRank");
+    }
+    if presence.max_flow && !capabilities.has_max_flow {
+        missing.push("algo.maxFlow");
+    }
+    if presence.msf && !capabilities.has_msf {
+        missing.push("algo.MSF");
+    }
+
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    Err(OtherError(format!(
+        "FalkorDB is missing required algorithm capabilities for selected queries: {}",
+        missing.join(", ")
+    )))
+}
 
 struct PerQueryLatency {
     // Indexed by q_id.
@@ -414,8 +568,9 @@ async fn run_neo4j(
     results_dir: Option<String>,
 ) -> BenchmarkResult<()> {
     let queries_file = file_name.clone();
-    let (queries_metadata, queries) = read_queries(file_name).await?;
-    let number_of_queries = queries_metadata.size;
+    let (queries_metadata, mut queries) = read_queries(file_name).await?;
+    let algorithm_presence = AlgorithmQueryPresence::from_queries(&queries);
+    let mut algorithm_projection_ready = false;
 
     let client = if let Some(ref endpoint_str) = endpoint {
         info!(
@@ -451,6 +606,33 @@ async fn run_neo4j(
     if endpoint.is_some() {
         client.collect_jvm_memory_metrics().await;
     }
+
+    // Ensure benchmark-critical relationship capacity is present for algorithm workloads.
+    client.ensure_friend_capacity_ready().await?;
+
+    if algorithm_presence.has_any_algorithm() {
+        let capabilities = client.detect_algorithm_capabilities().await?;
+        validate_neo4j_phase1_capabilities(algorithm_presence, capabilities)?;
+
+        if algorithm_presence.harmonic && !capabilities.has_harmonic_stream {
+            let removed = remove_query_by_name(&mut queries, ALGO_HARMONIC_QUERY_NAME);
+            if removed > 0 {
+                info!(
+                    "Skipping '{}' queries for Neo4j because gds.closeness.harmonic.stream is unavailable",
+                    ALGO_HARMONIC_QUERY_NAME
+                );
+            }
+        }
+
+        if algorithm_presence.has_phase1() {
+            client
+                .ensure_algorithm_projection(NEO4J_ALGORITHM_GRAPH_NAME)
+                .await?;
+            algorithm_projection_ready = true;
+        }
+    }
+
+    let number_of_queries = queries.len();
     // get the graph size
     let (node_count, relation_count) = client.graph_size().await?;
 
@@ -482,12 +664,9 @@ async fn run_neo4j(
         let est_bytes = base.saturating_mul(INDEX_NUM) / INDEX_DEN;
 
         let est_bytes_u64 = est_bytes.min(u64::MAX as u128) as u64;
-        benchmark::NEO4J_BASE_DATASET_ESTIMATE_BYTES
-            .set(est_bytes_u64.min(i64::MAX as u64) as i64);
-        benchmark::NEO4J_BASE_DATASET_ESTIMATE_MIB.set(
-            (est_bytes_u64 / (1024 * 1024))
-                .min(i64::MAX as u64) as i64,
-        );
+        benchmark::NEO4J_BASE_DATASET_ESTIMATE_BYTES.set(est_bytes_u64.min(i64::MAX as u64) as i64);
+        benchmark::NEO4J_BASE_DATASET_ESTIMATE_MIB
+            .set((est_bytes_u64 / (1024 * 1024)).min(i64::MAX as u64) as i64);
     }
 
     info!(
@@ -551,6 +730,18 @@ async fn run_neo4j(
 
     // Export per-query percentiles.
     per_query.export_to_prometheus(Vendor::Neo4j);
+
+    if algorithm_projection_ready {
+        if let Err(e) = client
+            .drop_algorithm_projection_if_exists(NEO4J_ALGORITHM_GRAPH_NAME)
+            .await
+        {
+            error!(
+                "Failed to drop Neo4j algorithm projection '{}': {}",
+                NEO4J_ALGORITHM_GRAPH_NAME, e
+            );
+        }
+    }
 
     write_run_results(
         results_dir,
@@ -660,7 +851,8 @@ async fn run_falkor(
     let falkor: Falkor<Stopped> = benchmark::falkor::Falkor::new_with_endpoint(endpoint.clone());
 
     let queries_file = file_name.clone();
-    let (queries_metadata, queries) = read_queries(file_name).await?;
+    let (queries_metadata, mut queries) = read_queries(file_name).await?;
+    let algorithm_presence = AlgorithmQueryPresence::from_queries(&queries);
 
     // Build a normalised-query -> q_name mapping for all queries (reads and writes).
     // We rely on the "query.text" field, which is the Cypher without the leading
@@ -674,17 +866,20 @@ async fn run_falkor(
             .split_whitespace()
             .collect::<Vec<_>>()
             .join(" ");
-        telemetry_query_map.entry(norm).or_insert_with(|| q.q_name.clone());
+        telemetry_query_map
+            .entry(norm)
+            .or_insert_with(|| q.q_name.clone());
     }
 
     // Start telemetry collection in the background (best-effort).
     // Use the same Redis endpoint Falkor is talking to.
     {
         let redis_url = benchmark::falkor::falkor_endpoint_to_redis_url(endpoint.as_ref());
-        let _telemetry_handle = benchmark::falkor::telemetry_collector::spawn_falkor_telemetry_collector(
-            redis_url,
-            telemetry_query_map,
-        );
+        let _telemetry_handle =
+            benchmark::falkor::telemetry_collector::spawn_falkor_telemetry_collector(
+                redis_url,
+                telemetry_query_map,
+            );
         // We intentionally don't await this handle; it should live for the duration of the run.
     }
 
@@ -716,6 +911,22 @@ async fn run_falkor(
     // Before running the workload, ensure the benchmark-critical indexes are present
     // and visible to FalkorDB so we avoid long-running queries due to missing indexes.
     falkor.wait_for_pokec_indexes_ready().await?;
+    falkor.ensure_friend_capacity_ready().await?;
+
+    if algorithm_presence.has_any_algorithm() {
+        let capabilities = falkor.detect_algorithm_capabilities().await?;
+        validate_falkor_phase1_capabilities(algorithm_presence, capabilities)?;
+
+        if algorithm_presence.harmonic && !capabilities.has_harmonic {
+            let removed = remove_query_by_name(&mut queries, ALGO_HARMONIC_QUERY_NAME);
+            if removed > 0 {
+                info!(
+                    "Skipping '{}' queries for FalkorDB because algo.HarmonicCentrality is unavailable",
+                    ALGO_HARMONIC_QUERY_NAME
+                );
+            }
+        }
+    }
 
     info!(
         "graph has {} nodes and {} relations",
@@ -728,8 +939,7 @@ async fn run_falkor(
     let rx: Arc<Mutex<Receiver<Msg<PreparedQuery>>>> = Arc::new(Mutex::new(rx));
 
     // iterate over queries and send them to the workers
-
-    let number_of_queries = queries_metadata.size;
+    let number_of_queries = queries.len();
     info!(
         "running {} queries",
         format_number(number_of_queries as u64)
@@ -882,7 +1092,7 @@ async fn init_falkor(
     batch_size: usize,
     endpoint: Option<String>,
 ) -> BenchmarkResult<()> {
-    let spec = Spec::new(benchmark::scenario::Name::Users, size, Vendor::Neo4j);
+    let spec = Spec::new(benchmark::scenario::Name::Users, size, Vendor::Falkor);
     let falkor = benchmark::falkor::Falkor::new_with_endpoint(endpoint.clone());
     if endpoint.is_none() {
         falkor.clean_db().await?;
@@ -925,6 +1135,7 @@ async fn init_falkor(
         "Completed processing {} items via UNWIND batches",
         format_number(total_processed as u64)
     );
+    falkor.ensure_friend_capacity_ready().await?;
 
     let (node_count, relation_count) = falkor.graph_size().await?;
     info!(
@@ -1088,6 +1299,9 @@ async fn init_neo4j(
                     "Backup file exists, skipping init, use --force to override ({})",
                     backup_path.as_str()
                 );
+                info!(
+                    "Skipping load because local backup exists; run-time prep will backfill bench_capacity if needed."
+                );
                 return Ok(());
             }
         } else {
@@ -1143,8 +1357,10 @@ async fn init_neo4j(
     // This applies to both local and external endpoints.
     let mut idx_hist = Histogram::new(7, 64)?;
 
-    let create_id_index = "CREATE INDEX pokec_user_id IF NOT EXISTS FOR (u:User) ON (u.id)".to_string();
-    let create_age_index = "CREATE INDEX pokec_age IF NOT EXISTS FOR (u:User) ON (u.age)".to_string();
+    let create_id_index =
+        "CREATE INDEX pokec_user_id IF NOT EXISTS FOR (u:User) ON (u.id)".to_string();
+    let create_age_index =
+        "CREATE INDEX pokec_age IF NOT EXISTS FOR (u:User) ON (u.age)".to_string();
 
     info!("Creating indexes (CRITICAL for edge loading performance)...");
     client
@@ -1162,7 +1378,11 @@ async fn init_neo4j(
     let total_processed = client
         .execute_pokec_users_import_unwind(data_stream, batch_size, &mut histogram)
         .await?;
-    info!("Processed {} data commands via UNWIND batches", total_processed);
+    info!(
+        "Processed {} data commands via UNWIND batches",
+        total_processed
+    );
+    client.ensure_friend_capacity_ready().await?;
     let (node_count, relation_count) = client.graph_size().await?;
     info!(
         "{} nodes and {} relations were imported at {:?}",
@@ -1208,6 +1428,7 @@ async fn prepare_queries(
     size: usize,
     file_name: String,
     write_ratio: f32,
+    algorithm_selection: AlgorithmQuerySelection,
 ) -> BenchmarkResult<()> {
     let start = Instant::now();
 
@@ -1222,8 +1443,12 @@ async fn prepare_queries(
         Vendor::Memgraph => Flavour::Memgraph,
     };
 
-    let queries_repository =
-        benchmark::queries_repository::UsersQueriesRepository::new(vertices, edges, flavour);
+    let queries_repository = benchmark::queries_repository::UsersQueriesRepository::new(
+        vertices,
+        edges,
+        flavour,
+        algorithm_selection,
+    );
     let catalog = queries_repository.catalog();
     let metadata = PrepareQueriesMetadata {
         size,
@@ -1288,8 +1513,8 @@ async fn run_memgraph(
     results_dir: Option<String>,
 ) -> BenchmarkResult<()> {
     let queries_file = file_name.clone();
-    let (queries_metadata, queries) = read_queries(file_name).await?;
-    let number_of_queries = queries_metadata.size;
+    let (queries_metadata, mut queries) = read_queries(file_name).await?;
+    let algorithm_presence = AlgorithmQueryPresence::from_queries(&queries);
 
     let client = if let Some(ref endpoint_str) = endpoint {
         info!(
@@ -1314,6 +1539,24 @@ async fn run_memgraph(
 
     // Best-effort Memgraph storage/memory reporting (query-interface metric).
     client.collect_storage_info_metrics().await;
+    client.ensure_friend_capacity_ready().await?;
+
+    if algorithm_presence.has_any_algorithm() {
+        let capabilities = client.detect_algorithm_capabilities().await?;
+        validate_memgraph_phase1_capabilities(algorithm_presence, capabilities)?;
+
+        if algorithm_presence.harmonic && !capabilities.has_harmonic {
+            let removed = remove_query_by_name(&mut queries, ALGO_HARMONIC_QUERY_NAME);
+            if removed > 0 {
+                info!(
+                    "Skipping '{}' queries for Memgraph because nxalg.harmonic_centrality is unavailable",
+                    ALGO_HARMONIC_QUERY_NAME
+                );
+            }
+        }
+    }
+
+    let number_of_queries = queries.len();
 
     // get the graph size
     let (node_count, relation_count) = client.graph_size().await?;
@@ -1468,8 +1711,7 @@ async fn debug_memgraph_queries(
 
         info!(
             "[Memgraph debug] Executing query id={} name='{}'",
-            q_id,
-            q_name
+            q_id, q_name
         );
 
         let start = Instant::now();
@@ -1639,6 +1881,9 @@ async fn init_memgraph(
                     "Backup file exists, skipping init, use --force to override ({})",
                     backup_path.as_str()
                 );
+                info!(
+                    "Skipping load because local backup exists; run-time prep will backfill bench_capacity if needed."
+                );
                 return Ok(());
             }
         } else {
@@ -1713,7 +1958,11 @@ async fn init_memgraph(
     let total_processed = client
         .execute_pokec_users_import_unwind(data_stream, batch_size, &mut histogram)
         .await?;
-    info!("Processed {} data commands via UNWIND batches", total_processed);
+    info!(
+        "Processed {} data commands via UNWIND batches",
+        total_processed
+    );
+    client.ensure_friend_capacity_ready().await?;
     let (node_count, relation_count) = client.graph_size().await?;
     info!(
         "{} nodes and {} relations were imported at {:?}",

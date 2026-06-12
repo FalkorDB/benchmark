@@ -80,6 +80,34 @@ pub enum Commands {
             help = "the write ratio of the queries (0.0 - 1.0)"
         )]
         write_ratio: f32,
+        #[arg(
+            long,
+            default_value_t = true,
+            action = clap::ArgAction::Set,
+            help = "enable the algo_pagerank_summary query in generated workloads"
+        )]
+        enable_algo_pagerank: bool,
+        #[arg(
+            long,
+            default_value_t = true,
+            action = clap::ArgAction::Set,
+            help = "enable the algo_max_flow_single_pair query in generated workloads"
+        )]
+        enable_algo_max_flow: bool,
+        #[arg(
+            long,
+            default_value_t = true,
+            action = clap::ArgAction::Set,
+            help = "enable the algo_msf_summary query in generated workloads"
+        )]
+        enable_algo_msf: bool,
+        #[arg(
+            long,
+            default_value_t = true,
+            action = clap::ArgAction::Set,
+            help = "enable the algo_harmonic_summary query in generated workloads"
+        )]
+        enable_algo_harmonic: bool,
     },
 
     #[command(
@@ -180,14 +208,14 @@ pub enum Commands {
             short,
             long,
             help = "endpoint for external Memgraph (e.g., bolt://127.0.0.1:7687)",
-            required = true,
+            required = true
         )]
         endpoint: String,
         #[arg(
             short,
             long,
             default_value = "small-readonly-memgraph",
-            help = "name of json file to load the generated Memgraph queries from",
+            help = "name of json file to load the generated Memgraph queries from"
         )]
         name: String,
     },

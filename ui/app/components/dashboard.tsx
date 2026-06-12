@@ -144,6 +144,22 @@ export default function DashBoard({
     fetchData();
   }, [fetchData]);
 
+  const availableQueries = useMemo(() => {
+    if (!data) return [];
+
+    const queriesFromUnrealistic = (data.unrealstic ?? [])
+      .flatMap((u) => Object.keys(u.histogram_for_type ?? {}))
+      .filter(Boolean);
+
+    const queriesFromRuns = (data.runs ?? [])
+      .flatMap((r) => Object.keys(r.result?.histogram_for_type ?? {}))
+      .filter(Boolean);
+
+    return Array.from(
+      new Set([...queriesFromUnrealistic, ...queriesFromRuns])
+    ).sort();
+  }, [data]);
+
   // On first load of a summary file, auto-pick filters that match the data.
   useEffect(() => {
     if (didInitFromData || !data?.runs?.length) return;
@@ -171,26 +187,7 @@ export default function DashBoard({
       new Set(data.runs.map((r) => r.platform?.toLowerCase()).filter(Boolean))
     );
 
-    // Queries: try to infer available query names from the loaded data so the "single" view
-    // can show histograms + telemetry immediately.
-    const queriesFromUnrealistic = Array.from(
-      new Set(
-        (data.unrealstic ?? [])
-          .flatMap((u) => Object.keys(u.histogram_for_type ?? {}))
-          .filter(Boolean)
-      )
-    );
-    const queriesFromRuns = Array.from(
-      new Set(
-        (data.runs ?? [])
-          .flatMap((r) => Object.keys(r.result?.histogram_for_type ?? {}))
-          .filter(Boolean)
-      )
-    );
-    const queries = (queriesFromUnrealistic.length
-      ? queriesFromUnrealistic
-      : queriesFromRuns
-    ).sort();
+    const queries = availableQueries;
 
     setSelectedOptions((prev) => {
       const next = { ...prev };
@@ -239,7 +236,7 @@ export default function DashBoard({
     });
 
     setDidInitFromData(true);
-  }, [data, didInitFromData, allowedVendors]);
+  }, [data, didInitFromData, allowedVendors, availableQueries]);
 
   const handleSideBarSelection = (groupTitle: string, optionId: string) => {
     setSelectedOptions((prev) => {
@@ -764,6 +761,7 @@ export default function DashBoard({
                 ).sort((a, b) => Number(a) - Number(b))
               : undefined
           }
+          queryOptions={availableQueries.length ? availableQueries : undefined}
           datasetSummary={datasetSummary}
         />
         <SidebarInset className="flex-grow h-full min-h-0 overflow-y-auto">

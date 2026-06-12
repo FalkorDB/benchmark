@@ -1,3 +1,4 @@
+use crate::data_prep::bench_capacity;
 use crate::error::BenchmarkError::{Neo4rsError, OtherError};
 use crate::error::BenchmarkResult;
 use crate::queries_repository::PreparedQuery;
@@ -17,6 +18,17 @@ use tracing::{error, info, trace};
 #[derive(Clone)]
 pub struct Neo4jClient {
     graph: Graph,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Neo4jAlgorithmCapabilities {
+    pub has_graph_project: bool,
+    pub has_graph_exists: bool,
+    pub has_graph_drop: bool,
+    pub has_pagerank_stream: bool,
+    pub has_max_flow_stats: bool,
+    pub has_spanning_tree_stats: bool,
+    pub has_harmonic_stream: bool,
 }
 
 impl Neo4jClient {
@@ -150,6 +162,205 @@ impl Neo4jClient {
         }
     }
 
+    pub async fn detect_algorithm_capabilities(
+        &self
+    ) -> BenchmarkResult<Neo4jAlgorithmCapabilities> {
+        let q = r#"
+SHOW PROCEDURES
+YIELD name
+WITH collect(toLower(name)) AS names
+RETURN
+  size([n IN names WHERE n = 'gds.graph.project']) AS graph_project_count,
+  size([n IN names WHERE n = 'gds.graph.exists']) AS graph_exists_count,
+  size([n IN names WHERE n = 'gds.graph.drop']) AS graph_drop_count,
+  size([n IN names WHERE n = 'gds.pagerank.stream']) AS pagerank_count,
+  size([n IN names WHERE n = 'gds.maxflow.stats']) AS max_flow_count,
+  size([n IN names WHERE n = 'gds.spanningtree.stats']) AS spanning_tree_count,
+  size([n IN names WHERE n = 'gds.closeness.harmonic.stream']) AS harmonic_count
+"#;
+
+        let mut result = self.graph.execute(query(q)).await.map_err(Neo4rsError)?;
+        let Some(row) = result.next().await.map_err(Neo4rsError)? else {
+            return Err(OtherError(
+                "Neo4j capability probe returned no rows".to_string(),
+            ));
+        };
+
+        let graph_project_count = Self::read_row_i64(&row, "graph_project_count");
+        let graph_exists_count = Self::read_row_i64(&row, "graph_exists_count");
+        let graph_drop_count = Self::read_row_i64(&row, "graph_drop_count");
+        let pagerank_count = Self::read_row_i64(&row, "pagerank_count");
+        let max_flow_count = Self::read_row_i64(&row, "max_flow_count");
+        let spanning_tree_count = Self::read_row_i64(&row, "spanning_tree_count");
+        let harmonic_count = Self::read_row_i64(&row, "harmonic_count");
+
+        Ok(Neo4jAlgorithmCapabilities {
+            has_graph_project: graph_project_count > 0,
+            has_graph_exists: graph_exists_count > 0,
+            has_graph_drop: graph_drop_count > 0,
+            has_pagerank_stream: pagerank_count > 0,
+            has_max_flow_stats: max_flow_count > 0,
+            has_spanning_tree_stats: spanning_tree_count > 0,
+            has_harmonic_stream: harmonic_count > 0,
+        })
+    }
+
+    pub async fn ensure_algorithm_projection(
+        &self,
+        graph_name: &str,
+    ) -> BenchmarkResult<()> {
+        if self.algorithm_projection_exists(graph_name).await? {
+            self.drop_algorithm_projection_if_exists(graph_name).await?;
+        }
+
+        let q = r#"
+CALL gds.graph.project(
+  $graph_name,
+  'User',
+  {
+    Friend: {
+      orientation: 'NATURAL',
+      properties: ['bench_capacity']
+    }
+  }
+)
+YIELD graphName
+RETURN graphName
+"#;
+
+        self.graph
+            .run(query(q).param("graph_name", graph_name.to_string()))
+            .await
+            .map_err(Neo4rsError)?;
+
+        Ok(())
+    }
+
+    pub async fn drop_algorithm_projection_if_exists(
+        &self,
+        graph_name: &str,
+    ) -> BenchmarkResult<()> {
+        if !self.algorithm_projection_exists(graph_name).await? {
+            return Ok(());
+        }
+
+        self.graph
+            .run(
+                query("CALL gds.graph.drop($graph_name) YIELD graphName RETURN graphName")
+                    .param("graph_name", graph_name.to_string()),
+            )
+            .await
+            .map_err(Neo4rsError)?;
+        Ok(())
+    }
+
+    pub async fn ensure_friend_capacity_ready(&self) -> BenchmarkResult<()> {
+        let total_edges = self
+            .query_single_u64("MATCH ()-[r:Friend]->() RETURN count(r) AS count")
+            .await?;
+        let missing_before = self
+            .query_single_u64(
+                "MATCH ()-[r:Friend]->() WHERE r.bench_capacity IS NULL RETURN count(r) AS count",
+            )
+            .await?;
+
+        info!(
+            "Neo4j bench_capacity readiness: total Friend edges={}, missing before={}",
+            total_edges, missing_before
+        );
+
+        if missing_before > 0 {
+            self.graph
+                .run(query(
+                    "MATCH (s:User)-[r:Friend]->(d:User) \
+                     WHERE r.bench_capacity IS NULL \
+                     SET r.bench_capacity = 1 + ((toInteger(s.id) * 31 + toInteger(d.id) * 17) % 20)",
+                ))
+                .await
+                .map_err(Neo4rsError)?;
+        }
+
+        let missing_after = self
+            .query_single_u64(
+                "MATCH ()-[r:Friend]->() WHERE r.bench_capacity IS NULL RETURN count(r) AS count",
+            )
+            .await?;
+        let backfilled = missing_before.saturating_sub(missing_after);
+
+        info!(
+            "Neo4j bench_capacity readiness complete: backfilled={}, missing after={}",
+            backfilled, missing_after
+        );
+
+        if missing_after > 0 {
+            return Err(OtherError(format!(
+                "Neo4j bench_capacity readiness failed: {} Friend edges still missing bench_capacity",
+                missing_after
+            )));
+        }
+
+        Ok(())
+    }
+
+    async fn query_single_u64(
+        &self,
+        q: &str,
+    ) -> BenchmarkResult<u64> {
+        let mut result = self.graph.execute(query(q)).await?;
+        if let Ok(Some(row)) = result.next().await {
+            if let Ok(value) = row.get::<u64>("count") {
+                return Ok(value);
+            }
+            if let Ok(value) = row.get::<i64>("count") {
+                return Ok(value.max(0) as u64);
+            }
+        }
+        Ok(0)
+    }
+
+    fn read_row_i64(
+        row: &Row,
+        key: &str,
+    ) -> i64 {
+        if let Ok(value) = row.get::<i64>(key) {
+            return value;
+        }
+        if let Ok(value) = row.get::<u64>(key) {
+            return value as i64;
+        }
+        0
+    }
+
+    async fn algorithm_projection_exists(
+        &self,
+        graph_name: &str,
+    ) -> BenchmarkResult<bool> {
+        let mut result = self
+            .graph
+            .execute(
+                query("CALL gds.graph.exists($graph_name) YIELD exists RETURN exists")
+                    .param("graph_name", graph_name.to_string()),
+            )
+            .await
+            .map_err(Neo4rsError)?;
+
+        let Some(row) = result.next().await.map_err(Neo4rsError)? else {
+            return Ok(false);
+        };
+
+        if let Ok(exists) = row.get::<bool>("exists") {
+            return Ok(exists);
+        }
+        if let Ok(exists) = row.get::<i64>("exists") {
+            return Ok(exists > 0);
+        }
+        if let Ok(exists) = row.get::<u64>("exists") {
+            return Ok(exists > 0);
+        }
+
+        Ok(false)
+    }
+
     async fn jvm_memory_used_bytes_via_jmx(&self) -> BenchmarkResult<(u64, u64)> {
         // `attributes` is a map: attributeName -> { description, value }.
         // For HeapMemoryUsage / NonHeapMemoryUsage, the `value` itself is a nested map that includes `used`.
@@ -162,7 +373,9 @@ RETURN
 
         let mut result = self.graph.execute(query(q)).await?;
         if let Ok(Some(row)) = result.next().await {
-            let heap_used: u64 = row.get::<u64>("heap_used").or_else(|_| row.get::<i64>("heap_used").map(|v| v.max(0) as u64))?;
+            let heap_used: u64 = row
+                .get::<u64>("heap_used")
+                .or_else(|_| row.get::<i64>("heap_used").map(|v| v.max(0) as u64))?;
             let nonheap_used: u64 = row
                 .get::<u64>("nonheap_used")
                 .or_else(|_| row.get::<i64>("nonheap_used").map(|v| v.max(0) as u64))?;
@@ -368,14 +581,14 @@ RETURN k AS name, attributes[k]['value'] AS value\n"
 /// into a BoltMap for parameterized queries.
 fn parse_property_map(map_str: &str) -> BenchmarkResult<BoltMap> {
     let mut bolt_map = BoltMap::new();
-    
+
     // Remove outer braces
     let content = map_str.trim().trim_start_matches('{').trim_end_matches('}');
-    
+
     // Simple parser for key: value pairs
     let mut current_pos = 0;
     let chars: Vec<char> = content.chars().collect();
-    
+
     while current_pos < chars.len() {
         // Skip whitespace
         while current_pos < chars.len() && chars[current_pos].is_whitespace() {
@@ -384,24 +597,28 @@ fn parse_property_map(map_str: &str) -> BenchmarkResult<BoltMap> {
         if current_pos >= chars.len() {
             break;
         }
-        
+
         // Parse key (identifier before ':')
         let key_start = current_pos;
         while current_pos < chars.len() && chars[current_pos] != ':' {
             current_pos += 1;
         }
-        let key = chars[key_start..current_pos].iter().collect::<String>().trim().to_string();
-        
+        let key = chars[key_start..current_pos]
+            .iter()
+            .collect::<String>()
+            .trim()
+            .to_string();
+
         if current_pos >= chars.len() {
             break;
         }
         current_pos += 1; // skip ':'
-        
+
         // Skip whitespace after ':'
         while current_pos < chars.len() && chars[current_pos].is_whitespace() {
             current_pos += 1;
         }
-        
+
         // Parse value
         let value_start = current_pos;
         let value: BoltType = if chars[current_pos] == '"' {
@@ -416,11 +633,18 @@ fn parse_property_map(map_str: &str) -> BenchmarkResult<BoltMap> {
             str_val.into()
         } else {
             // Numeric value
-            while current_pos < chars.len() && chars[current_pos] != ',' && chars[current_pos] != '}' {
+            while current_pos < chars.len()
+                && chars[current_pos] != ','
+                && chars[current_pos] != '}'
+            {
                 current_pos += 1;
             }
-            let num_str = chars[value_start..current_pos].iter().collect::<String>().trim().to_string();
-            
+            let num_str = chars[value_start..current_pos]
+                .iter()
+                .collect::<String>()
+                .trim()
+                .to_string();
+
             // Try to parse as i64 first, then f64
             if let Ok(int_val) = num_str.parse::<i64>() {
                 int_val.into()
@@ -431,20 +655,21 @@ fn parse_property_map(map_str: &str) -> BenchmarkResult<BoltMap> {
                 num_str.into()
             }
         };
-        
+
         bolt_map.put(key.into(), value);
-        
+
         // Skip to next comma or end
-        while current_pos < chars.len() && (chars[current_pos].is_whitespace() || chars[current_pos] == ',') {
+        while current_pos < chars.len()
+            && (chars[current_pos].is_whitespace() || chars[current_pos] == ',')
+        {
             current_pos += 1;
         }
     }
-    
+
     Ok(bolt_map)
 }
 
 impl Neo4jClient {
-
     /// Fast-path loader for the Pokec "Users" dataset.
     ///
     /// The cypher import files are line-based and consist of two phases:
@@ -493,16 +718,21 @@ impl Neo4jClient {
                 return Ok(());
             }
             *batch_count += 1;
-            
+
             // Use parameterized query instead of string concatenation
             let q = "UNWIND $batch AS row CREATE (u:User) SET u = row";
-            
+
             // Convert Vec<BoltMap> to Vec<BoltType> for BoltList
-            let bolt_types: Vec<BoltType> = node_maps.iter().map(|m| BoltType::Map(m.clone())).collect();
+            let bolt_types: Vec<BoltType> =
+                node_maps.iter().map(|m| BoltType::Map(m.clone())).collect();
             let batch_list = BoltList::from(bolt_types);
-            
+
             let start = Instant::now();
-            client.graph.run(query(q).param("batch", BoltType::List(batch_list))).await.map_err(Neo4rsError)?;
+            client
+                .graph
+                .run(query(q).param("batch", BoltType::List(batch_list)))
+                .await
+                .map_err(Neo4rsError)?;
             histogram.increment(start.elapsed().as_micros() as u64)?;
             node_maps.clear();
             Ok(())
@@ -518,28 +748,34 @@ impl Neo4jClient {
                 return Ok(());
             }
             *batch_count += 1;
-            
+
             // Convert edge pairs to BoltMap list for parameterized query
             let mut batch_maps = Vec::with_capacity(edge_pairs.len());
             for (src, dst) in edge_pairs.iter() {
                 let mut map = BoltMap::new();
                 map.put("src".into(), (*src as i64).into());
                 map.put("dst".into(), (*dst as i64).into());
+                map.put("capacity".into(), bench_capacity(*src, *dst).into());
                 batch_maps.push(map);
             }
-            
+
             // CRITICAL: Use explicit :User label in MATCH to enable index usage.
             // Without the label, Neo4j cannot use the User(id) index and will do a full scan.
             // This is the key difference that makes edge loading fast vs. extremely slow.
             // Now using parameterized query for better performance.
-            let q = "UNWIND $batch AS row MATCH (n:User {id: row.src}), (m:User {id: row.dst}) CREATE (n)-[:Friend]->(m)";
-            
+            let q = "UNWIND $batch AS row MATCH (n:User {id: row.src}), (m:User {id: row.dst}) CREATE (n)-[:Friend {bench_capacity: row.capacity}]->(m)";
+
             // Convert Vec<BoltMap> to Vec<BoltType> for BoltList
-            let bolt_types: Vec<BoltType> = batch_maps.into_iter().map(|m| BoltType::Map(m)).collect();
+            let bolt_types: Vec<BoltType> =
+                batch_maps.into_iter().map(|m| BoltType::Map(m)).collect();
             let batch_list = BoltList::from(bolt_types);
-            
+
             let start = Instant::now();
-            client.graph.run(query(q).param("batch", BoltType::List(batch_list))).await.map_err(Neo4rsError)?;
+            client
+                .graph
+                .run(query(q).param("batch", BoltType::List(batch_list)))
+                .await
+                .map_err(Neo4rsError)?;
             histogram.increment(start.elapsed().as_micros() as u64)?;
             edge_pairs.clear();
             Ok(())
@@ -624,8 +860,7 @@ impl Neo4jClient {
 
         info!(
             "Pokec Users import completed: {} statements batched into {} UNWIND queries",
-            total_processed,
-            batch_count
+            total_processed, batch_count
         );
 
         Ok(total_processed)

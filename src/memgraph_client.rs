@@ -1,3 +1,4 @@
+use crate::data_prep::bench_capacity;
 use crate::error::BenchmarkError::{Neo4rsError, OtherError};
 use crate::error::BenchmarkResult;
 use crate::queries_repository::PreparedQuery;
@@ -88,6 +89,14 @@ pub struct MemgraphClient {
     graph: Graph,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct MemgraphAlgorithmCapabilities {
+    pub has_pagerank_get: bool,
+    pub has_max_flow_get_flow: bool,
+    pub has_spanning_tree: bool,
+    pub has_harmonic: bool,
+}
+
 impl MemgraphClient {
     pub async fn new(
         uri: String,
@@ -174,6 +183,40 @@ impl MemgraphClient {
         Ok(())
     }
 
+    pub async fn detect_algorithm_capabilities(
+        &self
+    ) -> BenchmarkResult<MemgraphAlgorithmCapabilities> {
+        let q = r#"
+CALL mg.procedures()
+YIELD name
+WITH collect(toLower(name)) AS names
+RETURN
+  size([n IN names WHERE n = 'pagerank.get']) AS pagerank_count,
+  size([n IN names WHERE n = 'max_flow.get_flow']) AS max_flow_count,
+  size([n IN names WHERE n = 'igraphalg.spanning_tree']) AS spanning_tree_count,
+  size([n IN names WHERE n = 'nxalg.harmonic_centrality']) AS harmonic_count
+"#;
+
+        let mut result = self.graph.execute(query(q)).await.map_err(Neo4rsError)?;
+        let Some(row) = result.next().await.map_err(Neo4rsError)? else {
+            return Err(OtherError(
+                "Memgraph capability probe returned no rows".to_string(),
+            ));
+        };
+
+        let pagerank_count = Self::read_row_i64(&row, "pagerank_count");
+        let max_flow_count = Self::read_row_i64(&row, "max_flow_count");
+        let spanning_tree_count = Self::read_row_i64(&row, "spanning_tree_count");
+        let harmonic_count = Self::read_row_i64(&row, "harmonic_count");
+
+        Ok(MemgraphAlgorithmCapabilities {
+            has_pagerank_get: pagerank_count > 0,
+            has_max_flow_get_flow: max_flow_count > 0,
+            has_spanning_tree: spanning_tree_count > 0,
+            has_harmonic: harmonic_count > 0,
+        })
+    }
+
     pub async fn graph_size(&self) -> BenchmarkResult<(u64, u64)> {
         let mut result = self
             .graph
@@ -192,6 +235,81 @@ impl MemgraphClient {
             number_of_relationships = row.get("count")?;
         }
         Ok((number_of_nodes, number_of_relationships))
+    }
+
+    pub async fn ensure_friend_capacity_ready(&self) -> BenchmarkResult<()> {
+        let total_edges = self
+            .query_single_u64("MATCH ()-[r:Friend]->() RETURN count(r) AS count")
+            .await?;
+        let missing_before = self
+            .query_single_u64(
+                "MATCH ()-[r:Friend]->() WHERE r.bench_capacity IS NULL RETURN count(r) AS count",
+            )
+            .await?;
+
+        info!(
+            "Memgraph bench_capacity readiness: total Friend edges={}, missing before={}",
+            total_edges, missing_before
+        );
+
+        if missing_before > 0 {
+            self.run_query_no_results(
+                "MATCH (s:User)-[r:Friend]->(d:User) \
+                 WHERE r.bench_capacity IS NULL \
+                 SET r.bench_capacity = 1 + ((toInteger(s.id) * 31 + toInteger(d.id) * 17) % 20)",
+            )
+            .await?;
+        }
+
+        let missing_after = self
+            .query_single_u64(
+                "MATCH ()-[r:Friend]->() WHERE r.bench_capacity IS NULL RETURN count(r) AS count",
+            )
+            .await?;
+        let backfilled = missing_before.saturating_sub(missing_after);
+
+        info!(
+            "Memgraph bench_capacity readiness complete: backfilled={}, missing after={}",
+            backfilled, missing_after
+        );
+
+        if missing_after > 0 {
+            return Err(OtherError(format!(
+                "Memgraph bench_capacity readiness failed: {} Friend edges still missing bench_capacity",
+                missing_after
+            )));
+        }
+
+        Ok(())
+    }
+
+    async fn query_single_u64(
+        &self,
+        q: &str,
+    ) -> BenchmarkResult<u64> {
+        let mut result = self.graph.execute(query(q)).await.map_err(Neo4rsError)?;
+        if let Some(row) = result.next().await.map_err(Neo4rsError)? {
+            if let Ok(value) = row.get::<u64>("count") {
+                return Ok(value);
+            }
+            if let Ok(value) = row.get::<i64>("count") {
+                return Ok(value.max(0) as u64);
+            }
+        }
+        Ok(0)
+    }
+
+    fn read_row_i64(
+        row: &Row,
+        key: &str,
+    ) -> i64 {
+        if let Ok(value) = row.get::<i64>(key) {
+            return value;
+        }
+        if let Ok(value) = row.get::<u64>(key) {
+            return value as i64;
+        }
+        0
     }
 
     /// Best-effort: query Memgraph for its storage/memory statistics and write them into Prometheus gauges.
@@ -504,10 +622,15 @@ impl MemgraphClient {
                 if i > 0 {
                     maps.push(',');
                 }
-                maps.push_str(&format!("{{src:{},dst:{}}}", src, dst));
+                maps.push_str(&format!(
+                    "{{src:{},dst:{},capacity:{}}}",
+                    src,
+                    dst,
+                    bench_capacity(*src, *dst)
+                ));
             }
             let q = format!(
-                "UNWIND [{}] AS row MATCH (n:User {{id: row.src}}), (m:User {{id: row.dst}}) CREATE (n)-[:Friend]->(m)",
+                "UNWIND [{}] AS row MATCH (n:User {{id: row.src}}), (m:User {{id: row.dst}}) CREATE (n)-[:Friend {{bench_capacity: row.capacity}}]->(m)",
                 maps
             );
             let start = Instant::now();
@@ -587,8 +710,7 @@ impl MemgraphClient {
 
         info!(
             "Pokec Users import completed: {} statements batched into {} UNWIND queries",
-            total_processed,
-            batch_count
+            total_processed, batch_count
         );
 
         Ok(total_processed)
@@ -696,7 +818,8 @@ impl MemgraphClient {
         info!("Exporting database to {}", file_path);
 
         let mut file = File::create(file_path).await?;
-        file.write_all(b"// Memgraph export generated by benchmark\n").await?;
+        file.write_all(b"// Memgraph export generated by benchmark\n")
+            .await?;
 
         // 1) Export nodes that have an `id` property (preferred: allows stable relationship export).
         // We MERGE on (labels, id) and SET += all properties.

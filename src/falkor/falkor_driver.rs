@@ -1,3 +1,4 @@
+use crate::data_prep::bench_capacity;
 use crate::error::BenchmarkError::OtherError;
 use crate::error::BenchmarkResult;
 use crate::falkor::falkor_process::FalkorProcess;
@@ -26,6 +27,8 @@ use tokio::time::error::Elapsed;
 use tracing::{error, info};
 
 const REDIS_DUMP_FILE: &str = "./redis-data/dump.rdb";
+const FALKOR_BENCHMARK_QUERY_TIMEOUT_MS: i64 = 180_000;
+const FALKOR_BENCHMARK_QUERY_TIMEOUT_GUARD: Duration = Duration::from_secs(185);
 
 #[allow(dead_code)]
 pub struct Started(FalkorProcess);
@@ -36,6 +39,14 @@ pub struct Falkor<U> {
     endpoint: Option<String>,
     #[allow(dead_code)]
     state: U,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct FalkorAlgorithmCapabilities {
+    pub has_pagerank: bool,
+    pub has_max_flow: bool,
+    pub has_msf: bool,
+    pub has_harmonic: bool,
 }
 
 impl Default for Falkor<Stopped> {
@@ -250,9 +261,19 @@ impl Falkor<Started> {
         ))
     }
 
-    async fn check_pokec_indexes(
-        client: &mut FalkorBenchmarkClient,
-    ) -> BenchmarkResult<bool> {
+    pub async fn ensure_friend_capacity_ready(&self) -> BenchmarkResult<()> {
+        let mut client = self.client().await?;
+        client.ensure_friend_capacity_ready().await
+    }
+
+    pub async fn detect_algorithm_capabilities(
+        &self
+    ) -> BenchmarkResult<FalkorAlgorithmCapabilities> {
+        let mut client = self.client().await?;
+        client.detect_algorithm_capabilities().await
+    }
+
+    async fn check_pokec_indexes(client: &mut FalkorBenchmarkClient) -> BenchmarkResult<bool> {
         // `CALL db.indexes()` returns metadata about all indexes.
         // We do a best-effort scan of the rows looking for :User(id) and :User(age).
         let mut result = client
@@ -421,6 +442,102 @@ impl FalkorBenchmarkClient {
         Ok(())
     }
 
+    async fn query_single_i64(
+        &mut self,
+        q: &str,
+    ) -> BenchmarkResult<i64> {
+        let mut result = self.graph.query(q).with_timeout(60_000).execute().await?;
+        match result.data.next().as_deref() {
+            Some([I64(value)]) => Ok(*value),
+            other => Err(OtherError(format!(
+                "Unexpected response for scalar query '{}': {:?}",
+                q, other
+            ))),
+        }
+    }
+
+    pub async fn detect_algorithm_capabilities(
+        &mut self
+    ) -> BenchmarkResult<FalkorAlgorithmCapabilities> {
+        let probe = r#"
+CALL dbms.procedures()
+YIELD name
+WITH collect(toLower(name)) AS names
+RETURN
+  size([n IN names WHERE n = 'algo.pagerank']) AS pagerank_count,
+  size([n IN names WHERE n = 'algo.maxflow']) AS max_flow_count,
+  size([n IN names WHERE n = 'algo.msf']) AS msf_count,
+  size([n IN names WHERE n = 'algo.harmoniccentrality']) AS harmonic_count
+"#;
+
+        let mut result = self
+            .graph
+            .query(probe)
+            .with_timeout(30_000)
+            .execute()
+            .await?;
+        match result.data.next().as_deref() {
+            Some(
+                [I64(pagerank_count), I64(max_flow_count), I64(msf_count), I64(harmonic_count)],
+            ) => Ok(FalkorAlgorithmCapabilities {
+                has_pagerank: *pagerank_count > 0,
+                has_max_flow: *max_flow_count > 0,
+                has_msf: *msf_count > 0,
+                has_harmonic: *harmonic_count > 0,
+            }),
+            other => Err(OtherError(format!(
+                "Unexpected Falkor capability probe response: {:?}",
+                other
+            ))),
+        }
+    }
+
+    pub async fn ensure_friend_capacity_ready(&mut self) -> BenchmarkResult<()> {
+        let total_edges = self
+            .query_single_i64("MATCH ()-[r:Friend]->() RETURN count(r)")
+            .await?;
+        let missing_before = self
+            .query_single_i64(
+                "MATCH ()-[r:Friend]->() WHERE r.bench_capacity IS NULL RETURN count(r)",
+            )
+            .await?;
+
+        info!(
+            "Falkor bench_capacity readiness: total Friend edges={}, missing before={}",
+            total_edges, missing_before
+        );
+
+        if missing_before > 0 {
+            self.run_query_no_results(
+                "MATCH (s:User)-[r:Friend]->(d:User) \
+                 WHERE r.bench_capacity IS NULL \
+                 SET r.bench_capacity = 1 + ((s.id * 31 + d.id * 17) % 20)",
+            )
+            .await?;
+        }
+
+        let missing_after = self
+            .query_single_i64(
+                "MATCH ()-[r:Friend]->() WHERE r.bench_capacity IS NULL RETURN count(r)",
+            )
+            .await?;
+        let backfilled = missing_before.saturating_sub(missing_after);
+
+        info!(
+            "Falkor bench_capacity readiness complete: backfilled={}, missing after={}",
+            backfilled, missing_after
+        );
+
+        if missing_after > 0 {
+            return Err(OtherError(format!(
+                "Falkor bench_capacity readiness failed: {} Friend edges still missing bench_capacity",
+                missing_after
+            )));
+        }
+
+        Ok(())
+    }
+
     /// Fast-path loader for the Pokec "Users" dataset using UNWIND batches.
     ///
     /// Input is a stream of cypher statements in two phases:
@@ -491,10 +608,15 @@ impl FalkorBenchmarkClient {
                 if i > 0 {
                     maps.push(',');
                 }
-                maps.push_str(&format!("{{src:{},dst:{}}}", src, dst));
+                maps.push_str(&format!(
+                    "{{src:{},dst:{},capacity:{}}}",
+                    src,
+                    dst,
+                    bench_capacity(*src, *dst)
+                ));
             }
             let q = format!(
-                "UNWIND [{}] AS row MATCH (n:User {{id: row.src}}), (m:User {{id: row.dst}}) CREATE (n)-[:Friend]->(m)",
+                "UNWIND [{}] AS row MATCH (n:User {{id: row.src}}), (m:User {{id: row.dst}}) CREATE (n)-[:Friend {{bench_capacity: row.capacity}}]->(m)",
                 maps
             );
             client.run_query_no_results(&q).await?;
@@ -588,8 +710,7 @@ impl FalkorBenchmarkClient {
 
         info!(
             "Pokec Users import completed: {} statements batched into {} UNWIND queries",
-            total_processed,
-            batch_count
+            total_processed, batch_count
         );
 
         Ok(total_processed)
@@ -645,12 +766,20 @@ impl FalkorBenchmarkClient {
         // This mirrors the extended timeouts used in other Falkor paths
         // (e.g. index creation, batch execution, graph_size).
         let falkor_result = match q_type {
-            QueryType::Read => self.graph.ro_query(query).with_timeout(60_000).execute(),
-            QueryType::Write => self.graph.query(query).with_timeout(60_000).execute(),
+            QueryType::Read => self
+                .graph
+                .ro_query(query)
+                .with_timeout(FALKOR_BENCHMARK_QUERY_TIMEOUT_MS)
+                .execute(),
+            QueryType::Write => self
+                .graph
+                .query(query)
+                .with_timeout(FALKOR_BENCHMARK_QUERY_TIMEOUT_MS)
+                .execute(),
         };
 
         // Tokio-level guard: slightly above the FalkorDB per-query timeout.
-        let timeout = Duration::from_secs(60);
+        let timeout = FALKOR_BENCHMARK_QUERY_TIMEOUT_GUARD;
         let offset = msg.compute_offset_ms();
 
         FALKOR_MSG_DEADLINE_OFFSET_GAUGE.set(offset);
@@ -686,13 +815,12 @@ impl FalkorBenchmarkClient {
             .with_label_values(&["falkor", spawn_id, "", query_name, "", ""])
             .inc();
 
-        // Increase underlying FalkorDB timeout to 30 seconds for large datasets
         let falkor_result = self
             .graph
             .query(query)
-            .with_timeout(30_000)
+            .with_timeout(FALKOR_BENCHMARK_QUERY_TIMEOUT_MS)
             .execute();
-        let timeout = Duration::from_secs(30);
+        let timeout = FALKOR_BENCHMARK_QUERY_TIMEOUT_GUARD;
         let falkor_result = tokio::time::timeout(timeout, falkor_result).await;
         Self::read_reply(spawn_id, query_name, query, falkor_result)
     }
@@ -713,8 +841,12 @@ impl FalkorBenchmarkClient {
                 .with_label_values(&["falkor", spawn_id, "", &format!("batch_{}", i), "", ""])
                 .inc();
 
-            let falkor_result = self.graph.query(query).with_timeout(30000).execute();
-            let timeout = Duration::from_secs(30);
+            let falkor_result = self
+                .graph
+                .query(query)
+                .with_timeout(FALKOR_BENCHMARK_QUERY_TIMEOUT_MS)
+                .execute();
+            let timeout = FALKOR_BENCHMARK_QUERY_TIMEOUT_GUARD;
             let falkor_result = tokio::time::timeout(timeout, falkor_result).await;
 
             // If any query fails, return the error
@@ -739,13 +871,12 @@ impl FalkorBenchmarkClient {
             .with_label_values(&["falkor", spawn_id, "", query_name, "", ""])
             .inc();
 
-        // Increase index creation timeout to 30 seconds for large datasets
         let falkor_result = self
             .graph
             .query(query)
-            .with_timeout(30_000)
+            .with_timeout(FALKOR_BENCHMARK_QUERY_TIMEOUT_MS)
             .execute();
-        let timeout = Duration::from_secs(30);
+        let timeout = FALKOR_BENCHMARK_QUERY_TIMEOUT_GUARD;
         let falkor_result = tokio::time::timeout(timeout, falkor_result).await;
 
         match falkor_result {

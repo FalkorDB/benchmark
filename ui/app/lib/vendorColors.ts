@@ -6,7 +6,7 @@ type Orientation = "vertical" | "horizontal";
 
 export function normalizeVendor(vendor: string): VendorKey {
   const k = (vendor ?? "").toString().trim().toLowerCase();
-  if (k === "falkordb" || k === "falkor") return "falkordb";
+  if (k === "falkordb" || k === "falkor" || k.includes("falkor") || k.includes("r6g") || k.includes("r7g") || k.includes("r8g") || k.includes("r6i") || k.includes("r7i")) return "falkordb";
   if (k === "neo4j") return "neo4j";
   if (k === "memgraph") return "memgraph";
   return "unknown";

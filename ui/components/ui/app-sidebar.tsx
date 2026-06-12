@@ -26,6 +26,7 @@ export function AppSidebar({
   platform,
   allowedVendors,
   throughputOptions,
+  queryOptions,
   datasetSummary,
   ...props
 }: React.ComponentProps<typeof Sidebar> & {
@@ -34,6 +35,7 @@ export function AppSidebar({
   platform?: Platforms;
   allowedVendors?: string[];
   throughputOptions?: Array<string | number>;
+  queryOptions?: string[];
   datasetSummary?: {
     nodes: number;
     edges: number;
@@ -45,6 +47,13 @@ export function AppSidebar({
   const filteredSidebarItems = React.useMemo(() => {
     const allowed = (allowedVendors ?? []).map((v) => v.toLowerCase());
     const throughputs = (throughputOptions ?? []).map((t) => String(t));
+    const queries = queryOptions ?? [];
+    const staticQueryLabels = new Map(
+      (
+        sidebarConfig.sidebarData.find((group) => group.title === "Queries")
+          ?.options ?? []
+      ).map((option) => [option.id, option.label])
+    );
 
     const labelForVendor = (id: string) => {
       const k = (id ?? "").toString();
@@ -58,6 +67,19 @@ export function AppSidebar({
       if (lower === "graviton") return "Graviton";
       // Generic fallback: Title Case
       return lower.replace(/(^|\s|[-_])([a-z])/g, (_, p1, p2) => `${p1}${p2.toUpperCase()}`);
+    };
+    const labelForQuery = (id: string) => {
+      const staticLabel = staticQueryLabels.get(id);
+      if (staticLabel) return staticLabel;
+
+      return id
+        .split("_")
+        .map((token) => {
+          if (!token) return token;
+          if (token.length <= 3) return token.toUpperCase();
+          return token.charAt(0).toUpperCase() + token.slice(1);
+        })
+        .join(" ");
     };
 
     return sidebarConfig.sidebarData.map((group) => {
@@ -75,9 +97,16 @@ export function AppSidebar({
         };
       }
 
+      if (group.title === "Queries" && queries.length) {
+        return {
+          ...group,
+          options: queries.map((id) => ({ id, label: labelForQuery(id) })),
+        };
+      }
+
       return group;
     });
-  }, [allowedVendors, throughputOptions]);
+  }, [allowedVendors, throughputOptions, queryOptions]);
 
   return (
     <Sidebar

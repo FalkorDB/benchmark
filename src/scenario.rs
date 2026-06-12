@@ -8,9 +8,9 @@ use futures::Stream;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
-use std::pin::Pin;
-use std::path::Path;
 use std::io::Read;
+use std::path::Path;
+use std::pin::Pin;
 use strum_macros::Display;
 use tracing::info;
 
@@ -140,8 +140,7 @@ impl Spec<'_> {
             if fs::metadata(&decompressed_path).is_err() {
                 info!(
                     "Decompressing gzip cache {} to {}",
-                    cache_file,
-                    decompressed_path
+                    cache_file, decompressed_path
                 );
                 let compressed = fs::read(&cache_file)?;
                 let mut decoder = GzDecoder::new(&compressed[..]);
