@@ -27,8 +27,32 @@ use tokio::time::error::Elapsed;
 use tracing::{error, info};
 
 const REDIS_DUMP_FILE: &str = "./redis-data/dump.rdb";
-const FALKOR_BENCHMARK_QUERY_TIMEOUT_MS: i64 = 180_000;
-const FALKOR_BENCHMARK_QUERY_TIMEOUT_GUARD: Duration = Duration::from_secs(185);
+const DEFAULT_FALKOR_BENCHMARK_QUERY_TIMEOUT_MS: i64 = 180_000;
+const FALKOR_BENCHMARK_QUERY_TIMEOUT_ENV: &str = "FALKOR_QUERY_TIMEOUT_MS";
+const FALKOR_BENCHMARK_QUERY_TIMEOUT_GUARD_EXTRA_MS: u64 = 5_000;
+
+fn resolve_falkor_benchmark_query_timeout_ms() -> i64 {
+    match env::var(FALKOR_BENCHMARK_QUERY_TIMEOUT_ENV) {
+        Ok(value) => match value.parse::<i64>() {
+            Ok(parsed) if parsed > 0 => parsed,
+            _ => {
+                info!(
+                    "Invalid {}='{}'; using default {}ms",
+                    FALKOR_BENCHMARK_QUERY_TIMEOUT_ENV,
+                    value,
+                    DEFAULT_FALKOR_BENCHMARK_QUERY_TIMEOUT_MS
+                );
+                DEFAULT_FALKOR_BENCHMARK_QUERY_TIMEOUT_MS
+            }
+        },
+        Err(_) => DEFAULT_FALKOR_BENCHMARK_QUERY_TIMEOUT_MS,
+    }
+}
+
+fn resolve_falkor_benchmark_query_timeout_guard(timeout_ms: i64) -> Duration {
+    let timeout_ms = timeout_ms.max(1) as u64;
+    Duration::from_millis(timeout_ms.saturating_add(FALKOR_BENCHMARK_QUERY_TIMEOUT_GUARD_EXTRA_MS))
+}
 
 #[allow(dead_code)]
 pub struct Started(FalkorProcess);
@@ -317,8 +341,11 @@ impl<U> Falkor<U> {
             .with_num_connections(nonzero::nonzero!(8u8))
             .build()
             .await?;
+        let query_timeout_ms = resolve_falkor_benchmark_query_timeout_ms();
         Ok(FalkorBenchmarkClient {
             graph: client.select_graph("falkor"),
+            query_timeout_ms,
+            query_timeout_guard: resolve_falkor_benchmark_query_timeout_guard(query_timeout_ms),
         })
     }
 
@@ -426,6 +453,8 @@ fn redis_value_to_f64(v: &redis::Value) -> Option<f64> {
 #[derive(Clone)]
 pub struct FalkorBenchmarkClient {
     graph: AsyncGraph,
+    query_timeout_ms: i64,
+    query_timeout_guard: Duration,
 }
 
 impl FalkorBenchmarkClient {
@@ -769,17 +798,17 @@ RETURN
             QueryType::Read => self
                 .graph
                 .ro_query(query)
-                .with_timeout(FALKOR_BENCHMARK_QUERY_TIMEOUT_MS)
+                .with_timeout(self.query_timeout_ms)
                 .execute(),
             QueryType::Write => self
                 .graph
                 .query(query)
-                .with_timeout(FALKOR_BENCHMARK_QUERY_TIMEOUT_MS)
+                .with_timeout(self.query_timeout_ms)
                 .execute(),
         };
 
         // Tokio-level guard: slightly above the FalkorDB per-query timeout.
-        let timeout = FALKOR_BENCHMARK_QUERY_TIMEOUT_GUARD;
+        let timeout = self.query_timeout_guard;
         let offset = msg.compute_offset_ms();
 
         FALKOR_MSG_DEADLINE_OFFSET_GAUGE.set(offset);
@@ -818,9 +847,9 @@ RETURN
         let falkor_result = self
             .graph
             .query(query)
-            .with_timeout(FALKOR_BENCHMARK_QUERY_TIMEOUT_MS)
+            .with_timeout(self.query_timeout_ms)
             .execute();
-        let timeout = FALKOR_BENCHMARK_QUERY_TIMEOUT_GUARD;
+        let timeout = self.query_timeout_guard;
         let falkor_result = tokio::time::timeout(timeout, falkor_result).await;
         Self::read_reply(spawn_id, query_name, query, falkor_result)
     }
@@ -844,9 +873,9 @@ RETURN
             let falkor_result = self
                 .graph
                 .query(query)
-                .with_timeout(FALKOR_BENCHMARK_QUERY_TIMEOUT_MS)
+                .with_timeout(self.query_timeout_ms)
                 .execute();
-            let timeout = FALKOR_BENCHMARK_QUERY_TIMEOUT_GUARD;
+            let timeout = self.query_timeout_guard;
             let falkor_result = tokio::time::timeout(timeout, falkor_result).await;
 
             // If any query fails, return the error
@@ -874,9 +903,9 @@ RETURN
         let falkor_result = self
             .graph
             .query(query)
-            .with_timeout(FALKOR_BENCHMARK_QUERY_TIMEOUT_MS)
+            .with_timeout(self.query_timeout_ms)
             .execute();
-        let timeout = FALKOR_BENCHMARK_QUERY_TIMEOUT_GUARD;
+        let timeout = self.query_timeout_guard;
         let falkor_result = tokio::time::timeout(timeout, falkor_result).await;
 
         match falkor_result {

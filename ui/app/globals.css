@@ -52,6 +52,7 @@ body {
 
     /* Solid accents (used for text/borders) */
     --FalkorDB-color: #7568F2;
+    --FalkorDB2-color: #5145d6;
     --Neo4j-color: #0A6190;
     --Memgraph-color: #ff2b4a;
 
@@ -62,6 +63,8 @@ body {
     /* Chart gradients */
     --FalkorDB-gradient-start: #ff66b3;
     --FalkorDB-gradient-end: #7568F2;
+    --FalkorDB2-gradient-start: #d24aa8;
+    --FalkorDB2-gradient-end: #5145d6;
 
     /* Neo4j "Baltic" palette (Dark/Mid/Baltic/Light) */
     --Neo4j-gradient-dark-baltic: #014063;

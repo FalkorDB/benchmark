@@ -591,16 +591,19 @@ impl UsersQueriesRepository {
                     let text = match flavour {
                         Flavour::FalkorDB => "CALL algo.pageRank('User', null) \
                                              YIELD node, score \
-                                             RETURN count(node) AS node_count, avg(score) AS avg_score, max(score) AS max_score",
+                                             RETURN score \
+                                             LIMIT 1",
                         Flavour::Neo4j => {
                             "CALL gds.pageRank.stream('benchmark_algo_graph') \
                              YIELD nodeId, score \
-                             RETURN count(nodeId) AS node_count, avg(score) AS avg_score, max(score) AS max_score"
+                             RETURN score \
+                             LIMIT 1"
                         }
                         Flavour::Memgraph => {
                             "CALL pagerank.get() \
                              YIELD node, rank \
-                             RETURN count(node) AS node_count, avg(rank) AS avg_score, max(rank) AS max_score"
+                             RETURN rank AS score \
+                             LIMIT 1"
                         }
                     };
                     QueryBuilder::new().text(text).build()

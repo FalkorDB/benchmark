@@ -1,4 +1,4 @@
-export type VendorKey = "falkordb" | "neo4j" | "memgraph" | "unknown";
+export type VendorKey = "falkordb" | "falkordb2" | "neo4j" | "memgraph" | "unknown";
 
 type GradientStops = { offset: number; color: string }[];
 
@@ -6,6 +6,20 @@ type Orientation = "vertical" | "horizontal";
 
 export function normalizeVendor(vendor: string): VendorKey {
   const k = (vendor ?? "").toString().trim().toLowerCase();
+  if (
+    k === "falkordb2" ||
+    k.includes("falkordb2") ||
+    k === "falkordb-rs" ||
+    k.includes("falkordb-rs") ||
+    k.includes("secondary") ||
+    k.includes("rust")
+  ) return "falkordb2";
+  if (
+    k === "falkordb1" ||
+    k.includes("falkordb1") ||
+    k === "falkordb-c" ||
+    k.includes("falkordb-c")
+  ) return "falkordb";
   if (k === "falkordb" || k === "falkor" || k.includes("falkor") || k.includes("r6g") || k.includes("r7g") || k.includes("r8g") || k.includes("r6i") || k.includes("r7i")) return "falkordb";
   if (k === "neo4j") return "neo4j";
   if (k === "memgraph") return "memgraph";
@@ -27,6 +41,12 @@ function getStops(vendor: VendorKey): GradientStops {
       return [
         { offset: 0.0, color: cssVar("--FalkorDB-gradient-start", "#ff66b3") },
         { offset: 1.0, color: cssVar("--FalkorDB-gradient-end", "#7568F2") },
+      ];
+    case "falkordb2":
+      // Darker pink -> darker purple (used for second Falkor variant)
+      return [
+        { offset: 0.0, color: cssVar("--FalkorDB2-gradient-start", "#d24aa8") },
+        { offset: 1.0, color: cssVar("--FalkorDB2-gradient-end", "#5145d6") },
       ];
     case "neo4j":
       // Neo4j "Baltic" palette: Dark -> Mid -> Baltic -> Light

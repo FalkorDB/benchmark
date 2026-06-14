@@ -27,12 +27,14 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 #  PARALLEL    (default: 20)
 #  MPS         (default: 7500)
 #  QUERIES_FILE  (default: large-readonly)
-#  QUERIES_COUNT (default: 1000000)
+#  QUERIES_COUNT (default: 20000)
 #  WRITE_RATIO   (default: 0.03)
-#  ENABLE_ALGO_PAGERANK (default: 1)
+#  FALKOR_QUERY_TIMEOUT_MS (default: 900000)
+#  ENABLE_ALGO_PAGERANK (default: 0)
 #  ENABLE_ALGO_MAX_FLOW (default: 0)
 #  ENABLE_ALGO_MSF (default: 0)
 #  ENABLE_ALGO_HARMONIC (default: 0)
+#  FREE_PRIMARY_FALKOR_BEFORE_SECOND_RUN (default: 1)
 #
 # Results:
 #  RESULTS_DIR (default: Results-YYMMDD-HH:MM)
@@ -65,12 +67,14 @@ BATCH_SIZE=${BATCH_SIZE:-10000}
 PARALLEL=${PARALLEL:-10}
 MPS=${MPS:-200}
 QUERIES_FILE=${QUERIES_FILE:-"large-readonly"}
-QUERIES_COUNT=${QUERIES_COUNT:-100000}
+QUERIES_COUNT=${QUERIES_COUNT:-20000}
 WRITE_RATIO=${WRITE_RATIO:-0.0}
-ENABLE_ALGO_PAGERANK=${ENABLE_ALGO_PAGERANK:-1}
+FALKOR_QUERY_TIMEOUT_MS=${FALKOR_QUERY_TIMEOUT_MS:-900000}
+ENABLE_ALGO_PAGERANK=${ENABLE_ALGO_PAGERANK:-0}
 ENABLE_ALGO_MAX_FLOW=${ENABLE_ALGO_MAX_FLOW:-0}
 ENABLE_ALGO_MSF=${ENABLE_ALGO_MSF:-0}
 ENABLE_ALGO_HARMONIC=${ENABLE_ALGO_HARMONIC:-0}
+FREE_PRIMARY_FALKOR_BEFORE_SECOND_RUN=${FREE_PRIMARY_FALKOR_BEFORE_SECOND_RUN:-1}
 
 # Derive per-vendor query file names so each engine can use vendor-optimized queries.
 QUERIES_FILE_BASE="${QUERIES_FILE}"
@@ -93,10 +97,25 @@ normalize_bool() {
   esac
 }
 
+set_falkor_query_timeout() {
+  local label="$1"
+  local host="$2"
+  local port="$3"
+  local result
+
+  if ! result=$(redis-cli -h "$host" -p "$port" GRAPH.CONFIG SET TIMEOUT "$FALKOR_QUERY_TIMEOUT_MS" 2>&1); then
+    echo "  - Warning: failed to set ${label} query timeout to ${FALKOR_QUERY_TIMEOUT_MS}ms: ${result}" >&2
+    return 0
+  fi
+
+  echo "  - ${label} query timeout set to ${FALKOR_QUERY_TIMEOUT_MS}ms"
+}
+
 ENABLE_ALGO_PAGERANK_BOOL=$(normalize_bool "$ENABLE_ALGO_PAGERANK" "ENABLE_ALGO_PAGERANK")
 ENABLE_ALGO_MAX_FLOW_BOOL=$(normalize_bool "$ENABLE_ALGO_MAX_FLOW" "ENABLE_ALGO_MAX_FLOW")
 ENABLE_ALGO_MSF_BOOL=$(normalize_bool "$ENABLE_ALGO_MSF" "ENABLE_ALGO_MSF")
 ENABLE_ALGO_HARMONIC_BOOL=$(normalize_bool "$ENABLE_ALGO_HARMONIC" "ENABLE_ALGO_HARMONIC")
+FREE_PRIMARY_FALKOR_BEFORE_SECOND_RUN_BOOL=$(normalize_bool "$FREE_PRIMARY_FALKOR_BEFORE_SECOND_RUN" "FREE_PRIMARY_FALKOR_BEFORE_SECOND_RUN")
 ALGO_QUERY_ARGS=(
   --enable-algo-pagerank "$ENABLE_ALGO_PAGERANK_BOOL"
   --enable-algo-max-flow "$ENABLE_ALGO_MAX_FLOW_BOOL"
@@ -172,6 +191,7 @@ export NEO4J_PASSWORD
 export MEMGRAPH_PASSWORD
 export NEO4J_USER
 export MEMGRAPH_USER
+export FALKOR_QUERY_TIMEOUT_MS
 
 if [[ "${RUN_NEO4J}" == "1" ]]; then
   echo "==> Clearing Neo4j database (neo4j)"
@@ -402,6 +422,16 @@ if [[ "${RUN_NEO4J}" == "1" ]]; then
   cargo run --release --bin benchmark -- load --vendor neo4j --size large --endpoint "$NEO4J_ENDPOINT" -b "$BATCH_SIZE"
 fi
 
+if [[ "${RUN_FALKOR}" == "1" || "${RUN_FALKOR_2}" == "1" ]]; then
+  echo "==> Configuring FalkorDB query timeout (${FALKOR_QUERY_TIMEOUT_MS}ms)"
+fi
+if [[ "${RUN_FALKOR}" == "1" ]]; then
+  set_falkor_query_timeout "FalkorDB" "$FALKOR_HOST" "$FALKOR_PORT"
+fi
+if [[ "${RUN_FALKOR_2}" == "1" ]]; then
+  set_falkor_query_timeout "FalkorDB (secondary)" "$FALKOR_2_HOST" "$FALKOR_2_PORT"
+fi
+
 if [[ "${RUN_NEO4J}" == "1" || "${RUN_FALKOR}" == "1" || "${RUN_FALKOR_2}" == "1" || "${RUN_MEMGRAPH}" == "1" ]]; then
   echo "==> Validating database contents before running queries"
 fi
@@ -456,13 +486,35 @@ fi
 
 if [[ "${RUN_FALKOR_2}" == "1" ]]; then
   echo "  - Checking FalkorDB (secondary) data..."
-  FALKOR_2_STATS=$(redis-cli -h "$FALKOR_2_HOST" -p "$FALKOR_2_PORT" GRAPH.QUERY falkor "CALL db.meta.stats()" 2>/dev/null || echo "")
-  FALKOR_2_NODE_COUNT=$(echo "$FALKOR_2_STATS" | sed -n '11p' | grep -oE '[0-9]+' || echo "0")
-  FALKOR_2_REL_COUNT=$(echo "$FALKOR_2_STATS" | sed -n '10p' | grep -oE '[0-9]+' || echo "0")
-  FALKOR_2_NODE_COUNT=${FALKOR_2_NODE_COUNT:-0}
-  FALKOR_2_REL_COUNT=${FALKOR_2_REL_COUNT:-0}
+  FALKOR_2_STATS_MAX_RETRIES=${FALKOR_2_STATS_MAX_RETRIES:-10}
+  FALKOR_2_STATS_RETRY_DELAY_SECS=${FALKOR_2_STATS_RETRY_DELAY_SECS:-2}
+  FALKOR_2_STATS=""
+  FALKOR_2_NODE_COUNT=0
+  FALKOR_2_REL_COUNT=0
+
+  for ((attempt=1; attempt<=FALKOR_2_STATS_MAX_RETRIES; attempt++)); do
+    # Preserve stderr in logs (do not redirect it away); tolerate transient command failures.
+    FALKOR_2_STATS=$(redis-cli -h "$FALKOR_2_HOST" -p "$FALKOR_2_PORT" GRAPH.QUERY falkor "CALL db.meta.stats()" || true)
+    FALKOR_2_NODE_COUNT=$(echo "$FALKOR_2_STATS" | sed -n '11p' | grep -oE '[0-9]+' || true)
+    FALKOR_2_REL_COUNT=$(echo "$FALKOR_2_STATS" | sed -n '10p' | grep -oE '[0-9]+' || true)
+    FALKOR_2_NODE_COUNT=${FALKOR_2_NODE_COUNT:-0}
+    FALKOR_2_REL_COUNT=${FALKOR_2_REL_COUNT:-0}
+
+    if [[ "$FALKOR_2_NODE_COUNT" -gt 0 ]]; then
+      break
+    fi
+
+    if [[ "$attempt" -lt "$FALKOR_2_STATS_MAX_RETRIES" ]]; then
+      echo "    FalkorDB (secondary) stats not ready yet (attempt ${attempt}/${FALKOR_2_STATS_MAX_RETRIES}); retrying in ${FALKOR_2_STATS_RETRY_DELAY_SECS}s..."
+      sleep "$FALKOR_2_STATS_RETRY_DELAY_SECS"
+    fi
+  done
   echo "    FalkorDB (secondary): ${FALKOR_2_NODE_COUNT} User nodes, ${FALKOR_2_REL_COUNT} Friend relationships (via db.meta.stats)"
   if [[ "$FALKOR_2_NODE_COUNT" -eq 0 ]]; then
+    if [[ -n "$FALKOR_2_STATS" ]]; then
+      echo "    Last db.meta.stats output from secondary:" >&2
+      echo "$FALKOR_2_STATS" >&2
+    fi
     echo "❌ FalkorDB (secondary) has no User nodes loaded. Cannot proceed with benchmark." >&2
     exit 1
   fi
@@ -508,6 +560,11 @@ if [[ "${RUN_FALKOR}" == "1" ]]; then
 fi
 
 if [[ "${RUN_FALKOR_2}" == "1" ]]; then
+  if [[ "${RUN_FALKOR}" == "1" && "$FREE_PRIMARY_FALKOR_BEFORE_SECOND_RUN_BOOL" == "true" ]]; then
+    echo "==> Releasing primary FalkorDB graph memory before secondary run"
+    redis-cli -h "$FALKOR_HOST" -p "$FALKOR_PORT" GRAPH.DELETE falkor >/dev/null 2>&1 || true
+    redis-cli -h "$FALKOR_HOST" -p "$FALKOR_PORT" DEL falkor >/dev/null 2>&1 || true
+  fi
   echo "==> Running workload against FalkorDB (secondary) on $FALKOR_ENDPOINT_2"
   cargo run --release --bin benchmark -- run --vendor falkor   --name "$FALKOR_QUERIES_FILE"   --parallel "$PARALLEL" --mps "$MPS" --endpoint "$FALKOR_ENDPOINT_2"   --results-dir "$RESULTS_DIR"
 
