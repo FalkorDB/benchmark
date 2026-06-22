@@ -1,0 +1,136 @@
+name: Integration Tests
+
+on:
+  pull_request:
+    branches: [ "main" ]
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Retry transient crates.io download failures and avoid HTTP/2 "unexpected eof" errors.
+  CARGO_NET_RETRY: "10"
+  CARGO_HTTP_MULTIPLEXING: "false"
+  FALKORDB_HOST: 127.0.0.1
+  FALKORDB_PORT: 6379
+
+jobs:
+  integration-tests:
+    runs-on: ubuntu-latest
+    
+    services:
+      falkordb:
+        image: falkordb/falkordb:latest
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      
+      - name: Install Rust
+        uses: actions-rs/toolchain@16499b5e05bf2e26879000db0c1d13f7e13fa3af # v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+
+      - uses: taiki-e/install-action@88ada01c46e65c47040a0ae865537cc76fcd0e1c # just
+        with:
+          tool: just
+
+      - name: Install redis-cli
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y redis-tools
+
+      - name: Wait for FalkorDB to be ready
+        run: |
+          echo "Waiting for FalkorDB to be ready..."
+          for i in {1..30}; do
+            if redis-cli -h 127.0.0.1 -p 6379 ping > /dev/null 2>&1; then
+              echo "FalkorDB is ready!"
+              break
+            fi
+            echo "Attempt $i: FalkorDB not ready yet..."
+            sleep 2
+          done
+          redis-cli -h 127.0.0.1 -p 6379 ping
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          # Cache only dependency sources (registry/git), not target/ or ~/.cargo/bin:
+          # prevents the crates.io refetch that flaked, with no stale-artifact risk.
+          cache-targets: "false"
+          cache-bin: "false"
+
+      - name: Run integration tests
+        run: just integration
+
+      - name: Run integration tests with all features
+        run: just integration --all-features
+
+  integration-tests-tokio:
+    runs-on: ubuntu-latest
+    
+    services:
+      falkordb:
+        image: falkordb/falkordb:latest
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      
+      - name: Install Rust
+        uses: actions-rs/toolchain@16499b5e05bf2e26879000db0c1d13f7e13fa3af # v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+
+      - uses: taiki-e/install-action@88ada01c46e65c47040a0ae865537cc76fcd0e1c # just
+        with:
+          tool: just
+
+      - name: Install redis-cli
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y redis-tools
+
+      - name: Wait for FalkorDB to be ready
+        run: |
+          echo "Waiting for FalkorDB to be ready..."
+          for i in {1..30}; do
+            if redis-cli -h 127.0.0.1 -p 6379 ping > /dev/null 2>&1; then
+              echo "FalkorDB is ready!"
+              break
+            fi
+            echo "Attempt $i: FalkorDB not ready yet..."
+            sleep 2
+          done
+          redis-cli -h 127.0.0.1 -p 6379 ping
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          # Cache only dependency sources (registry/git), not target/ or ~/.cargo/bin:
+          # prevents the crates.io refetch that flaked, with no stale-artifact risk.
+          cache-targets: "false"
+          cache-bin: "false"
+
+      - name: Run async integration tests
+        run: just integration --features tokio

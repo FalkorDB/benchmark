@@ -1,0 +1,85 @@
+name: Code Coverage
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  schedule:
+      - cron: '0 0 * * *'  # This runs the workflow every day at midnight UTC
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Retry transient crates.io download failures and avoid HTTP/2 "unexpected eof" errors.
+  CARGO_NET_RETRY: "10"
+  CARGO_HTTP_MULTIPLEXING: "false"
+  FALKORDB_HOST: 127.0.0.1
+  FALKORDB_PORT: 6379
+
+# Generate code coverage using llvm cov
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    
+    services:
+      falkordb:
+        image: falkordb/falkordb:edge
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      
+      - name: Install redis-cli
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y redis-tools
+      
+      - name: Wait for FalkorDB to be ready
+        run: |
+          echo "Waiting for FalkorDB to be ready..."
+          for i in {1..30}; do
+            if redis-cli -h 127.0.0.1 -p 6379 ping > /dev/null 2>&1; then
+              echo "FalkorDB is ready!"
+              break
+            fi
+            echo "Attempt $i: FalkorDB not ready yet..."
+            sleep 2
+          done
+          redis-cli -h 127.0.0.1 -p 6379 ping
+      
+      - uses: taiki-e/install-action@88ada01c46e65c47040a0ae865537cc76fcd0e1c # just, cargo-llvm-cov, nextest
+        with:
+          tool: just,cargo-llvm-cov,nextest
+      
+      - name: Populate test graph
+        run: pip install falkordb && just db-populate
+      
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          # Cache only dependency sources (registry/git), not target/ or ~/.cargo/bin:
+          # prevents the crates.io refetch that flaked, with no stale-artifact risk.
+          cache-targets: "false"
+          cache-bin: "false"
+
+      - name: Generate Code Coverage
+        run: just coverage
+      
+      - name: Upload coverage reports to Codecov
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
+        with:
+          files: codecov.json
+          fail_ci_if_error: true
+          token: ${{ secrets.CODECOV_TOKEN }}
