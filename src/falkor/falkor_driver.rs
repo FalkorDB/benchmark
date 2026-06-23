@@ -13,8 +13,9 @@ use crate::{
     FALKOR_GRAPH_MEMORY_USAGE_MB, FALKOR_MSG_DEADLINE_OFFSET_GAUGE, OPERATION_COUNTER,
     OPERATION_ERROR_COUNTER, REDIS_DATA_DIR,
 };
-use falkordb::FalkorValue::I64;
-use falkordb::{AsyncGraph, FalkorClientBuilder, FalkorResult, LazyResultSet, QueryResult};
+use falkordb::{
+    AsyncGraph, ConnectionStrategy, FalkorClientBuilder, FalkorResult, QueryResult, RowStream,
+};
 use std::env;
 use std::hint::black_box;
 use std::io;
@@ -215,10 +216,16 @@ impl Falkor<Started> {
         // According to FalkorDB docs, db.meta.stats() yields the columns:
         //   labels, relTypes, relCount, nodeCount, labelCount, relTypeCount, propertyKeyCount
         // in that order.
-        match falkor_result.data.next().as_deref() {
-            Some([_, _, I64(rel_count), I64(node_count), ..]) => {
-                Ok((*node_count as u64, *rel_count as u64))
+        match falkor_result.data.next().await {
+            Some(Ok(row)) => {
+                let rel_count: i64 = row.try_get_at(2)?;
+                let node_count: i64 = row.try_get_at(3)?;
+                Ok((node_count as u64, rel_count as u64))
             }
+            Some(Err(e)) => Err(OtherError(format!(
+                "Failed to parse response from CALL db.meta.stats(): {:?}",
+                e
+            ))),
             other => Err(OtherError(format!(
                 "Unexpected response from CALL db.meta.stats(): {:?}",
                 other
@@ -227,12 +234,16 @@ impl Falkor<Started> {
     }
 
     #[allow(dead_code)]
-    fn extract_u64_value(
+    async fn extract_u64_value(
         &self,
-        falkor_result: &mut QueryResult<LazyResultSet>,
+        falkor_result: &mut QueryResult<RowStream>,
     ) -> BenchmarkResult<u64> {
-        match falkor_result.data.next().as_deref() {
-            Some([I64(value)]) => Ok(*value as u64),
+        match falkor_result.data.next().await {
+            Some(Ok(row)) => Ok(row.try_get_at::<i64>(0)? as u64),
+            Some(Err(e)) => Err(OtherError(format!(
+                "Failed to parse scalar response row: {:?}",
+                e
+            ))),
             _ => Err(OtherError(
                 "Value not found or not of expected type".to_string(),
             )),
@@ -310,7 +321,14 @@ impl Falkor<Started> {
         let mut have_user_id = false;
         let mut have_user_age = false;
 
-        while let Some(row) = result.data.next() {
+        while let Some(row_result) = result.data.next().await {
+            let row = match row_result {
+                Ok(row) => row,
+                Err(e) => {
+                    info!("Error while reading FalkorDB index row: {}", e);
+                    continue;
+                }
+            };
             let row_str = format!("{:?}", row);
             if !have_user_id && row_str.contains("User") && row_str.contains("id") {
                 have_user_id = true;
@@ -338,9 +356,12 @@ impl<U> Falkor<U> {
         let connection_info = connection_string.try_into()?;
         let client = FalkorClientBuilder::new_async()
             .with_connection_info(connection_info)
-            .with_num_connections(nonzero::nonzero!(8u8))
+            .with_connection_strategy(ConnectionStrategy::Pooled {
+                size: nonzero::nonzero!(8u8),
+            })
             .build()
             .await?;
+        info!("Initialized Falkor async client with pooled strategy (size=8)");
         let query_timeout_ms = resolve_falkor_benchmark_query_timeout_ms();
         Ok(FalkorBenchmarkClient {
             graph: client.select_graph("falkor"),
@@ -465,8 +486,9 @@ impl FalkorBenchmarkClient {
         // Use a longer timeout for import statements.
         let res = self.graph.query(q).with_timeout(60_000).execute().await?;
         // Consume results (for completeness; most CREATE queries return no rows)
-        for row in res.data {
-            black_box(row);
+        let mut data = res.data;
+        while let Some(row) = data.next().await {
+            let _ = black_box(row);
         }
         Ok(())
     }
@@ -476,8 +498,12 @@ impl FalkorBenchmarkClient {
         q: &str,
     ) -> BenchmarkResult<i64> {
         let mut result = self.graph.query(q).with_timeout(60_000).execute().await?;
-        match result.data.next().as_deref() {
-            Some([I64(value)]) => Ok(*value),
+        match result.data.next().await {
+            Some(Ok(row)) => Ok(row.try_get_at::<i64>(0)?),
+            Some(Err(e)) => Err(OtherError(format!(
+                "Failed to parse scalar query response for '{}': {:?}",
+                q, e
+            ))),
             other => Err(OtherError(format!(
                 "Unexpected response for scalar query '{}': {:?}",
                 q, other
@@ -505,15 +531,23 @@ RETURN
             .with_timeout(30_000)
             .execute()
             .await?;
-        match result.data.next().as_deref() {
-            Some(
-                [I64(pagerank_count), I64(max_flow_count), I64(msf_count), I64(harmonic_count)],
-            ) => Ok(FalkorAlgorithmCapabilities {
-                has_pagerank: *pagerank_count > 0,
-                has_max_flow: *max_flow_count > 0,
-                has_msf: *msf_count > 0,
-                has_harmonic: *harmonic_count > 0,
-            }),
+        match result.data.next().await {
+            Some(Ok(row)) => {
+                let pagerank_count: i64 = row.try_get_at(0)?;
+                let max_flow_count: i64 = row.try_get_at(1)?;
+                let msf_count: i64 = row.try_get_at(2)?;
+                let harmonic_count: i64 = row.try_get_at(3)?;
+                Ok(FalkorAlgorithmCapabilities {
+                    has_pagerank: pagerank_count > 0,
+                    has_max_flow: max_flow_count > 0,
+                    has_msf: msf_count > 0,
+                    has_harmonic: harmonic_count > 0,
+                })
+            }
+            Some(Err(e)) => Err(OtherError(format!(
+                "Failed to parse Falkor capability probe response: {:?}",
+                e
+            ))),
             other => Err(OtherError(format!(
                 "Unexpected Falkor capability probe response: {:?}",
                 other
@@ -829,7 +863,7 @@ RETURN
         OPERATION_COUNTER
             .with_label_values(&["falkor", worker_id, "", q_name, "", ""])
             .inc();
-        Self::read_reply(worker_id, q_name, query, falkor_result)
+        Self::read_reply(worker_id, q_name, query, falkor_result).await
     }
 
     // #[instrument(skip(self), fields(query = %query, query_name = %query_name))]
@@ -851,7 +885,7 @@ RETURN
             .execute();
         let timeout = self.query_timeout_guard;
         let falkor_result = tokio::time::timeout(timeout, falkor_result).await;
-        Self::read_reply(spawn_id, query_name, query, falkor_result)
+        Self::read_reply(spawn_id, query_name, query, falkor_result).await
     }
 
     /// Execute a batch of cypher commands individually (FalkorDB doesn't support multi-statement queries)
@@ -880,7 +914,7 @@ RETURN
 
             // If any query fails, return the error
             if let Err(e) =
-                Self::read_reply(spawn_id, &format!("batch_{}", i), query, falkor_result)
+                Self::read_reply(spawn_id, &format!("batch_{}", i), query, falkor_result).await
             {
                 return Err(e);
             }
@@ -911,8 +945,9 @@ RETURN
         match falkor_result {
             Ok(falkor_result) => match falkor_result {
                 Ok(query_result) => {
-                    for row in query_result.data {
-                        black_box(row);
+                    let mut data = query_result.data;
+                    while let Some(row) = data.next().await {
+                        let _ = black_box(row);
                     }
                     Ok(())
                 }
@@ -945,17 +980,18 @@ RETURN
         }
     }
 
-    fn read_reply<'a>(
-        spawn_id: &'a str,
-        query_name: &'a str,
-        query: &'a str,
-        reply: Result<FalkorResult<QueryResult<LazyResultSet<'a>>>, Elapsed>,
+    async fn read_reply(
+        spawn_id: &str,
+        query_name: &str,
+        query: &str,
+        reply: Result<FalkorResult<QueryResult<RowStream>>, Elapsed>,
     ) -> BenchmarkResult<()> {
         match reply {
             Ok(falkor_result) => match falkor_result {
                 Ok(query_result) => {
-                    for row in query_result.data {
-                        black_box(row);
+                    let mut data = query_result.data;
+                    while let Some(row) = data.next().await {
+                        let _ = black_box(row);
                     }
                     Ok(())
                 }

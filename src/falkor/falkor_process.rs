@@ -10,7 +10,7 @@ use crate::{
     FALKOR_NODES_GAUGE, FALKOR_RELATIONSHIPS_GAUGE, FALKOR_RESTART_COUNTER,
     FALKOR_RUNNING_REQUESTS_GAUGE, FALKOR_WAITING_REQUESTS_GAUGE, MEM_USAGE_GAUGE, REDIS_DATA_DIR,
 };
-use falkordb::FalkorValue::I64;
+use futures::StreamExt;
 use falkordb::{AsyncGraph, FalkorClientBuilder, FalkorConnectionInfo};
 use prometheus::core::{AtomicU64, GenericCounter};
 use std::env;
@@ -272,11 +272,18 @@ async fn execute_i64_query(
     query: &str,
 ) -> BenchmarkResult<i64> {
     let mut values = graph.query(query).with_timeout(5000).execute().await?;
-    if let Some(value) = values.data.next() {
-        match value.as_slice() {
-            [I64(i64_value)] => Ok(*i64_value),
-            _ => {
-                let msg = format!("Unexpected response: {:?} for query {}", value, query);
+    if let Some(value_result) = values.data.next().await {
+        match value_result {
+            Ok(row) => match row.try_get_at::<i64>(0) {
+                Ok(value) => Ok(value),
+                Err(e) => {
+                    let msg = format!("Unexpected response row for query {}: {:?}", query, e);
+                    error!(msg);
+                    Err(OtherError(msg))
+                }
+            },
+            Err(e) => {
+                let msg = format!("Failed to parse response row for query {}: {:?}", query, e);
                 error!(msg);
                 Err(OtherError(msg))
             }
