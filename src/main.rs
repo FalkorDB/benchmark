@@ -1184,6 +1184,7 @@ fn system_time_epoch_secs(t: SystemTime) -> u64 {
         .as_secs()
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn write_run_results(
     results_dir: Option<String>,
     vendor: Vendor,
@@ -1792,7 +1793,7 @@ async fn spawn_memgraph_worker(
                                 duration.as_micros() as u64,
                             );
                             counter += 1;
-                            if counter % 1000 == 0 {
+                            if counter.is_multiple_of(1000) {
                                 info!("worker {} processed {} queries", worker_id, counter);
                             }
                         }

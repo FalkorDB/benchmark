@@ -426,7 +426,7 @@ pub fn aggregate_aws_tests(
             // Convert to AWS-like instance type: r7i.2xlarge
             let lower = n.to_lowercase();
             let parts: Vec<&str> = lower
-                .split(|c| c == '-' || c == '_' || c == ' ')
+                .split(|c| ['-', '_', ' '].contains(&c))
                 .filter(|p| !p.is_empty())
                 .collect();
             if parts.is_empty() {
@@ -902,7 +902,8 @@ impl MetricsIndex {
     ///   - falkordb_telemetry_wait_us{query="..."}
     ///   - falkordb_telemetry_exec_us{query="..."}
     ///   - falkordb_telemetry_report_us{query="..."}
-    /// and converts them to milliseconds.
+    ///
+    ///   and converts them to milliseconds.
     fn telemetry_for_type(
         &self,
         vendor: Vendor,
@@ -920,7 +921,9 @@ impl MetricsIndex {
         let execs = self.samples.get(exec_metric).cloned().unwrap_or_default();
         let reports = self.samples.get(report_metric).cloned().unwrap_or_default();
 
-        fn by_query(samples: Vec<(BTreeMap<String, String>, f64)>) -> BTreeMap<String, f64> {
+        type MetricSamples = Vec<(BTreeMap<String, String>, f64)>;
+
+        fn by_query(samples: MetricSamples) -> BTreeMap<String, f64> {
             let mut out = BTreeMap::new();
             for (labels, v) in samples {
                 if let Some(q) = labels.get("query").cloned() {
