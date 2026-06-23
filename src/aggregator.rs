@@ -22,6 +22,10 @@ struct RunResultsMeta {
     elapsed_ms: u128,
 }
 
+type MetricLabels = BTreeMap<String, String>;
+type MetricSample = (MetricLabels, f64);
+type MetricSamplesByName = BTreeMap<String, Vec<MetricSample>>;
+
 #[derive(Debug, Serialize)]
 struct UiLatency {
     p50: String,
@@ -772,7 +776,7 @@ fn histogram_quantile_seconds(
 #[derive(Debug, Default)]
 struct MetricsIndex {
     // name -> (labels_key -> value)
-    samples: BTreeMap<String, Vec<(BTreeMap<String, String>, f64)>>,
+    samples: MetricSamplesByName,
 }
 
 impl MetricsIndex {
@@ -921,7 +925,7 @@ impl MetricsIndex {
         let execs = self.samples.get(exec_metric).cloned().unwrap_or_default();
         let reports = self.samples.get(report_metric).cloned().unwrap_or_default();
 
-        type MetricSamples = Vec<(BTreeMap<String, String>, f64)>;
+        type MetricSamples = Vec<MetricSample>;
 
         fn by_query(samples: MetricSamples) -> BTreeMap<String, f64> {
             let mut out = BTreeMap::new();
