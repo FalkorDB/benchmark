@@ -9,6 +9,7 @@ use crate::{
 };
 use std::env;
 use std::ffi::OsString;
+use std::path::Path;
 use std::process::Output;
 use std::process::{Child, Command};
 use std::time::Duration;
@@ -33,6 +34,11 @@ impl Default for Neo4j {
 }
 
 impl Neo4j {
+    pub fn store_size_bytes(&self) -> u64 {
+        let store_dir = Path::new(&self.neo4j_home).join("data/databases/neo4j");
+        dir_size_bytes(&store_dir)
+    }
+
     fn new() -> Neo4j {
         let neo4j_home =
             env::var("NEO4J_HOME").unwrap_or_else(|_| String::from("./downloads/neo4j_local"));
@@ -61,6 +67,7 @@ impl Neo4j {
             self.uri.to_string(),
             self.user.to_string(),
             self.password.to_string(),
+            Some("neo4j".to_string()),
         )
         .await
     }
@@ -277,4 +284,41 @@ fn search_in_os_strings(
     os_strings
         .iter()
         .any(|os_string| os_string.as_os_str().to_str() == Some(target))
+}
+
+fn dir_size_bytes(path: &Path) -> u64 {
+    let md = match std::fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(_) => return 0,
+    };
+
+    if md.is_file() {
+        return md.len();
+    }
+
+    if !md.is_dir() {
+        return 0;
+    }
+
+    let mut total = 0u64;
+    let entries = match std::fs::read_dir(path) {
+        Ok(e) => e,
+        Err(_) => return 0,
+    };
+
+    for ent in entries.flatten() {
+        let p = ent.path();
+        // Best-effort: exclude lucene/fulltext directories so this stays closer to
+        // "data + native indexes" sizing.
+        if p.components().any(|c| {
+            let s = c.as_os_str().to_string_lossy().to_lowercase();
+            s == "lucene" || s == "fulltext"
+        }) {
+            continue;
+        }
+
+        total = total.saturating_add(dir_size_bytes(&p));
+    }
+
+    total
 }

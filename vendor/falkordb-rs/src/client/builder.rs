@@ -1,0 +1,569 @@
+/*
+ * Copyright FalkorDB Ltd. 2023 - present
+ * Licensed under the MIT License.
+ */
+
+use crate::{
+    client::{ConnectionStrategy, FalkorClientProvider},
+    FalkorConnectionInfo, FalkorDBError, FalkorResult, FalkorSyncClient, RetryPolicy,
+};
+use std::num::{NonZeroU8, NonZeroUsize};
+use std::time::Duration;
+
+#[cfg(feature = "tokio")]
+use crate::FalkorAsyncClient;
+
+/// A Builder-pattern implementation struct for creating a new Falkor client.
+pub struct FalkorClientBuilder<const R: char> {
+    connection_info: Option<FalkorConnectionInfo>,
+    strategy: ConnectionStrategy,
+    #[cfg_attr(not(feature = "tokio"), allow(dead_code))]
+    max_inflight: Option<NonZeroUsize>,
+    tcp_settings: Option<redis::io::tcp::TcpSettings>,
+    retry_policy: RetryPolicy,
+    query_logging: bool,
+}
+
+impl<const R: char> FalkorClientBuilder<R> {
+    /// Provide a connection info for the database connection
+    /// Will otherwise use the default connection details.
+    ///
+    /// # Arguments
+    /// * `falkor_connection_info`: the [`FalkorConnectionInfo`] to provide
+    ///
+    /// # Returns
+    /// The consumed and modified self.
+    pub fn with_connection_info(
+        self,
+        falkor_connection_info: FalkorConnectionInfo,
+    ) -> Self {
+        Self {
+            connection_info: Some(falkor_connection_info),
+            ..self
+        }
+    }
+
+    /// Specify how many underlying connections to maintain for concurrent operations.
+    ///
+    /// This updates the connection count of the builder's active
+    /// [`ConnectionStrategy`] (pool size for [`ConnectionStrategy::Pooled`], or number
+    /// of multiplexed sockets for [`ConnectionStrategy::Multiplexed`]). When combined
+    /// with `with_connection_strategy` (async builder only), the last setter wins.
+    ///
+    /// # Arguments
+    /// * `num_connections`: the number of connections to maintain, a non-zero [`u8`]
+    ///   (so at most 255)
+    ///
+    /// # Returns
+    /// The consumed and modified self.
+    pub fn with_num_connections(
+        self,
+        num_connections: NonZeroU8,
+    ) -> Self {
+        Self {
+            strategy: self.strategy.with_connection_count(num_connections),
+            ..self
+        }
+    }
+
+    /// Configure an opt-in [`RetryPolicy`] that automatically re-issues *eligible* operations on
+    /// *transient* connection failures, with bounded backoff.
+    ///
+    /// **Disabled by default**: without this call the client attempts every operation exactly once,
+    /// exactly as before. The available scope ([`RetryScope::ReadOnly`](crate::RetryScope)) retries
+    /// only read-only / idempotent operations, so enabling a policy never re-issues a write.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use falkordb::{FalkorClientBuilder, RetryPolicy};
+    ///
+    /// # fn doc() -> Result<(), Box<dyn std::error::Error>> {
+    /// let client = FalkorClientBuilder::new()
+    ///     .with_retry_policy(RetryPolicy::read_only().max_attempts(4))
+    ///     .build()?;
+    /// # let _ = client;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn with_retry_policy(
+        self,
+        retry_policy: RetryPolicy,
+    ) -> Self {
+        Self {
+            retry_policy,
+            ..self
+        }
+    }
+
+    /// Opt in to recording the **raw query text** as a span field (`db.query.text`) on the client's
+    /// `tracing` spans. **Off by default** for privacy: by default only a redacted query
+    /// fingerprint (`db.query.fingerprint`) is recorded, never the query text or parameter values.
+    ///
+    /// Enable this only in trusted environments — the raw Cypher you pass can contain inlined
+    /// literals (secrets/PII). Parameter values supplied via `with_param` are never recorded even
+    /// when this is on. Has no effect unless the `tracing` feature is enabled.
+    pub fn with_query_logging(
+        self,
+        enabled: bool,
+    ) -> Self {
+        Self {
+            query_logging: enabled,
+            ..self
+        }
+    }
+
+    /// Configure TCP-level socket settings for direct Redis TCP connections
+    /// opened by this client (keepalive, `TCP_NODELAY`, `TCP_USER_TIMEOUT` on
+    /// Linux).
+    ///
+    /// Unix-domain socket / embedded connections ignore these settings, and the
+    /// Sentinel connection path is not affected by this option.
+    ///
+    /// Useful for long-lived clients sitting behind NATs, stateful firewalls,
+    /// or idle-timeout-enforcing proxies that silently drop inactive TCP
+    /// sessions.
+    ///
+    /// # Arguments
+    /// * `tcp_settings`: a [`redis::io::tcp::TcpSettings`] value — use
+    ///   `TcpSettings::default()` as the starting point and chain the
+    ///   `set_*` methods you need.
+    ///
+    /// # Returns
+    /// The consumed and modified self.
+    pub fn with_tcp_settings(
+        self,
+        tcp_settings: redis::io::tcp::TcpSettings,
+    ) -> Self {
+        Self {
+            tcp_settings: Some(tcp_settings),
+            ..self
+        }
+    }
+
+    /// Convenience: enable TCP keepalive probes with the given idle time.
+    /// Sends keepalive probes after `idle` of inactivity on direct Redis TCP
+    /// connections. See [`with_tcp_settings`](Self::with_tcp_settings) for
+    /// scope limitations.
+    ///
+    /// Equivalent to:
+    /// ```ignore
+    /// builder.with_tcp_settings(
+    ///     redis::io::tcp::TcpSettings::default()
+    ///         .set_keepalive(
+    ///             redis::io::tcp::socket2::TcpKeepalive::new().with_time(idle)
+    ///         )
+    /// )
+    /// ```
+    ///
+    /// # Arguments
+    /// * `idle`: connection idle time before the first keepalive probe is sent.
+    ///
+    /// # Returns
+    /// The consumed and modified self.
+    pub fn with_tcp_keepalive(
+        self,
+        idle: Duration,
+    ) -> Self {
+        let settings = redis::io::tcp::TcpSettings::default()
+            .set_keepalive(redis::io::tcp::socket2::TcpKeepalive::new().with_time(idle));
+        self.with_tcp_settings(settings)
+    }
+
+    fn get_client<E: ToString, T: TryInto<FalkorConnectionInfo, Error = E>>(
+        connection_info: T,
+        tcp_settings: Option<&redis::io::tcp::TcpSettings>,
+    ) -> FalkorResult<(FalkorClientProvider, FalkorConnectionInfo)> {
+        let connection_info = connection_info
+            .try_into()
+            .map_err(|err| FalkorDBError::InvalidConnectionInfo(err.to_string()))?;
+
+        #[cfg(feature = "embedded")]
+        if let FalkorConnectionInfo::Embedded(ref config) = connection_info {
+            // Start the embedded server
+            let embedded_server =
+                std::sync::Arc::new(crate::embedded::EmbeddedServer::start(config.clone())?);
+
+            // Create a Redis client that connects to the embedded server's Unix socket
+            let socket_path = embedded_server.socket_path();
+            let redis_connection_info = redis::IntoConnectionInfo::into_connection_info(
+                redis::ConnectionAddr::Unix(socket_path.to_path_buf()),
+            )
+            .map_err(|err| FalkorDBError::InvalidConnectionInfo(err.to_string()))?;
+
+            let client = redis::Client::open(redis_connection_info.clone())
+                .map_err(|err| FalkorDBError::RedisError(err.to_string()))?;
+
+            return Ok((
+                FalkorClientProvider::Redis {
+                    client,
+                    sentinel: None,
+                    sentinel_replica: None,
+                    embedded_server: Some(embedded_server),
+                },
+                FalkorConnectionInfo::Redis(redis_connection_info),
+            ));
+        }
+
+        Ok((
+            match connection_info {
+                FalkorConnectionInfo::Redis(ref redis_info) => {
+                    // In redis 1.0+, TCP settings live on ConnectionInfo
+                    // itself. Clone the info, apply the settings (if any),
+                    // then open the client from it.
+                    let mut cfg = redis_info.clone();
+                    if let Some(settings) = tcp_settings {
+                        cfg = cfg.set_tcp_settings(settings.clone());
+                    }
+                    let client = redis::Client::open(cfg)
+                        .map_err(|err| FalkorDBError::RedisError(err.to_string()))?;
+                    FalkorClientProvider::Redis {
+                        client,
+                        sentinel: None,
+                        sentinel_replica: None,
+                        #[cfg(feature = "embedded")]
+                        embedded_server: None,
+                    }
+                }
+                #[cfg(feature = "embedded")]
+                FalkorConnectionInfo::Embedded(_) => unreachable!("Handled above"),
+            },
+            connection_info,
+        ))
+    }
+}
+
+impl FalkorClientBuilder<'S'> {
+    /// Creates a new [`FalkorClientBuilder`] for a sync client.
+    ///
+    /// # Returns
+    /// The new [`FalkorClientBuilder`]
+    #[allow(clippy::new_without_default)]
+    pub fn new() -> Self {
+        FalkorClientBuilder {
+            connection_info: None,
+            strategy: ConnectionStrategy::Pooled {
+                size: NonZeroU8::new(8).expect("Error creating perfectly valid u8"),
+            },
+            max_inflight: None,
+            tcp_settings: None,
+            retry_policy: RetryPolicy::disabled(),
+            query_logging: false,
+        }
+    }
+
+    /// Consume the builder, returning the newly constructed sync client
+    ///
+    /// # Returns
+    /// a new [`FalkorSyncClient`]
+    pub fn build(self) -> FalkorResult<FalkorSyncClient> {
+        let connection_info = self
+            .connection_info
+            .unwrap_or("falkor://127.0.0.1:6379".try_into()?);
+
+        let (mut client, actual_connection_info) =
+            Self::get_client(connection_info, self.tcp_settings.as_ref())?;
+
+        #[allow(irrefutable_let_patterns)]
+        if let FalkorConnectionInfo::Redis(redis_conn_info) = &actual_connection_info {
+            if let Some(sentinels) = client.get_sentinel_client(redis_conn_info)? {
+                client.set_sentinel(sentinels.master);
+                if let Some(replica) = sentinels.replica {
+                    client.set_sentinel_replica(replica);
+                }
+            }
+        }
+        FalkorSyncClient::create(
+            client,
+            actual_connection_info,
+            self.strategy.connection_count().get(),
+            self.retry_policy,
+            self.query_logging,
+        )
+    }
+}
+
+#[cfg(feature = "tokio")]
+impl FalkorClientBuilder<'A'> {
+    /// Creates a new [`FalkorClientBuilder`] for an asynchronous client.
+    ///
+    /// # Returns
+    /// The new [`FalkorClientBuilder`]
+    pub fn new_async() -> Self {
+        FalkorClientBuilder {
+            connection_info: None,
+            strategy: ConnectionStrategy::Multiplexed {
+                connections: NonZeroU8::new(8).expect("Error creating perfectly valid u8"),
+            },
+            max_inflight: None,
+            tcp_settings: None,
+            retry_policy: RetryPolicy::disabled(),
+            query_logging: false,
+        }
+    }
+
+    /// Select the [`ConnectionStrategy`] the async client should use.
+    ///
+    /// Overrides the default ([`ConnectionStrategy::Multiplexed`] with 8 sockets). When
+    /// combined with [`with_num_connections`](FalkorClientBuilder::with_num_connections),
+    /// the last setter wins: this method replaces the whole strategy (including its
+    /// count), while `with_num_connections` only updates the active strategy's count.
+    ///
+    /// # Arguments
+    /// * `strategy`: the [`ConnectionStrategy`] to use.
+    ///
+    /// # Returns
+    /// The consumed and modified self.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use falkordb::{ConnectionStrategy, FalkorClientBuilder};
+    /// use std::num::NonZeroU8;
+    ///
+    /// # async fn doc() {
+    /// let client = FalkorClientBuilder::new_async()
+    ///     .with_connection_strategy(ConnectionStrategy::Multiplexed {
+    ///         connections: NonZeroU8::new(4).unwrap(),
+    ///     })
+    ///     .build()
+    ///     .await
+    ///     .expect("Failed to build client");
+    ///
+    /// // Many concurrent queries are pipelined over the 4 shared sockets.
+    /// let mut graph = client.select_graph("social");
+    /// let _ = graph.ro_query("RETURN 1").execute().await;
+    /// # }
+    /// ```
+    pub fn with_connection_strategy(
+        self,
+        strategy: ConnectionStrategy,
+    ) -> Self {
+        Self { strategy, ..self }
+    }
+
+    /// Bound the number of concurrently in-flight commands per multiplexed socket.
+    ///
+    /// Maps to the underlying `ConnectionManager` concurrency limit and only affects the
+    /// [`ConnectionStrategy::Multiplexed`] strategy (it is ignored for
+    /// [`ConnectionStrategy::Pooled`], whose pool size already caps in-flight commands).
+    /// Use it to apply backpressure; without it, multiplexed mode does not bound the
+    /// number of outstanding requests.
+    ///
+    /// A limit of zero would permanently stall the socket (no commands could ever
+    /// complete), so this method requires a [`NonZeroUsize`].
+    ///
+    /// # Arguments
+    /// * `max_inflight`: maximum number of in-flight commands per multiplexed socket,
+    ///   must be non-zero.
+    ///
+    /// # Returns
+    /// The consumed and modified self.
+    pub fn with_max_inflight(
+        self,
+        max_inflight: NonZeroUsize,
+    ) -> Self {
+        Self {
+            max_inflight: Some(max_inflight),
+            ..self
+        }
+    }
+
+    /// Consume the builder, returning the newly constructed async client
+    ///
+    /// # Returns
+    /// a new [`FalkorAsyncClient`]
+    pub async fn build(self) -> FalkorResult<FalkorAsyncClient> {
+        let connection_info = self
+            .connection_info
+            .unwrap_or("falkor://127.0.0.1:6379".try_into()?);
+
+        let (mut client, actual_connection_info) =
+            Self::get_client(connection_info, self.tcp_settings.as_ref())?;
+
+        #[allow(irrefutable_let_patterns)]
+        if let FalkorConnectionInfo::Redis(redis_conn_info) = &actual_connection_info {
+            if let Some(sentinels) = client.get_sentinel_client_async(redis_conn_info).await? {
+                client.set_sentinel(sentinels.master);
+                if let Some(replica) = sentinels.replica {
+                    client.set_sentinel_replica(replica);
+                }
+            }
+        }
+        FalkorAsyncClient::create(
+            client,
+            actual_connection_info,
+            self.strategy,
+            self.max_inflight,
+            self.retry_policy,
+            self.query_logging,
+        )
+        .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sync_builder() {
+        let connection_info = "falkor://127.0.0.1:6379".try_into();
+        assert!(connection_info.is_ok());
+
+        assert!(FalkorClientBuilder::new()
+            .with_connection_info(connection_info.unwrap())
+            .with_query_logging(true)
+            .build()
+            .is_ok());
+    }
+
+    #[test]
+    fn test_connection_pool_size() {
+        let client = FalkorClientBuilder::new()
+            .with_num_connections(NonZeroU8::new(16).expect("Could not create a perfectly fine u8"))
+            .build();
+        assert!(client.is_ok());
+
+        assert_eq!(client.unwrap().connection_pool_size(), 16);
+    }
+
+    #[test]
+    fn test_builder_with_tcp_keepalive() {
+        let builder = FalkorClientBuilder::new().with_tcp_keepalive(Duration::from_secs(30));
+        let settings = builder
+            .tcp_settings
+            .as_ref()
+            .expect("tcp_settings should be set after with_tcp_keepalive");
+        assert!(settings.keepalive().is_some());
+    }
+
+    #[test]
+    fn test_builder_with_tcp_settings() {
+        let settings = redis::io::tcp::TcpSettings::default()
+            .set_nodelay(true)
+            .set_keepalive(
+                redis::io::tcp::socket2::TcpKeepalive::new().with_time(Duration::from_secs(60)),
+            );
+        let builder = FalkorClientBuilder::new().with_tcp_settings(settings);
+        let applied = builder
+            .tcp_settings
+            .as_ref()
+            .expect("tcp_settings should be set after with_tcp_settings");
+        assert!(applied.nodelay());
+        assert!(applied.keepalive().is_some());
+    }
+
+    #[test]
+    #[cfg(feature = "embedded")]
+    fn test_embedded_config_creation() {
+        // Test that we can create an embedded config
+        let config = crate::EmbeddedConfig::default();
+        assert_eq!(config.db_filename, "falkordb.rdb");
+        assert!(config.redis_server_path.is_none());
+        assert!(config.falkordb_module_path.is_none());
+    }
+
+    #[test]
+    #[cfg(feature = "embedded")]
+    fn test_embedded_builder_fails_without_binaries() {
+        // Test that building with embedded config fails gracefully when binaries are not found
+        use std::path::PathBuf;
+
+        let config = crate::EmbeddedConfig {
+            redis_server_path: Some(PathBuf::from("/nonexistent/redis-server")),
+            falkordb_module_path: Some(PathBuf::from("/nonexistent/falkordb.so")),
+            ..Default::default()
+        };
+
+        let result = FalkorClientBuilder::new()
+            .with_connection_info(crate::FalkorConnectionInfo::Embedded(config))
+            .build();
+
+        // Should fail because the binaries don't exist
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(matches!(e, crate::FalkorDBError::EmbeddedServerError(_)));
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "embedded")]
+    fn test_embedded_builder_with_custom_config() {
+        use std::path::PathBuf;
+
+        let config = crate::EmbeddedConfig {
+            redis_server_path: Some(PathBuf::from("/custom/redis")),
+            falkordb_module_path: Some(PathBuf::from("/custom/falkordb.so")),
+            db_filename: "custom.rdb".to_string(),
+            ..Default::default()
+        };
+
+        // Just test that we can create the builder with custom config
+        let builder = FalkorClientBuilder::new()
+            .with_connection_info(crate::FalkorConnectionInfo::Embedded(config));
+
+        // Attempting to build will fail without actual binaries, but builder creation should work
+        let result = builder.build();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_builder_with_different_pool_sizes() {
+        for size in [1, 4, 8, 16, 32] {
+            let client = FalkorClientBuilder::new()
+                .with_num_connections(NonZeroU8::new(size).expect("Could not create non-zero u8"))
+                .build();
+
+            if let Ok(client) = client {
+                assert_eq!(client.connection_pool_size(), size);
+            }
+        }
+    }
+
+    #[test]
+    fn test_builder_without_connection_info() {
+        // Test default connection behavior
+        let client = FalkorClientBuilder::new().build();
+        // Should use default connection info (falkor://127.0.0.1:6379)
+        // Will fail without a running server, but that's expected
+        assert!(client.is_ok() || client.is_err());
+    }
+
+    #[test]
+    fn test_builder_with_invalid_connection_string() {
+        let result = FalkorClientBuilder::new()
+            .with_connection_info("invalid://bad:url".try_into().unwrap_or_else(|_| {
+                // If try_into fails, it will error before build
+                "falkor://127.0.0.1:6379".try_into().unwrap()
+            }))
+            .build();
+
+        // The build might succeed or fail depending on connection
+        assert!(result.is_ok() || result.is_err());
+    }
+
+    #[test]
+    #[cfg(feature = "tokio")]
+    fn test_async_builder_creation() {
+        let _builder = FalkorClientBuilder::new_async();
+        // Just verify we can create an async builder without panicking
+    }
+
+    #[test]
+    #[cfg(all(feature = "embedded", feature = "tokio"))]
+    fn test_async_builder_with_embedded() {
+        use std::path::PathBuf;
+
+        let config = crate::EmbeddedConfig {
+            redis_server_path: Some(PathBuf::from("/nonexistent/redis")),
+            falkordb_module_path: Some(PathBuf::from("/nonexistent/falkordb.so")),
+            ..Default::default()
+        };
+
+        // Just verify we can create an async builder with embedded config
+        let _builder = FalkorClientBuilder::new_async()
+            .with_connection_info(crate::FalkorConnectionInfo::Embedded(config));
+
+        // Can't easily test async build without tokio runtime in tests
+        // but creation should work
+    }
+}
