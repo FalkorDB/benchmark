@@ -33,6 +33,7 @@ jobs:
         run: rustup update ${{ matrix.toolchain }} && rustup default ${{ matrix.toolchain }}
 
       - name: Install protobuf compiler
+        # Kept explicit to ensure protoc is always available in CI.
         run: sudo apt-get install -y protobuf-compiler
 
       - name: Build
