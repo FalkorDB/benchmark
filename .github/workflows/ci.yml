@@ -32,6 +32,9 @@ jobs:
       - name: Set up Rust
         run: rustup update ${{ matrix.toolchain }} && rustup default ${{ matrix.toolchain }}
 
+      - name: Install protobuf compiler
+        run: sudo apt-get install -y protobuf-compiler
+
       - name: Build
         run: cargo build --verbose --all-targets --all-features
 
