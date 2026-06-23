@@ -433,7 +433,7 @@ RETURN
             }
 
             count += 1;
-            if count % 10000 == 0 {
+            if count.is_multiple_of(10000) {
                 info!("Executed {} queries", count);
             }
         }
@@ -538,7 +538,7 @@ RETURN
                     }
                     let duration = start.elapsed();
                     count += 1;
-                    if count % 1000 == 0 {
+                    if count.is_multiple_of(1000) {
                         info!("{} lines processed", count);
                     }
                     histogram.increment(duration.as_micros() as u64)?;
@@ -901,7 +901,7 @@ RETURN
             let q = trimmed.trim_end_matches(';');
 
             let mut results = self.execute_query(q).await?;
-            while let Some(_) = results.next().await {
+            while results.next().await.is_some() {
                 // Drain results
             }
         }

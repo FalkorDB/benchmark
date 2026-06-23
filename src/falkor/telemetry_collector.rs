@@ -10,11 +10,9 @@ use tracing::info;
 #[derive(Debug)]
 struct TelemetryEntry {
     query: String,
-    total: f64,
     wait: f64,
     exec: f64,
     report: f64,
-    write: bool,
 }
 
 /// Normalise a Cypher query so it can be matched across minor formatting
@@ -52,10 +50,6 @@ fn parse_telemetry_entry(fields_val: &Value) -> Option<TelemetryEntry> {
     }
 
     let query = m.get("Query")?.clone();
-    let total = m
-        .get("Total duration")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0.0);
     let wait = m
         .get("Wait duration")
         .and_then(|v| v.parse().ok())
@@ -68,15 +62,12 @@ fn parse_telemetry_entry(fields_val: &Value) -> Option<TelemetryEntry> {
         .get("Report duration")
         .and_then(|v| v.parse().ok())
         .unwrap_or(0.0);
-    let write = m.get("Write").map(|v| v == "1").unwrap_or(false);
 
     Some(TelemetryEntry {
         query,
-        total,
         wait,
         exec,
         report,
-        write,
     })
 }
 

@@ -567,14 +567,6 @@ RETURN k AS name, attributes[k]['value'] AS value\n"
         Ok(())
     }
 
-    /// Execute stream with batch processing
-    async fn run_query_no_results(
-        &self,
-        q: &str,
-    ) -> BenchmarkResult<()> {
-        self.graph.run(query(q)).await.map_err(Neo4rsError)?;
-        Ok(())
-    }
 }
 
 /// Parse a Cypher property map string like "{id: 1, age: 20, gender: \"male\", completion_percentage: 75}"
@@ -766,8 +758,7 @@ impl Neo4jClient {
             let q = "UNWIND $batch AS row MATCH (n:User {id: row.src}), (m:User {id: row.dst}) CREATE (n)-[:Friend {bench_capacity: row.capacity}]->(m)";
 
             // Convert Vec<BoltMap> to Vec<BoltType> for BoltList
-            let bolt_types: Vec<BoltType> =
-                batch_maps.into_iter().map(|m| BoltType::Map(m)).collect();
+            let bolt_types: Vec<BoltType> = batch_maps.into_iter().map(BoltType::Map).collect();
             let batch_list = BoltList::from(bolt_types);
 
             let start = Instant::now();

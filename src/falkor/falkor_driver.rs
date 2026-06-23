@@ -350,8 +350,7 @@ impl<U> Falkor<U> {
     pub async fn client(&self) -> BenchmarkResult<FalkorBenchmarkClient> {
         let connection_string = self
             .endpoint
-            .as_ref()
-            .map(|s| s.as_str())
+            .as_deref()
             .unwrap_or("falkor://127.0.0.1:6379");
         let connection_info = connection_string.try_into()?;
         let client = FalkorClientBuilder::new_async()
@@ -912,12 +911,7 @@ RETURN
             let timeout = self.query_timeout_guard;
             let falkor_result = tokio::time::timeout(timeout, falkor_result).await;
 
-            // If any query fails, return the error
-            if let Err(e) =
-                Self::read_reply(spawn_id, &format!("batch_{}", i), query, falkor_result).await
-            {
-                return Err(e);
-            }
+            Self::read_reply(spawn_id, &format!("batch_{}", i), query, falkor_result).await?;
         }
 
         Ok(())
