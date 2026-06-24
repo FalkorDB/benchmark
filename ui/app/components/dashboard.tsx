@@ -976,7 +976,7 @@ export default function DashBoard({
                   Better performance, lower overall costs
                 </p>
 
-                {telemetryBreakdownPerRun.length > 0 && (
+                {!hideHardware && telemetryBreakdownPerRun.length > 0 && (
                   <div className="w-full pb-2">
                     <p className="text-xs text-gray-600 text-center font-fira pb-1">
                       Telemetry breakdown for {telemetryBreakdownPerRun[0].query} (wait / exec / report)
