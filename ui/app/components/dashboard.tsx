@@ -18,6 +18,10 @@ type DashboardProps = {
    * ignore any other vendors present in the data file).
    */
   comparisonVendors?: string[];
+  /**
+   * Hides hardware controls/indicators and ignores hardware filtering when true.
+   */
+  hideHardware?: boolean;
 };
 
 const DEFAULT_SELECTED_OPTIONS: Record<string, string[]> = {
@@ -33,6 +37,7 @@ export default function DashBoard({
   dataUrl = "/resultData.json",
   initialSelectedOptions,
   comparisonVendors,
+  hideHardware = false,
 }: DashboardProps) {
   const [activeUrl, setActiveUrl] = useState(dataUrl);
   const [data, setData] = useState<BenchmarkData | null>(null);
@@ -183,9 +188,11 @@ export default function DashBoard({
           .filter(Boolean)
       )
     );
-    const hardware = Array.from(
-      new Set(data.runs.map((r) => r.platform?.toLowerCase()).filter(Boolean))
-    );
+    const hardware = hideHardware
+      ? []
+      : Array.from(
+          new Set(data.runs.map((r) => r.platform?.toLowerCase()).filter(Boolean))
+        );
 
     const queries = availableQueries;
 
@@ -221,22 +228,24 @@ export default function DashBoard({
       replaceIfNoMatch("Clients", clients);
       replaceIfNoMatch("Throughput", throughputs);
       
-      // For hardware selection, default to showing *all* hardwares present in the file if no match.
-      if (hardware.length) {
-        const current = next["Hardware"] ?? [];
-        const hasMatch = current.some((c) => hardware.some((a) => a === c));
-        if (!hasMatch) {
-          next["Hardware"] = hardware;
+      if (!hideHardware) {
+        // For hardware selection, default to showing *all* hardwares present in the file if no match.
+        if (hardware.length) {
+          const current = next["Hardware"] ?? [];
+          const hasMatch = current.some((c) => hardware.some((a) => a === c));
+          if (!hasMatch) {
+            next["Hardware"] = hardware;
+          }
+        } else {
+          replaceIfNoMatch("Hardware", hardware);
         }
-      } else {
-        replaceIfNoMatch("Hardware", hardware);
       }
 
       return next;
     });
 
     setDidInitFromData(true);
-  }, [data, didInitFromData, allowedVendors, availableQueries]);
+  }, [data, didInitFromData, allowedVendors, availableQueries, hideHardware]);
 
   const handleSideBarSelection = (groupTitle: string, optionId: string) => {
     setSelectedOptions((prev) => {
@@ -339,7 +348,9 @@ export default function DashBoard({
     }
 
     const results = data.runs.filter((run) => {
-      const isHardwareMatch = selectedOptions.Hardware?.length
+      const isHardwareMatch = hideHardware
+        ? true
+        : selectedOptions.Hardware?.length
         ? run.platform &&
           selectedOptions.Hardware.some((hardware) =>
             run.platform.toLowerCase().includes(hardware.toLowerCase())
@@ -371,7 +382,7 @@ export default function DashBoard({
     });
 
     setFilteredResults(results);
-  }, [data, selectedOptions]);
+  }, [data, selectedOptions, hideHardware]);
 
   const latencyDataForRealistic = useMemo(() => {
     const convertToMilliseconds = (value: string): number => {
@@ -732,6 +743,18 @@ export default function DashBoard({
     return Array.from(byVendor.values());
   }, [filteredResults]);
 
+  const hasConcurrentRunDetails = useMemo(() => {
+    return concurrentRuns.some((r) => {
+      const elapsedMs = Number(r?.result?.["elapsed-ms"] ?? 0);
+      const avgLatency = Number(r?.result?.["avg-latency-ms"] ?? 0);
+      const stats = r?.result?.["spawn-stats"];
+      const ratio = Number(stats?.["max-min-ratio"] ?? 0);
+      const cv = Number(stats?.cv ?? 0);
+
+      return elapsedMs > 0 || avgLatency > 0 || ratio > 0 || cv > 0;
+    });
+  }, [concurrentRuns]);
+
   return (
     <SidebarProvider className="h-screen w-screen overflow-hidden">
       <div className="flex h-full w-full">
@@ -739,6 +762,7 @@ export default function DashBoard({
           selectedOptions={selectedOptions}
           handleSideBarSelection={handleSideBarSelection}
           platform={data?.platforms}
+          hideHardware={hideHardware}
           allowedVendors={
             data?.runs?.length
               ? Array.from(
@@ -786,25 +810,11 @@ export default function DashBoard({
                   className="bg-white border border-gray-200/80 text-gray-800 text-sm rounded-lg px-3 py-2 font-fira shadow-sm focus:outline-none focus:ring-1 focus:ring-primary focus:border-primary cursor-pointer min-w-[280px]"
                 >
                   <option value={baseFileName}>Latest Run (Default)</option>
-                  {pastRuns.map((run) => {
-                    const date = new Date(run.timestamp * 1000);
-                    const formatted = date.toLocaleString("en-US", {
-                      timeZone: "UTC",
-                      year: "numeric",
-                      month: "short",
-                      day: "2-digit",
-                      hour: "2-digit",
-                      minute: "2-digit",
-                      second: "2-digit",
-                      hour12: false,
-                    }) + " UTC";
-                    
-                    return (
-                      <option key={run.filename} value={run.filename}>
-                        {formatted}
-                      </option>
-                    );
-                  })}
+                  {pastRuns.map((run) => (
+                    <option key={run.filename} value={run.filename}>
+                      {run.filename}
+                    </option>
+                  ))}
                 </select>
               </div>
             </div>
@@ -837,48 +847,50 @@ export default function DashBoard({
                 </div>
               </div>
 
-              <div className="bg-muted/50 rounded-xl p-4 w-full flex flex-col min-h-[180px]">
-                <h2 className="text-2xl font-bold text-center font-space">
-                  RUN DETAILS
-                </h2>
-                <p className="pb-2 text-gray-600 text-center font-fira">
-                  Duration, mean latency, and worker fairness
-                </p>
-                <div className="w-full overflow-x-auto">
-                  <table className="w-full text-sm font-fira">
-                    <thead>
-                      <tr className="text-left text-gray-600">
-                        <th className="py-1 pr-4">Vendor</th>
-                        <th className="py-1 pr-4">Duration</th>
-                        <th className="py-1 pr-4">Avg latency</th>
-                        <th className="py-1 pr-4">Worker imbalance</th>
-                        <th className="py-1 pr-4">Worker CV</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {concurrentRuns.map((r) => {
-                        const elapsedMs = Number(r?.result?.["elapsed-ms"] ?? 0);
-                        const avgLatency = Number(r?.result?.["avg-latency-ms"] ?? 0);
-                        const stats = r?.result?.["spawn-stats"];
-                        const ratio = Number(stats?.["max-min-ratio"] ?? 0);
-                        const cv = Number(stats?.cv ?? 0);
+              {hasConcurrentRunDetails && (
+                <div className="bg-muted/50 rounded-xl p-4 w-full flex flex-col min-h-[180px]">
+                  <h2 className="text-2xl font-bold text-center font-space">
+                    RUN DETAILS
+                  </h2>
+                  <p className="pb-2 text-gray-600 text-center font-fira">
+                    Duration, mean latency, and worker fairness
+                  </p>
+                  <div className="w-full overflow-x-auto">
+                    <table className="w-full text-sm font-fira">
+                      <thead>
+                        <tr className="text-left text-gray-600">
+                          <th className="py-1 pr-4">Vendor</th>
+                          <th className="py-1 pr-4">Duration</th>
+                          <th className="py-1 pr-4">Avg latency</th>
+                          <th className="py-1 pr-4">Worker imbalance</th>
+                          <th className="py-1 pr-4">Worker CV</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {concurrentRuns.map((r) => {
+                          const elapsedMs = Number(r?.result?.["elapsed-ms"] ?? 0);
+                          const avgLatency = Number(r?.result?.["avg-latency-ms"] ?? 0);
+                          const stats = r?.result?.["spawn-stats"];
+                          const ratio = Number(stats?.["max-min-ratio"] ?? 0);
+                          const cv = Number(stats?.cv ?? 0);
 
-                        return (
-                          <tr key={r.vendor} className="border-t border-gray-200/60">
-                            <td className="py-2 pr-4 font-semibold">{r.vendor}</td>
-                            <td className="py-2 pr-4">{formatDuration(elapsedMs)}</td>
-                            <td className="py-2 pr-4">{avgLatency.toFixed(2)} ms</td>
-                            <td className="py-2 pr-4">
-                              {ratio > 0 ? `${ratio.toFixed(2)}x (max/min)` : "—"}
-                            </td>
-                            <td className="py-2 pr-4">{cv > 0 ? cv.toFixed(3) : "—"}</td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
+                          return (
+                            <tr key={r.vendor} className="border-t border-gray-200/60">
+                              <td className="py-2 pr-4 font-semibold">{r.vendor}</td>
+                              <td className="py-2 pr-4">{formatDuration(elapsedMs)}</td>
+                              <td className="py-2 pr-4">{avgLatency.toFixed(2)} ms</td>
+                              <td className="py-2 pr-4">
+                                {ratio > 0 ? `${ratio.toFixed(2)}x (max/min)` : "—"}
+                              </td>
+                              <td className="py-2 pr-4">{cv > 0 ? cv.toFixed(3) : "—"}</td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
-              </div>
+              )}
 
               <div
                 className="bg-muted/50 rounded-xl p-4 w-full flex flex-col items-center justify-between min-h-[420px]"

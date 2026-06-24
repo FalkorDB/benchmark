@@ -6,7 +6,15 @@ export default function Home() {
   return (
     <main className="h-screen flex flex-col">
       <Header />
-      <DashBoard comparisonVendors={["falkordb", "neo4j"]} />
+      <DashBoard
+        dataUrl="/summaries/neo4j_vs_falkordb.json"
+        comparisonVendors={["falkordb", "neo4j"]}
+        hideHardware
+        initialSelectedOptions={{
+          "Workload Type": ["concurrent"],
+          Vendors: ["falkordb", "neo4j"],
+        }}
+      />
     </main>
   );
 }

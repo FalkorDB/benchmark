@@ -127,6 +127,7 @@ export function NavMain({
   selectedOptions,
   handleSideBarSelection,
   platform,
+  hideHardware,
   datasetSummary,
 }: {
   items: {
@@ -139,6 +140,7 @@ export function NavMain({
   selectedOptions: Record<string, string[]>;
   handleSideBarSelection: (groupTitle: string, optionId: string) => void;
   platform?: Platforms;
+  hideHardware?: boolean;
   datasetSummary?: {
     nodes: number;
     edges: number;
@@ -154,6 +156,7 @@ export function NavMain({
 
   const filteredItems = items.filter((group) => {
     if (group.title === "Queries" && isRealisticWorkloadOn) return false;
+    if (group.title === "Hardware" && hideHardware) return false;
     if (
       (group.title === "Clients" ||
         group.title === "Throughput" ||
@@ -186,24 +189,6 @@ export function NavMain({
               <div className="flex flex-col">
                 <h2 className="text-lg font-semibold mb-1">Dataset &amp; workload</h2>
                 <div className="mt-0.5 flex flex-col gap-0.5 text-xs text-gray-700 font-medium">
-                  {datasetSummary.startedAtEpochSecs && (
-                    <div className="flex justify-between gap-4 pb-1 mb-1 border-b border-gray-200/40">
-                      <span className="text-gray-500">Date &amp; time</span>
-                      <span className="tabular-nums text-right">
-                        {(() => {
-                          const date = new Date(datasetSummary.startedAtEpochSecs * 1000);
-                          const pad = (num: number) => String(num).padStart(2, "0");
-                          const yyyy = date.getUTCFullYear();
-                          const mm = pad(date.getUTCMonth() + 1);
-                          const dd = pad(date.getUTCDate());
-                          const hh = pad(date.getUTCHours());
-                          const min = pad(date.getUTCMinutes());
-                          const ss = pad(date.getUTCSeconds());
-                          return `${yyyy}-${mm}-${dd} ${hh}:${min}:${ss} UTC`;
-                        })()}
-                      </span>
-                    </div>
-                  )}
                   <div className="flex justify-between gap-4">
                     <span className="text-gray-500">Nodes</span>
                     <span className="tabular-nums">
