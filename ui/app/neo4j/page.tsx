@@ -8,6 +8,7 @@ export default function Neo4jVsFalkor() {
       <DashBoard
         dataUrl="/summaries/neo4j_vs_falkordb.json"
         comparisonVendors={["falkordb", "neo4j"]}
+        hideHardware
         initialSelectedOptions={{
           "Workload Type": ["concurrent"],
           Vendors: ["falkordb", "neo4j"],

@@ -24,6 +24,7 @@ export function AppSidebar({
   selectedOptions,
   handleSideBarSelection,
   platform,
+  hideHardware,
   allowedVendors,
   throughputOptions,
   queryOptions,
@@ -33,6 +34,7 @@ export function AppSidebar({
   selectedOptions: Record<string, string[]>;
   handleSideBarSelection: (groupTitle: string, optionId: string) => void;
   platform?: Platforms;
+  hideHardware?: boolean;
   allowedVendors?: string[];
   throughputOptions?: Array<string | number>;
   queryOptions?: string[];
@@ -82,7 +84,9 @@ export function AppSidebar({
         .join(" ");
     };
 
-    return sidebarConfig.sidebarData.map((group) => {
+    return sidebarConfig.sidebarData
+      .filter((group) => !(hideHardware && group.title === "Hardware"))
+      .map((group) => {
       if (group.title === "Vendors" && allowed.length) {
         return {
           ...group,
@@ -106,7 +110,7 @@ export function AppSidebar({
 
       return group;
     });
-  }, [allowedVendors, throughputOptions, queryOptions]);
+  }, [allowedVendors, throughputOptions, queryOptions, hideHardware]);
 
   return (
     <Sidebar
@@ -124,6 +128,7 @@ export function AppSidebar({
           selectedOptions={selectedOptions}
           handleSideBarSelection={handleSideBarSelection}
           platform={platform}
+          hideHardware={hideHardware}
           datasetSummary={datasetSummary}
         />
       </SidebarContent>
