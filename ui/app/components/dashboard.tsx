@@ -789,7 +789,7 @@ export default function DashBoard({
           datasetSummary={datasetSummary}
         />
         <SidebarInset className="flex-grow h-full min-h-0 overflow-y-auto">
-          {pastRuns.length > 0 && (
+          {!hideHardware && pastRuns.length > 0 && (
             <div className="bg-muted/30 border-b border-gray-200/40 p-4 flex flex-wrap items-center justify-between gap-4 font-space">
               <div className="flex flex-col">
                 <span className="text-xs text-gray-500 font-medium">Select Run History</span>
