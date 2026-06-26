@@ -58,6 +58,8 @@ export default function DashBoard({
       baseDatasetBytes?: number;
     }[]
   >([]);
+  const [didInitFromData, setDidInitFromData] = useState(false);
+  const [loadedDataUrl, setLoadedDataUrl] = useState<string | null>(null);
 
   const [manifest, setManifest] = useState<Record<string, { filename: string; timestamp: number }[]>>({});
 
@@ -78,6 +80,8 @@ export default function DashBoard({
 
   useEffect(() => {
     setActiveUrl(dataUrl);
+    setData(null);
+    setLoadedDataUrl(null);
     setDidInitFromData(false);
   }, [dataUrl]);
 
@@ -112,42 +116,53 @@ export default function DashBoard({
     return next;
   });
 
-  const [didInitFromData, setDidInitFromData] = useState(false);
-
-  const fetchData = useCallback(async () => {
-    try {
-      const response = await fetch(activeUrl);
-      if (!response.ok)
-        throw new Error(`HTTP error! status: ${response.status}`);
-
-      const json = (await response.json()) as BenchmarkData;
-
-      if (allowedVendors?.length) {
-        const filtered: BenchmarkData = {
-          ...json,
-          runs: (json.runs ?? []).filter((r) =>
-            allowedVendors.includes(r.vendor?.toLowerCase())
-          ),
-          unrealstic: (json.unrealstic ?? []).filter((u) =>
-            allowedVendors.includes(u.vendor?.toLowerCase())
-          ),
-        };
-        setData(filtered);
-      } else {
-        setData(json);
-      }
-    } catch (error) {
-      toast({
-        title: "Error fetching data",
-        description: error instanceof Error ? error.message : "Unknown error",
-        variant: "destructive",
-      });
-    }
-  }, [toast, activeUrl, allowedVendors]);
 
   useEffect(() => {
+    let cancelled = false;
+    const urlForRequest = activeUrl;
+
+    const fetchData = async () => {
+      try {
+        const response = await fetch(urlForRequest);
+        if (!response.ok)
+          throw new Error(`HTTP error! status: ${response.status}`);
+
+        const json = (await response.json()) as BenchmarkData;
+
+        if (cancelled) return;
+
+        if (allowedVendors?.length) {
+          const filtered: BenchmarkData = {
+            ...json,
+            runs: (json.runs ?? []).filter((r) =>
+              allowedVendors.includes(r.vendor?.toLowerCase())
+            ),
+            unrealstic: (json.unrealstic ?? []).filter((u) =>
+              allowedVendors.includes(u.vendor?.toLowerCase())
+            ),
+          };
+          setData(filtered);
+        } else {
+          setData(json);
+        }
+        setLoadedDataUrl(urlForRequest);
+      } catch (error) {
+        if (cancelled) return;
+        setLoadedDataUrl(null);
+        toast({
+          title: "Error fetching data",
+          description: error instanceof Error ? error.message : "Unknown error",
+          variant: "destructive",
+        });
+      }
+    };
+
     fetchData();
-  }, [fetchData]);
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeUrl, allowedVendors, toast]);
 
   const availableQueries = useMemo(() => {
     if (!data) return [];
@@ -167,7 +182,7 @@ export default function DashBoard({
 
   // On first load of a summary file, auto-pick filters that match the data.
   useEffect(() => {
-    if (didInitFromData || !data?.runs?.length) return;
+    if (didInitFromData || loadedDataUrl !== activeUrl || !data?.runs?.length) return;
 
     const vendors = allowedVendors?.length
       ? allowedVendors
@@ -245,7 +260,7 @@ export default function DashBoard({
     });
 
     setDidInitFromData(true);
-  }, [data, didInitFromData, allowedVendors, availableQueries, hideHardware]);
+  }, [data, didInitFromData, loadedDataUrl, activeUrl, allowedVendors, availableQueries, hideHardware]);
 
   const handleSideBarSelection = (groupTitle: string, optionId: string) => {
     setSelectedOptions((prev) => {
@@ -380,6 +395,20 @@ export default function DashBoard({
         isVendorMatch && isClientMatch && isThroughputMatch && isHardwareMatch
       );
     });
+    const shouldDeduplicateConcurrentPublicRuns =
+      hideHardware &&
+      selectedOptions["Workload Type"]?.includes("concurrent");
+
+    if (shouldDeduplicateConcurrentPublicRuns) {
+      const byVendor = new Map<string, Run>();
+      for (const run of results) {
+        const vendorKey = (run.vendor ?? "").toString().toLowerCase();
+        if (!vendorKey || byVendor.has(vendorKey)) continue;
+        byVendor.set(vendorKey, run);
+      }
+      setFilteredResults(Array.from(byVendor.values()));
+      return;
+    }
 
     setFilteredResults(results);
   }, [data, selectedOptions, hideHardware]);
@@ -700,7 +729,7 @@ export default function DashBoard({
   const workloadType = selectedOptions["Workload Type"];
   useEffect(() => {
     setGridKey((prevKey) => prevKey + 1);
-  }, [workloadType]);
+  }, [workloadType, activeUrl]);
 
   //saving data to window.allChartData
   /* eslint-disable */
@@ -805,6 +834,8 @@ export default function DashBoard({
                     } else {
                       setActiveUrl(`/summaries/${val}`);
                     }
+                    setData(null);
+                    setLoadedDataUrl(null);
                     setDidInitFromData(false);
                   }}
                   className="bg-white border border-gray-200/80 text-gray-800 text-sm rounded-lg px-3 py-2 font-fira shadow-sm focus:outline-none focus:ring-1 focus:ring-primary focus:border-primary cursor-pointer min-w-[280px]"
