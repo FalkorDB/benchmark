@@ -11,8 +11,9 @@ export default function Home() {
         comparisonVendors={["falkordb", "neo4j"]}
         hideHardware
         initialSelectedOptions={{
-          "Workload Type": ["concurrent"],
+          "Workload Type": ["single"],
           Vendors: ["falkordb", "neo4j"],
+          Queries: ["aggregate_expansion_4_with_filter"],
         }}
       />
     </main>
