@@ -19,9 +19,10 @@ module.exports = {
 		height: {
 			'screen-dynamic': 'calc(100vh - var(--dynamic-padding))',
 		  },
-  		colors: {
+		colors: {
 			FalkorDB: 'var(--FalkorDB-color)',
 			Neo4j: 'var(--Neo4j-color)',
+			Memgraph: 'var(--Memgraph-color)',
   			background: 'hsl(var(--background))',
   			foreground: 'hsl(var(--foreground))',
   			card: {

@@ -1,0 +1,47 @@
+name: "CodeQL"
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  schedule:
+    - cron: '0 0 * * 0'  # every Sunday
+
+env:
+  # Retry transient crates.io download failures and avoid HTTP/2 "unexpected eof" errors.
+  # No rust-cache here: caching target/ would stop CodeQL from observing a real build.
+  CARGO_NET_RETRY: "10"
+  CARGO_HTTP_MULTIPLEXING: "false"
+
+jobs:
+  analyze:
+    name: Analyze
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [ 'rust' ]
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+    - name: Initialize CodeQL
+      uses: github/codeql-action/init@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4
+      with:
+        languages: ${{ matrix.language }}
+      env:
+        CODEQL_ENABLE_EXPERIMENTAL_FEATURES: true
+
+    - name: Build Rust project
+      run: |
+        cargo build --all
+
+    - name: Perform CodeQL Analysis
+      uses: github/codeql-action/analyze@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4

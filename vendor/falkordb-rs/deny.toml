@@ -1,0 +1,50 @@
+[advisories]
+
+[bans]
+multiple-versions = "deny"
+skip = [
+    "getrandom",
+    "hashbrown",
+    "r-efi",
+    "windows-sys",
+    # `webpki-roots` 0.26 is a thin shim that re-exports 0.26-compatible roots from
+    # `webpki-roots` 1.0, so both versions appear together. Pulled only by `ureq` (the
+    # `embedded` feature's HTTPS downloader); harmless and resolves once `ureq` updates.
+    "webpki-roots",
+    # `sha2` (embedded download checksum verification) pulls `cpufeatures` 0.2 while
+    # `redis`'s `rand`/`chacha20` pull 0.3. Tiny CPU-feature-detection shim; benign.
+    "cpufeatures",
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+
+[licenses]
+exceptions = [
+    { name = "ring", allow = ["LicenseRef-ring"] } # ring uses a specific BoringSSL license that does not match the standard text so requires allowing the specific hash
+]
+unused-allowed-license = "allow"
+confidence-threshold = 0.93
+allow = [
+    "Apache-2.0 WITH LLVM-exception",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "MIT",
+    "ISC",
+    "Unicode-3.0",
+    # Mozilla CA root store bundled by `webpki-roots` (via `ureq`, used only by the
+    # `embedded` feature's HTTPS downloader). CDLA-Permissive-2.0 is a permissive,
+    # no-copyleft data license.
+    "CDLA-Permissive-2.0",
+]
+
+
+[[licenses.clarify]]
+name = "ring"
+expression = "LicenseRef-ring"
+license-files = [
+    { path = "LICENSE", hash = 0xbd0eed23 },
+]
