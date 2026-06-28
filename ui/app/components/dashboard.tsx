@@ -824,7 +824,7 @@ export default function DashBoard({
                 <span className="text-xs text-gray-500 font-medium">Select Run History</span>
                 <h1 className="text-sm font-semibold text-gray-800">Viewing Benchmark Run</h1>
               </div>
-              <div className="flex items-center gap-3">
+              <div className="flex items-center gap-3 w-full md:w-auto">
                 <select
                   value={activeUrl.replace("/summaries/", "")}
                   onChange={(e) => {
@@ -838,7 +838,7 @@ export default function DashBoard({
                     setLoadedDataUrl(null);
                     setDidInitFromData(false);
                   }}
-                  className="bg-white border border-gray-200/80 text-gray-800 text-sm rounded-lg px-3 py-2 font-fira shadow-sm focus:outline-none focus:ring-1 focus:ring-primary focus:border-primary cursor-pointer min-w-[280px]"
+                  className="bg-white border border-gray-200/80 text-gray-800 text-sm rounded-lg px-3 py-2 font-fira shadow-sm focus:outline-none focus:ring-1 focus:ring-primary focus:border-primary cursor-pointer w-full md:w-auto md:min-w-[280px]"
                 >
                   <option value={baseFileName}>Latest Run (Default)</option>
                   {pastRuns.map((run) => (
