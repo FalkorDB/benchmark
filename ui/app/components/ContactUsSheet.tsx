@@ -97,7 +97,7 @@ export default function ContactUsSheet({ isOpen, setIsOpen }: ContactUsSheetProp
         if (!open) resetForm();
       }}
     >
-      <SheetContent className="w-full max-w-md p-6">
+      <SheetContent className="w-3/4 sm:w-full sm:max-w-md p-6 overflow-y-auto">
         {submitted ? (
           <div className="flex flex-col items-center justify-center h-full">
             <CheckCircleIcon className="w-20 h-20 text-green-500 font-fira" />
