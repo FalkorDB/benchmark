@@ -785,8 +785,8 @@ export default function DashBoard({
   }, [concurrentRuns]);
 
   return (
-    <SidebarProvider className="h-screen w-screen overflow-hidden">
-      <div className="flex h-full w-full">
+    <SidebarProvider className="max-h-none md:max-h-svh h-auto md:h-screen w-full md:w-screen overflow-visible md:overflow-hidden">
+      <div className="flex h-full w-full min-h-0">
         <AppSidebar
           selectedOptions={selectedOptions}
           handleSideBarSelection={handleSideBarSelection}
@@ -817,7 +817,7 @@ export default function DashBoard({
           queryOptions={availableQueries.length ? availableQueries : undefined}
           datasetSummary={datasetSummary}
         />
-        <SidebarInset className="flex-grow h-full min-h-0 overflow-y-auto">
+        <SidebarInset className="flex-grow h-auto md:h-full min-h-0 max-h-none md:max-h-svh overflow-visible md:overflow-y-auto">
           {!hideHardware && pastRuns.length > 0 && (
             <div className="bg-muted/30 border-b border-gray-200/40 p-4 flex flex-wrap items-center justify-between gap-4 font-space">
               <div className="flex flex-col">
