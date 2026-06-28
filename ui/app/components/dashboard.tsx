@@ -954,14 +954,14 @@ export default function DashBoard({
                 </div>
               </div>
 
-              <div className="bg-muted/50 rounded-xl flex items-center justify-center h-[50px]">
+              <div className="bg-muted/50 rounded-xl flex items-center justify-center h-auto md:h-[50px]">
                 <FooterComponent />
               </div>
             </div>
           ) : (
             <div
               key={gridKey}
-              className="grid w-full h-full min-w-0 grid-cols-[7fr_3fr] grid-rows-[2fr,50px] gap-2 p-1"
+              className="grid w-full h-full min-w-0 grid-cols-1 md:grid-cols-[7fr_3fr] grid-rows-[auto_auto_auto] md:grid-rows-[2fr,50px] gap-2 p-1"
             >
               <div
                 className="bg-muted/50 rounded-xl p-4 min-h-0 w-full flex flex-col min-w-0 items-center justify-between"
@@ -1064,7 +1064,7 @@ export default function DashBoard({
                   </div>
                 </div>
               </div>
-              <div className="col-span-2 bg-muted/50 rounded-xl flex items-center justify-center h-[50px]">
+              <div className="col-span-1 md:col-span-2 bg-muted/50 rounded-xl flex items-center justify-center h-auto md:h-[50px]">
                 <FooterComponent />
               </div>
             </div>
