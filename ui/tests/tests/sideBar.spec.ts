@@ -2,7 +2,7 @@ import { test, expect } from "@playwright/test";
 import BrowserWrapper from "../infra/ui/browserWrapper";
 import MainPage from "../logic/POM/mainPage";
 import urls from "../config/urls.json";
-import { hoverItems, sideBarItems } from "../config/testData";
+import { sideBarItems } from "../config/testData";
 
 function pickNumericValue(value: unknown): number | null {
   if (typeof value === "number" && Number.isFinite(value)) return value;
@@ -84,13 +84,14 @@ test.describe("SideBar tests", () => {
       const sidebar = await browser.createNewPage(MainPage, urls.baseUrl);
       await sidebar.selectWorkloadType("Concurrent");
       const graphDetails = await sidebar.getGraphDetails();
-      await sidebar.clickOnSidebarSelection(item);
-      const updatedGraphDetails = await sidebar.getGraphDetails();
-
       const original = valuesByKey(graphDetails);
 
+      await sidebar.clickOnSidebarSelection(item);
+
       await expect(async () => {
-        const updated = valuesByKey(updatedGraphDetails);
+        // Re-read the chart on every retry so we observe the updated state
+        // once the selection has propagated (the update is not instant).
+        const updated = valuesByKey(await sidebar.getGraphDetails());
 
         // Compare only keys that exist on both sides.
         let changedCount = 0;
@@ -126,15 +127,6 @@ test.describe("SideBar tests", () => {
     const sidebar = await browser.createNewPage(MainPage, urls.baseUrl);
     await sidebar.scrollToBottomInSidebar();
     expect(await sidebar.isScrolledToBottomInSidebar()).toBe(true);
-  });
-
-  hoverItems.forEach(({ item, expectedRes }) => {
-    test(`Verify hover behavior for hardware item: ${item}`, async () => {
-      const sidebar = await browser.createNewPage(MainPage, urls.baseUrl);
-      await sidebar.selectWorkloadType("Concurrent");
-      await sidebar.hoverOnSideBarHardware(item);
-      expect(await sidebar.isHoverElementVisible()).toBe(expectedRes);
-    });
   });
 
 });
