@@ -964,7 +964,7 @@ export default function DashBoard({
               className="grid w-full h-full min-w-0 grid-cols-1 md:grid-cols-[7fr_3fr] grid-rows-[auto_auto_auto] md:grid-rows-[2fr,50px] gap-2 p-1"
             >
               <div
-                className="bg-muted/50 rounded-xl p-4 min-h-0 w-full flex flex-col min-w-0 items-center justify-between"
+                className="bg-muted/50 rounded-xl p-4 min-h-[360px] md:min-h-0 w-full flex flex-col min-w-0 items-center justify-between"
                 id="latency-chart"
               >
                 <h2 className="text-2xl font-bold text-center font-space">
@@ -993,7 +993,7 @@ export default function DashBoard({
                   </div>
                 </div>
               </div>
-              <div className="bg-muted/50 rounded-xl p-4 min-h-0 w-full flex flex-col min-w-0 items-center justify-between">
+              <div className="bg-muted/50 rounded-xl p-4 min-h-[360px] md:min-h-0 w-full flex flex-col min-w-0 items-center justify-between">
                 <h2 className="text-2xl font-bold text-center font-space">
                   MEMORY USAGE
                 </h2>
