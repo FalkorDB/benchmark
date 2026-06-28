@@ -6,15 +6,15 @@ import { AiOutlineDiscord } from "react-icons/ai";
 
 export function Header() {
   return (
-    <header className="flex flex-col text-xl bg-[#F7F3EF] h-20 z-20">
-      <div className="flex items-center justify-between py-4 px-8">
-        <div className="flex gap-4 items-center">
-          <Link href="https://www.falkordb.com" target="_blank">
-            <Image src="/logo.svg" alt="FalkorDB" width={130} height={25} />
+    <header className="flex flex-col text-xl bg-[#F7F3EF] min-h-20 md:h-20 z-20">
+      <div className="flex items-center justify-between gap-2 py-3 px-4 md:py-4 md:px-8">
+        <div className="flex gap-2 md:gap-4 items-center min-w-0">
+          <Link href="https://www.falkordb.com" target="_blank" className="shrink-0">
+            <Image src="/logo.svg" alt="FalkorDB" width={130} height={25} className="w-24 md:w-[130px] h-auto" />
           </Link>
-          <div className="h-10 w-[2px] border-l border-black"></div>
+          <div className="hidden md:block h-10 w-[2px] border-l border-black"></div>
 
-          <h1 className="font-space font-bold text-[20px]">
+          <h1 className="hidden md:block font-space font-bold text-base lg:text-[20px] truncate">
             Graph Database Performance Benchmarks
           </h1>
         </div>
