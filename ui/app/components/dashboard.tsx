@@ -1,7 +1,8 @@
 "use client";
 
 import { AppSidebar } from "@/components/ui/app-sidebar";
-import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
+import { SidebarInset, SidebarProvider, useSidebar } from "@/components/ui/sidebar";
+import { SlidersHorizontal } from "lucide-react";
 import FooterComponent from "./footer";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { BenchmarkData, Run } from "../types/benchmark";
@@ -32,6 +33,22 @@ const DEFAULT_SELECTED_OPTIONS: Record<string, string[]> = {
   Hardware: ["arm"],
   Queries: ["aggregate_expansion_4_with_filter"],
 };
+
+function MobileFiltersBar() {
+  const { toggleSidebar } = useSidebar();
+  return (
+    <button
+      type="button"
+      onClick={toggleSidebar}
+      aria-label="Open filters and options"
+      className="md:hidden sticky top-0 z-30 flex w-full items-center gap-2 border-b border-gray-200/60 bg-[#F7F3EF] px-4 py-3 text-left font-space active:bg-gray-200/60"
+    >
+      <SlidersHorizontal className="size-5 shrink-0" />
+      <span className="text-sm font-semibold">Filters &amp; Options</span>
+      <span className="ml-auto text-xs font-medium text-gray-500">Tap to open</span>
+    </button>
+  );
+}
 
 export default function DashBoard({
   dataUrl = "/resultData.json",
@@ -818,6 +835,7 @@ export default function DashBoard({
           datasetSummary={datasetSummary}
         />
         <SidebarInset className="flex-grow h-auto md:h-full min-h-0 max-h-none md:max-h-svh overflow-visible md:overflow-y-auto">
+          <MobileFiltersBar />
           {!hideHardware && pastRuns.length > 0 && (
             <div className="bg-muted/30 border-b border-gray-200/40 p-4 flex flex-wrap items-center justify-between gap-4 font-space">
               <div className="flex flex-col">
