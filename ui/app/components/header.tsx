@@ -18,14 +18,14 @@ export function Header() {
             Graph Database Performance Benchmarks
           </h1>
         </div>
-        <ul className="flex gap-4 items-center font-medium bg-white rounded-lg shadow p-4 h-14">
+        <ul className="flex gap-2 md:gap-4 items-center font-medium bg-white rounded-lg shadow p-2 md:p-4 h-12 md:h-14 shrink-0">
           <Link
             title="Home"
-            className="flex gap-2 items-center pl-1"
+            className="hidden sm:flex gap-2 items-center pl-1"
             href="https://www.falkordb.com"
             target="_blank"
           >
-            <IoHomeOutline size={25} />
+            <IoHomeOutline className="size-5 md:size-[25px]" />
           </Link>
           <Link
             title="Github"
@@ -33,27 +33,27 @@ export function Header() {
             href="https://github.com/FalkorDB/benchmark"
             target="_blank"
           >
-            <FaGithub size={25} />
+            <FaGithub className="size-5 md:size-[25px]" />
           </Link>
           <Link
             title="Discord"
-            className="flex gap-2 items-center pl-2"
+            className="flex gap-2 items-center pl-1 md:pl-2"
             href="https://discord.com/invite/99y2Ubh6tg"
             target="_blank"
           >
-            <AiOutlineDiscord size={30} />
+            <AiOutlineDiscord className="size-6 md:size-[30px]" />
           </Link>
           <div className="h-7 w-[2px] border-l bg-gradient-to-r from-[#EC806C] via-[#B66EBD] to-[#7568F2]"></div>
           <a
             href="https://app.falkordb.cloud/signup"
-            className="h-8 text-black font-medium text-base hover:underline flex text-center justify-center"
+            className="hidden sm:flex h-8 text-black font-medium text-sm md:text-base hover:underline text-center justify-center items-center"
             target="_blank"
           >
             Sign up
           </a>
           <a
             href="https://falkordb.com/try-free/"
-            className="h-10 bg-gradient-to-r from-[#EC806C] via-[#B66EBD] to-[#7568F2] text-white font-medium text-base px-4 py-2 rounded-lg shadow-md hover:opacity-90 transition-all duration-200 flex text-center justify-center"
+            className="h-9 md:h-10 bg-gradient-to-r from-[#EC806C] via-[#B66EBD] to-[#7568F2] text-white font-medium text-sm md:text-base px-3 md:px-4 py-2 rounded-lg shadow-md hover:opacity-90 transition-all duration-200 flex text-center justify-center items-center whitespace-nowrap"
             target="_blank"
           >
             Start Free
