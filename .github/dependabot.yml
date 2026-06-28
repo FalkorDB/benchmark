@@ -9,7 +9,7 @@ updates:
     directory: "/ui" # Location of package manifests
     schedule:
       interval: "weekly"
-    target-branch: "staging"
+    target-branch: "master"
     groups:
       npm-minor-patch:
         update-types:
@@ -20,11 +20,11 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
-    target-branch: "staging"
+    target-branch: "master"
 
   # This is actually for cargo crates
   - package-ecosystem: "cargo"
     directory: "/"
     schedule:
       interval: "weekly"
-    target-branch: "staging"
+    target-branch: "master"
