@@ -1,4 +1,4 @@
-import { MoveUpRight } from "lucide-react";
+import { MoveUpRight, MessageSquare } from "lucide-react";
 import { useState } from "react";
 import ContactUsSheet from "./ContactUsSheet";
 
@@ -43,12 +43,15 @@ const FooterComponent = () => {
         </a>
       </div>
 
-      <div className="flex items-center h-16 w-full bg-muted/50 p-4">
+      <div className="fixed bottom-4 left-4 z-40 md:static md:z-auto flex items-center w-auto md:w-auto bg-transparent md:bg-muted/50 md:p-4">
         <button
           onClick={() => setIsOpen(true)}
-          className="ml-auto bg-[#FF66B3] text-[#ffffff] border px-4 py-2 rounded-lg font-semibold text-sm min-w-[150px] max-w-full min-h-[40px] max-h-full whitespace-normal break-words text-center flex items-center justify-center"
+          aria-label="Speak with us"
+          title="Speak with us"
+          className="bg-[#FF66B3] text-[#ffffff] border shadow-lg md:shadow size-14 md:size-auto rounded-full md:rounded-lg p-0 md:px-4 md:py-2 font-semibold md:min-w-[150px] md:min-h-[40px] whitespace-nowrap text-center flex items-center justify-center gap-2 hover:opacity-90 transition-opacity"
         >
-          SPEAK WITH US
+          <MessageSquare className="size-6 md:hidden" />
+          <span className="hidden md:inline">SPEAK WITH US</span>
         </button>
         <ContactUsSheet isOpen={isOpen} setIsOpen={setIsOpen} />
       </div>
