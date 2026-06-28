@@ -118,7 +118,7 @@ export function AppSidebar({
       {...props}
       className="flex flex-col h-screen-dynamic"
     >
-      <SidebarHeader className="mt-20">
+      <SidebarHeader className="mt-4 md:mt-20">
         <SidebarBrand Brand={userBrandInfo?.brand} />
         <SidebarTrigger className="ml-auto" />
       </SidebarHeader>
