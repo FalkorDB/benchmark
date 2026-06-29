@@ -4,7 +4,7 @@ import { Header } from "./components/header";
 
 export default function Home() {
   return (
-    <main className="h-screen flex flex-col">
+    <main className="min-h-screen md:h-screen flex flex-col">
       <Header />
       <DashBoard
         dataUrl="/summaries/neo4j_vs_falkordb.json"

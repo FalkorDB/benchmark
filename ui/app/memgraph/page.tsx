@@ -3,7 +3,7 @@ import { Header } from "../components/header";
 
 export default function MemgraphVsFalkor() {
   return (
-    <main className="h-screen flex flex-col">
+    <main className="min-h-screen md:h-screen flex flex-col">
       <Header />
       <DashBoard
         dataUrl="/summaries/memgraph_vs_falkordb.json"
