@@ -1,5 +1,6 @@
 name: Playwright Tests
 on:
+  workflow_dispatch:
   push:
     branches: [ master, staging ]
   pull_request:
@@ -9,6 +10,7 @@ concurrency:
   cancel-in-progress: true
 jobs:
   test:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.user.login != 'dependabot[bot]' || contains(github.head_ref, '/ui/') }}
     timeout-minutes: 10
     runs-on: ubuntu-latest
     defaults:
@@ -16,21 +18,33 @@ jobs:
         working-directory: ./ui
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
       - name: Set up Node.js
         uses: actions/setup-node@v6
         with:
           node-version: lts/*
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
       - name: Install dependencies
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
         run: npm ci
-      - name: Install Playwright Browsers
-        run: npx playwright install --with-deps chromium
       - name: Set up environment and run minimal Playwright smoke test
         env:
           NEXT_PUBLIC_HUBSPOT_PORTAL_ID: ${{ secrets.NEXT_PUBLIC_HUBSPOT_PORTAL_ID }}
           NEXT_PUBLIC_HUBSPOT_FORM_ID: ${{ secrets.NEXT_PUBLIC_HUBSPOT_FORM_ID }}
           PORT: 3000
         run: |
+          if command -v google-chrome >/dev/null 2>&1; then
+            export PLAYWRIGHT_CHROMIUM_CHANNEL=chrome
+            google-chrome --version
+          elif command -v google-chrome-stable >/dev/null 2>&1; then
+            export PLAYWRIGHT_CHROMIUM_CHANNEL=chrome
+            google-chrome-stable --version
+          else
+            echo "System Chrome not found; installing Playwright Chromium headless shell fallback."
+            npx playwright install --only-shell chromium
+          fi
           npm run dev &
           echo "Waiting for Next.js to be ready on http://localhost:3000 ..."
           for i in {1..120}; do
