@@ -23,7 +23,7 @@ tokio = { version = "1.52.3", features = ["full", "tracing"] }
 futures = "0.3.31"
 rand = "0.10.1"
 histogram = { version = "0.11", features = ["serde"] }
-reqwest = { version = "0.12.9", features = ["gzip"] }
+reqwest = { version = "0.13.4", features = ["gzip"] }
 strum = { version = "0.26.3", features = ["derive"] }
 strum_macros = "0.26.4"
 tokio-stream = { version = "0.1.17", features = ["io-util"] }
