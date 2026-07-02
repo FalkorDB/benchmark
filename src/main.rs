@@ -28,7 +28,7 @@ use benchmark::{
 use clap::{Command, CommandFactory, Parser};
 use clap_complete::{generate, Generator};
 use futures::StreamExt;
-use histogram::Histogram;
+use histogram::{Histogram, SampleQuantiles};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::io;
@@ -329,10 +329,11 @@ fn percentile_us(
     hist: &histogram::Histogram,
     p: f64,
 ) -> u64 {
-    hist.percentile(p)
+    let quantile = if p > 1.0 { p / 100.0 } else { p };
+    SampleQuantiles::quantile(hist, quantile)
         .ok()
         .flatten()
-        .map(|b| b.end())
+        .and_then(|result| result.entries().values().next().map(|b| b.end()))
         .unwrap_or(0)
 }
 
@@ -1155,9 +1156,10 @@ async fn init_falkor(
 
 fn show_historgam(histogram: Histogram) {
     for percentile in 1..=99 {
-        let p = histogram
-            .percentile(percentile as f64)
-            .map(|r| r.map(|b| Duration::from_micros(b.end())));
+        let p = SampleQuantiles::quantile(&histogram, percentile as f64 / 100.0)
+            .ok()
+            .flatten()
+            .and_then(|result| result.entries().values().next().map(|b| Duration::from_micros(b.end())));
 
         info!("p{}: {:?}", percentile, p);
     }
