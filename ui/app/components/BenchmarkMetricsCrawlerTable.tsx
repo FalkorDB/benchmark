@@ -20,6 +20,7 @@ const formatTimestamp = (epochSeconds?: number) => {
 };
 
 const getQueryCounts = (run: Run): Array<{ query: string; count: number | null }> => {
+  if (!run?.result) return [];
   const byQuery = run.result.operations?.["by-query"];
   if (byQuery) {
     return Object.entries(byQuery)
@@ -65,25 +66,28 @@ export default function BenchmarkMetricsCrawlerTable({
           </tr>
         </thead>
         <tbody>
-          {runs.map((run, index) => (
-            <tr key={`${run.vendor}-${run.platform}-${index}`}>
-              <td>{run.vendor}</td>
-              <td>{run.platform}</td>
-              <td>{formatNumber(run.clients)}</td>
-              <td>{formatNumber(run["target-messages-per-second"])}</td>
-              <td>{formatNumber(run.result["actual-messages-per-second"])}</td>
-              <td>{run.result.latency?.p50 ?? ""}</td>
-              <td>{run.result.latency?.p95 ?? ""}</td>
-              <td>{run.result.latency?.p99 ?? ""}</td>
-              <td>{formatNumber(run.result["avg-latency-ms"])}</td>
-              <td>{formatNumber(run.result["cpu-usage"])}</td>
-              <td>{run.result["ram-usage"] ?? ""}</td>
-              <td>{formatNumber(run.result.errors)}</td>
-              <td>{formatNumber(run.result["successful-requests"])}</td>
-              <td>{formatNumber(run["read-write-ratio"])}</td>
-              <td>{formatTimestamp(run["started-at-epoch-secs"])}</td>
-            </tr>
-          ))}
+          {runs.map((run, index) => {
+            if (!run?.result) return null;
+            return (
+              <tr key={`${run.vendor}-${run.platform}-${index}`}>
+                <td>{run.vendor}</td>
+                <td>{run.platform}</td>
+                <td>{formatNumber(run.clients)}</td>
+                <td>{formatNumber(run["target-messages-per-second"])}</td>
+                <td>{formatNumber(run.result["actual-messages-per-second"])}</td>
+                <td>{run.result.latency?.p50 ?? ""}</td>
+                <td>{run.result.latency?.p95 ?? ""}</td>
+                <td>{run.result.latency?.p99 ?? ""}</td>
+                <td>{formatNumber(run.result["avg-latency-ms"])}</td>
+                <td>{formatNumber(run.result["cpu-usage"])}</td>
+                <td>{run.result["ram-usage"] ?? ""}</td>
+                <td>{formatNumber(run.result.errors)}</td>
+                <td>{formatNumber(run.result["successful-requests"])}</td>
+                <td>{formatNumber(run["read-write-ratio"])}</td>
+                <td>{formatTimestamp(run["started-at-epoch-secs"])}</td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
 
@@ -97,15 +101,16 @@ export default function BenchmarkMetricsCrawlerTable({
           </tr>
         </thead>
         <tbody>
-          {runs.flatMap((run, runIndex) =>
-            getQueryCounts(run).map(({ query, count }) => (
+          {runs.flatMap((run, runIndex) => {
+            if (!run?.result) return [];
+            return getQueryCounts(run).map(({ query, count }) => (
               <tr key={`${run.vendor}-${runIndex}-${query}`}>
                 <td>{run.vendor}</td>
                 <td>{query}</td>
                 <td>{count === null ? "n/a" : formatNumber(count)}</td>
               </tr>
-            ))
-          )}
+            ));
+          })}
         </tbody>
       </table>
     </section>
