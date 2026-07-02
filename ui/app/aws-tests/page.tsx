@@ -3,31 +3,29 @@ import { Header } from "../components/header";
 import BenchmarkMetricsCrawlerTable from "../components/BenchmarkMetricsCrawlerTable";
 import { loadBenchmarkSummary, loadRunsManifest } from "../lib/benchmark-data.server";
 
-export default async function Neo4jVsFalkor() {
-  const dataUrl = "/summaries/neo4j_vs_falkordb.json";
+export default async function AwsTestsFalkorGravitonVsIntel() {
+  const dataUrl = "/summaries/aws_tests_falkor_graviton_vs_intel.json";
   const [initialData, initialManifest] = await Promise.all([
     loadBenchmarkSummary(dataUrl),
     loadRunsManifest(),
   ]);
   return (
-    <main className="min-h-screen md:h-screen flex flex-col">
+    <main className="h-screen flex flex-col">
       <Header />
       <DashBoard
         dataUrl={dataUrl}
         initialData={initialData}
         initialManifest={initialManifest}
-        comparisonVendors={["falkordb", "neo4j"]}
-        hideHardware
+        // Do not hardcode comparisonVendors: aws-tests labels are instance types (e.g. r7i.2xlarge).
         initialSelectedOptions={{
-          "Workload Type": ["single"],
-          Vendors: ["falkordb", "neo4j"],
-          Queries: ["aggregate_expansion_4_with_filter"],
+          "Workload Type": ["concurrent"],
+          Hardware: ["falkordb1", "falkordb2", "intel", "arm"],
         }}
       />
       <BenchmarkMetricsCrawlerTable
         data={initialData}
         dataUrl={dataUrl}
-        title="Neo4j vs FalkorDB"
+        title="AWS FalkorDB Graviton vs Intel"
       />
     </main>
   );

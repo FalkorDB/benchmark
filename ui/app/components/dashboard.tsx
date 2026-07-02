@@ -10,10 +10,29 @@ import { useToast } from "@/hooks/use-toast";
 import HorizontalBarChart from "./HorizontalBarChart";
 import VerticalBarChart from "./VerticalBarChart";
 import MemoryBarChart from "./MemoryBarChart";
+type RunsManifest = Record<string, { filename: string; timestamp: number }[]>;
+
+const filterDataByVendors = (
+  data: BenchmarkData,
+  allowedVendors: string[] | null
+): BenchmarkData => {
+  if (!allowedVendors?.length) return data;
+  return {
+    ...data,
+    runs: (data.runs ?? []).filter((r) =>
+      allowedVendors.includes(r.vendor?.toLowerCase())
+    ),
+    unrealstic: (data.unrealstic ?? []).filter((u) =>
+      allowedVendors.includes(u.vendor?.toLowerCase())
+    ),
+  };
+};
 
 type DashboardProps = {
   dataUrl?: string;
   initialSelectedOptions?: Partial<Record<string, string[]>>;
+  initialData?: BenchmarkData | null;
+  initialManifest?: RunsManifest;
   /**
    * If provided, the dashboard will only show these vendors in the UI (and will
    * ignore any other vendors present in the data file).
@@ -53,11 +72,21 @@ function MobileFiltersBar() {
 export default function DashBoard({
   dataUrl = "/resultData.json",
   initialSelectedOptions,
+  initialData = null,
+  initialManifest,
   comparisonVendors,
   hideHardware = false,
 }: DashboardProps) {
+  const allowedVendors = useMemo(() => {
+    const v = (comparisonVendors ?? [])
+      .map((x) => x.toLowerCase())
+      .filter(Boolean);
+    return v.length ? v : null;
+  }, [comparisonVendors]);
   const [activeUrl, setActiveUrl] = useState(dataUrl);
-  const [data, setData] = useState<BenchmarkData | null>(null);
+  const [data, setData] = useState<BenchmarkData | null>(() =>
+    initialData ? filterDataByVendors(initialData, allowedVendors) : null
+  );
   const { toast } = useToast();
   const [gridKey, setGridKey] = useState(0);
   const [p99SingleRatio, setP99SingleRatio] = useState<number | null>(null);
@@ -76,11 +105,14 @@ export default function DashBoard({
     }[]
   >([]);
   const [didInitFromData, setDidInitFromData] = useState(false);
-  const [loadedDataUrl, setLoadedDataUrl] = useState<string | null>(null);
+  const [loadedDataUrl, setLoadedDataUrl] = useState<string | null>(() =>
+    initialData ? dataUrl : null
+  );
 
-  const [manifest, setManifest] = useState<Record<string, { filename: string; timestamp: number }[]>>({});
+  const [manifest, setManifest] = useState<RunsManifest>(initialManifest ?? {});
 
   useEffect(() => {
+    if (Object.keys(manifest).length > 0) return;
     const fetchManifest = async () => {
       try {
         const response = await fetch("/summaries/manifest.json");
@@ -93,14 +125,14 @@ export default function DashBoard({
       }
     };
     fetchManifest();
-  }, []);
+  }, [manifest]);
 
   useEffect(() => {
     setActiveUrl(dataUrl);
-    setData(null);
-    setLoadedDataUrl(null);
+    setData(initialData ? filterDataByVendors(initialData, allowedVendors) : null);
+    setLoadedDataUrl(initialData ? dataUrl : null);
     setDidInitFromData(false);
-  }, [dataUrl]);
+  }, [dataUrl, initialData, allowedVendors]);
 
   const baseFileName = useMemo(() => {
     if (!dataUrl) return "";
@@ -112,10 +144,6 @@ export default function DashBoard({
     return manifest[baseFileName] || [];
   }, [manifest, baseFileName]);
 
-  const allowedVendors = useMemo(() => {
-    const v = (comparisonVendors ?? []).map((x) => x.toLowerCase()).filter(Boolean);
-    return v.length ? v : null;
-  }, [comparisonVendors]);
 
   const [selectedOptions, setSelectedOptions] = React.useState<
     Record<string, string[]>
@@ -135,6 +163,7 @@ export default function DashBoard({
 
 
   useEffect(() => {
+    if (loadedDataUrl === activeUrl && data) return;
     let cancelled = false;
     const urlForRequest = activeUrl;
 
@@ -148,20 +177,7 @@ export default function DashBoard({
 
         if (cancelled) return;
 
-        if (allowedVendors?.length) {
-          const filtered: BenchmarkData = {
-            ...json,
-            runs: (json.runs ?? []).filter((r) =>
-              allowedVendors.includes(r.vendor?.toLowerCase())
-            ),
-            unrealstic: (json.unrealstic ?? []).filter((u) =>
-              allowedVendors.includes(u.vendor?.toLowerCase())
-            ),
-          };
-          setData(filtered);
-        } else {
-          setData(json);
-        }
+        setData(filterDataByVendors(json, allowedVendors));
         setLoadedDataUrl(urlForRequest);
       } catch (error) {
         if (cancelled) return;
@@ -179,7 +195,7 @@ export default function DashBoard({
     return () => {
       cancelled = true;
     };
-  }, [activeUrl, allowedVendors, toast]);
+  }, [activeUrl, allowedVendors, toast, loadedDataUrl, data]);
 
   const availableQueries = useMemo(() => {
     if (!data) return [];
