@@ -16,12 +16,7 @@ export const headerItems: { navItem: string; expectedRes: string }[] = [
   ];
 
   export const sideBarItems: { item: string; expectedRes: boolean }[] = [
-    { item: "INTEL", expectedRes: true },
-    { item: "20", expectedRes: true },
     { item: "Neo4j", expectedRes: true },
-  ];
-
-  export const hoverItems: { item: string; expectedRes: boolean }[] = [
-    { item: "ARM", expectedRes: true },
-    { item: "INTEL", expectedRes: true },
+    { item: "20", expectedRes: true },
+    { item: "1000", expectedRes: true },
   ];

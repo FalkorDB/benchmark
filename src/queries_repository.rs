@@ -1,6 +1,6 @@
 use crate::query::{Bolt, Query, QueryBuilder};
-use rand::seq::SliceRandom;
-use rand::{random, Rng};
+use rand::prelude::IndexedRandom;
+use rand::random;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -227,7 +227,7 @@ impl QueriesRepository {
         queries: &HashMap<String, QueryGenerator>,
         query_names: &[String],
     ) -> Option<PreparedQuery> {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let key = query_names.choose(&mut rng)?;
         let generator = queries.get(key)?;
         let q_id = *self.name_to_id.get(key).unwrap_or(&0);
@@ -270,8 +270,7 @@ struct RandomUtil {
 
 impl RandomUtil {
     fn random_vertex(&self) -> i32 {
-        let mut rng = rand::thread_rng();
-        rng.gen_range(1..=self.vertices)
+        rand::random_range(1..=self.vertices)
     }
     #[allow(dead_code)]
     fn random_path(&self) -> (i32, i32) {
@@ -581,6 +580,69 @@ impl UsersQueriesRepository {
                 QueryBuilder::new()
                     .text("MATCH (n {id: $id}) RETURN n")
                     .param("id", random.random_vertex())
+                    .build()
+            })
+            // Value hash join: bind one user by id, scan all users, join on age
+            .add_query("value_join", QueryType::Read, |random, _flavour| {
+                QueryBuilder::new()
+                    .text("MATCH (a:User {id: $id}), (b:User) WHERE a.age = b.age RETURN b.id")
+                    .param("id", random.random_vertex())
+                    .build()
+            })
+            .add_query("value_join_cnt", QueryType::Read, |random, _flavour| {
+                QueryBuilder::new()
+                    .text("MATCH (a:User {id: $id}), (b:User) WHERE a.age = b.age RETURN count(b)")
+                    .param("id", random.random_vertex())
+                    .build()
+            })
+            // Full sort over every user
+            .add_query("order_by_age", QueryType::Read, |_random, _flavour| {
+                QueryBuilder::new()
+                    .text("MATCH (n:User) RETURN n.id, n.age ORDER BY n.age, n.id")
+                    .build()
+            })
+            // UNWIND of a per-row list literal
+            .add_query("unwind_rows", QueryType::Read, |random, _flavour| {
+                QueryBuilder::new()
+                    .text("MATCH (n:User {id: $id}) UNWIND [n.id, n.id + 1, n.id + 2] AS x RETURN x")
+                    .param("id", random.random_vertex())
+                    .build()
+            })
+            // Variable-length expansion from one user
+            .add_query("var_len_friends", QueryType::Read, |random, _flavour| {
+                QueryBuilder::new()
+                    .text("MATCH (a:User {id: $id})-[*1..2]->(b:User) RETURN b.id")
+                    .param("id", random.random_vertex())
+                    .build()
+            })
+            // OPTIONAL MATCH (correlated expansion)
+            .add_query("optional_friend", QueryType::Read, |random, _flavour| {
+                QueryBuilder::new()
+                    .text("MATCH (a:User {id: $id}) OPTIONAL MATCH (a)-->(b:User) RETURN a.id, b.id")
+                    .param("id", random.random_vertex())
+                    .build()
+            })
+            // CALL {} subquery (correlated)
+            .add_query("call_subquery", QueryType::Read, |random, _flavour| {
+                QueryBuilder::new()
+                    .text("MATCH (a:User {id: $id}) CALL { WITH a MATCH (a)-->(b:User) RETURN b.id AS bid } RETURN bid")
+                    .param("id", random.random_vertex())
+                    .build()
+            })
+            // Node lookup by internal id
+            .add_query("id_seek", QueryType::Read, |random, _flavour| {
+                QueryBuilder::new()
+                    .text("MATCH (n) WHERE id(n) = $id RETURN n.id")
+                    .param("id", random.random_vertex())
+                    .build()
+            })
+            // Node scan over an internal-id range (columnar fan-out)
+            .add_query("id_range_scan", QueryType::Read, |random, _flavour| {
+                let start = random.random_vertex();
+                QueryBuilder::new()
+                    .text("MATCH (n) WHERE id(n) >= $start AND id(n) < $end RETURN n.id")
+                    .param("start", start)
+                    .param("end", start + 100)
                     .build()
             });
         if algorithm_selection.pagerank {
