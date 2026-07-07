@@ -3,7 +3,7 @@ use benchmark::cli::Commands;
 use benchmark::cli::Commands::GenerateAutoComplete;
 use benchmark::error::BenchmarkError::OtherError;
 use benchmark::error::BenchmarkResult;
-use benchmark::falkor::{Falkor, FalkorAlgorithmCapabilities, Started, Stopped};
+use benchmark::falkor::{Falkor, FalkorAlgorithmCapabilities, Stopped};
 use benchmark::memgraph_client::{MemgraphAlgorithmCapabilities, MemgraphClient};
 use benchmark::neo4j_client::{Neo4jAlgorithmCapabilities, Neo4jClient};
 use benchmark::queries_repository::{
@@ -957,9 +957,10 @@ async fn run_falkor(
     let started_at = SystemTime::now();
     // start workers
     let start = Instant::now();
+    let worker_client = falkor.client().await?;
     for spawn_id in 0..parallel {
         let handle = spawn_falkor_worker(
-            &falkor,
+            worker_client.clone(),
             spawn_id,
             &rx,
             simulate,
@@ -1019,7 +1020,7 @@ async fn run_falkor(
 }
 
 async fn spawn_falkor_worker(
-    falkor: &Falkor<Started>,
+    mut client: benchmark::falkor::FalkorBenchmarkClient,
     worker_id: usize,
     receiver: &Arc<Mutex<Receiver<Msg<PreparedQuery>>>>,
     simulate: Option<usize>,
@@ -1027,7 +1028,6 @@ async fn spawn_falkor_worker(
     per_query: Arc<PerQueryLatency>,
 ) -> BenchmarkResult<JoinHandle<()>> {
     info!("spawning worker");
-    let mut client = falkor.client().await?;
     let receiver = Arc::clone(receiver);
     let handle = tokio::spawn(async move {
         let worker_id = worker_id.to_string();

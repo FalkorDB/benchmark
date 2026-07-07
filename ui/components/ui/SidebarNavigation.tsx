@@ -514,11 +514,8 @@ export function NavMain({
                       <h3 className="text-sm font-bold border-b border-gray-200 pb-2 mb-3 text-gray-900">
                         Query Explanations &amp; Samples
                       </h3>
-                      <p className="text-[11px] text-gray-600 mb-3 leading-relaxed">
-                        Covers the full benchmark query catalog, including phase-1 additions: MERGE/DELETE/REMOVE/FOREACH writes, UNION composition, deeper 5/6-hop traversals, allShortestPaths, var-length edge filters, count/index optimizers, path introspection, and algorithm workloads.
-                      </p>
                       <div className="flex flex-col gap-4">
-                        {QUERY_DESCRIPTIONS.map((q) => (
+                        {[...QUERY_DESCRIPTIONS].sort((a, b) => a.name.localeCompare(b.name)).map((q) => (
                           <div key={q.id} className="text-xs border-b border-gray-200/60 pb-3 last:border-0 last:pb-0 text-left">
                             <div className="flex items-center justify-between mb-1 gap-2">
                               <span className="font-bold text-gray-900">{q.name}</span>
@@ -550,7 +547,15 @@ export function NavMain({
                   group.layout === "row" ? "flex-row" : "flex-col"
                 }`}
               >
-                {group.options.map((option, index) => {
+                {(group.title === "Queries"
+                  ? [...group.options].sort((a, b) =>
+                      a.label.localeCompare(b.label, undefined, {
+                        numeric: true,
+                        sensitivity: "base",
+                      })
+                    )
+                  : group.options
+                ).map((option, index) => {
                   const isSelected = selectedOptions[group.title]?.includes(
                     option.id
                   );

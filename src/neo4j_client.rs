@@ -566,7 +566,6 @@ RETURN k AS name, attributes[k]['value'] AS value\n"
         }
         Ok(())
     }
-
 }
 
 /// Parse a Cypher property map string like "{id: 1, age: 20, gender: \"male\", completion_percentage: 75}"
