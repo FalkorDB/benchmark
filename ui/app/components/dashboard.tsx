@@ -28,6 +28,16 @@ const filterDataByVendors = (
   };
 };
 
+const hasValidRunResult = (run: unknown): run is Run => {
+  if (!run || typeof run !== "object") return false;
+  const candidate = run as Partial<Run>;
+  return (
+    typeof candidate.vendor === "string" &&
+    candidate.vendor.length > 0 &&
+    Boolean(candidate.result && typeof candidate.result === "object")
+  );
+};
+
 type DashboardProps = {
   dataUrl?: string;
   initialSelectedOptions?: Partial<Record<string, string[]>>;
@@ -110,6 +120,10 @@ export default function DashBoard({
   );
 
   const [manifest, setManifest] = useState<RunsManifest>(initialManifest ?? {});
+  const validRuns = useMemo(
+    () => (data?.runs ?? []).filter((run) => hasValidRunResult(run)),
+    [data]
+  );
 
   useEffect(() => {
     if (Object.keys(manifest).length > 0) return;
@@ -211,34 +225,34 @@ export default function DashBoard({
       .flatMap((u) => Object.keys(u.histogram_for_type ?? {}))
       .filter(Boolean);
 
-    const queriesFromRuns = (data.runs ?? [])
+    const queriesFromRuns = validRuns
       .flatMap((r) => Object.keys(r.result?.histogram_for_type ?? {}))
       .filter(Boolean);
 
     return Array.from(
       new Set([...queriesFromUnrealistic, ...queriesFromRuns])
     ).sort();
-  }, [data]);
+  }, [data, validRuns]);
 
   // On first load of a summary file, auto-pick filters that match the data.
   useEffect(() => {
-    if (didInitFromData || loadedDataUrl !== activeUrl || !data?.runs?.length) return;
+    if (didInitFromData || loadedDataUrl !== activeUrl || !validRuns.length) return;
 
     const vendors = allowedVendors?.length
       ? allowedVendors
       : Array.from(
           new Set(
-            data.runs
+            validRuns
               .map((r) => r.vendor?.toString().toLowerCase())
               .filter(Boolean)
           )
         );
     const clients = Array.from(
-      new Set(data.runs.map((r) => String(r.clients)).filter(Boolean))
+      new Set(validRuns.map((r) => String(r.clients)).filter(Boolean))
     );
     const throughputs = Array.from(
       new Set(
-        data.runs
+        validRuns
           .map((r) => String(r["target-messages-per-second"]))
           .filter(Boolean)
       )
@@ -246,7 +260,7 @@ export default function DashBoard({
     const hardware = hideHardware
       ? []
       : Array.from(
-          new Set(data.runs.map((r) => r.platform?.toLowerCase()).filter(Boolean))
+          new Set(validRuns.map((r) => r.platform?.toLowerCase()).filter(Boolean))
         );
 
     const queries = availableQueries;
@@ -300,7 +314,7 @@ export default function DashBoard({
     });
 
     setDidInitFromData(true);
-  }, [data, didInitFromData, loadedDataUrl, activeUrl, allowedVendors, availableQueries, hideHardware]);
+  }, [validRuns, didInitFromData, loadedDataUrl, activeUrl, allowedVendors, availableQueries, hideHardware]);
 
   const handleSideBarSelection = (groupTitle: string, optionId: string) => {
     setSelectedOptions((prev) => {
@@ -377,10 +391,10 @@ export default function DashBoard({
       return;
     }
 
-    if (data.runs?.length) {
+    if (validRuns.length) {
       // Note: aggregated summaries store the histogram on runs[].result.histogram_for_type.
       setFilteredUnrealistic(
-        data.runs
+        validRuns
           .map((run: Run) => ({
             vendor: run.vendor,
             histogram: run?.result?.histogram_for_type?.[selectedQuery] || [],
@@ -393,16 +407,15 @@ export default function DashBoard({
     }
 
     setFilteredUnrealistic([]);
-  }, [data, selectedOptions.Queries]);
+  }, [data, validRuns, selectedOptions.Queries]);
 
   // filter realstic data
   useEffect(() => {
-    if (!data || !data.runs) {
+    if (!validRuns.length) {
       setFilteredResults([]);
       return;
     }
-
-    const results = data.runs.filter((run) => {
+    const results = validRuns.filter((run) => {
       const isHardwareMatch = hideHardware
         ? true
         : selectedOptions.Hardware?.length
@@ -451,7 +464,7 @@ export default function DashBoard({
     }
 
     setFilteredResults(results);
-  }, [data, selectedOptions, hideHardware]);
+  }, [validRuns, selectedOptions, hideHardware]);
 
   const latencyDataForRealistic = useMemo(() => {
     const convertToMilliseconds = (value: string): number => {
@@ -473,13 +486,14 @@ export default function DashBoard({
 
     const data: LatencyDatum[] = filteredResults.map((item) => ({
       vendor: item.vendor,
-      p50: convertToMilliseconds(item.result.latency.p50),
-      p95: convertToMilliseconds(item.result.latency.p95),
-      p99: convertToMilliseconds(item.result.latency.p99),
+      p50: convertToMilliseconds(item.result?.latency?.p50 ?? "0ms"),
+      p95: convertToMilliseconds(item.result?.latency?.p95 ?? "0ms"),
+      p99: convertToMilliseconds(item.result?.latency?.p99 ?? "0ms"),
     }));
 
     const computeStats = (key: "p50" | "p95" | "p99") => {
       const values = data.map((d) => d[key]);
+      if (!values.length) return { minValue: 0, maxValue: 0, ratio: 0 };
       const minValue = Math.round(Math.min(...values));
       const maxValue = Math.round(Math.max(...values));
       const ratio =
@@ -607,10 +621,14 @@ export default function DashBoard({
     };
   }, [latencyDataForRealistic, getBarColor]);
 
-  const throughputData = filteredResults.map((item) => ({
-    vendor: item.vendor,
-    actualMessagesPerSecond: item.result["actual-messages-per-second"],
-  }));
+  const throughputData = filteredResults
+    .map((item) => ({
+      vendor: item.vendor,
+      actualMessagesPerSecond: Number(
+        item.result?.["actual-messages-per-second"] ?? 0
+      ),
+    }))
+    .filter((item) => Number.isFinite(item.actualMessagesPerSecond));
 
   // Telemetry breakdown per run (single-workload per-query view)
   const telemetryBreakdownPerRun = useMemo(() => {
@@ -618,7 +636,7 @@ export default function DashBoard({
     if (!selectedQuery) return [];
 
     // Use filteredResults so it respects vendor/hardware/throughput filters.
-    const runs = filteredResults.length ? filteredResults : data?.runs ?? [];
+    const runs = filteredResults.length ? filteredResults : validRuns;
 
     return runs
       .map((r) => {
@@ -641,22 +659,25 @@ export default function DashBoard({
       execMs: number;
       reportMs: number;
     }>;
-  }, [data, filteredResults, selectedOptions.Queries]);
+  }, [filteredResults, selectedOptions.Queries, validRuns]);
 
-  const maxThroughput = Math.max(
-    ...throughputData.map((item) => item.actualMessagesPerSecond)
+  const throughputValues = throughputData.map(
+    (item) => item.actualMessagesPerSecond
   );
-  const minThroughput = Math.min(
-    ...throughputData.map((item) => item.actualMessagesPerSecond)
-  );
+  const maxThroughput = throughputValues.length
+    ? Math.max(...throughputValues)
+    : 0;
+  const minThroughput = throughputValues.length
+    ? Math.min(...throughputValues)
+    : 0;
   const throughputRatio =
     minThroughput !== 0 ? Math.round(maxThroughput / minThroughput) : 0;
 
   // Dataset & workload summary (nodes, edges, read/write queries)
   const datasetSummary = React.useMemo(() => {
-    if (!data?.runs?.length) return null;
+    if (!validRuns.length) return null;
 
-    const baseRun = data.runs[0];
+    const baseRun = validRuns[0];
     const nodes = baseRun.edges ?? 0;
     const edges = baseRun.relationships ?? 0;
 
@@ -695,7 +716,7 @@ export default function DashBoard({
     }
 
     return { nodes, edges, readQueries, writeQueries, startedAtEpochSecs: baseRun["started-at-epoch-secs"] };
-  }, [data]);
+  }, [validRuns]);
 
   const parseMemory = (memory: string): number => {
     if (!memory) return 0;
@@ -761,8 +782,15 @@ export default function DashBoard({
     {}
   );
 
-  const maxSingleMemory = Math.max(...singleMemory.map((item) => item.memory));
-  const minSingleMemory = Math.min(...singleMemory.map((item) => item.memory));
+  const singleMemoryValues = singleMemory
+    .map((item) => item.memory)
+    .filter((value) => Number.isFinite(value));
+  const maxSingleMemory = singleMemoryValues.length
+    ? Math.max(...singleMemoryValues)
+    : 0;
+  const minSingleMemory = singleMemoryValues.length
+    ? Math.min(...singleMemoryValues)
+    : 0;
   const singleMemoryRatio =
     minSingleMemory !== 0 ? Math.round(maxSingleMemory / minSingleMemory) : 0;
 
@@ -833,10 +861,10 @@ export default function DashBoard({
           platform={data?.platforms}
           hideHardware={hideHardware}
           allowedVendors={
-            data?.runs?.length
+            validRuns.length
               ? Array.from(
                   new Set(
-                    data.runs
+                    validRuns
                       .map((r) => r.vendor?.toString().toLowerCase())
                       .filter(Boolean)
                   )
@@ -844,10 +872,10 @@ export default function DashBoard({
               : undefined
           }
           throughputOptions={
-            data?.runs?.length
+            validRuns.length
               ? Array.from(
                   new Set(
-                    data.runs
+                    validRuns
                       .map((r) => r["target-messages-per-second"])
                       .filter((v) => v !== undefined && v !== null)
                   )
