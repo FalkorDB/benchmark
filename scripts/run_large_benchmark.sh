@@ -70,6 +70,10 @@ QUERIES_FILE=${QUERIES_FILE:-"large-readonly"}
 QUERIES_COUNT=${QUERIES_COUNT:-20000}
 WRITE_RATIO=${WRITE_RATIO:-0.0}
 FALKOR_QUERY_TIMEOUT_MS=${FALKOR_QUERY_TIMEOUT_MS:-900000}
+FALKOR_READY_MAX_RETRIES=${FALKOR_READY_MAX_RETRIES:-30}
+FALKOR_READY_RETRY_DELAY_SECS=${FALKOR_READY_RETRY_DELAY_SECS:-2}
+FALKOR_CLEAR_MAX_RETRIES=${FALKOR_CLEAR_MAX_RETRIES:-30}
+FALKOR_CLEAR_RETRY_DELAY_SECS=${FALKOR_CLEAR_RETRY_DELAY_SECS:-1}
 ENABLE_ALGO_PAGERANK=${ENABLE_ALGO_PAGERANK:-0}
 ENABLE_ALGO_MAX_FLOW=${ENABLE_ALGO_MAX_FLOW:-0}
 ENABLE_ALGO_MSF=${ENABLE_ALGO_MSF:-0}
@@ -109,6 +113,68 @@ set_falkor_query_timeout() {
   fi
 
   echo "  - ${label} query timeout set to ${FALKOR_QUERY_TIMEOUT_MS}ms"
+}
+
+clear_falkor_graph() {
+  local label="$1"
+  local host="$2"
+  local port="$3"
+  wait_for_falkor_endpoint_ready "$label" "$host" "$port"
+
+  echo "==> Clearing ${label} graph (falkor) on port $port"
+  redis-cli -h "$host" -p "$port" GRAPH.DELETE falkor >/dev/null 2>&1 || true
+  # Also ensure no leftover non-graph key with the same name remains
+  redis-cli -h "$host" -p "$port" DEL falkor >/dev/null 2>&1 || true
+  wait_for_falkor_graph_cleared "$label" "$host" "$port"
+}
+
+wait_for_falkor_endpoint_ready() {
+  local label="$1"
+  local host="$2"
+  local port="$3"
+
+  for ((attempt=1; attempt<=FALKOR_READY_MAX_RETRIES; attempt++)); do
+    if redis-cli -h "$host" -p "$port" PING >/dev/null 2>&1; then
+      if [[ "$attempt" -gt 1 ]]; then
+        echo "  - ${label} endpoint became ready on ${host}:${port} after ${attempt} attempt(s)"
+      fi
+      return 0
+    fi
+
+    if [[ "$attempt" -lt "$FALKOR_READY_MAX_RETRIES" ]]; then
+      echo "  - ${label} endpoint not ready on ${host}:${port} (attempt ${attempt}/${FALKOR_READY_MAX_RETRIES}); retrying in ${FALKOR_READY_RETRY_DELAY_SECS}s..."
+      sleep "$FALKOR_READY_RETRY_DELAY_SECS"
+    fi
+  done
+
+  echo "❌ ${label} endpoint is not reachable on ${host}:${port} after ${FALKOR_READY_MAX_RETRIES} attempts." >&2
+  exit 1
+}
+
+wait_for_falkor_graph_cleared() {
+  local label="$1"
+  local host="$2"
+  local port="$3"
+  local exists
+
+  for ((attempt=1; attempt<=FALKOR_CLEAR_MAX_RETRIES; attempt++)); do
+    exists=$(redis-cli --raw -h "$host" -p "$port" EXISTS falkor 2>/dev/null || echo "1")
+    if [[ "$exists" == "0" ]]; then
+      if [[ "$attempt" -gt 1 ]]; then
+        echo "  - ${label} graph key 'falkor' cleared after ${attempt} attempt(s)"
+      fi
+      return 0
+    fi
+
+    if [[ "$attempt" -lt "$FALKOR_CLEAR_MAX_RETRIES" ]]; then
+      echo "  - Waiting for ${label} graph key 'falkor' to clear (attempt ${attempt}/${FALKOR_CLEAR_MAX_RETRIES}); retrying in ${FALKOR_CLEAR_RETRY_DELAY_SECS}s..."
+      sleep "$FALKOR_CLEAR_RETRY_DELAY_SECS"
+    fi
+  done
+
+  echo "❌ ${label} graph key 'falkor' still exists after ${FALKOR_CLEAR_MAX_RETRIES} attempts." >&2
+  redis-cli -h "$host" -p "$port" TYPE falkor 2>/dev/null || true
+  exit 1
 }
 
 ENABLE_ALGO_PAGERANK_BOOL=$(normalize_bool "$ENABLE_ALGO_PAGERANK" "ENABLE_ALGO_PAGERANK")
@@ -253,18 +319,10 @@ if [[ "${RUN_FALKOR_2}" == "1" ]]; then
   fi
 fi
 
-# Delete the entire FalkorDB graph key; ignore failures if the graph doesn't exist yet
+# Clear primary FalkorDB graph key before primary loading.
+# Secondary graph is cleared right before its own loading phase.
 if [[ "${RUN_FALKOR}" == "1" ]]; then
-  echo "==> Clearing FalkorDB graph (falkor) on port $FALKOR_PORT"
-  redis-cli -h "$FALKOR_HOST" -p "$FALKOR_PORT" GRAPH.DELETE falkor >/dev/null 2>&1 || true
-  # Also ensure no leftover non-graph key with the same name remains
-  redis-cli -h "$FALKOR_HOST" -p "$FALKOR_PORT" DEL falkor >/dev/null 2>&1 || true
-fi
-
-if [[ "${RUN_FALKOR_2}" == "1" ]]; then
-  echo "==> Clearing FalkorDB (secondary) graph on port $FALKOR_2_PORT"
-  redis-cli -h "$FALKOR_2_HOST" -p "$FALKOR_2_PORT" GRAPH.DELETE falkor >/dev/null 2>&1 || true
-  redis-cli -h "$FALKOR_2_HOST" -p "$FALKOR_2_PORT" DEL falkor >/dev/null 2>&1 || true
+  clear_falkor_graph "FalkorDB" "$FALKOR_HOST" "$FALKOR_PORT"
 fi
 
 # NOTE: Newer Neo4j cypher-shell versions send `CALL db.ping()` on connect.
@@ -323,22 +381,6 @@ if [[ "${RUN_FALKOR}" == "1" ]]; then
     -c 128 -b 16 -t 16
 fi
 
-if [[ "${RUN_FALKOR_2}" == "1" ]]; then
-  # Bulk-load large Pokec dataset into secondary FalkorDB using falkordb-bulk-loader
-  echo "==> Bulk-loading large Pokec dataset into FalkorDB (secondary) via falkordb-bulk-loader"
-  REDIS_URL_2="redis://$FALKOR_2_HOST:$FALKOR_2_PORT"
-  if ! command -v python3 >/dev/null 2>&1; then
-    echo "❌ python3 not found; required to run falkordb-bulk-loader" >&2
-    exit 1
-  fi
-
-  PYTHONPATH="../falkordb-bulk-loader" python3 "../falkordb-bulk-loader/falkordb_bulk_loader/bulk_insert.py" falkor \
-    -u "$REDIS_URL_2" \
-    -n "$CSV_DIR/User.csv" \
-    -r "$CSV_DIR/FRIEND.csv" \
-    -j INTEGER -s -i User:id -i User:age \
-    -c 128 -b 16 -t 16
-fi
 
 if [[ "${RUN_MEMGRAPH}" == "1" ]]; then
   echo "==> Bulk-loading large Pokec dataset into Memgraph via LOAD CSV"
@@ -422,17 +464,12 @@ if [[ "${RUN_NEO4J}" == "1" ]]; then
   cargo run --release --bin benchmark -- load --vendor neo4j --size large --endpoint "$NEO4J_ENDPOINT" -b "$BATCH_SIZE"
 fi
 
-if [[ "${RUN_FALKOR}" == "1" || "${RUN_FALKOR_2}" == "1" ]]; then
-  echo "==> Configuring FalkorDB query timeout (${FALKOR_QUERY_TIMEOUT_MS}ms)"
-fi
 if [[ "${RUN_FALKOR}" == "1" ]]; then
+  echo "==> Configuring FalkorDB query timeout (${FALKOR_QUERY_TIMEOUT_MS}ms) before primary run"
   set_falkor_query_timeout "FalkorDB" "$FALKOR_HOST" "$FALKOR_PORT"
 fi
-if [[ "${RUN_FALKOR_2}" == "1" ]]; then
-  set_falkor_query_timeout "FalkorDB (secondary)" "$FALKOR_2_HOST" "$FALKOR_2_PORT"
-fi
 
-if [[ "${RUN_NEO4J}" == "1" || "${RUN_FALKOR}" == "1" || "${RUN_FALKOR_2}" == "1" || "${RUN_MEMGRAPH}" == "1" ]]; then
+if [[ "${RUN_NEO4J}" == "1" || "${RUN_FALKOR}" == "1" || "${RUN_MEMGRAPH}" == "1" ]]; then
   echo "==> Validating database contents before running queries"
 fi
 
@@ -484,41 +521,6 @@ if [[ "${RUN_FALKOR}" == "1" ]]; then
   fi
 fi
 
-if [[ "${RUN_FALKOR_2}" == "1" ]]; then
-  echo "  - Checking FalkorDB (secondary) data..."
-  FALKOR_2_STATS_MAX_RETRIES=${FALKOR_2_STATS_MAX_RETRIES:-10}
-  FALKOR_2_STATS_RETRY_DELAY_SECS=${FALKOR_2_STATS_RETRY_DELAY_SECS:-2}
-  FALKOR_2_STATS=""
-  FALKOR_2_NODE_COUNT=0
-  FALKOR_2_REL_COUNT=0
-
-  for ((attempt=1; attempt<=FALKOR_2_STATS_MAX_RETRIES; attempt++)); do
-    # Preserve stderr in logs (do not redirect it away); tolerate transient command failures.
-    FALKOR_2_STATS=$(redis-cli -h "$FALKOR_2_HOST" -p "$FALKOR_2_PORT" GRAPH.QUERY falkor "CALL db.meta.stats()" || true)
-    FALKOR_2_NODE_COUNT=$(echo "$FALKOR_2_STATS" | sed -n '11p' | grep -oE '[0-9]+' || true)
-    FALKOR_2_REL_COUNT=$(echo "$FALKOR_2_STATS" | sed -n '10p' | grep -oE '[0-9]+' || true)
-    FALKOR_2_NODE_COUNT=${FALKOR_2_NODE_COUNT:-0}
-    FALKOR_2_REL_COUNT=${FALKOR_2_REL_COUNT:-0}
-
-    if [[ "$FALKOR_2_NODE_COUNT" -gt 0 ]]; then
-      break
-    fi
-
-    if [[ "$attempt" -lt "$FALKOR_2_STATS_MAX_RETRIES" ]]; then
-      echo "    FalkorDB (secondary) stats not ready yet (attempt ${attempt}/${FALKOR_2_STATS_MAX_RETRIES}); retrying in ${FALKOR_2_STATS_RETRY_DELAY_SECS}s..."
-      sleep "$FALKOR_2_STATS_RETRY_DELAY_SECS"
-    fi
-  done
-  echo "    FalkorDB (secondary): ${FALKOR_2_NODE_COUNT} User nodes, ${FALKOR_2_REL_COUNT} Friend relationships (via db.meta.stats)"
-  if [[ "$FALKOR_2_NODE_COUNT" -eq 0 ]]; then
-    if [[ -n "$FALKOR_2_STATS" ]]; then
-      echo "    Last db.meta.stats output from secondary:" >&2
-      echo "$FALKOR_2_STATS" >&2
-    fi
-    echo "❌ FalkorDB (secondary) has no User nodes loaded. Cannot proceed with benchmark." >&2
-    exit 1
-  fi
-fi
 
 if [[ "${RUN_MEMGRAPH}" == "1" ]]; then
   echo "  - Checking Memgraph data..."
@@ -561,9 +563,62 @@ fi
 
 if [[ "${RUN_FALKOR_2}" == "1" ]]; then
   if [[ "${RUN_FALKOR}" == "1" && "$FREE_PRIMARY_FALKOR_BEFORE_SECOND_RUN_BOOL" == "true" ]]; then
-    echo "==> Releasing primary FalkorDB graph memory before secondary run"
-    redis-cli -h "$FALKOR_HOST" -p "$FALKOR_PORT" GRAPH.DELETE falkor >/dev/null 2>&1 || true
-    redis-cli -h "$FALKOR_HOST" -p "$FALKOR_PORT" DEL falkor >/dev/null 2>&1 || true
+    echo "==> Releasing primary FalkorDB graph memory before secondary loading"
+    clear_falkor_graph "FalkorDB" "$FALKOR_HOST" "$FALKOR_PORT"
+  fi
+
+  clear_falkor_graph "FalkorDB (secondary)" "$FALKOR_2_HOST" "$FALKOR_2_PORT"
+
+  # Bulk-load large Pokec dataset into secondary FalkorDB only after primary run finishes.
+  echo "==> Bulk-loading large Pokec dataset into FalkorDB (secondary) via falkordb-bulk-loader"
+  REDIS_URL_2="redis://$FALKOR_2_HOST:$FALKOR_2_PORT"
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "❌ python3 not found; required to run falkordb-bulk-loader" >&2
+    exit 1
+  fi
+
+  PYTHONPATH="../falkordb-bulk-loader" python3 "../falkordb-bulk-loader/falkordb_bulk_loader/bulk_insert.py" falkor \
+    -u "$REDIS_URL_2" \
+    -n "$CSV_DIR/User.csv" \
+    -r "$CSV_DIR/FRIEND.csv" \
+    -j INTEGER -s -i User:id -i User:age \
+    -c 128 -b 16 -t 16
+
+  echo "==> Configuring FalkorDB (secondary) query timeout (${FALKOR_QUERY_TIMEOUT_MS}ms)"
+  set_falkor_query_timeout "FalkorDB (secondary)" "$FALKOR_2_HOST" "$FALKOR_2_PORT"
+
+  echo "==> Validating FalkorDB (secondary) contents before secondary run"
+  FALKOR_2_STATS_MAX_RETRIES=${FALKOR_2_STATS_MAX_RETRIES:-10}
+  FALKOR_2_STATS_RETRY_DELAY_SECS=${FALKOR_2_STATS_RETRY_DELAY_SECS:-2}
+  FALKOR_2_STATS=""
+  FALKOR_2_NODE_COUNT=0
+  FALKOR_2_REL_COUNT=0
+
+  for ((attempt=1; attempt<=FALKOR_2_STATS_MAX_RETRIES; attempt++)); do
+    # Preserve stderr in logs (do not redirect it away); tolerate transient command failures.
+    FALKOR_2_STATS=$(redis-cli -h "$FALKOR_2_HOST" -p "$FALKOR_2_PORT" GRAPH.QUERY falkor "CALL db.meta.stats()" || true)
+    FALKOR_2_NODE_COUNT=$(echo "$FALKOR_2_STATS" | sed -n '11p' | grep -oE '[0-9]+' || true)
+    FALKOR_2_REL_COUNT=$(echo "$FALKOR_2_STATS" | sed -n '10p' | grep -oE '[0-9]+' || true)
+    FALKOR_2_NODE_COUNT=${FALKOR_2_NODE_COUNT:-0}
+    FALKOR_2_REL_COUNT=${FALKOR_2_REL_COUNT:-0}
+
+    if [[ "$FALKOR_2_NODE_COUNT" -gt 0 ]]; then
+      break
+    fi
+
+    if [[ "$attempt" -lt "$FALKOR_2_STATS_MAX_RETRIES" ]]; then
+      echo "    FalkorDB (secondary) stats not ready yet (attempt ${attempt}/${FALKOR_2_STATS_MAX_RETRIES}); retrying in ${FALKOR_2_STATS_RETRY_DELAY_SECS}s..."
+      sleep "$FALKOR_2_STATS_RETRY_DELAY_SECS"
+    fi
+  done
+  echo "    FalkorDB (secondary): ${FALKOR_2_NODE_COUNT} User nodes, ${FALKOR_2_REL_COUNT} Friend relationships (via db.meta.stats)"
+  if [[ "$FALKOR_2_NODE_COUNT" -eq 0 ]]; then
+    if [[ -n "$FALKOR_2_STATS" ]]; then
+      echo "    Last db.meta.stats output from secondary:" >&2
+      echo "$FALKOR_2_STATS" >&2
+    fi
+    echo "❌ FalkorDB (secondary) has no User nodes loaded. Cannot proceed with benchmark." >&2
+    exit 1
   fi
   echo "==> Running workload against FalkorDB (secondary) on $FALKOR_ENDPOINT_2"
   cargo run --release --bin benchmark -- run --vendor falkor   --name "$FALKOR_QUERIES_FILE"   --parallel "$PARALLEL" --mps "$MPS" --endpoint "$FALKOR_ENDPOINT_2"   --results-dir "$RESULTS_DIR"

@@ -5,6 +5,21 @@
 
 ## See the benchmarks ([Click here](https://benchmark.falkordb.com/))
 # Key Benchmark Takeaways
+## Navigation
+- [About the benchmarks](#about-the-benchmarks)
+- [System Requirements](#system-requirements)
+  - [Prerequisites](#prerequisites)
+  - [Installation Steps](#installation-steps)
+- [Run the benchmark](#run-the-benchmark)
+  - [Run via helper scripts](#run-via-helper-scripts)
+  - [CLI workflow](#cli-workflow)
+  - [Multi-vendor reports](#multi-vendor-runs-and-per-vendor-comparison-reports-ui)
+  - [Per-query latency tracking](#per-query-latency-tracking-for-the-single-view)
+  - [Query explanations and samples](#query-explanations-and-samples)
+  - [Simulation mode](#run-simulation-to-see-that-the-benchmark-itself-can-sustain-specific-mps-given-a-fixed-latency-on-that-hardware)
+- [Data](#data)
+- [FAQ](#faq)
+- [Grafana and Prometheus](#grafana-and-prometheus)
 
 Get mission-critical performance even under extreme workloads, with response times staying under 140ms at p99, while
 competitors struggle with multi-second latencies. Reduce infrastructure costs and improve user experience with
@@ -82,6 +97,59 @@ from `~/`
 - copy the falkor shared lib to `cp ~/FalkorDB/bin/linux-x64-release/src/falkordb.so .`
 
 #### run the benchmark
+##### run via helper scripts
+
+Use the wrapper scripts in `scripts/` for the fastest end-to-end benchmark activation:
+
+- `scripts/run_small_benchmark.sh`
+- `scripts/run_medium_benchmark.sh`
+- `scripts/run_large_benchmark.sh`
+
+Each script handles the full pipeline for its dataset size:
+1. clears and loads enabled vendors
+2. generates vendor-specific query files
+3. runs benchmark workloads
+4. writes results into a shared `RESULTS_DIR`
+5. aggregates UI-ready summaries
+
+Quick start:
+
+```bash
+./scripts/run_small_benchmark.sh
+./scripts/run_medium_benchmark.sh
+./scripts/run_large_benchmark.sh
+```
+
+Run only Falkor primary + secondary comparison:
+
+```bash
+RUN_FALKOR=1 RUN_FALKOR_2=1 RUN_NEO4J=0 RUN_MEMGRAPH=0 ./scripts/run_medium_benchmark.sh
+```
+
+Override workload shape:
+
+```bash
+QUERIES_COUNT=25000 WRITE_RATIO=0.05 PARALLEL=10 MPS=3000 ./scripts/run_medium_benchmark.sh
+```
+
+Point wrappers to external endpoints:
+
+```bash
+FALKOR_ENDPOINT=falkor://127.0.0.1:6379 \
+FALKOR_ENDPOINT_2=falkor://127.0.0.1:6800 \
+NEO4J_ENDPOINT=neo4j://127.0.0.1:7687 \
+MEMGRAPH_ENDPOINT=bolt://127.0.0.1:17687 \
+./scripts/run_small_benchmark.sh
+```
+
+Common environment knobs:
+- vendor toggles: `RUN_FALKOR`, `RUN_FALKOR_2`, `RUN_NEO4J`, `RUN_MEMGRAPH`
+- workload controls: `BATCH_SIZE`, `PARALLEL`, `MPS`, `QUERIES_COUNT`, `WRITE_RATIO`, `QUERIES_FILE`
+- algorithm toggles: `ENABLE_ALGO_PAGERANK`, `ENABLE_ALGO_MAX_FLOW`, `ENABLE_ALGO_MSF`, `ENABLE_ALGO_HARMONIC`
+- output folder: `RESULTS_DIR`
+- Falkor timeout tuning (medium/large wrappers): `FALKOR_QUERY_TIMEOUT_MS`
+
+##### CLI workflow
 
 ##### Generate the docker compose for prometheus and grafana
 
@@ -188,9 +256,17 @@ Important: if you change the query set/metrics, regenerate the workload file bef
 
 ##### helper script
 
-For a convenience wrapper that loads data, regenerates a queries file, runs multiple vendors into a shared results directory, and aggregates UI summaries, see:
+For convenience wrappers that load data, regenerate queries, run workloads, and aggregate UI summaries, see:
 
 - `scripts/run_small_benchmark.sh`
+- `scripts/run_medium_benchmark.sh`
+- `scripts/run_large_benchmark.sh`
+
+##### query explanations and samples
+
+For the maintained query catalog guide (including phase-1 additions and sample Cypher), see:
+
+- `QUERY_EXPLANATIONS_AND_SAMPLES.md`
 
 ##### run simulation to see that the benchmark itself can sustain specific mps given a fixed latency on that hardware
 

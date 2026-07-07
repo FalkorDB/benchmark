@@ -102,9 +102,17 @@ export function AppSidebar({
       }
 
       if (group.title === "Queries" && queries.length) {
+        const sortedQueryOptions = [...queries]
+          .map((id) => ({ id, label: labelForQuery(id) }))
+          .sort((a, b) =>
+            a.label.localeCompare(b.label, undefined, {
+              numeric: true,
+              sensitivity: "base",
+            })
+          );
         return {
           ...group,
-          options: queries.map((id) => ({ id, label: labelForQuery(id) })),
+          options: sortedQueryOptions,
         };
       }
 

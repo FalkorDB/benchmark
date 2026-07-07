@@ -651,10 +651,12 @@ impl UsersQueriesRepository {
                 QueryType::Read,
                 |_random, flavour| {
                     let text = match flavour {
-                        Flavour::FalkorDB => "CALL algo.pageRank('User', null) \
+                        Flavour::FalkorDB => {
+                            "CALL algo.pageRank('User', null) \
                                              YIELD node, score \
                                              RETURN score \
-                                             LIMIT 1",
+                                             LIMIT 1"
+                        }
                         Flavour::Neo4j => {
                             "CALL gds.pageRank.stream('benchmark_algo_graph') \
                              YIELD nodeId, score \
@@ -683,11 +685,13 @@ impl UsersQueriesRepository {
                         Flavour::FalkorDB => {
                             "MATCH (s:User {id: $source_id}), (t:User {id: $target_id}) \
                              CALL db.relationshipTypes() YIELD relationshipType \
-                             WITH s, t, collect(relationshipType) AS relationshipTypes \
+                             WITH s, t, relationshipType \
+                             ORDER BY relationshipType \
+                             LIMIT 1 \
                              CALL algo.maxFlow({ \
                                  sourceNodes: [s], \
                                  targetNodes: [t], \
-                                 relationshipTypes: relationshipTypes, \
+                                 relationshipTypes: [relationshipType], \
                                  capacityProperty: 'bench_capacity' \
                              }) \
                              YIELD maxFlow \
@@ -792,6 +796,164 @@ impl UsersQueriesRepository {
             );
         }
 
+        // Phase 1 additions: queries that do not require dataset fixture changes.
+        queries_builder = queries_builder
+            .add_query("merge_user_insert_path", QueryType::Write, |random, _flavour| {
+                let insert_id = random.vertices.saturating_add(random.random_vertex());
+                QueryBuilder::new()
+                    .text("MERGE (u:User {id: $id}) ON CREATE SET u.created_at = timestamp(), u.age = $age RETURN u.id")
+                    .param("id", insert_id)
+                    .param("age", random.random_vertex())
+                    .build()
+            })
+            .add_query(
+                "merge_user_upsert_existing",
+                QueryType::Write,
+                |random, _flavour| {
+                    QueryBuilder::new()
+                        .text("MERGE (u:User {id: $id}) ON CREATE SET u.created_at = timestamp() ON MATCH SET u.age = $age, u.last_seen = timestamp() RETURN u.id")
+                        .param("id", random.random_vertex())
+                        .param("age", random.random_vertex())
+                        .build()
+                },
+            )
+            .add_query("merge_friend_edge_upsert", QueryType::Write, |random, _flavour| {
+                let (from, to) = random.random_path();
+                QueryBuilder::new()
+                    .text("MATCH (a:User {id: $from}), (b:User {id: $to}) MERGE (a)-[r:Friend]->(b) ON CREATE SET r.since = date() ON MATCH SET r.touch = date() RETURN id(r)")
+                    .param("from", from)
+                    .param("to", to)
+                    .build()
+            })
+            .add_query("detach_delete_user", QueryType::Write, |random, _flavour| {
+                QueryBuilder::new()
+                    .text("MATCH (u:User {id: $id}) DETACH DELETE u")
+                    .param("id", random.random_vertex())
+                    .build()
+            })
+            .add_query(
+                "remove_user_property_and_label",
+                QueryType::Write,
+                |random, _flavour| {
+                    QueryBuilder::new()
+                        .text("MATCH (u:User {id: $id}) REMOVE u.rpc_social_credit, u:TemporaryLabel RETURN u.id")
+                        .param("id", random.random_vertex())
+                        .build()
+                },
+            )
+            .add_query("foreach_loop_mutation", QueryType::Write, |random, _flavour| {
+                QueryBuilder::new()
+                    .text("MATCH (u:User {id: $id}) FOREACH (x IN [1,2,3] | SET u.loop_counter = x) RETURN u.loop_counter")
+                    .param("id", random.random_vertex())
+                    .build()
+            })
+            .add_query("union_all_ids", QueryType::Read, |random, _flavour| {
+                QueryBuilder::new()
+                    .text("MATCH (u:User {id: $id}) RETURN u.id AS uid UNION ALL MATCH (v:User) WHERE v.id < 10 RETURN v.id AS uid")
+                    .param("id", random.random_vertex())
+                    .build()
+            })
+            .add_query("union_distinct_ids", QueryType::Read, |random, _flavour| {
+                QueryBuilder::new()
+                    .text("MATCH (u:User {id: $id}) RETURN u.id AS uid UNION MATCH (v:User {id: $id}) RETURN v.id AS uid")
+                    .param("id", random.random_vertex())
+                    .build()
+            })
+            .add_query("all_shortest_paths_len", QueryType::Read, |random, flavour| {
+                let (from, to) = random.random_path();
+                let text = match flavour {
+                    Flavour::Memgraph => {
+                        "MATCH p = (:User {id: $from})-[*BFS]->(:User {id: $to}) RETURN length(p)"
+                    }
+                    Flavour::FalkorDB => {
+                        "MATCH (s:User {id: $from}), (t:User {id: $to}) WITH s, t MATCH p = allShortestPaths((s)-[:Friend*1..4]->(t)) RETURN length(p)"
+                    }
+                    Flavour::Neo4j => {
+                        "MATCH (s:User {id: $from}), (t:User {id: $to}) MATCH p = allShortestPaths((s)-[:Friend*1..4]->(t)) RETURN length(p)"
+                    }
+                };
+                QueryBuilder::new()
+                    .text(text)
+                    .param("from", from)
+                    .param("to", to)
+                    .build()
+            })
+            .add_query(
+                "var_len_with_edge_where_filter",
+                QueryType::Read,
+                |random, flavour| {
+                    let text = match flavour {
+                        Flavour::FalkorDB => {
+                            "MATCH (s:User {id: $id})-[r:Friend*1..3]->(t:User) WHERE r.bench_capacity >= $min_capacity RETURN count(t)"
+                        }
+                        _ => {
+                            "MATCH (s:User {id: $id})-[r:Friend*1..3]->(t:User) WHERE all(rel IN r WHERE rel.bench_capacity >= $min_capacity) RETURN count(t)"
+                        }
+                    };
+                    QueryBuilder::new()
+                        .text(text)
+                        .param("id", random.random_vertex())
+                        .param("min_capacity", 1)
+                        .build()
+                },
+            )
+            .add_query(
+                "exact_5_hop_traverse_count",
+                QueryType::Read,
+                |random, _flavour| {
+                    QueryBuilder::new()
+                        .text("MATCH (s:User {id: $id})-[:Friend*5..5]->(t:User) RETURN count(t) AS cnt")
+                        .param("id", random.random_vertex())
+                        .build()
+                },
+            )
+            .add_query(
+                "exact_6_hop_traverse_count",
+                QueryType::Read,
+                |random, _flavour| {
+                    QueryBuilder::new()
+                        .text("MATCH (s:User {id: $id})-[:Friend*6..6]->(t:User) RETURN count(t) AS cnt")
+                        .param("id", random.random_vertex())
+                        .build()
+                },
+            )
+            .add_query("count_users_plain", QueryType::Read, |_random, _flavour| {
+                QueryBuilder::new()
+                    .text("MATCH (u:User) RETURN count(u) AS cnt")
+                    .build()
+            })
+            .add_query("count_friend_edges_plain", QueryType::Read, |_random, _flavour| {
+                QueryBuilder::new()
+                    .text("MATCH ()-[r:Friend]->() RETURN count(r) AS cnt")
+                    .build()
+            })
+            .add_query("indexed_or_predicate", QueryType::Read, |random, _flavour| {
+                let (id1, id2) = random.random_path();
+                QueryBuilder::new()
+                    .text("MATCH (u:User) WHERE u.id = $id1 OR u.id = $id2 RETURN u.id")
+                    .param("id1", id1)
+                    .param("id2", id2)
+                    .build()
+            })
+            .add_query("indexed_in_list_predicate", QueryType::Read, |random, _flavour| {
+                let id1 = random.random_vertex();
+                let id2 = random.random_vertex();
+                let id3 = random.random_vertex();
+                let id4 = random.random_vertex();
+                QueryBuilder::new()
+                    .text("MATCH (u:User) WHERE u.id IN [$id1, $id2, $id3, $id4] RETURN u.id")
+                    .param("id1", id1)
+                    .param("id2", id2)
+                    .param("id3", id3)
+                    .param("id4", id4)
+                    .build()
+            })
+            .add_query("entity_path_introspection", QueryType::Read, |random, _flavour| {
+                QueryBuilder::new()
+                    .text("MATCH p=(a:User {id: $id})-[r:Friend]->(b:User) RETURN labels(a), type(r), properties(a), nodes(p), relationships(p), length(p) LIMIT 1")
+                    .param("id", random.random_vertex())
+                    .build()
+            });
         let queries_repository = queries_builder.build();
 
         UsersQueriesRepository { queries_repository }

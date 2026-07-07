@@ -27,12 +27,13 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 #  PARALLEL (default: 20)
 #  MPS      (default: 7500)
 #  QUERIES_FILE (default: medium-readonly)
-#  QUERIES_COUNT (default: 1000000)
+#  QUERIES_COUNT (default: 20000)
 #  WRITE_RATIO (default: 0.0)
+#  FALKOR_QUERY_TIMEOUT_MS (default: 900000)
 #  ENABLE_ALGO_PAGERANK (default: 1)
-#  ENABLE_ALGO_MAX_FLOW (default: 0)
-#  ENABLE_ALGO_MSF (default: 0)
-#  ENABLE_ALGO_HARMONIC (default: 0)
+#  ENABLE_ALGO_MAX_FLOW (default: 1)
+#  ENABLE_ALGO_MSF (default: 1)
+#  ENABLE_ALGO_HARMONIC (default: 1)
 #
 # Results:
 #  RESULTS_DIR (default: Results-YYMMDD-HH:MM)
@@ -60,14 +61,15 @@ RUN_MEMGRAPH=${RUN_MEMGRAPH:-0}
 
 BATCH_SIZE=${BATCH_SIZE:-5000}
 PARALLEL=${PARALLEL:-10}
-MPS=${MPS:-5000}
+MPS=${MPS:-3000}
 QUERIES_FILE=${QUERIES_FILE:-"medium-readonly"}
-QUERIES_COUNT=${QUERIES_COUNT:-100000}
-WRITE_RATIO=${WRITE_RATIO:-0.0}
+QUERIES_COUNT=${QUERIES_COUNT:-25000}
+WRITE_RATIO=${WRITE_RATIO:-0.05}
+FALKOR_QUERY_TIMEOUT_MS=${FALKOR_QUERY_TIMEOUT_MS:-900000}
 ENABLE_ALGO_PAGERANK=${ENABLE_ALGO_PAGERANK:-1}
-ENABLE_ALGO_MAX_FLOW=${ENABLE_ALGO_MAX_FLOW:-0}
-ENABLE_ALGO_MSF=${ENABLE_ALGO_MSF:-0}
-ENABLE_ALGO_HARMONIC=${ENABLE_ALGO_HARMONIC:-0}
+ENABLE_ALGO_MAX_FLOW=${ENABLE_ALGO_MAX_FLOW:-1}
+ENABLE_ALGO_MSF=${ENABLE_ALGO_MSF:-1}
+ENABLE_ALGO_HARMONIC=${ENABLE_ALGO_HARMONIC:-1}
 
 # Derive per-vendor query file names so each engine can use vendor-optimized queries.
 QUERIES_FILE_BASE="${QUERIES_FILE}"
@@ -90,6 +92,19 @@ normalize_bool() {
   esac
 }
 
+set_falkor_query_timeout() {
+  local label="$1"
+  local host="$2"
+  local port="$3"
+  local result
+
+  if ! result=$(redis-cli -h "$host" -p "$port" GRAPH.CONFIG SET TIMEOUT "$FALKOR_QUERY_TIMEOUT_MS" 2>&1); then
+    echo "  - Warning: failed to set ${label} query timeout to ${FALKOR_QUERY_TIMEOUT_MS}ms: ${result}" >&2
+    return 0
+  fi
+
+  echo "  - ${label} query timeout set to ${FALKOR_QUERY_TIMEOUT_MS}ms"
+}
 ENABLE_ALGO_PAGERANK_BOOL=$(normalize_bool "$ENABLE_ALGO_PAGERANK" "ENABLE_ALGO_PAGERANK")
 ENABLE_ALGO_MAX_FLOW_BOOL=$(normalize_bool "$ENABLE_ALGO_MAX_FLOW" "ENABLE_ALGO_MAX_FLOW")
 ENABLE_ALGO_MSF_BOOL=$(normalize_bool "$ENABLE_ALGO_MSF" "ENABLE_ALGO_MSF")
@@ -116,6 +131,7 @@ fi
 
 export NEO4J_PASSWORD
 export MEMGRAPH_PASSWORD
+export FALKOR_QUERY_TIMEOUT_MS
 
 # The benchmark binary now supports credentials via env vars when endpoint URL omits them.
 export NEO4J_USER
@@ -260,6 +276,15 @@ if [[ "${RUN_MEMGRAPH}" == "1" ]]; then
   echo "==> Loading medium dataset into Memgraph (UNWIND loader)"
   # --force clears the external Memgraph instance before loading
   cargo run --release --bin benchmark -- load --vendor memgraph --size medium --endpoint "$MEMGRAPH_ENDPOINT" -b "$BATCH_SIZE" --force
+fi
+if [[ "${RUN_FALKOR}" == "1" || "${RUN_FALKOR_2}" == "1" ]]; then
+  echo "==> Configuring FalkorDB query timeout (${FALKOR_QUERY_TIMEOUT_MS}ms)"
+fi
+if [[ "${RUN_FALKOR}" == "1" ]]; then
+  set_falkor_query_timeout "FalkorDB" "$FALKOR_HOST" "$FALKOR_PORT"
+fi
+if [[ "${RUN_FALKOR_2}" == "1" ]]; then
+  set_falkor_query_timeout "FalkorDB (secondary)" "$FALKOR_2_HOST" "$FALKOR_2_PORT"
 fi
 
 echo "==> Generating vendor-specific query files (base=${QUERIES_FILE_BASE}, dataset=medium, count=${QUERIES_COUNT}, write_ratio=${WRITE_RATIO})"

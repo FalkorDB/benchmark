@@ -10,8 +10,8 @@ use crate::{
     FALKOR_NODES_GAUGE, FALKOR_RELATIONSHIPS_GAUGE, FALKOR_RESTART_COUNTER,
     FALKOR_RUNNING_REQUESTS_GAUGE, FALKOR_WAITING_REQUESTS_GAUGE, MEM_USAGE_GAUGE, REDIS_DATA_DIR,
 };
-use futures::StreamExt;
 use falkordb::{AsyncGraph, FalkorClientBuilder, FalkorConnectionInfo};
+use futures::StreamExt;
 use prometheus::core::{AtomicU64, GenericCounter};
 use std::env;
 use std::sync::{Arc, Mutex};
