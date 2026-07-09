@@ -1,4 +1,5 @@
 use crate::query::{Bolt, Query, QueryBuilder};
+use clap::ValueEnum;
 use rand::prelude::IndexedRandom;
 use rand::random;
 use serde::{Deserialize, Serialize};
@@ -41,6 +42,34 @@ impl Default for AlgorithmQuerySelection {
             msf: true,
             harmonic: true,
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+#[value(rename_all = "kebab-case")]
+pub enum QueryCoverageProfile {
+    Baseline,
+    ExtendedCore,
+    FixtureDependent,
+}
+
+impl QueryCoverageProfile {
+    pub fn includes_extended_core(self) -> bool {
+        matches!(
+            self,
+            QueryCoverageProfile::ExtendedCore | QueryCoverageProfile::FixtureDependent
+        )
+    }
+
+    pub fn includes_fixture_dependent(self) -> bool {
+        matches!(self, QueryCoverageProfile::FixtureDependent)
+    }
+}
+
+impl Default for QueryCoverageProfile {
+    fn default() -> Self {
+        Self::Baseline
     }
 }
 
@@ -341,6 +370,7 @@ impl UsersQueriesRepository {
         edges: i32,
         flavour: Flavour,
         algorithm_selection: AlgorithmQuerySelection,
+        query_coverage_profile: QueryCoverageProfile,
     ) -> UsersQueriesRepository {
         let mut queries_builder = QueriesRepositoryBuilder::new(vertices, edges)
             .flavour(flavour)
@@ -365,14 +395,14 @@ impl UsersQueriesRepository {
             })
 .add_query("single_edge_update", QueryType::Write, |random, _flavour| {
                 QueryBuilder::new()
-                    .text("MATCH (n:User)-[e:Friend]->(m:User) WITH e ORDER BY rand() LIMIT 1 SET e.color = $color RETURN e")
+                    .text("MATCH (n:User)-[e:Friend]->(m:User) WITH n, m, e ORDER BY rand() LIMIT 1 SET e.color = $color, e.bench_capacity = coalesce(e.bench_capacity, 1 + ((n.id * 31 + m.id * 17) % 20)) RETURN e")
                     .param("color", random.random_vertex())
                     .build()
             })
 .add_query("single_edge_write", QueryType::Write, |random, _flavour| {
                 let (from, to) = random.random_path();
                 QueryBuilder::new()
-                    .text("MATCH (n:User {id: $from}), (m:User {id: $to}) WITH n, m CREATE (n)-[e:Friend]->(m) RETURN e")
+                    .text("MATCH (n:User {id: $from}), (m:User {id: $to}) MERGE (n)-[e:Friend]->(m) ON CREATE SET e.bench_capacity = 1 + ((n.id * 31 + m.id * 17) % 20) ON MATCH SET e.bench_capacity = coalesce(e.bench_capacity, 1 + ((n.id * 31 + m.id * 17) % 20)), e.touch = date() RETURN e")
                     .param("from", from)
                     .param("to", to)
                     .build()
@@ -820,7 +850,7 @@ impl UsersQueriesRepository {
             .add_query("merge_friend_edge_upsert", QueryType::Write, |random, _flavour| {
                 let (from, to) = random.random_path();
                 QueryBuilder::new()
-                    .text("MATCH (a:User {id: $from}), (b:User {id: $to}) MERGE (a)-[r:Friend]->(b) ON CREATE SET r.since = date() ON MATCH SET r.touch = date() RETURN id(r)")
+                    .text("MATCH (a:User {id: $from}), (b:User {id: $to}) MERGE (a)-[r:Friend]->(b) ON CREATE SET r.since = date(), r.bench_capacity = 1 + ((a.id * 31 + b.id * 17) % 20) ON MATCH SET r.touch = date(), r.bench_capacity = coalesce(r.bench_capacity, 1 + ((a.id * 31 + b.id * 17) % 20)) RETURN id(r)")
                     .param("from", from)
                     .param("to", to)
                     .build()
@@ -954,6 +984,109 @@ impl UsersQueriesRepository {
                     .param("id", random.random_vertex())
                     .build()
             });
+        if query_coverage_profile.includes_extended_core() && !matches!(flavour, Flavour::Memgraph)
+        {
+            queries_builder = queries_builder.add_query(
+                "temporal_spatial_roundtrip",
+                QueryType::Read,
+                |_random, _flavour| {
+                    QueryBuilder::new()
+                        .text(
+                            "RETURN \
+                                date('2024-01-01') AS d, \
+                                localtime('12:30:00') AS t, \
+                                duration('P2DT3H') AS dur, \
+                                distance( \
+                                    point({latitude: 32.1, longitude: 34.8}), \
+                                    point({latitude: 32.2, longitude: 34.9}) \
+                                ) AS dist",
+                        )
+                        .build()
+                },
+            );
+        }
+
+        if query_coverage_profile.includes_fixture_dependent() {
+            queries_builder = queries_builder
+                .add_query("vector_query_nodes_smoke", QueryType::Read, |_random, flavour| {
+                    let text = match flavour {
+                        Flavour::FalkorDB => {
+                            "CALL db.idx.vector.queryNodes('User', 'embedding', 10, vecf32([0.1, 0.2, 0.3])) \
+                             YIELD node, score \
+                             RETURN id(node), score \
+                             LIMIT 10"
+                        }
+                        Flavour::Neo4j => {
+                            "CALL db.index.vector.queryNodes('bench_user_embedding_idx', 10, [0.1, 0.2, 0.3]) \
+                             YIELD node, score \
+                             RETURN id(node), score \
+                             LIMIT 10"
+                        }
+                        Flavour::Memgraph => {
+                            "CALL vector_search.search('bench_user_embedding_idx', 10, [0.1, 0.2, 0.3]) \
+                             YIELD node, similarity \
+                             RETURN id(node), similarity AS score \
+                             LIMIT 10"
+                        }
+                    };
+                    QueryBuilder::new().text(text).build()
+                })
+                .add_query(
+                    "fulltext_query_nodes_smoke",
+                    QueryType::Read,
+                    |_random, flavour| {
+                        let text = match flavour {
+                            Flavour::FalkorDB => {
+                                "CALL db.idx.fulltext.queryNodes('User', 'fixture_alice') \
+                                 YIELD node, score \
+                                 RETURN id(node), score \
+                                 LIMIT 10"
+                            }
+                            Flavour::Neo4j => {
+                                "CALL db.index.fulltext.queryNodes('bench_user_ft_idx', 'fixture_alice') \
+                                 YIELD node, score \
+                                 RETURN id(node), score \
+                                 LIMIT 10"
+                            }
+                            Flavour::Memgraph => {
+                                "CALL text_search.search('bench_user_ft_idx', 'data.ft_text:fixture_alice') \
+                                 YIELD node, score \
+                                 RETURN id(node), score \
+                                 LIMIT 10"
+                            }
+                        };
+                        QueryBuilder::new().text(text).build()
+                    },
+                )
+                .add_query(
+                    "fulltext_query_relationships_smoke",
+                    QueryType::Read,
+                    |_random, flavour| {
+                        let text = match flavour {
+                            Flavour::FalkorDB => {
+                                "CALL db.idx.fulltext.queryRelationships('Friend', 'fixture_blue') \
+                                 YIELD relationship, score \
+                                 RETURN id(relationship), score \
+                                 LIMIT 10"
+                            }
+                            Flavour::Neo4j => {
+                                "CALL db.index.fulltext.queryRelationships('bench_friend_ft_idx', 'fixture_blue') \
+                                 YIELD relationship, score \
+                                 RETURN id(relationship), score \
+                                 LIMIT 10"
+                            }
+                            Flavour::Memgraph => {
+                                "CALL text_search.search_edges('bench_friend_ft_idx', 'data.ft_text:fixture_blue') \
+                                 YIELD edge, score \
+                                 RETURN id(edge), score \
+                                 LIMIT 10"
+                            }
+                        };
+                        QueryBuilder::new().text(text).build()
+                    },
+                );
+        }
+
         let queries_repository = queries_builder.build();
 
         UsersQueriesRepository { queries_repository }
@@ -1014,6 +1147,7 @@ mod tests {
             1000,
             Flavour::FalkorDB,
             AlgorithmQuerySelection::default(),
+            QueryCoverageProfile::Baseline,
         );
         assert_eq!(
             repository.queries_repository.algorithm_read_query_count(),
@@ -1033,6 +1167,7 @@ mod tests {
                 msf: false,
                 harmonic: false,
             },
+            QueryCoverageProfile::Baseline,
         );
 
         assert_eq!(

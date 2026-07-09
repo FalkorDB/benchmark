@@ -4,10 +4,13 @@ use benchmark::cli::Commands::GenerateAutoComplete;
 use benchmark::error::BenchmarkError::OtherError;
 use benchmark::error::BenchmarkResult;
 use benchmark::falkor::{Falkor, FalkorAlgorithmCapabilities, Stopped};
-use benchmark::memgraph_client::{MemgraphAlgorithmCapabilities, MemgraphClient};
-use benchmark::neo4j_client::{Neo4jAlgorithmCapabilities, Neo4jClient};
+use benchmark::memgraph_client::{
+    MemgraphAlgorithmCapabilities, MemgraphClient, MemgraphFixtureCapabilities,
+};
+use benchmark::neo4j_client::{Neo4jAlgorithmCapabilities, Neo4jClient, Neo4jFixtureCapabilities};
 use benchmark::queries_repository::{
-    AlgorithmQuerySelection, Flavour, PreparedQuery, QueryCatalogEntry, NEO4J_ALGORITHM_GRAPH_NAME,
+    AlgorithmQuerySelection, Flavour, PreparedQuery, QueryCatalogEntry, QueryCoverageProfile,
+    NEO4J_ALGORITHM_GRAPH_NAME,
 };
 use benchmark::scenario::Name::Users;
 use benchmark::scenario::{Size, Spec, Vendor};
@@ -210,6 +213,7 @@ async fn main() -> BenchmarkResult<()> {
             dry_run,
             batch_size,
             endpoint,
+            query_profile,
         } => {
             // Expose metrics while running load operations.
             let _prometheus_endpoint =
@@ -219,12 +223,13 @@ async fn main() -> BenchmarkResult<()> {
                 "Init benchmark {} {} {} (batch_size: {})",
                 vendor, size, force, batch_size
             );
+            validate_query_coverage_profile_support(vendor, query_profile)?;
             match vendor {
                 Vendor::Neo4j => {
                     if dry_run {
                         dry_init_neo4j(size, batch_size).await?;
                     } else {
-                        init_neo4j(size, force, batch_size, endpoint).await?;
+                        init_neo4j(size, force, batch_size, endpoint, query_profile).await?;
                     }
                 }
                 Vendor::Falkor => {
@@ -232,14 +237,14 @@ async fn main() -> BenchmarkResult<()> {
                         info!("Dry run");
                         todo!()
                     } else {
-                        init_falkor(size, force, batch_size, endpoint).await?;
+                        init_falkor(size, force, batch_size, endpoint, query_profile).await?;
                     }
                 }
                 Vendor::Memgraph => {
                     if dry_run {
                         dry_init_memgraph(size, batch_size).await?;
                     } else {
-                        init_memgraph(size, force, batch_size, endpoint).await?;
+                        init_memgraph(size, force, batch_size, endpoint, query_profile).await?;
                     }
                 }
             }
@@ -282,7 +287,9 @@ async fn main() -> BenchmarkResult<()> {
             enable_algo_max_flow,
             enable_algo_msf,
             enable_algo_harmonic,
+            query_profile,
         } => {
+            validate_query_coverage_profile_support(vendor, query_profile)?;
             let algorithm_selection = AlgorithmQuerySelection {
                 pagerank: enable_algo_pagerank,
                 max_flow: enable_algo_max_flow,
@@ -296,6 +303,7 @@ async fn main() -> BenchmarkResult<()> {
                 name,
                 write_ratio,
                 algorithm_selection,
+                query_profile,
             )
             .await?;
         }
@@ -345,6 +353,16 @@ const ALGO_PAGERANK_QUERY_NAME: &str = "algo_pagerank_summary";
 const ALGO_MAX_FLOW_QUERY_NAME: &str = "algo_max_flow_single_pair";
 const ALGO_MSF_QUERY_NAME: &str = "algo_msf_summary";
 const ALGO_HARMONIC_QUERY_NAME: &str = "algo_harmonic_summary";
+const VECTOR_QUERY_NODES_SMOKE_QUERY_NAME: &str = "vector_query_nodes_smoke";
+const FULLTEXT_QUERY_NODES_SMOKE_QUERY_NAME: &str = "fulltext_query_nodes_smoke";
+const FULLTEXT_QUERY_RELATIONSHIPS_SMOKE_QUERY_NAME: &str = "fulltext_query_relationships_smoke";
+
+fn validate_query_coverage_profile_support(
+    _vendor: Vendor,
+    _query_profile: QueryCoverageProfile,
+) -> BenchmarkResult<()> {
+    Ok(())
+}
 
 #[derive(Debug, Clone, Copy, Default)]
 struct AlgorithmQueryPresence {
@@ -450,6 +468,40 @@ fn validate_memgraph_phase1_capabilities(
     )))
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct FixtureQueryPresence {
+    vector_query_nodes: bool,
+    fulltext_query_nodes: bool,
+    fulltext_query_relationships: bool,
+}
+
+impl FixtureQueryPresence {
+    fn all() -> Self {
+        Self {
+            vector_query_nodes: true,
+            fulltext_query_nodes: true,
+            fulltext_query_relationships: true,
+        }
+    }
+    fn from_queries(queries: &[PreparedQuery]) -> Self {
+        let mut presence = Self::default();
+        for query in queries {
+            match query.q_name.as_str() {
+                VECTOR_QUERY_NODES_SMOKE_QUERY_NAME => presence.vector_query_nodes = true,
+                FULLTEXT_QUERY_NODES_SMOKE_QUERY_NAME => presence.fulltext_query_nodes = true,
+                FULLTEXT_QUERY_RELATIONSHIPS_SMOKE_QUERY_NAME => {
+                    presence.fulltext_query_relationships = true
+                }
+                _ => {}
+            }
+        }
+        presence
+    }
+
+    fn has_any(self) -> bool {
+        self.vector_query_nodes || self.fulltext_query_nodes || self.fulltext_query_relationships
+    }
+}
 fn validate_falkor_phase1_capabilities(
     presence: AlgorithmQueryPresence,
     capabilities: FalkorAlgorithmCapabilities,
@@ -472,6 +524,84 @@ fn validate_falkor_phase1_capabilities(
 
     Err(OtherError(format!(
         "FalkorDB is missing required algorithm capabilities for selected queries: {}",
+        missing.join(", ")
+    )))
+}
+
+fn validate_falkor_fixture_capabilities(
+    presence: FixtureQueryPresence,
+    capabilities: benchmark::falkor::FalkorFixtureCapabilities,
+) -> BenchmarkResult<()> {
+    let mut missing = Vec::new();
+
+    if presence.vector_query_nodes && !capabilities.has_vector_query_nodes {
+        missing.push("db.idx.vector.queryNodes");
+    }
+    if presence.fulltext_query_nodes && !capabilities.has_fulltext_query_nodes {
+        missing.push("db.idx.fulltext.queryNodes");
+    }
+    if presence.fulltext_query_relationships && !capabilities.has_fulltext_query_relationships {
+        missing.push("db.idx.fulltext.queryRelationships");
+    }
+
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    Err(OtherError(format!(
+        "FalkorDB is missing required fixture-query capabilities: {}",
+        missing.join(", ")
+    )))
+}
+
+fn validate_neo4j_fixture_capabilities(
+    presence: FixtureQueryPresence,
+    capabilities: Neo4jFixtureCapabilities,
+) -> BenchmarkResult<()> {
+    let mut missing = Vec::new();
+
+    if presence.vector_query_nodes && !capabilities.has_vector_query_nodes {
+        missing.push("db.index.vector.queryNodes");
+    }
+    if presence.fulltext_query_nodes && !capabilities.has_fulltext_query_nodes {
+        missing.push("db.index.fulltext.queryNodes");
+    }
+    if presence.fulltext_query_relationships && !capabilities.has_fulltext_query_relationships {
+        missing.push("db.index.fulltext.queryRelationships");
+    }
+
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    Err(OtherError(format!(
+        "Neo4j is missing required fixture-query capabilities: {}",
+        missing.join(", ")
+    )))
+}
+
+fn validate_memgraph_fixture_capabilities(
+    presence: FixtureQueryPresence,
+    capabilities: MemgraphFixtureCapabilities,
+) -> BenchmarkResult<()> {
+    let mut missing = Vec::new();
+
+    if presence.vector_query_nodes && !capabilities.has_vector_search {
+        missing.push("vector_search.search");
+    }
+    if presence.fulltext_query_nodes && !capabilities.has_text_search_nodes {
+        missing.push("text_search.search");
+    }
+    if presence.fulltext_query_relationships && !capabilities.has_text_search_relationships {
+        missing.push("text_search.search_edges");
+    }
+
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    Err(OtherError(format!(
+        "Memgraph is missing required fixture-query capabilities: {}",
         missing.join(", ")
     )))
 }
@@ -570,7 +700,9 @@ async fn run_neo4j(
 ) -> BenchmarkResult<()> {
     let queries_file = file_name.clone();
     let (queries_metadata, mut queries) = read_queries(file_name).await?;
+    validate_query_coverage_profile_support(Vendor::Neo4j, queries_metadata.query_profile)?;
     let algorithm_presence = AlgorithmQueryPresence::from_queries(&queries);
+    let fixture_presence = FixtureQueryPresence::from_queries(&queries);
     let mut algorithm_projection_ready = false;
 
     let client = if let Some(ref endpoint_str) = endpoint {
@@ -610,6 +742,13 @@ async fn run_neo4j(
 
     // Ensure benchmark-critical relationship capacity is present for algorithm workloads.
     client.ensure_friend_capacity_ready().await?;
+    if fixture_presence.has_any() {
+        let fixture_capabilities = client.detect_fixture_capabilities().await?;
+        validate_neo4j_fixture_capabilities(fixture_presence, fixture_capabilities)?;
+    }
+    if queries_metadata.query_profile.includes_fixture_dependent() || fixture_presence.has_any() {
+        client.ensure_post_phase1_fixtures_ready().await?;
+    }
 
     if algorithm_presence.has_any_algorithm() {
         let capabilities = client.detect_algorithm_capabilities().await?;
@@ -853,7 +992,9 @@ async fn run_falkor(
 
     let queries_file = file_name.clone();
     let (queries_metadata, mut queries) = read_queries(file_name).await?;
+    validate_query_coverage_profile_support(Vendor::Falkor, queries_metadata.query_profile)?;
     let algorithm_presence = AlgorithmQueryPresence::from_queries(&queries);
+    let fixture_presence = FixtureQueryPresence::from_queries(&queries);
 
     // Build a normalised-query -> q_name mapping for all queries (reads and writes).
     // We rely on the "query.text" field, which is the Cypher without the leading
@@ -893,7 +1034,14 @@ async fn run_falkor(
             .is_err()
         {
             info!("Dump file not found, initializing falkor database...");
-            init_falkor(queries_metadata.dataset, false, 1000, endpoint.clone()).await?;
+            init_falkor(
+                queries_metadata.dataset,
+                false,
+                1000,
+                endpoint.clone(),
+                queries_metadata.query_profile,
+            )
+            .await?;
         }
         // restore the dump
         falkor.restore_db(queries_metadata.dataset).await?;
@@ -913,6 +1061,15 @@ async fn run_falkor(
     // and visible to FalkorDB so we avoid long-running queries due to missing indexes.
     falkor.wait_for_pokec_indexes_ready().await?;
     falkor.ensure_friend_capacity_ready().await?;
+    if fixture_presence.has_any() {
+        let mut capability_client = falkor.client().await?;
+        let fixture_capabilities = capability_client.detect_fixture_capabilities().await?;
+        validate_falkor_fixture_capabilities(fixture_presence, fixture_capabilities)?;
+    }
+    if queries_metadata.query_profile.includes_fixture_dependent() || fixture_presence.has_any() {
+        let mut fixture_client = falkor.client().await?;
+        fixture_client.ensure_post_phase1_fixtures_ready().await?;
+    }
 
     if algorithm_presence.has_any_algorithm() {
         let capabilities = falkor.detect_algorithm_capabilities().await?;
@@ -1092,7 +1249,9 @@ async fn init_falkor(
     _force: bool,
     batch_size: usize,
     endpoint: Option<String>,
+    query_profile: QueryCoverageProfile,
 ) -> BenchmarkResult<()> {
+    validate_query_coverage_profile_support(Vendor::Falkor, query_profile)?;
     let spec = Spec::new(benchmark::scenario::Name::Users, size, Vendor::Falkor);
     let falkor = benchmark::falkor::Falkor::new_with_endpoint(endpoint.clone());
     if endpoint.is_none() {
@@ -1137,6 +1296,9 @@ async fn init_falkor(
         format_number(total_processed as u64)
     );
     falkor.ensure_friend_capacity_ready().await?;
+    if query_profile.includes_fixture_dependent() {
+        falkor_client.ensure_post_phase1_fixtures_ready().await?;
+    }
 
     let (node_count, relation_count) = falkor.graph_size().await?;
     info!(
@@ -1159,7 +1321,13 @@ fn show_historgam(histogram: Histogram) {
         let p = SampleQuantiles::quantile(&histogram, percentile as f64 / 100.0)
             .ok()
             .flatten()
-            .and_then(|result| result.entries().values().next().map(|b| Duration::from_micros(b.end())));
+            .and_then(|result| {
+                result
+                    .entries()
+                    .values()
+                    .next()
+                    .map(|b| Duration::from_micros(b.end()))
+            });
 
         info!("p{}: {:?}", percentile, p);
     }
@@ -1280,7 +1448,9 @@ async fn init_neo4j(
     force: bool,
     batch_size: usize,
     endpoint: Option<String>,
+    query_profile: QueryCoverageProfile,
 ) -> BenchmarkResult<()> {
+    validate_query_coverage_profile_support(Vendor::Neo4j, query_profile)?;
     let spec = Spec::new(benchmark::scenario::Name::Users, size, Vendor::Neo4j);
 
     let client = if let Some(ref endpoint_str) = endpoint {
@@ -1386,6 +1556,11 @@ async fn init_neo4j(
         total_processed
     );
     client.ensure_friend_capacity_ready().await?;
+    if query_profile.includes_fixture_dependent() {
+        let fixture_capabilities = client.detect_fixture_capabilities().await?;
+        validate_neo4j_fixture_capabilities(FixtureQueryPresence::all(), fixture_capabilities)?;
+        client.ensure_post_phase1_fixtures_ready().await?;
+    }
     let (node_count, relation_count) = client.graph_size().await?;
     info!(
         "{} nodes and {} relations were imported at {:?}",
@@ -1423,6 +1598,8 @@ struct PrepareQueriesMetadata {
     size: usize,
     dataset: Size,
     #[serde(default)]
+    query_profile: QueryCoverageProfile,
+    #[serde(default)]
     catalog: Vec<QueryCatalogEntry>,
 }
 async fn prepare_queries(
@@ -1432,6 +1609,7 @@ async fn prepare_queries(
     file_name: String,
     write_ratio: f32,
     algorithm_selection: AlgorithmQuerySelection,
+    query_profile: QueryCoverageProfile,
 ) -> BenchmarkResult<()> {
     let start = Instant::now();
 
@@ -1451,11 +1629,13 @@ async fn prepare_queries(
         edges,
         flavour,
         algorithm_selection,
+        query_profile,
     );
     let catalog = queries_repository.catalog();
     let metadata = PrepareQueriesMetadata {
         size,
         dataset,
+        query_profile,
         catalog,
     };
     let queries = Box::new(queries_repository.random_queries(size, write_ratio));
@@ -1517,7 +1697,9 @@ async fn run_memgraph(
 ) -> BenchmarkResult<()> {
     let queries_file = file_name.clone();
     let (queries_metadata, mut queries) = read_queries(file_name).await?;
+    validate_query_coverage_profile_support(Vendor::Memgraph, queries_metadata.query_profile)?;
     let algorithm_presence = AlgorithmQueryPresence::from_queries(&queries);
+    let fixture_presence = FixtureQueryPresence::from_queries(&queries);
 
     let client = if let Some(ref endpoint_str) = endpoint {
         info!(
@@ -1543,6 +1725,13 @@ async fn run_memgraph(
     // Best-effort Memgraph storage/memory reporting (query-interface metric).
     client.collect_storage_info_metrics().await;
     client.ensure_friend_capacity_ready().await?;
+    if fixture_presence.has_any() {
+        let fixture_capabilities = client.detect_fixture_capabilities().await?;
+        validate_memgraph_fixture_capabilities(fixture_presence, fixture_capabilities)?;
+    }
+    if queries_metadata.query_profile.includes_fixture_dependent() || fixture_presence.has_any() {
+        client.ensure_post_phase1_fixtures_ready().await?;
+    }
 
     if algorithm_presence.has_any_algorithm() {
         let capabilities = client.detect_algorithm_capabilities().await?;
@@ -1857,7 +2046,9 @@ async fn init_memgraph(
     force: bool,
     batch_size: usize,
     endpoint: Option<String>,
+    query_profile: QueryCoverageProfile,
 ) -> BenchmarkResult<()> {
+    validate_query_coverage_profile_support(Vendor::Memgraph, query_profile)?;
     let spec = Spec::new(benchmark::scenario::Name::Users, size, Vendor::Memgraph);
 
     let client = if let Some(ref endpoint_str) = endpoint {
@@ -1966,6 +2157,11 @@ async fn init_memgraph(
         total_processed
     );
     client.ensure_friend_capacity_ready().await?;
+    if query_profile.includes_fixture_dependent() {
+        let fixture_capabilities = client.detect_fixture_capabilities().await?;
+        validate_memgraph_fixture_capabilities(FixtureQueryPresence::all(), fixture_capabilities)?;
+        client.ensure_post_phase1_fixtures_ready().await?;
+    }
     let (node_count, relation_count) = client.graph_size().await?;
     info!(
         "{} nodes and {} relations were imported at {:?}",

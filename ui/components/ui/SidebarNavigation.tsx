@@ -349,6 +349,82 @@ const QUERY_DESCRIPTIONS = [
     cypher: "MATCH p=(a:User {id: $id})-[r:Friend]->(b:User)\nRETURN labels(a), type(r), properties(a), nodes(p), relationships(p), length(p)\nLIMIT 1"
   },
   {
+    name: "Temporal + Spatial Roundtrip",
+    id: "temporal_spatial_roundtrip",
+    description: "Extended-core scalar/function sanity query (available on FalkorDB and Neo4j profiles).",
+    cypher: `RETURN
+  date('2024-01-01') AS d,
+  localtime('12:30:00') AS t,
+  duration('P2DT3H') AS dur,
+  distance(point({latitude: 32.1, longitude: 34.8}), point({latitude: 32.2, longitude: 34.9})) AS dist`
+  },
+  {
+    name: "Vector Query Nodes (Smoke)",
+    id: "vector_query_nodes_smoke",
+    description: "Fixture-dependent vector-search smoke query with vendor-specific procedures/index names.",
+    cypher: `// FalkorDB:
+CALL db.idx.vector.queryNodes('User', 'embedding', 10, vecf32([0.1, 0.2, 0.3]))
+YIELD node, score
+RETURN id(node), score
+LIMIT 10
+
+// Neo4j:
+CALL db.index.vector.queryNodes('bench_user_embedding_idx', 10, [0.1, 0.2, 0.3])
+YIELD node, score
+RETURN id(node), score
+LIMIT 10
+
+// Memgraph:
+CALL vector_search.search('bench_user_embedding_idx', 10, [0.1, 0.2, 0.3])
+YIELD node, similarity
+RETURN id(node), similarity AS score
+LIMIT 10`
+  },
+  {
+    name: "Fulltext Query Nodes (Smoke)",
+    id: "fulltext_query_nodes_smoke",
+    description: "Fixture-dependent node fulltext smoke query with vendor-specific procedures/index names.",
+    cypher: `// FalkorDB:
+CALL db.idx.fulltext.queryNodes('User', 'fixture_alice')
+YIELD node, score
+RETURN id(node), score
+LIMIT 10
+
+// Neo4j:
+CALL db.index.fulltext.queryNodes('bench_user_ft_idx', 'fixture_alice')
+YIELD node, score
+RETURN id(node), score
+LIMIT 10
+
+// Memgraph:
+CALL text_search.search('bench_user_ft_idx', 'data.ft_text:fixture_alice')
+YIELD node, score
+RETURN id(node), score
+LIMIT 10`
+  },
+  {
+    name: "Fulltext Query Relationships (Smoke)",
+    id: "fulltext_query_relationships_smoke",
+    description: "Fixture-dependent relationship fulltext smoke query with vendor-specific procedures/index names.",
+    cypher: `// FalkorDB:
+CALL db.idx.fulltext.queryRelationships('Friend', 'fixture_blue')
+YIELD relationship, score
+RETURN id(relationship), score
+LIMIT 10
+
+// Neo4j:
+CALL db.index.fulltext.queryRelationships('bench_friend_ft_idx', 'fixture_blue')
+YIELD relationship, score
+RETURN id(relationship), score
+LIMIT 10
+
+// Memgraph:
+CALL text_search.search_edges('bench_friend_ft_idx', 'data.ft_text:fixture_blue')
+YIELD edge, score
+RETURN id(edge), score
+LIMIT 10`
+  },
+  {
     name: "ID Seek (Columnar)",
     id: "id_seek",
     description: "Internal id point lookup (columnar/id-path coverage).",

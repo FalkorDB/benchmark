@@ -34,6 +34,11 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 #  ENABLE_ALGO_MAX_FLOW (default: 1)
 #  ENABLE_ALGO_MSF (default: 1)
 #  ENABLE_ALGO_HARMONIC (default: 1)
+#  IN_SCRIPT_QUERY_PROFILE (default: empty; set in this file to force profile)
+#    baseline          - baseline query set
+#    extended-core     - baseline + extended core queries
+#    fixture-dependent - extended-core + fixture/index-dependent queries
+#  QUERY_PROFILE (env fallback when IN_SCRIPT_QUERY_PROFILE is empty; default: baseline)
 #
 # Results:
 #  RESULTS_DIR (default: Results-YYMMDD-HH:MM)
@@ -53,7 +58,7 @@ MEMGRAPH_USER=${MEMGRAPH_USER:-"memgraph"}
 MEMGRAPH_PASSWORD=${MEMGRAPH_PASSWORD:-"six666six"}
 
 # Vendor toggles: set to 1 to enable, 0 to disable
-RUN_FALKOR=${RUN_FALKOR:-1}
+RUN_FALKOR=${RUN_FALKOR:-0}
 # Set to 1 to run comparison against the secondary FalkorDB version
 RUN_FALKOR_2=${RUN_FALKOR_2:-1}
 RUN_NEO4J=${RUN_NEO4J:-0}
@@ -70,6 +75,23 @@ ENABLE_ALGO_PAGERANK=${ENABLE_ALGO_PAGERANK:-1}
 ENABLE_ALGO_MAX_FLOW=${ENABLE_ALGO_MAX_FLOW:-1}
 ENABLE_ALGO_MSF=${ENABLE_ALGO_MSF:-1}
 ENABLE_ALGO_HARMONIC=${ENABLE_ALGO_HARMONIC:-1}
+# Optional in-script query profile override.
+# Set this value directly in the script to force a profile for every run.
+# Leave empty ("") to keep env-based behavior (QUERY_PROFILE env var, else baseline).
+IN_SCRIPT_QUERY_PROFILE="fixture-dependent"
+if [[ -n "$IN_SCRIPT_QUERY_PROFILE" ]]; then
+  QUERY_PROFILE="$IN_SCRIPT_QUERY_PROFILE"
+else
+  QUERY_PROFILE=${QUERY_PROFILE:-baseline}
+fi
+
+case "$QUERY_PROFILE" in
+  baseline|extended-core|fixture-dependent) ;;
+  *)
+    echo "Invalid QUERY_PROFILE '$QUERY_PROFILE'. Valid options: baseline, extended-core, fixture-dependent." >&2
+    exit 1
+    ;;
+esac
 
 # Derive per-vendor query file names so each engine can use vendor-optimized queries.
 QUERIES_FILE_BASE="${QUERIES_FILE}"
@@ -246,7 +268,7 @@ if [[ "${RUN_FALKOR}" == "1" ]]; then
   PYTHONPATH="../falkordb-bulk-loader" python3 ../falkordb-bulk-loader/falkordb_bulk_loader/bulk_insert.py falkor \
     -u "$REDIS_URL" \
     -n "$CSV_DIR/User.csv" \
-    -r "$CSV_DIR/FRIEND.csv" \
+    -R Friend "$CSV_DIR/FRIEND.csv" \
     -j INTEGER -s -i User:id -i User:age \
     -c 128 -b 16 -t 16
 fi
@@ -262,20 +284,20 @@ if [[ "${RUN_FALKOR_2}" == "1" ]]; then
   PYTHONPATH="../falkordb-bulk-loader" python3 ../falkordb-bulk-loader/falkordb_bulk_loader/bulk_insert.py falkor \
     -u "$REDIS_URL_2" \
     -n "$CSV_DIR/User.csv" \
-    -r "$CSV_DIR/FRIEND.csv" \
+    -R Friend "$CSV_DIR/FRIEND.csv" \
     -j INTEGER -s -i User:id -i User:age \
     -c 128 -b 16 -t 16
 fi
 
 if [[ "${RUN_NEO4J}" == "1" ]]; then
   echo "==> Loading medium dataset into Neo4j"
-  cargo run --release --bin benchmark -- load --vendor neo4j --size medium --endpoint "$NEO4J_ENDPOINT" -b "$BATCH_SIZE"
+  cargo run --release --bin benchmark -- load --vendor neo4j --size medium --endpoint "$NEO4J_ENDPOINT" -b "$BATCH_SIZE" --query-profile "$QUERY_PROFILE"
 fi
 
 if [[ "${RUN_MEMGRAPH}" == "1" ]]; then
   echo "==> Loading medium dataset into Memgraph (UNWIND loader)"
   # --force clears the external Memgraph instance before loading
-  cargo run --release --bin benchmark -- load --vendor memgraph --size medium --endpoint "$MEMGRAPH_ENDPOINT" -b "$BATCH_SIZE" --force
+  cargo run --release --bin benchmark -- load --vendor memgraph --size medium --endpoint "$MEMGRAPH_ENDPOINT" -b "$BATCH_SIZE" --force --query-profile "$QUERY_PROFILE"
 fi
 if [[ "${RUN_FALKOR}" == "1" || "${RUN_FALKOR_2}" == "1" ]]; then
   echo "==> Configuring FalkorDB query timeout (${FALKOR_QUERY_TIMEOUT_MS}ms)"
@@ -287,17 +309,17 @@ if [[ "${RUN_FALKOR_2}" == "1" ]]; then
   set_falkor_query_timeout "FalkorDB (secondary)" "$FALKOR_2_HOST" "$FALKOR_2_PORT"
 fi
 
-echo "==> Generating vendor-specific query files (base=${QUERIES_FILE_BASE}, dataset=medium, count=${QUERIES_COUNT}, write_ratio=${WRITE_RATIO})"
+echo "==> Generating vendor-specific query files (base=${QUERIES_FILE_BASE}, dataset=medium, count=${QUERIES_COUNT}, write_ratio=${WRITE_RATIO}, profile=${QUERY_PROFILE})"
 echo "==> Algorithm query toggles (pagerank=${ENABLE_ALGO_PAGERANK_BOOL}, max_flow=${ENABLE_ALGO_MAX_FLOW_BOOL}, msf=${ENABLE_ALGO_MSF_BOOL}, harmonic=${ENABLE_ALGO_HARMONIC_BOOL})"
 # Always regenerate so each vendor gets the latest query catalog + stable q_id fields.
 if [[ "${RUN_FALKOR}" == "1" || "${RUN_FALKOR_2}" == "1" ]]; then
-  cargo run --release --bin benchmark -- generate-queries --vendor falkor   --dataset medium --size "$QUERIES_COUNT" --name "$FALKOR_QUERIES_FILE"   --write-ratio "$WRITE_RATIO" "${ALGO_QUERY_ARGS[@]}"
+  cargo run --release --bin benchmark -- generate-queries --vendor falkor   --dataset medium --size "$QUERIES_COUNT" --name "$FALKOR_QUERIES_FILE"   --write-ratio "$WRITE_RATIO" --query-profile "$QUERY_PROFILE" "${ALGO_QUERY_ARGS[@]}"
 fi
 if [[ "${RUN_NEO4J}" == "1" ]]; then
-  cargo run --release --bin benchmark -- generate-queries --vendor neo4j   --dataset medium --size "$QUERIES_COUNT" --name "$NEO4J_QUERIES_FILE"   --write-ratio "$WRITE_RATIO" "${ALGO_QUERY_ARGS[@]}"
+  cargo run --release --bin benchmark -- generate-queries --vendor neo4j   --dataset medium --size "$QUERIES_COUNT" --name "$NEO4J_QUERIES_FILE"   --write-ratio "$WRITE_RATIO" --query-profile "$QUERY_PROFILE" "${ALGO_QUERY_ARGS[@]}"
 fi
 if [[ "${RUN_MEMGRAPH}" == "1" ]]; then
-  cargo run --release --bin benchmark -- generate-queries --vendor memgraph --dataset medium --size "$QUERIES_COUNT" --name "$MEMGRAPH_QUERIES_FILE" --write-ratio "$WRITE_RATIO" "${ALGO_QUERY_ARGS[@]}"
+  cargo run --release --bin benchmark -- generate-queries --vendor memgraph --dataset medium --size "$QUERIES_COUNT" --name "$MEMGRAPH_QUERIES_FILE" --write-ratio "$WRITE_RATIO" --query-profile "$QUERY_PROFILE" "${ALGO_QUERY_ARGS[@]}"
 fi
 
 echo "==> Running ${QUERIES_FILE} workload (parallel=${PARALLEL}, mps=${MPS})"

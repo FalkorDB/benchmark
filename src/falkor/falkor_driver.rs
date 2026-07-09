@@ -74,6 +74,13 @@ pub struct FalkorAlgorithmCapabilities {
     pub has_harmonic: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct FalkorFixtureCapabilities {
+    pub has_vector_query_nodes: bool,
+    pub has_fulltext_query_nodes: bool,
+    pub has_fulltext_query_relationships: bool,
+}
+
 impl Default for Falkor<Stopped> {
     fn default() -> Self {
         Self::new()
@@ -554,6 +561,47 @@ RETURN
         }
     }
 
+    pub async fn detect_fixture_capabilities(
+        &mut self
+    ) -> BenchmarkResult<FalkorFixtureCapabilities> {
+        let probe = r#"
+CALL dbms.procedures()
+YIELD name
+WITH collect(toLower(name)) AS names
+RETURN
+  size([n IN names WHERE n = 'db.idx.vector.querynodes']) AS vector_query_nodes_count,
+  size([n IN names WHERE n = 'db.idx.fulltext.querynodes']) AS fulltext_query_nodes_count,
+  size([n IN names WHERE n = 'db.idx.fulltext.queryrelationships']) AS fulltext_query_relationships_count
+"#;
+
+        let mut result = self
+            .graph
+            .query(probe)
+            .with_timeout(30_000)
+            .execute()
+            .await?;
+        match result.data.next().await {
+            Some(Ok(row)) => {
+                let vector_query_nodes_count: i64 = row.try_get_at(0)?;
+                let fulltext_query_nodes_count: i64 = row.try_get_at(1)?;
+                let fulltext_query_relationships_count: i64 = row.try_get_at(2)?;
+                Ok(FalkorFixtureCapabilities {
+                    has_vector_query_nodes: vector_query_nodes_count > 0,
+                    has_fulltext_query_nodes: fulltext_query_nodes_count > 0,
+                    has_fulltext_query_relationships: fulltext_query_relationships_count > 0,
+                })
+            }
+            Some(Err(e)) => Err(OtherError(format!(
+                "Failed to parse Falkor fixture capability probe response: {:?}",
+                e
+            ))),
+            other => Err(OtherError(format!(
+                "Unexpected Falkor fixture capability probe response: {:?}",
+                other
+            ))),
+        }
+    }
+
     pub async fn ensure_friend_capacity_ready(&mut self) -> BenchmarkResult<()> {
         let total_edges = self
             .query_single_i64("MATCH ()-[r:Friend]->() RETURN count(r)")
@@ -598,6 +646,201 @@ RETURN
         }
 
         Ok(())
+    }
+
+    pub async fn ensure_post_phase1_fixtures_ready(&mut self) -> BenchmarkResult<()> {
+        // Required fixture indexes (idempotent creation).
+        self.create_index_if_not_exists(
+            "main",
+            "create_fulltext_index_user_ft_text",
+            "CREATE FULLTEXT INDEX FOR (l:User) ON (l.ft_text)",
+        )
+        .await?;
+        self.create_index_if_not_exists(
+            "main",
+            "create_fulltext_index_friend_ft_text",
+            "CREATE FULLTEXT INDEX FOR ()-[l:Friend]->() ON (l.ft_text)",
+        )
+        .await?;
+        self.create_index_if_not_exists(
+            "main",
+            "create_vector_index_user_embedding",
+            "CREATE VECTOR INDEX FOR (l:User) ON (l.embedding) OPTIONS { dimension: 3, similarityFunction: 'cosine' }",
+        )
+        .await?;
+
+        // Deterministic fixture seeding (idempotent `SET` updates).
+        self.run_query_no_results(
+            "MATCH (u:User) \
+             WHERE u.id % 97 = 0 \
+             SET \
+                u.ft_text = 'fixture_alice user_' + toString(u.id), \
+                u.embedding = vecf32([ \
+                    toFloat((u.id % 10) + 1) / 10.0, \
+                    toFloat(((u.id + 3) % 10) + 1) / 10.0, \
+                    toFloat(((u.id + 6) % 10) + 1) / 10.0 \
+                ])",
+        )
+        .await?;
+        self.run_query_no_results(
+            "MATCH (s:User)-[r:Friend]->(d:User) \
+             WHERE s.id % 97 = 0 \
+             SET r.ft_text = 'fixture_blue edge_' + toString(s.id) + '_' + toString(d.id)",
+        )
+        .await?;
+
+        const MAX_ATTEMPTS: u32 = 18;
+        const DELAY_SECS: u64 = 5;
+
+        for attempt in 1..=MAX_ATTEMPTS {
+            let user_ft_count = match self
+                .query_single_i64(
+                    "MATCH (u:User) \
+                     WHERE u.ft_text CONTAINS 'fixture_alice' \
+                     RETURN count(u)",
+                )
+                .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    info!(
+                        "Error while checking Falkor user fulltext fixture readiness (attempt {}/{}): {}",
+                        attempt, MAX_ATTEMPTS, e
+                    );
+                    tokio::time::sleep(Duration::from_secs(DELAY_SECS)).await;
+                    continue;
+                }
+            };
+            let rel_ft_count = match self
+                .query_single_i64(
+                    "MATCH ()-[r:Friend]->() \
+                     WHERE r.ft_text CONTAINS 'fixture_blue' \
+                     RETURN count(r)",
+                )
+                .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    info!(
+                        "Error while checking Falkor relationship fulltext fixture readiness (attempt {}/{}): {}",
+                        attempt, MAX_ATTEMPTS, e
+                    );
+                    tokio::time::sleep(Duration::from_secs(DELAY_SECS)).await;
+                    continue;
+                }
+            };
+            let embedding_count = match self
+                .query_single_i64(
+                    "MATCH (u:User) \
+                     WHERE u.embedding IS NOT NULL \
+                     RETURN count(u)",
+                )
+                .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    info!(
+                        "Error while checking Falkor vector fixture readiness (attempt {}/{}): {}",
+                        attempt, MAX_ATTEMPTS, e
+                    );
+                    tokio::time::sleep(Duration::from_secs(DELAY_SECS)).await;
+                    continue;
+                }
+            };
+
+            let vector_hits = match self
+                .query_single_i64(
+                    "CALL db.idx.vector.queryNodes('User', 'embedding', 1, vecf32([0.1, 0.2, 0.3])) \
+                     YIELD node, score \
+                     RETURN count(node)",
+                )
+                .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    info!(
+                        "Error while probing Falkor vector index readiness (attempt {}/{}): {}",
+                        attempt, MAX_ATTEMPTS, e
+                    );
+                    tokio::time::sleep(Duration::from_secs(DELAY_SECS)).await;
+                    continue;
+                }
+            };
+            let fulltext_node_hits = match self
+                .query_single_i64(
+                    "CALL db.idx.fulltext.queryNodes('User', 'fixture_alice') \
+                     YIELD node, score \
+                     RETURN count(node)",
+                )
+                .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    info!(
+                        "Error while probing Falkor fulltext node index readiness (attempt {}/{}): {}",
+                        attempt, MAX_ATTEMPTS, e
+                    );
+                    tokio::time::sleep(Duration::from_secs(DELAY_SECS)).await;
+                    continue;
+                }
+            };
+            let fulltext_rel_hits = match self
+                .query_single_i64(
+                    "CALL db.idx.fulltext.queryRelationships('Friend', 'fixture_blue') \
+                     YIELD relationship, score \
+                     RETURN count(relationship)",
+                )
+                .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    info!(
+                        "Error while probing Falkor fulltext relationship index readiness (attempt {}/{}): {}",
+                        attempt, MAX_ATTEMPTS, e
+                    );
+                    tokio::time::sleep(Duration::from_secs(DELAY_SECS)).await;
+                    continue;
+                }
+            };
+
+            if user_ft_count > 0
+                && rel_ft_count > 0
+                && embedding_count > 0
+                && vector_hits > 0
+                && fulltext_node_hits > 0
+                && fulltext_rel_hits > 0
+            {
+                info!(
+                    "Falkor post-phase fixtures ready after {} attempt(s): users_ft={}, rel_ft={}, embedding={}, vector_hits={}, fulltext_node_hits={}, fulltext_rel_hits={}",
+                    attempt,
+                    user_ft_count,
+                    rel_ft_count,
+                    embedding_count,
+                    vector_hits,
+                    fulltext_node_hits,
+                    fulltext_rel_hits
+                );
+                return Ok(());
+            }
+
+            info!(
+                "Falkor post-phase fixtures not fully ready yet (attempt {}/{}): users_ft={}, rel_ft={}, embedding={}, vector_hits={}, fulltext_node_hits={}, fulltext_rel_hits={}",
+                attempt,
+                MAX_ATTEMPTS,
+                user_ft_count,
+                rel_ft_count,
+                embedding_count,
+                vector_hits,
+                fulltext_node_hits,
+                fulltext_rel_hits
+            );
+            tokio::time::sleep(Duration::from_secs(DELAY_SECS)).await;
+        }
+
+        Err(OtherError(
+            "Timed out waiting for Falkor post-phase fixture indexes/procedures to become ready"
+                .to_string(),
+        ))
     }
 
     /// Fast-path loader for the Pokec "Users" dataset using UNWIND batches.
