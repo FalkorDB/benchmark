@@ -789,12 +789,16 @@ async fn spawn_neo4j_worker(
 
             match received {
                 Some(prepared_query) => {
-                    let start_time = Instant::now();
+                    // Coordinated-omission correction: anchor latency at the
+                    // intended schedule time, not dequeue time. Running behind
+                    // schedule counts as latency; the driver's catch-up sleep
+                    // (when ahead of schedule) does not.
+                    let intended_start = prepared_query.intended_start();
 
                     let r = client
                         .execute_prepared_query(worker_id_str, &prepared_query, &simulate)
                         .await;
-                    let duration = start_time.elapsed();
+                    let duration = Instant::now().saturating_duration_since(intended_start);
                     match r {
                         Ok(_) => {
                             NEO4J_SUCCESS_REQUESTS_DURATION_HISTOGRAM
@@ -1040,12 +1044,16 @@ async fn spawn_falkor_worker(
 
             match received {
                 Some(prepared_query) => {
-                    let start_time = Instant::now();
+                    // Coordinated-omission correction: anchor latency at the
+                    // intended schedule time, not dequeue time. Running behind
+                    // schedule counts as latency; the driver's catch-up sleep
+                    // (when ahead of schedule) does not.
+                    let intended_start = prepared_query.intended_start();
 
                     let r = client
                         .execute_prepared_query(worker_id_str, &prepared_query, &simulate)
                         .await;
-                    let duration = start_time.elapsed();
+                    let duration = Instant::now().saturating_duration_since(intended_start);
                     match r {
                         Ok(_) => {
                             FALKOR_SUCCESS_REQUESTS_DURATION_HISTOGRAM
@@ -1774,12 +1782,16 @@ async fn spawn_memgraph_worker(
 
             match received {
                 Some(prepared_query) => {
-                    let start_time = Instant::now();
+                    // Coordinated-omission correction: anchor latency at the
+                    // intended schedule time, not dequeue time. Running behind
+                    // schedule counts as latency; the driver's catch-up sleep
+                    // (when ahead of schedule) does not.
+                    let intended_start = prepared_query.intended_start();
 
                     let r = client
                         .execute_prepared_query(worker_id_str, &prepared_query, &simulate)
                         .await;
-                    let duration = start_time.elapsed();
+                    let duration = Instant::now().saturating_duration_since(intended_start);
                     match r {
                         Ok(_) => {
                             MEMGRAPH_SUCCESS_REQUESTS_DURATION_HISTOGRAM

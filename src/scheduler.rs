@@ -33,6 +33,16 @@ impl<Payload: Send + Sync> Msg<Payload> {
             offset_ms
         }
     }
+
+    /// The instant this message was scheduled to start executing.
+    ///
+    /// Latency must be measured from this anchor rather than from dequeue time,
+    /// otherwise a backed-up schedule silently drops its queueing delay from the
+    /// recorded latency (coordinated omission).
+    #[inline]
+    pub fn intended_start(&self) -> Instant {
+        self.start_time + Duration::from_millis(self.offset)
+    }
 }
 /// schedule at a rate of msg_per_sec messages per second to sender for number_of_messages
 /// returns a handle to the spawned task
