@@ -23,7 +23,8 @@ use benchmark::{
     FALKOR_LATENCY_P95_US, FALKOR_LATENCY_P99_US, FALKOR_QUERY_LATENCY_PCT_US,
     FALKOR_SUCCESS_REQUESTS_DURATION_HISTOGRAM, MEMGRAPH_ERROR_REQUESTS_DURATION_HISTOGRAM,
     MEMGRAPH_LATENCY_P50_US, MEMGRAPH_LATENCY_P95_US, MEMGRAPH_LATENCY_P99_US,
-    MEMGRAPH_QUERY_LATENCY_PCT_US, MEMGRAPH_STORAGE_BASE_DATASET_BYTES,
+    MEMGRAPH_QUERY_LATENCY_PCT_US, MEMGRAPH_QUERY_TIMEOUT_RATE_PCT,
+    MEMGRAPH_STORAGE_BASE_DATASET_BYTES,
     MEMGRAPH_SUCCESS_REQUESTS_DURATION_HISTOGRAM, NEO4J_ERROR_REQUESTS_DURATION_HISTOGRAM,
     NEO4J_LATENCY_P50_US, NEO4J_LATENCY_P95_US, NEO4J_LATENCY_P99_US, NEO4J_QUERY_LATENCY_PCT_US,
     NEO4J_STORE_SIZE_BYTES, NEO4J_SUCCESS_REQUESTS_DURATION_HISTOGRAM,
@@ -184,6 +185,18 @@ fn parse_memgraph_endpoint(
     };
 
     Ok((uri, user, password, Some("memgraph".to_string())))
+}
+
+const SMALL_WORKLOAD_QUERY_THRESHOLD: usize = 10_000;
+const SMALL_WORKLOAD_WORKER_PROGRESS_BATCH: u32 = 100;
+const DEFAULT_WORKER_PROGRESS_BATCH: u32 = 1_000;
+
+fn worker_progress_batch_size(total_queries: usize) -> u32 {
+    if total_queries < SMALL_WORKLOAD_QUERY_THRESHOLD {
+        SMALL_WORKLOAD_WORKER_PROGRESS_BATCH
+    } else {
+        DEFAULT_WORKER_PROGRESS_BATCH
+    }
 }
 
 #[tokio::main]
@@ -405,6 +418,14 @@ fn remove_query_by_name(
     before.saturating_sub(queries.len())
 }
 
+fn is_timeout_error(err: &benchmark::error::BenchmarkError) -> bool {
+    matches!(
+        err,
+        benchmark::error::BenchmarkError::OtherError(message)
+            if message.to_ascii_lowercase().contains("timeout")
+    )
+}
+
 fn validate_neo4j_phase1_capabilities(
     presence: AlgorithmQueryPresence,
     capabilities: Neo4jAlgorithmCapabilities,
@@ -610,28 +631,65 @@ struct PerQueryLatency {
     // Indexed by q_id.
     catalog: Vec<QueryCatalogEntry>,
     hists: Vec<std::sync::Mutex<histogram::Histogram>>,
+    totals: Vec<std::sync::atomic::AtomicU64>,
+    timeouts: Vec<std::sync::atomic::AtomicU64>,
 }
 
 impl PerQueryLatency {
     fn new(catalog: Vec<QueryCatalogEntry>) -> BenchmarkResult<Self> {
         let mut hists = Vec::with_capacity(catalog.len());
+        let mut totals = Vec::with_capacity(catalog.len());
+        let mut timeouts = Vec::with_capacity(catalog.len());
         for _ in 0..catalog.len() {
             hists.push(std::sync::Mutex::new(histogram::Histogram::new(7, 64)?));
+            totals.push(std::sync::atomic::AtomicU64::new(0));
+            timeouts.push(std::sync::atomic::AtomicU64::new(0));
         }
-        Ok(Self { catalog, hists })
+        Ok(Self {
+            catalog,
+            hists,
+            totals,
+            timeouts,
+        })
     }
 
-    fn record_us(
+    fn record_success_us(
         &self,
         q_id: u16,
         us: u64,
     ) {
         let idx = q_id as usize;
+        if let Some(total) = self.totals.get(idx) {
+            total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         let Some(m) = self.hists.get(idx) else {
             return;
         };
         if let Ok(mut h) = m.lock() {
             let _ = h.increment(us);
+        }
+    }
+
+    fn record_failure(
+        &self,
+        q_id: u16,
+    ) {
+        let idx = q_id as usize;
+        if let Some(total) = self.totals.get(idx) {
+            total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    fn record_timeout(
+        &self,
+        q_id: u16,
+    ) {
+        let idx = q_id as usize;
+        if let Some(total) = self.totals.get(idx) {
+            total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        if let Some(timeout) = self.timeouts.get(idx) {
+            timeout.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
     }
 
@@ -645,9 +703,31 @@ impl PerQueryLatency {
             Vendor::Neo4j => NEO4J_QUERY_LATENCY_PCT_US.reset(),
             Vendor::Memgraph => MEMGRAPH_QUERY_LATENCY_PCT_US.reset(),
         }
+        if matches!(vendor, Vendor::Memgraph) {
+            MEMGRAPH_QUERY_TIMEOUT_RATE_PCT.reset();
+        }
 
         for entry in &self.catalog {
             let idx = entry.id as usize;
+
+            if matches!(vendor, Vendor::Memgraph) {
+                let total = self
+                    .totals
+                    .get(idx)
+                    .map(|v| v.load(std::sync::atomic::Ordering::Relaxed))
+                    .unwrap_or(0);
+                let timeout = self
+                    .timeouts
+                    .get(idx)
+                    .map(|v| v.load(std::sync::atomic::Ordering::Relaxed))
+                    .unwrap_or(0);
+                if total > 0 {
+                    let rate_pct = (timeout as f64 / total as f64) * 100.0;
+                    MEMGRAPH_QUERY_TIMEOUT_RATE_PCT
+                        .with_label_values(&[entry.name.as_str()])
+                        .set(rate_pct);
+                }
+            }
             let Some(m) = self.hists.get(idx) else {
                 continue;
             };
@@ -773,6 +853,7 @@ async fn run_neo4j(
     }
 
     let number_of_queries = queries.len();
+    let worker_progress_every = worker_progress_batch_size(number_of_queries);
     // get the graph size
     let (node_count, relation_count) = client.graph_size().await?;
 
@@ -818,6 +899,11 @@ async fn run_neo4j(
         "running {} queries",
         format_number(number_of_queries as u64)
     );
+    info!(
+        "worker query spread batch set to {} (total queries: {})",
+        worker_progress_every,
+        format_number(number_of_queries as u64)
+    );
     // prepare the mpsc channel
     let (tx, rx) = tokio::sync::mpsc::channel::<Msg<PreparedQuery>>(20 * parallel);
     let rx: Arc<Mutex<Receiver<Msg<PreparedQuery>>>> = Arc::new(Mutex::new(rx));
@@ -840,6 +926,7 @@ async fn run_neo4j(
             simulate,
             latency_hist.clone(),
             per_query.clone(),
+            worker_progress_every,
         )
         .await?;
         workers_handles.push(handle);
@@ -914,6 +1001,7 @@ async fn spawn_neo4j_worker(
     simulate: Option<usize>,
     latency_hist: Arc<tokio::sync::Mutex<histogram::Histogram>>,
     per_query: Arc<PerQueryLatency>,
+    worker_progress_every: u32,
 ) -> BenchmarkResult<JoinHandle<()>> {
     info!("spawning worker");
     let receiver = Arc::clone(receiver);
@@ -944,17 +1032,18 @@ async fn spawn_neo4j_worker(
                                 let _ = h.increment(duration.as_micros() as u64);
                             }
                             // Per-query latency tracking
-                            per_query.record_us(
+                            per_query.record_success_us(
                                 prepared_query.payload.q_id,
                                 duration.as_micros() as u64,
                             );
                             counter += 1;
-                            if counter.is_multiple_of(1000) {
+                            if counter.is_multiple_of(worker_progress_every) {
                                 info!("worker {} processed {} queries", worker_id, counter);
                             }
                         }
                         Err(e) => {
                             NEO4J_ERROR_REQUESTS_DURATION_HISTOGRAM.observe(duration.as_secs_f64());
+                            per_query.record_failure(prepared_query.payload.q_id);
                             let seconds_wait = 3u64;
                             info!(
                                 "worker {} failed to process query, not sleeping for {} seconds {:?}",
@@ -1098,8 +1187,14 @@ async fn run_falkor(
 
     // iterate over queries and send them to the workers
     let number_of_queries = queries.len();
+    let worker_progress_every = worker_progress_batch_size(number_of_queries);
     info!(
         "running {} queries",
+        format_number(number_of_queries as u64)
+    );
+    info!(
+        "worker query spread batch set to {} (total queries: {})",
+        worker_progress_every,
         format_number(number_of_queries as u64)
     );
 
@@ -1124,6 +1219,7 @@ async fn run_falkor(
             simulate,
             latency_hist.clone(),
             per_query.clone(),
+            worker_progress_every,
         )
         .await?;
         workers_handles.push(handle);
@@ -1184,6 +1280,7 @@ async fn spawn_falkor_worker(
     simulate: Option<usize>,
     latency_hist: Arc<tokio::sync::Mutex<histogram::Histogram>>,
     per_query: Arc<PerQueryLatency>,
+    worker_progress_every: u32,
 ) -> BenchmarkResult<JoinHandle<()>> {
     info!("spawning worker");
     let receiver = Arc::clone(receiver);
@@ -1213,18 +1310,19 @@ async fn spawn_falkor_worker(
                                 let _ = h.increment(duration.as_micros() as u64);
                             }
                             // Per-query latency tracking
-                            per_query.record_us(
+                            per_query.record_success_us(
                                 prepared_query.payload.q_id,
                                 duration.as_micros() as u64,
                             );
                             counter += 1;
-                            if counter.is_multiple_of(1000) {
+                            if counter.is_multiple_of(worker_progress_every) {
                                 info!("worker {} processed {} queries", worker_id, counter);
                             }
                         }
                         Err(e) => {
                             FALKOR_ERROR_REQUESTS_DURATION_HISTOGRAM
                                 .observe(duration.as_secs_f64());
+                            per_query.record_failure(prepared_query.payload.q_id);
                             let seconds_wait = 3u64;
                             info!(
                                 "worker {} failed to process query, not sleeping for {} seconds {:?}",
@@ -1749,6 +1847,7 @@ async fn run_memgraph(
     }
 
     let number_of_queries = queries.len();
+    let worker_progress_every = worker_progress_batch_size(number_of_queries);
 
     // get the graph size
     let (node_count, relation_count) = client.graph_size().await?;
@@ -1767,6 +1866,11 @@ async fn run_memgraph(
     );
     info!(
         "running {} queries",
+        format_number(number_of_queries as u64)
+    );
+    info!(
+        "worker query spread batch set to {} (total queries: {})",
+        worker_progress_every,
         format_number(number_of_queries as u64)
     );
     // prepare the mpsc channel
@@ -1791,6 +1895,7 @@ async fn run_memgraph(
             simulate,
             latency_hist.clone(),
             per_query.clone(),
+            worker_progress_every,
         )
         .await?;
         workers_handles.push(handle);
@@ -1949,6 +2054,7 @@ async fn spawn_memgraph_worker(
     simulate: Option<usize>,
     latency_hist: Arc<tokio::sync::Mutex<histogram::Histogram>>,
     per_query: Arc<PerQueryLatency>,
+    worker_progress_every: u32,
 ) -> BenchmarkResult<JoinHandle<()>> {
     info!("spawning worker");
     let receiver = Arc::clone(receiver);
@@ -1979,18 +2085,23 @@ async fn spawn_memgraph_worker(
                                 let _ = h.increment(duration.as_micros() as u64);
                             }
                             // Per-query latency tracking
-                            per_query.record_us(
+                            per_query.record_success_us(
                                 prepared_query.payload.q_id,
                                 duration.as_micros() as u64,
                             );
                             counter += 1;
-                            if counter.is_multiple_of(1000) {
+                            if counter.is_multiple_of(worker_progress_every) {
                                 info!("worker {} processed {} queries", worker_id, counter);
                             }
                         }
                         Err(e) => {
                             MEMGRAPH_ERROR_REQUESTS_DURATION_HISTOGRAM
                                 .observe(duration.as_secs_f64());
+                            if is_timeout_error(&e) {
+                                per_query.record_timeout(prepared_query.payload.q_id);
+                            } else {
+                                per_query.record_failure(prepared_query.payload.q_id);
+                            }
                             let seconds_wait = 3u64;
                             info!(
                                 "worker {} failed to process query, not sleeping for {} seconds {:?}",

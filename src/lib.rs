@@ -1,10 +1,12 @@
 use lazy_static::lazy_static;
 use prometheus::register_counter_vec;
+use prometheus::register_gauge_vec;
 use prometheus::register_histogram;
 use prometheus::register_int_counter;
 use prometheus::register_int_gauge;
 use prometheus::register_int_gauge_vec;
 use prometheus::CounterVec;
+use prometheus::GaugeVec;
 use prometheus::Histogram;
 use prometheus::IntCounter;
 use prometheus::IntGauge;
@@ -336,6 +338,12 @@ lazy_static! {
         "memgraph_query_latency_pct_us",
         "Latency percentile per query in microseconds (computed in-process)",
         &["query", "pct"]
+    )
+    .unwrap();
+    pub static ref MEMGRAPH_QUERY_TIMEOUT_RATE_PCT: GaugeVec = register_gauge_vec!(
+        "memgraph_query_timeout_rate_pct",
+        "Timeout rate per query in percent (computed in-process)",
+        &["query"]
     )
     .unwrap();
 }

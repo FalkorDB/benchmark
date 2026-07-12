@@ -989,18 +989,22 @@ impl UsersQueriesRepository {
             queries_builder = queries_builder.add_query(
                 "temporal_spatial_roundtrip",
                 QueryType::Read,
-                |_random, _flavour| {
+                |_random, flavour| {
+                    let distance_function = match flavour {
+                        Flavour::Neo4j => "point.distance",
+                        _ => "distance",
+                    };
                     QueryBuilder::new()
-                        .text(
+                        .text(format!(
                             "RETURN \
                                 date('2024-01-01') AS d, \
                                 localtime('12:30:00') AS t, \
                                 duration('P2DT3H') AS dur, \
-                                distance( \
-                                    point({latitude: 32.1, longitude: 34.8}), \
-                                    point({latitude: 32.2, longitude: 34.9}) \
-                                ) AS dist",
-                        )
+                                {distance_function}( \
+                                    point({{latitude: 32.1, longitude: 34.8}}), \
+                                    point({{latitude: 32.2, longitude: 34.9}}) \
+                                ) AS dist"
+                        ))
                         .build()
                 },
             );

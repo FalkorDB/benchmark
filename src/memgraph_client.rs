@@ -18,13 +18,31 @@ use std::time::Duration;
 use tokio::fs::File;
 use tokio::io::{self, AsyncWriteExt};
 use tokio::time::Instant;
-use tracing::{error, info, trace};
+use tracing::{error, info, trace, warn};
 
 #[derive(Default, Debug, Clone)]
 struct MemgraphStorageInfo {
     memory_res_bytes: Option<i64>,
     peak_memory_res_bytes: Option<i64>,
     memory_tracked_bytes: Option<i64>,
+}
+
+fn memgraph_query_timeout_from_env() -> Duration {
+    const DEFAULT_TIMEOUT_MS: u64 = 900_000;
+
+    match std::env::var("MEMGRAPH_QUERY_TIMEOUT_MS") {
+        Ok(raw) => match raw.parse::<u64>() {
+            Ok(ms) if ms > 0 => Duration::from_millis(ms),
+            _ => {
+                warn!(
+                    "Invalid MEMGRAPH_QUERY_TIMEOUT_MS='{}', using default {}ms",
+                    raw, DEFAULT_TIMEOUT_MS
+                );
+                Duration::from_millis(DEFAULT_TIMEOUT_MS)
+            }
+        },
+        Err(_) => Duration::from_millis(DEFAULT_TIMEOUT_MS),
+    }
 }
 
 fn parse_human_bytes_to_i64(s: &str) -> Option<i64> {
@@ -87,6 +105,7 @@ fn get_row_i64(
 #[derive(Clone)]
 pub struct MemgraphClient {
     graph: Graph,
+    query_timeout: Duration,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -121,8 +140,17 @@ impl MemgraphClient {
             .map_err(Neo4rsError)?;
 
         let graph = Graph::connect(config).await.map_err(Neo4rsError)?;
+        let query_timeout = memgraph_query_timeout_from_env();
 
-        Ok(MemgraphClient { graph })
+        info!(
+            "Memgraph per-query timeout configured to {}ms",
+            query_timeout.as_millis()
+        );
+
+        Ok(MemgraphClient {
+            graph,
+            query_timeout,
+        })
     }
 
     pub async fn execute_prepared_query<S: AsRef<str>>(
@@ -138,8 +166,8 @@ impl MemgraphClient {
 
         let worker_id = worker_id.as_ref();
         let q_name = q_name.as_str();
-        // Timeout for individual Memgraph queries (10 seconds)
-        let timeout = Duration::from_secs(10);
+        // Timeout for the full query lifecycle (execute + stream consumption).
+        let timeout = self.query_timeout;
         let offset = msg.compute_offset_ms();
 
         MEMGRAPH_MSG_DEADLINE_OFFSET_GAUGE.set(offset);
@@ -150,10 +178,20 @@ impl MemgraphClient {
 
         let bolt_query = bolt.query.as_str();
         let bolt_params = bolt.clone().params;
+        let memgraph_query = async {
+            let mut stream = self
+                .graph
+                .execute(neo4rs::query(bolt_query).params(bolt_params))
+                .await
+                .map_err(Neo4rsError)?;
 
-        let memgraph_result = self
-            .graph
-            .execute(neo4rs::query(bolt_query).params(bolt_params));
+            while let Ok(Some(row)) = stream.next().await {
+                trace!("Row: {:?}", row);
+                black_box(row);
+            }
+
+            Ok(())
+        };
 
         if let Some(delay) = simulate {
             if *delay > 0 {
@@ -163,28 +201,26 @@ impl MemgraphClient {
             return Ok(());
         }
 
-        let memgraph_result = tokio::time::timeout(timeout, memgraph_result).await;
+        let memgraph_result = tokio::time::timeout(timeout, memgraph_query).await;
         OPERATION_COUNTER
             .with_label_values(&["memgraph", worker_id, "", q_name, "", ""])
             .inc();
         match memgraph_result {
-            Ok(Ok(mut stream)) => {
-                while let Ok(Some(row)) = stream.next().await {
-                    trace!("Row: {:?}", row);
-                    black_box(row);
-                }
-            }
+            Ok(Ok(())) => {}
             Ok(Err(e)) => {
                 OPERATION_COUNTER
                     .with_label_values(&["memgraph", worker_id, "error", q_name, "", ""])
                     .inc();
-                return Err(Neo4rsError(e));
+                return Err(e);
             }
             Err(_) => {
                 OPERATION_COUNTER
                     .with_label_values(&["memgraph", worker_id, "timeout", q_name, "", ""])
                     .inc();
-                return Err(OtherError("Timeout".to_string()));
+                return Err(OtherError(format!(
+                    "Timeout after {}ms",
+                    timeout.as_millis()
+                )));
             }
         }
         Ok(())
