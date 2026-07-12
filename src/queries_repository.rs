@@ -45,10 +45,23 @@ impl Default for AlgorithmQuerySelection {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    ValueEnum,
+    Default,
+)]
 #[serde(rename_all = "kebab-case")]
 #[value(rename_all = "kebab-case")]
 pub enum QueryCoverageProfile {
+    #[default]
     Baseline,
     ExtendedCore,
     FixtureDependent,
@@ -67,11 +80,6 @@ impl QueryCoverageProfile {
     }
 }
 
-impl Default for QueryCoverageProfile {
-    fn default() -> Self {
-        Self::Baseline
-    }
-}
 
 fn is_algorithm_query_name(name: &str) -> bool {
     ALGORITHM_QUERY_NAMES.contains(&name)
