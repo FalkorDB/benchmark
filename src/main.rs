@@ -4,10 +4,13 @@ use benchmark::cli::Commands::GenerateAutoComplete;
 use benchmark::error::BenchmarkError::OtherError;
 use benchmark::error::BenchmarkResult;
 use benchmark::falkor::{Falkor, FalkorAlgorithmCapabilities, Stopped};
-use benchmark::memgraph_client::{MemgraphAlgorithmCapabilities, MemgraphClient};
-use benchmark::neo4j_client::{Neo4jAlgorithmCapabilities, Neo4jClient};
+use benchmark::memgraph_client::{
+    MemgraphAlgorithmCapabilities, MemgraphClient, MemgraphFixtureCapabilities,
+};
+use benchmark::neo4j_client::{Neo4jAlgorithmCapabilities, Neo4jClient, Neo4jFixtureCapabilities};
 use benchmark::queries_repository::{
-    AlgorithmQuerySelection, Flavour, PreparedQuery, QueryCatalogEntry, NEO4J_ALGORITHM_GRAPH_NAME,
+    AlgorithmQuerySelection, Flavour, PreparedQuery, QueryCatalogEntry, QueryCoverageProfile,
+    NEO4J_ALGORITHM_GRAPH_NAME,
 };
 use benchmark::scenario::Name::Users;
 use benchmark::scenario::{Size, Spec, Vendor};
@@ -20,7 +23,8 @@ use benchmark::{
     FALKOR_LATENCY_P95_US, FALKOR_LATENCY_P99_US, FALKOR_QUERY_LATENCY_PCT_US,
     FALKOR_SUCCESS_REQUESTS_DURATION_HISTOGRAM, MEMGRAPH_ERROR_REQUESTS_DURATION_HISTOGRAM,
     MEMGRAPH_LATENCY_P50_US, MEMGRAPH_LATENCY_P95_US, MEMGRAPH_LATENCY_P99_US,
-    MEMGRAPH_QUERY_LATENCY_PCT_US, MEMGRAPH_STORAGE_BASE_DATASET_BYTES,
+    MEMGRAPH_QUERY_LATENCY_PCT_US, MEMGRAPH_QUERY_TIMEOUT_RATE_PCT,
+    MEMGRAPH_STORAGE_BASE_DATASET_BYTES,
     MEMGRAPH_SUCCESS_REQUESTS_DURATION_HISTOGRAM, NEO4J_ERROR_REQUESTS_DURATION_HISTOGRAM,
     NEO4J_LATENCY_P50_US, NEO4J_LATENCY_P95_US, NEO4J_LATENCY_P99_US, NEO4J_QUERY_LATENCY_PCT_US,
     NEO4J_STORE_SIZE_BYTES, NEO4J_SUCCESS_REQUESTS_DURATION_HISTOGRAM,
@@ -183,6 +187,18 @@ fn parse_memgraph_endpoint(
     Ok((uri, user, password, Some("memgraph".to_string())))
 }
 
+const SMALL_WORKLOAD_QUERY_THRESHOLD: usize = 10_000;
+const SMALL_WORKLOAD_WORKER_PROGRESS_BATCH: u32 = 100;
+const DEFAULT_WORKER_PROGRESS_BATCH: u32 = 1_000;
+
+fn worker_progress_batch_size(total_queries: usize) -> u32 {
+    if total_queries < SMALL_WORKLOAD_QUERY_THRESHOLD {
+        SMALL_WORKLOAD_WORKER_PROGRESS_BATCH
+    } else {
+        DEFAULT_WORKER_PROGRESS_BATCH
+    }
+}
+
 #[tokio::main]
 async fn main() -> BenchmarkResult<()> {
     let mut cmd = Cli::command();
@@ -210,6 +226,7 @@ async fn main() -> BenchmarkResult<()> {
             dry_run,
             batch_size,
             endpoint,
+            query_profile,
         } => {
             // Expose metrics while running load operations.
             let _prometheus_endpoint =
@@ -219,12 +236,13 @@ async fn main() -> BenchmarkResult<()> {
                 "Init benchmark {} {} {} (batch_size: {})",
                 vendor, size, force, batch_size
             );
+            validate_query_coverage_profile_support(vendor, query_profile)?;
             match vendor {
                 Vendor::Neo4j => {
                     if dry_run {
                         dry_init_neo4j(size, batch_size).await?;
                     } else {
-                        init_neo4j(size, force, batch_size, endpoint).await?;
+                        init_neo4j(size, force, batch_size, endpoint, query_profile).await?;
                     }
                 }
                 Vendor::Falkor => {
@@ -232,14 +250,14 @@ async fn main() -> BenchmarkResult<()> {
                         info!("Dry run");
                         todo!()
                     } else {
-                        init_falkor(size, force, batch_size, endpoint).await?;
+                        init_falkor(size, force, batch_size, endpoint, query_profile).await?;
                     }
                 }
                 Vendor::Memgraph => {
                     if dry_run {
                         dry_init_memgraph(size, batch_size).await?;
                     } else {
-                        init_memgraph(size, force, batch_size, endpoint).await?;
+                        init_memgraph(size, force, batch_size, endpoint, query_profile).await?;
                     }
                 }
             }
@@ -282,7 +300,9 @@ async fn main() -> BenchmarkResult<()> {
             enable_algo_max_flow,
             enable_algo_msf,
             enable_algo_harmonic,
+            query_profile,
         } => {
+            validate_query_coverage_profile_support(vendor, query_profile)?;
             let algorithm_selection = AlgorithmQuerySelection {
                 pagerank: enable_algo_pagerank,
                 max_flow: enable_algo_max_flow,
@@ -296,6 +316,7 @@ async fn main() -> BenchmarkResult<()> {
                 name,
                 write_ratio,
                 algorithm_selection,
+                query_profile,
             )
             .await?;
         }
@@ -345,6 +366,16 @@ const ALGO_PAGERANK_QUERY_NAME: &str = "algo_pagerank_summary";
 const ALGO_MAX_FLOW_QUERY_NAME: &str = "algo_max_flow_single_pair";
 const ALGO_MSF_QUERY_NAME: &str = "algo_msf_summary";
 const ALGO_HARMONIC_QUERY_NAME: &str = "algo_harmonic_summary";
+const VECTOR_QUERY_NODES_SMOKE_QUERY_NAME: &str = "vector_query_nodes_smoke";
+const FULLTEXT_QUERY_NODES_SMOKE_QUERY_NAME: &str = "fulltext_query_nodes_smoke";
+const FULLTEXT_QUERY_RELATIONSHIPS_SMOKE_QUERY_NAME: &str = "fulltext_query_relationships_smoke";
+
+fn validate_query_coverage_profile_support(
+    _vendor: Vendor,
+    _query_profile: QueryCoverageProfile,
+) -> BenchmarkResult<()> {
+    Ok(())
+}
 
 #[derive(Debug, Clone, Copy, Default)]
 struct AlgorithmQueryPresence {
@@ -385,6 +416,14 @@ fn remove_query_by_name(
     let before = queries.len();
     queries.retain(|query| query.q_name != query_name);
     before.saturating_sub(queries.len())
+}
+
+fn is_timeout_error(err: &benchmark::error::BenchmarkError) -> bool {
+    matches!(
+        err,
+        benchmark::error::BenchmarkError::OtherError(message)
+            if message.to_ascii_lowercase().contains("timeout")
+    )
 }
 
 fn validate_neo4j_phase1_capabilities(
@@ -450,6 +489,40 @@ fn validate_memgraph_phase1_capabilities(
     )))
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct FixtureQueryPresence {
+    vector_query_nodes: bool,
+    fulltext_query_nodes: bool,
+    fulltext_query_relationships: bool,
+}
+
+impl FixtureQueryPresence {
+    fn all() -> Self {
+        Self {
+            vector_query_nodes: true,
+            fulltext_query_nodes: true,
+            fulltext_query_relationships: true,
+        }
+    }
+    fn from_queries(queries: &[PreparedQuery]) -> Self {
+        let mut presence = Self::default();
+        for query in queries {
+            match query.q_name.as_str() {
+                VECTOR_QUERY_NODES_SMOKE_QUERY_NAME => presence.vector_query_nodes = true,
+                FULLTEXT_QUERY_NODES_SMOKE_QUERY_NAME => presence.fulltext_query_nodes = true,
+                FULLTEXT_QUERY_RELATIONSHIPS_SMOKE_QUERY_NAME => {
+                    presence.fulltext_query_relationships = true
+                }
+                _ => {}
+            }
+        }
+        presence
+    }
+
+    fn has_any(self) -> bool {
+        self.vector_query_nodes || self.fulltext_query_nodes || self.fulltext_query_relationships
+    }
+}
 fn validate_falkor_phase1_capabilities(
     presence: AlgorithmQueryPresence,
     capabilities: FalkorAlgorithmCapabilities,
@@ -476,32 +549,147 @@ fn validate_falkor_phase1_capabilities(
     )))
 }
 
+fn validate_falkor_fixture_capabilities(
+    presence: FixtureQueryPresence,
+    capabilities: benchmark::falkor::FalkorFixtureCapabilities,
+) -> BenchmarkResult<()> {
+    let mut missing = Vec::new();
+
+    if presence.vector_query_nodes && !capabilities.has_vector_query_nodes {
+        missing.push("db.idx.vector.queryNodes");
+    }
+    if presence.fulltext_query_nodes && !capabilities.has_fulltext_query_nodes {
+        missing.push("db.idx.fulltext.queryNodes");
+    }
+    if presence.fulltext_query_relationships && !capabilities.has_fulltext_query_relationships {
+        missing.push("db.idx.fulltext.queryRelationships");
+    }
+
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    Err(OtherError(format!(
+        "FalkorDB is missing required fixture-query capabilities: {}",
+        missing.join(", ")
+    )))
+}
+
+fn validate_neo4j_fixture_capabilities(
+    presence: FixtureQueryPresence,
+    capabilities: Neo4jFixtureCapabilities,
+) -> BenchmarkResult<()> {
+    let mut missing = Vec::new();
+
+    if presence.vector_query_nodes && !capabilities.has_vector_query_nodes {
+        missing.push("db.index.vector.queryNodes");
+    }
+    if presence.fulltext_query_nodes && !capabilities.has_fulltext_query_nodes {
+        missing.push("db.index.fulltext.queryNodes");
+    }
+    if presence.fulltext_query_relationships && !capabilities.has_fulltext_query_relationships {
+        missing.push("db.index.fulltext.queryRelationships");
+    }
+
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    Err(OtherError(format!(
+        "Neo4j is missing required fixture-query capabilities: {}",
+        missing.join(", ")
+    )))
+}
+
+fn validate_memgraph_fixture_capabilities(
+    presence: FixtureQueryPresence,
+    capabilities: MemgraphFixtureCapabilities,
+) -> BenchmarkResult<()> {
+    let mut missing = Vec::new();
+
+    if presence.vector_query_nodes && !capabilities.has_vector_search {
+        missing.push("vector_search.search");
+    }
+    if presence.fulltext_query_nodes && !capabilities.has_text_search_nodes {
+        missing.push("text_search.search");
+    }
+    if presence.fulltext_query_relationships && !capabilities.has_text_search_relationships {
+        missing.push("text_search.search_edges");
+    }
+
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    Err(OtherError(format!(
+        "Memgraph is missing required fixture-query capabilities: {}",
+        missing.join(", ")
+    )))
+}
+
 struct PerQueryLatency {
     // Indexed by q_id.
     catalog: Vec<QueryCatalogEntry>,
     hists: Vec<std::sync::Mutex<histogram::Histogram>>,
+    totals: Vec<std::sync::atomic::AtomicU64>,
+    timeouts: Vec<std::sync::atomic::AtomicU64>,
 }
 
 impl PerQueryLatency {
     fn new(catalog: Vec<QueryCatalogEntry>) -> BenchmarkResult<Self> {
         let mut hists = Vec::with_capacity(catalog.len());
+        let mut totals = Vec::with_capacity(catalog.len());
+        let mut timeouts = Vec::with_capacity(catalog.len());
         for _ in 0..catalog.len() {
             hists.push(std::sync::Mutex::new(histogram::Histogram::new(7, 64)?));
+            totals.push(std::sync::atomic::AtomicU64::new(0));
+            timeouts.push(std::sync::atomic::AtomicU64::new(0));
         }
-        Ok(Self { catalog, hists })
+        Ok(Self {
+            catalog,
+            hists,
+            totals,
+            timeouts,
+        })
     }
 
-    fn record_us(
+    fn record_success_us(
         &self,
         q_id: u16,
         us: u64,
     ) {
         let idx = q_id as usize;
+        if let Some(total) = self.totals.get(idx) {
+            total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         let Some(m) = self.hists.get(idx) else {
             return;
         };
         if let Ok(mut h) = m.lock() {
             let _ = h.increment(us);
+        }
+    }
+
+    fn record_failure(
+        &self,
+        q_id: u16,
+    ) {
+        let idx = q_id as usize;
+        if let Some(total) = self.totals.get(idx) {
+            total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    fn record_timeout(
+        &self,
+        q_id: u16,
+    ) {
+        let idx = q_id as usize;
+        if let Some(total) = self.totals.get(idx) {
+            total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        if let Some(timeout) = self.timeouts.get(idx) {
+            timeout.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
     }
 
@@ -515,9 +703,31 @@ impl PerQueryLatency {
             Vendor::Neo4j => NEO4J_QUERY_LATENCY_PCT_US.reset(),
             Vendor::Memgraph => MEMGRAPH_QUERY_LATENCY_PCT_US.reset(),
         }
+        if matches!(vendor, Vendor::Memgraph) {
+            MEMGRAPH_QUERY_TIMEOUT_RATE_PCT.reset();
+        }
 
         for entry in &self.catalog {
             let idx = entry.id as usize;
+
+            if matches!(vendor, Vendor::Memgraph) {
+                let total = self
+                    .totals
+                    .get(idx)
+                    .map(|v| v.load(std::sync::atomic::Ordering::Relaxed))
+                    .unwrap_or(0);
+                let timeout = self
+                    .timeouts
+                    .get(idx)
+                    .map(|v| v.load(std::sync::atomic::Ordering::Relaxed))
+                    .unwrap_or(0);
+                if total > 0 {
+                    let rate_pct = (timeout as f64 / total as f64) * 100.0;
+                    MEMGRAPH_QUERY_TIMEOUT_RATE_PCT
+                        .with_label_values(&[entry.name.as_str()])
+                        .set(rate_pct);
+                }
+            }
             let Some(m) = self.hists.get(idx) else {
                 continue;
             };
@@ -570,7 +780,9 @@ async fn run_neo4j(
 ) -> BenchmarkResult<()> {
     let queries_file = file_name.clone();
     let (queries_metadata, mut queries) = read_queries(file_name).await?;
+    validate_query_coverage_profile_support(Vendor::Neo4j, queries_metadata.query_profile)?;
     let algorithm_presence = AlgorithmQueryPresence::from_queries(&queries);
+    let fixture_presence = FixtureQueryPresence::from_queries(&queries);
     let mut algorithm_projection_ready = false;
 
     let client = if let Some(ref endpoint_str) = endpoint {
@@ -610,6 +822,13 @@ async fn run_neo4j(
 
     // Ensure benchmark-critical relationship capacity is present for algorithm workloads.
     client.ensure_friend_capacity_ready().await?;
+    if fixture_presence.has_any() {
+        let fixture_capabilities = client.detect_fixture_capabilities().await?;
+        validate_neo4j_fixture_capabilities(fixture_presence, fixture_capabilities)?;
+    }
+    if queries_metadata.query_profile.includes_fixture_dependent() || fixture_presence.has_any() {
+        client.ensure_post_phase1_fixtures_ready().await?;
+    }
 
     if algorithm_presence.has_any_algorithm() {
         let capabilities = client.detect_algorithm_capabilities().await?;
@@ -634,6 +853,7 @@ async fn run_neo4j(
     }
 
     let number_of_queries = queries.len();
+    let worker_progress_every = worker_progress_batch_size(number_of_queries);
     // get the graph size
     let (node_count, relation_count) = client.graph_size().await?;
 
@@ -679,6 +899,11 @@ async fn run_neo4j(
         "running {} queries",
         format_number(number_of_queries as u64)
     );
+    info!(
+        "worker query spread batch set to {} (total queries: {})",
+        worker_progress_every,
+        format_number(number_of_queries as u64)
+    );
     // prepare the mpsc channel
     let (tx, rx) = tokio::sync::mpsc::channel::<Msg<PreparedQuery>>(20 * parallel);
     let rx: Arc<Mutex<Receiver<Msg<PreparedQuery>>>> = Arc::new(Mutex::new(rx));
@@ -701,6 +926,7 @@ async fn run_neo4j(
             simulate,
             latency_hist.clone(),
             per_query.clone(),
+            worker_progress_every,
         )
         .await?;
         workers_handles.push(handle);
@@ -775,6 +1001,7 @@ async fn spawn_neo4j_worker(
     simulate: Option<usize>,
     latency_hist: Arc<tokio::sync::Mutex<histogram::Histogram>>,
     per_query: Arc<PerQueryLatency>,
+    worker_progress_every: u32,
 ) -> BenchmarkResult<JoinHandle<()>> {
     info!("spawning worker");
     let receiver = Arc::clone(receiver);
@@ -805,17 +1032,18 @@ async fn spawn_neo4j_worker(
                                 let _ = h.increment(duration.as_micros() as u64);
                             }
                             // Per-query latency tracking
-                            per_query.record_us(
+                            per_query.record_success_us(
                                 prepared_query.payload.q_id,
                                 duration.as_micros() as u64,
                             );
                             counter += 1;
-                            if counter.is_multiple_of(1000) {
+                            if counter.is_multiple_of(worker_progress_every) {
                                 info!("worker {} processed {} queries", worker_id, counter);
                             }
                         }
                         Err(e) => {
                             NEO4J_ERROR_REQUESTS_DURATION_HISTOGRAM.observe(duration.as_secs_f64());
+                            per_query.record_failure(prepared_query.payload.q_id);
                             let seconds_wait = 3u64;
                             info!(
                                 "worker {} failed to process query, not sleeping for {} seconds {:?}",
@@ -853,7 +1081,9 @@ async fn run_falkor(
 
     let queries_file = file_name.clone();
     let (queries_metadata, mut queries) = read_queries(file_name).await?;
+    validate_query_coverage_profile_support(Vendor::Falkor, queries_metadata.query_profile)?;
     let algorithm_presence = AlgorithmQueryPresence::from_queries(&queries);
+    let fixture_presence = FixtureQueryPresence::from_queries(&queries);
 
     // Build a normalised-query -> q_name mapping for all queries (reads and writes).
     // We rely on the "query.text" field, which is the Cypher without the leading
@@ -893,7 +1123,14 @@ async fn run_falkor(
             .is_err()
         {
             info!("Dump file not found, initializing falkor database...");
-            init_falkor(queries_metadata.dataset, false, 1000, endpoint.clone()).await?;
+            init_falkor(
+                queries_metadata.dataset,
+                false,
+                1000,
+                endpoint.clone(),
+                queries_metadata.query_profile,
+            )
+            .await?;
         }
         // restore the dump
         falkor.restore_db(queries_metadata.dataset).await?;
@@ -913,6 +1150,15 @@ async fn run_falkor(
     // and visible to FalkorDB so we avoid long-running queries due to missing indexes.
     falkor.wait_for_pokec_indexes_ready().await?;
     falkor.ensure_friend_capacity_ready().await?;
+    if fixture_presence.has_any() {
+        let mut capability_client = falkor.client().await?;
+        let fixture_capabilities = capability_client.detect_fixture_capabilities().await?;
+        validate_falkor_fixture_capabilities(fixture_presence, fixture_capabilities)?;
+    }
+    if queries_metadata.query_profile.includes_fixture_dependent() || fixture_presence.has_any() {
+        let mut fixture_client = falkor.client().await?;
+        fixture_client.ensure_post_phase1_fixtures_ready().await?;
+    }
 
     if algorithm_presence.has_any_algorithm() {
         let capabilities = falkor.detect_algorithm_capabilities().await?;
@@ -941,8 +1187,14 @@ async fn run_falkor(
 
     // iterate over queries and send them to the workers
     let number_of_queries = queries.len();
+    let worker_progress_every = worker_progress_batch_size(number_of_queries);
     info!(
         "running {} queries",
+        format_number(number_of_queries as u64)
+    );
+    info!(
+        "worker query spread batch set to {} (total queries: {})",
+        worker_progress_every,
         format_number(number_of_queries as u64)
     );
 
@@ -967,6 +1219,7 @@ async fn run_falkor(
             simulate,
             latency_hist.clone(),
             per_query.clone(),
+            worker_progress_every,
         )
         .await?;
         workers_handles.push(handle);
@@ -1027,6 +1280,7 @@ async fn spawn_falkor_worker(
     simulate: Option<usize>,
     latency_hist: Arc<tokio::sync::Mutex<histogram::Histogram>>,
     per_query: Arc<PerQueryLatency>,
+    worker_progress_every: u32,
 ) -> BenchmarkResult<JoinHandle<()>> {
     info!("spawning worker");
     let receiver = Arc::clone(receiver);
@@ -1056,18 +1310,19 @@ async fn spawn_falkor_worker(
                                 let _ = h.increment(duration.as_micros() as u64);
                             }
                             // Per-query latency tracking
-                            per_query.record_us(
+                            per_query.record_success_us(
                                 prepared_query.payload.q_id,
                                 duration.as_micros() as u64,
                             );
                             counter += 1;
-                            if counter.is_multiple_of(1000) {
+                            if counter.is_multiple_of(worker_progress_every) {
                                 info!("worker {} processed {} queries", worker_id, counter);
                             }
                         }
                         Err(e) => {
                             FALKOR_ERROR_REQUESTS_DURATION_HISTOGRAM
                                 .observe(duration.as_secs_f64());
+                            per_query.record_failure(prepared_query.payload.q_id);
                             let seconds_wait = 3u64;
                             info!(
                                 "worker {} failed to process query, not sleeping for {} seconds {:?}",
@@ -1092,7 +1347,9 @@ async fn init_falkor(
     _force: bool,
     batch_size: usize,
     endpoint: Option<String>,
+    query_profile: QueryCoverageProfile,
 ) -> BenchmarkResult<()> {
+    validate_query_coverage_profile_support(Vendor::Falkor, query_profile)?;
     let spec = Spec::new(benchmark::scenario::Name::Users, size, Vendor::Falkor);
     let falkor = benchmark::falkor::Falkor::new_with_endpoint(endpoint.clone());
     if endpoint.is_none() {
@@ -1137,6 +1394,9 @@ async fn init_falkor(
         format_number(total_processed as u64)
     );
     falkor.ensure_friend_capacity_ready().await?;
+    if query_profile.includes_fixture_dependent() {
+        falkor_client.ensure_post_phase1_fixtures_ready().await?;
+    }
 
     let (node_count, relation_count) = falkor.graph_size().await?;
     info!(
@@ -1159,7 +1419,13 @@ fn show_historgam(histogram: Histogram) {
         let p = SampleQuantiles::quantile(&histogram, percentile as f64 / 100.0)
             .ok()
             .flatten()
-            .and_then(|result| result.entries().values().next().map(|b| Duration::from_micros(b.end())));
+            .and_then(|result| {
+                result
+                    .entries()
+                    .values()
+                    .next()
+                    .map(|b| Duration::from_micros(b.end()))
+            });
 
         info!("p{}: {:?}", percentile, p);
     }
@@ -1280,7 +1546,9 @@ async fn init_neo4j(
     force: bool,
     batch_size: usize,
     endpoint: Option<String>,
+    query_profile: QueryCoverageProfile,
 ) -> BenchmarkResult<()> {
+    validate_query_coverage_profile_support(Vendor::Neo4j, query_profile)?;
     let spec = Spec::new(benchmark::scenario::Name::Users, size, Vendor::Neo4j);
 
     let client = if let Some(ref endpoint_str) = endpoint {
@@ -1386,6 +1654,11 @@ async fn init_neo4j(
         total_processed
     );
     client.ensure_friend_capacity_ready().await?;
+    if query_profile.includes_fixture_dependent() {
+        let fixture_capabilities = client.detect_fixture_capabilities().await?;
+        validate_neo4j_fixture_capabilities(FixtureQueryPresence::all(), fixture_capabilities)?;
+        client.ensure_post_phase1_fixtures_ready().await?;
+    }
     let (node_count, relation_count) = client.graph_size().await?;
     info!(
         "{} nodes and {} relations were imported at {:?}",
@@ -1423,6 +1696,8 @@ struct PrepareQueriesMetadata {
     size: usize,
     dataset: Size,
     #[serde(default)]
+    query_profile: QueryCoverageProfile,
+    #[serde(default)]
     catalog: Vec<QueryCatalogEntry>,
 }
 async fn prepare_queries(
@@ -1432,6 +1707,7 @@ async fn prepare_queries(
     file_name: String,
     write_ratio: f32,
     algorithm_selection: AlgorithmQuerySelection,
+    query_profile: QueryCoverageProfile,
 ) -> BenchmarkResult<()> {
     let start = Instant::now();
 
@@ -1451,11 +1727,13 @@ async fn prepare_queries(
         edges,
         flavour,
         algorithm_selection,
+        query_profile,
     );
     let catalog = queries_repository.catalog();
     let metadata = PrepareQueriesMetadata {
         size,
         dataset,
+        query_profile,
         catalog,
     };
     let queries = Box::new(queries_repository.random_queries(size, write_ratio));
@@ -1517,7 +1795,9 @@ async fn run_memgraph(
 ) -> BenchmarkResult<()> {
     let queries_file = file_name.clone();
     let (queries_metadata, mut queries) = read_queries(file_name).await?;
+    validate_query_coverage_profile_support(Vendor::Memgraph, queries_metadata.query_profile)?;
     let algorithm_presence = AlgorithmQueryPresence::from_queries(&queries);
+    let fixture_presence = FixtureQueryPresence::from_queries(&queries);
 
     let client = if let Some(ref endpoint_str) = endpoint {
         info!(
@@ -1543,6 +1823,13 @@ async fn run_memgraph(
     // Best-effort Memgraph storage/memory reporting (query-interface metric).
     client.collect_storage_info_metrics().await;
     client.ensure_friend_capacity_ready().await?;
+    if fixture_presence.has_any() {
+        let fixture_capabilities = client.detect_fixture_capabilities().await?;
+        validate_memgraph_fixture_capabilities(fixture_presence, fixture_capabilities)?;
+    }
+    if queries_metadata.query_profile.includes_fixture_dependent() || fixture_presence.has_any() {
+        client.ensure_post_phase1_fixtures_ready().await?;
+    }
 
     if algorithm_presence.has_any_algorithm() {
         let capabilities = client.detect_algorithm_capabilities().await?;
@@ -1560,6 +1847,7 @@ async fn run_memgraph(
     }
 
     let number_of_queries = queries.len();
+    let worker_progress_every = worker_progress_batch_size(number_of_queries);
 
     // get the graph size
     let (node_count, relation_count) = client.graph_size().await?;
@@ -1578,6 +1866,11 @@ async fn run_memgraph(
     );
     info!(
         "running {} queries",
+        format_number(number_of_queries as u64)
+    );
+    info!(
+        "worker query spread batch set to {} (total queries: {})",
+        worker_progress_every,
         format_number(number_of_queries as u64)
     );
     // prepare the mpsc channel
@@ -1602,6 +1895,7 @@ async fn run_memgraph(
             simulate,
             latency_hist.clone(),
             per_query.clone(),
+            worker_progress_every,
         )
         .await?;
         workers_handles.push(handle);
@@ -1760,6 +2054,7 @@ async fn spawn_memgraph_worker(
     simulate: Option<usize>,
     latency_hist: Arc<tokio::sync::Mutex<histogram::Histogram>>,
     per_query: Arc<PerQueryLatency>,
+    worker_progress_every: u32,
 ) -> BenchmarkResult<JoinHandle<()>> {
     info!("spawning worker");
     let receiver = Arc::clone(receiver);
@@ -1790,18 +2085,23 @@ async fn spawn_memgraph_worker(
                                 let _ = h.increment(duration.as_micros() as u64);
                             }
                             // Per-query latency tracking
-                            per_query.record_us(
+                            per_query.record_success_us(
                                 prepared_query.payload.q_id,
                                 duration.as_micros() as u64,
                             );
                             counter += 1;
-                            if counter.is_multiple_of(1000) {
+                            if counter.is_multiple_of(worker_progress_every) {
                                 info!("worker {} processed {} queries", worker_id, counter);
                             }
                         }
                         Err(e) => {
                             MEMGRAPH_ERROR_REQUESTS_DURATION_HISTOGRAM
                                 .observe(duration.as_secs_f64());
+                            if is_timeout_error(&e) {
+                                per_query.record_timeout(prepared_query.payload.q_id);
+                            } else {
+                                per_query.record_failure(prepared_query.payload.q_id);
+                            }
                             let seconds_wait = 3u64;
                             info!(
                                 "worker {} failed to process query, not sleeping for {} seconds {:?}",
@@ -1857,7 +2157,9 @@ async fn init_memgraph(
     force: bool,
     batch_size: usize,
     endpoint: Option<String>,
+    query_profile: QueryCoverageProfile,
 ) -> BenchmarkResult<()> {
+    validate_query_coverage_profile_support(Vendor::Memgraph, query_profile)?;
     let spec = Spec::new(benchmark::scenario::Name::Users, size, Vendor::Memgraph);
 
     let client = if let Some(ref endpoint_str) = endpoint {
@@ -1966,6 +2268,11 @@ async fn init_memgraph(
         total_processed
     );
     client.ensure_friend_capacity_ready().await?;
+    if query_profile.includes_fixture_dependent() {
+        let fixture_capabilities = client.detect_fixture_capabilities().await?;
+        validate_memgraph_fixture_capabilities(FixtureQueryPresence::all(), fixture_capabilities)?;
+        client.ensure_post_phase1_fixtures_ready().await?;
+    }
     let (node_count, relation_count) = client.graph_size().await?;
     info!(
         "{} nodes and {} relations were imported at {:?}",

@@ -142,8 +142,8 @@ impl Neo4j {
                 self.stop(false).await?;
             }
             let home = self.neo4j_home.clone();
-            let databases = format!("{}/data/databases/neo4j", &home);
-            let transactions = format!("{}/data/transactions/neo4j", &home);
+            let databases = format!("{}/data/databases/neo4j", home);
+            let transactions = format!("{}/data/transactions/neo4j", home);
             let args = ["-rf", &databases, &transactions];
             let out = spawn_command("rm", &args).await?;
             if out.status.success() {

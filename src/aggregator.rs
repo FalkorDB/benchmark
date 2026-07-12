@@ -2,7 +2,7 @@ use benchmark::error::BenchmarkError::OtherError;
 use benchmark::error::BenchmarkResult;
 use benchmark::scenario::{Name, Size, Spec, Vendor};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -852,10 +852,12 @@ impl MetricsIndex {
             Vendor::Neo4j => "neo4j_query_latency_pct_us",
             Vendor::Memgraph => "memgraph_query_latency_pct_us",
         };
-
-        let Some(samples) = self.samples.get(metric) else {
-            return BTreeMap::new();
+        let timeout_metric = match vendor {
+            Vendor::Memgraph => Some("memgraph_query_timeout_rate_pct"),
+            _ => None,
         };
+
+        let samples = self.samples.get(metric).cloned().unwrap_or_default();
 
         // The UI expects this exact order.
         let wanted_pcts: [(&str, f64); 11] = [
@@ -874,7 +876,7 @@ impl MetricsIndex {
 
         // query -> pct -> us
         let mut tmp: BTreeMap<String, BTreeMap<String, f64>> = BTreeMap::new();
-        for (labels, value) in samples {
+        for (labels, value) in &samples {
             let Some(query) = labels.get("query").cloned() else {
                 continue;
             };
@@ -884,13 +886,33 @@ impl MetricsIndex {
             tmp.entry(query).or_default().insert(pct, *value);
         }
 
+        // query -> timeout rate percentage
+        let mut timeout_rates: BTreeMap<String, f64> = BTreeMap::new();
+        if let Some(timeout_metric_name) = timeout_metric {
+            if let Some(timeout_samples) = self.samples.get(timeout_metric_name) {
+                for (labels, value) in timeout_samples {
+                    let Some(query) = labels.get("query").cloned() else {
+                        continue;
+                    };
+                    timeout_rates.insert(query, *value);
+                }
+            }
+        }
+
         let mut out = BTreeMap::new();
-        for (query, by_pct) in tmp {
-            let mut arr = Vec::with_capacity(wanted_pcts.len());
+        let mut all_queries: BTreeSet<String> = BTreeSet::new();
+        all_queries.extend(tmp.keys().cloned());
+        all_queries.extend(timeout_rates.keys().cloned());
+
+        for query in all_queries {
+            let by_pct = tmp.get(&query);
+            let mut arr = Vec::with_capacity(wanted_pcts.len() + 1);
             for (label, _p) in wanted_pcts {
-                let us = by_pct.get(label).copied().unwrap_or(0.0);
+                let us = by_pct.and_then(|v| v.get(label)).copied().unwrap_or(0.0);
                 arr.push(us / 1000.0); // ms
             }
+            // Final slot is timeout-rate percentage (to the right of P99 in the UI).
+            arr.push(timeout_rates.get(&query).copied().unwrap_or(0.0));
             // Only keep queries with at least one non-zero percentile.
             if arr.iter().any(|v| *v > 0.0) {
                 out.insert(query, arr);

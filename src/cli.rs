@@ -1,3 +1,4 @@
+use crate::queries_repository::QueryCoverageProfile;
 use crate::scenario::Vendor;
 use clap::{Parser, Subcommand};
 use clap_complete::Shell;
@@ -53,6 +54,14 @@ pub enum Commands {
             help = "endpoint for external database connection (e.g., falkor://127.0.0.1:6379)"
         )]
         endpoint: Option<String>,
+        #[arg(
+            long,
+            value_enum,
+            required = false,
+            default_value_t = QueryCoverageProfile::Baseline,
+            help = "query coverage profile used to decide if post-phase fixture/index setup should run"
+        )]
+        query_profile: QueryCoverageProfile,
     },
     #[command(
         about = "generate a set of queries and store them in a file to be used with the run command"
@@ -108,6 +117,14 @@ pub enum Commands {
             help = "enable the algo_harmonic_summary query in generated workloads"
         )]
         enable_algo_harmonic: bool,
+        #[arg(
+            long,
+            value_enum,
+            required = false,
+            default_value_t = QueryCoverageProfile::Baseline,
+            help = "query coverage profile to generate (baseline, extended-core, fixture-dependent)"
+        )]
+        query_profile: QueryCoverageProfile,
     },
 
     #[command(

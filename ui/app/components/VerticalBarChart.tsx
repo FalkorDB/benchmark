@@ -54,6 +54,11 @@ const VerticalBarChart: React.FC<VerticalBarChartProps> = ({
   latencyStats
 }) => {
   const xLabels = (chartData.labels ?? []) as string[];
+  const isTimeoutBucket = (dataIndex: number) => {
+    if (chartId !== "single") return false;
+    const label = xLabels[dataIndex];
+    return typeof label === "string" && label.toLowerCase().includes("timeout");
+  };
 
   const legendFillForVendor = (chart: ChartType, vendorLike: string) => {
     // Canvas gradients are defined in absolute canvas coordinates. The legend box is drawn
@@ -139,8 +144,20 @@ const VerticalBarChart: React.FC<VerticalBarChartProps> = ({
       tooltip: {
         callbacks: {
           label: function (context: unknown) {
-            const c = context as { raw?: unknown; dataset?: { label?: string } };
+            const c = context as {
+              raw?: unknown;
+              dataIndex?: number;
+              dataset?: { label?: string };
+            };
             const value = c.raw;
+            const dataIndex =
+              typeof c.dataIndex === "number" ? c.dataIndex : -1;
+            const numericValue =
+              typeof value === "number" ? value : Number(value);
+
+            if (isTimeoutBucket(dataIndex) && Number.isFinite(numericValue)) {
+              return `${c.dataset?.label ?? ""}: ${numericValue.toFixed(2)}%`;
+            }
             return `${c.dataset?.label ?? ""}: ${String(value ?? "")}${unit}`;
           },
         },
@@ -211,11 +228,19 @@ const VerticalBarChart: React.FC<VerticalBarChartProps> = ({
         },
         color: "grey",
         formatter: (value: number, context: unknown) => {
-          const ctx = context as { dataset?: { label?: string } };
+          const ctx = context as {
+            dataset?: { label?: string };
+            dataIndex?: number;
+          };
           if (value <= 0) return "";
 
           // Single mode: show the raw histogram number.
           if (chartId === "single") {
+            const dataIndex =
+              typeof ctx.dataIndex === "number" ? ctx.dataIndex : -1;
+            if (isTimeoutBucket(dataIndex)) {
+              return `${value.toFixed(2)}%`;
+            }
             return `${Math.round(value)}`;
           }
 

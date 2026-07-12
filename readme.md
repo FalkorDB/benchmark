@@ -193,6 +193,11 @@ NOTE: It is possible to use the load command with externally run vendor endpoint
 - `cargo run --release --bin benchmark -- load --vendor neo4j -s small --endpoint neo4j://neo4j:benchmark123@127.0.0.1:7687`
 - `cargo run --release --bin benchmark -- load --vendor memgraph -s small --endpoint bolt://127.0.0.1:7687`
 
+Profile-aware loading (runs additional fixture/index setup when required):
+- `cargo run --release --bin benchmark -- load --vendor neo4j -s small --query-profile fixture-dependent`
+- `cargo run --release --bin benchmark -- load --vendor memgraph -s small --query-profile fixture-dependent`
+- `cargo run --release --bin benchmark -- load --vendor falkor -s small --query-profile fixture-dependent`
+
 ##### create a set of queries to be used with the run command
 
 -
@@ -202,6 +207,11 @@ NOTE: It is possible to use the load command with externally run vendor endpoint
 NOTE: preparing a smaller run of 1,000,000 queries:
 
 `cargo run --release --bin benchmark -- generate-queries  -s1000000 --dataset small --name=small-readonly --write-ratio 0.0`
+
+Generate with a broader coverage profile:
+
+- `cargo run --release --bin benchmark -- generate-queries -s1000000 --dataset small --name=small-extended --write-ratio 0.0 --vendor neo4j --query-profile extended-core`
+- `cargo run --release --bin benchmark -- generate-queries -s1000000 --dataset small --name=small-fixtures --write-ratio 0.0 --vendor memgraph --query-profile fixture-dependent`
 
 ##### run the benchmarks
 
