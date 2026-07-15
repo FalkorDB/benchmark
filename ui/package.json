@@ -27,7 +27,7 @@
     "chartjs-plugin-datalabels": "^2.2.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
-    "lucide-react": "^0.469.0",
+    "lucide-react": "^1.24.0",
     "next": "^15.5.18",
     "playwright": "^1.61.1",
     "react": "^19.2.7",
