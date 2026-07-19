@@ -127,7 +127,7 @@ ui-smoke:
     echo "Waiting for Next.js to be ready on http://localhost:${port}/ ..."
     ready=0
     for i in $(seq 1 120); do
-        if curl -fsS "http://localhost:${port}/" >/dev/null 2>&1; then
+        if curl -fsS --connect-timeout 2 --max-time 5 "http://localhost:${port}/" >/dev/null 2>&1; then
             echo "Next.js is up."
             ready=1
             break
