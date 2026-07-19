@@ -190,7 +190,13 @@ pub async fn run(config: &Config) -> BenchmarkResult<Report> {
         .endpoint
         .as_str()
         .try_into()
-        .map_err(|e| OtherError(format!("invalid endpoint '{}': {:?}", config.endpoint, e)))?;
+        .map_err(|e| {
+            OtherError(format!(
+                "invalid endpoint '{}': {:?}",
+                redact_endpoint(&config.endpoint),
+                e
+            ))
+        })?;
 
     // A single dedicated connection: honest single-flight latency (the client otherwise defaults
     // to 8 multiplexed sockets).

@@ -9,12 +9,16 @@ use crate::error::BenchmarkResult;
 use crate::synthetic::report::ServerInfo;
 use tracing::warn;
 
-/// Query `INFO server` + `MODULE LIST` over a raw redis connection and assemble a [`ServerInfo`].
+/// Query `INFO server`, `MODULE LIST` and `GRAPH.CONFIG GET CACHE_SIZE` over a raw redis
+/// connection and assemble a [`ServerInfo`].
 ///
 /// `redis_url` is a `redis://host:port` string (convert a `falkor://` endpoint with
-/// [`crate::falkor::falkor_driver::falkor_endpoint_to_redis_url`]). `server_image` is recorded
-/// verbatim. Failure to read is non-fatal for the caller's decision, but returned as an error here
-/// so the caller can log it and continue with a best-effort (partial) `ServerInfo`.
+/// [`crate::falkor::falkor_endpoint_to_redis_url`]). `server_image` is recorded verbatim.
+///
+/// Only failure to open/connect the redis client is returned as an error. Each individual command
+/// (`INFO` / `MODULE LIST` / `GRAPH.CONFIG`) that fails is *logged and skipped*, leaving its
+/// field(s) as `None`, so a partial reply still yields a best-effort `ServerInfo` rather than
+/// discarding everything.
 pub async fn collect(
     redis_url: &str,
     server_image: Option<String>,
