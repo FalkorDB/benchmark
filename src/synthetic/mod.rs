@@ -55,8 +55,10 @@ impl OpName {
         }
     }
 
-    /// Build the query for invocation `i` (parameterized; content varies so we don't measure a
-    /// single trivially-cached literal).
+    /// Build the query for invocation `i`: a parameterized query whose body is constant but whose
+    /// parameter *value* varies with `i`, so we exercise real parameter binding rather than a
+    /// single frozen literal (while the constant body still lets the plan cache work — see
+    /// [`Self::render_cypher`]).
     pub fn build_query(
         self,
         i: usize,
@@ -74,11 +76,14 @@ impl OpName {
 
     /// Render the Cypher string for invocation `i` in the given cache mode.
     ///
-    /// In [`CacheMode::Uncached`] a unique trailing comment (`/* co<i> */`) is appended so every
-    /// invocation is a distinct plan-cache key — forcing FalkorDB to recompile the query each time
-    /// (verified via the response's `cached_execution` flag), which exposes expression-compilation
-    /// cost. In [`CacheMode::Cached`] the text is identical every time, so after warm-up the plan
-    /// is reused and only execution is measured.
+    /// FalkorDB keys its plan cache on the query **body** — the text after the `CYPHER <params>`
+    /// prefix that [`Query::to_cypher`] emits — so varying only a parameter *value* still hits the
+    /// cache. In [`CacheMode::Cached`] the body (`RETURN $i AS x`) is therefore identical every
+    /// invocation (only the stripped `CYPHER i = <n>` prefix changes), so after warm-up the plan is
+    /// reused and only execution is measured. In [`CacheMode::Uncached`] a unique trailing comment
+    /// (`/* co<i> */`) is appended to the body, making every invocation a distinct cache key and
+    /// forcing FalkorDB to recompile each time (verified via the response's `cached_execution`
+    /// flag), which exposes expression-compilation cost.
     pub fn render_cypher(
         self,
         i: usize,
@@ -96,9 +101,11 @@ impl OpName {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 #[value(rename_all = "snake_case")]
 pub enum CacheSelection {
-    /// Warm plan cache: identical query text, plan reused → execution only.
+    /// Warm plan cache: identical query **body** every run (only the stripped `CYPHER <params>`
+    /// prefix varies), so the plan is reused → execution only.
     Cached,
-    /// Forced plan-cache miss every run (unique query text) → execution + compilation.
+    /// Forced plan-cache miss every run (a unique comment makes each query body distinct) →
+    /// execution + compilation.
     Uncached,
     /// Measure both and report the derived compilation cost (default).
     Both,
@@ -176,7 +183,7 @@ fn redact_endpoint(endpoint: &str) -> String {
     }
 }
 
-/// Open a single-connection [`AsyncGraph`] handle for `endpoint` on graph `graph_name`.
+/// Open a single-connection [`falkordb::AsyncGraph`] handle for `endpoint` on graph `graph_name`.
 ///
 /// Uses a one-socket pool so latency is honest single-flight (the client otherwise defaults to 8
 /// multiplexed sockets). A malformed `endpoint` is reported as an error with credentials redacted.
@@ -432,7 +439,8 @@ pub async fn run_and_report(config: &Config) -> BenchmarkResult<()> {
 }
 
 /// Execute a parsed `synthetic` subcommand. This keeps `main.rs` a thin shell: it maps the CLI
-/// [`SyntheticCommands`] onto a [`Config`] and runs the probe, or prints the operation catalog.
+/// [`crate::cli::SyntheticCommands`] onto a [`Config`] and runs the probe, or prints the operation
+/// catalog.
 pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkResult<()> {
     match command {
         crate::cli::SyntheticCommands::Run {
