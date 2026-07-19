@@ -89,6 +89,11 @@ run *args:
 # `just synthetic-bench --samples 1000 --op return_const`.
 # Run the synthetic single-operation latency probe (forwards args to `synthetic run`).
 synthetic-bench *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Drop an optional leading `--` so both `just synthetic-bench --samples 5` and
+    # `just synthetic-bench -- --samples 5` forward the flags to the probe (matches `just run`).
+    if [ "${1:-}" = "--" ]; then shift; fi
     cargo run --release --bin benchmark -- synthetic run "$@"
 
 # List the available synthetic operations.
