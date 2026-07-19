@@ -140,6 +140,18 @@ single-flight latency. This is the first slice of a larger tool (see the design 
 [`synthetic-benchmark.md`](synthetic-benchmark.md)); later parts add an operation catalog, a
 synthetic dataset, and a concurrency sweep.
 
+Each operation is measured under two plan-cache conditions so you can see the cost of expression
+**compilation** separately from execution:
+
+- **cached** — the plan is reused (warm cache), so only execution is measured;
+- **uncached** — every invocation is forced to miss the plan cache (a unique query-text token), so
+  it recompiles each time, exposing compilation cost.
+
+`compilation_ms ≈ uncached − cached` server time. (FalkorDB's `CACHE_SIZE` can't be set to `0` and
+is load-time only, so the uncached condition is produced client-side and verified via the response's
+`cached_execution` flag; the server's actual `CACHE_SIZE` is recorded in the report.) Use `--cache
+cached|uncached|both` (default `both`).
+
 Set up and run, start to end:
 
 ```bash
@@ -155,7 +167,7 @@ just synthetic-ops
 # 4. run the probe (records the exact server image so results are reproducible)
 IMAGE=$(docker inspect --format '{{index .RepoDigests 0}}' falkordb/falkordb:latest)
 just synthetic-bench --endpoint falkor://127.0.0.1:6379 \
-    --op return_const --samples 1000 --warmup 200 \
+    --op return_const --samples 1000 --warmup 200 --cache both \
     --server-image "$IMAGE" --out synthetic-report.json
 ```
 
@@ -163,21 +175,28 @@ Sample output:
 
 ```text
 synthetic benchmark — endpoint falkor://127.0.0.1:6379  samples 1000  warmup 200  connection pool(size=1)
-server — falkordb module ver 42001  redis 8.6.3
+server — falkordb module ver 42001  redis 8.6.3  CACHE_SIZE 25
 server image: falkordb/falkordb@sha256:9042fdc4...
 
 return_const
-  server_ms  median 0.017  mean 0.018  p99 0.030  (n=982, removed 18)
-  total_ms   median 0.397  mean 0.403  p99 0.519  (n=982, removed 18)
-  non_internal_ms (paired total-server)  median 0.379
-  cached_execution=false: 0.0%  (unknown 0)
+  [cached — plan reused, execution only]
+    server_ms  median 0.018  mean 0.019  p99 0.031  (n=983, removed 17)
+    total_ms   median 0.391  mean 0.397  p99 0.514  (n=983, removed 17)
+    non_internal_ms (paired total-server)  median 0.374
+    cached_execution=false: 0.0%  (unknown 0)
+  [uncached — plan-cache miss each run, execution + compilation]
+    server_ms  median 0.029  mean 0.030  p99 0.047  (n=977, removed 23)
+    total_ms   median 0.388  mean 0.392  p99 0.490  (n=977, removed 23)
+    non_internal_ms (paired total-server)  median 0.358
+    cached_execution=false: 100.0%  (unknown 0)
+  compilation_ms (median uncached-cached server time)  0.011
 report written to synthetic-report.json
 ```
 
 The report's `meta.server` block records the FalkorDB module version, `redis_version`/`build_id`,
-and the operator-supplied `--server-image` (FalkorDB does not expose a graph-module git SHA to
-clients, so the image digest is the reproducible build identity). A `:edge` image reports a
-`999999` placeholder version and the tool warns you to use a tagged image for comparisons.
+`CACHE_SIZE`, and the operator-supplied `--server-image` (FalkorDB does not expose a graph-module
+git SHA to clients, so the image digest is the reproducible build identity). A `:edge` image reports
+a `999999` placeholder version and the tool warns you to use a tagged image for comparisons.
 
 To run the integration test against a live server:
 

@@ -68,6 +68,54 @@ impl OpName {
                 .build(),
         }
     }
+
+    /// Render the Cypher string for invocation `i` in the given cache mode.
+    ///
+    /// In [`CacheMode::Uncached`] a unique trailing comment (`/* co<i> */`) is appended so every
+    /// invocation is a distinct plan-cache key — forcing FalkorDB to recompile the query each time
+    /// (verified via the response's `cached_execution` flag), which exposes expression-compilation
+    /// cost. In [`CacheMode::Cached`] the text is identical every time, so after warm-up the plan
+    /// is reused and only execution is measured.
+    pub fn render_cypher(
+        self,
+        i: usize,
+        mode: CacheMode,
+    ) -> String {
+        let base = self.build_query(i).to_cypher();
+        match mode {
+            CacheMode::Cached => base,
+            CacheMode::Uncached => format!("{} /* co{} */", base, i),
+        }
+    }
+}
+
+/// Which plan-cache condition to measure an operation under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[value(rename_all = "snake_case")]
+pub enum CacheSelection {
+    /// Warm plan cache: identical query text, plan reused → execution only.
+    Cached,
+    /// Forced plan-cache miss every run (unique query text) → execution + compilation.
+    Uncached,
+    /// Measure both and report the derived compilation cost (default).
+    Both,
+}
+
+impl CacheSelection {
+    fn modes(self) -> &'static [CacheMode] {
+        match self {
+            CacheSelection::Cached => &[CacheMode::Cached],
+            CacheSelection::Uncached => &[CacheMode::Uncached],
+            CacheSelection::Both => &[CacheMode::Cached, CacheMode::Uncached],
+        }
+    }
+}
+
+/// A single plan-cache condition (one element of a [`CacheSelection`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheMode {
+    Cached,
+    Uncached,
 }
 
 /// Configuration for a single-operation probe run.
@@ -79,6 +127,7 @@ pub struct Config {
     pub warmup: usize,
     pub server_timeout_ms: i64,
     pub client_deadline_ms: u64,
+    pub cache: CacheSelection,
     pub out: String,
     pub server_image: Option<String>,
 }
@@ -92,6 +141,7 @@ impl Default for Config {
             warmup: 200,
             server_timeout_ms: 5_000,
             client_deadline_ms: 6_000,
+            cache: CacheSelection::Both,
             out: "synthetic-report.json".to_string(),
             server_image: None,
         }
@@ -170,8 +220,9 @@ pub async fn run(config: &Config) -> BenchmarkResult<Report> {
 
     // Ensure the graph key exists: a read (`RO_QUERY`) against a never-written graph fails with
     // "Invalid graph operation on empty key". Probe with a read first and only write to
-    // instantiate it when absent, so a read-only replica whose graph already exists still works.
-    // Both are bounded by the client deadline so a stuck socket can't hang setup.
+    // instantiate the graph when the error is exactly that empty-key condition — so a read-only
+    // replica whose graph already exists still works, and any other error (auth/network) is
+    // surfaced rather than masked. Both are bounded by the client deadline.
     let probe = tokio::time::timeout(
         client_deadline,
         graph
@@ -179,50 +230,57 @@ pub async fn run(config: &Config) -> BenchmarkResult<Report> {
             .with_timeout(config.server_timeout_ms)
             .execute(),
     )
-    .await;
-    let needs_instantiation = !matches!(probe, Ok(Ok(_)));
-    if needs_instantiation {
-        tokio::time::timeout(
-            client_deadline,
-            graph
-                .query("RETURN 1")
-                .with_timeout(config.server_timeout_ms)
-                .execute(),
-        )
-        .await
-        .map_err(|e| OtherError(format!("graph 'falkor' instantiation timed out: {}", e)))?
-        .map_err(|e| OtherError(format!("failed to instantiate graph 'falkor': {:?}", e)))?;
+    .await
+    .map_err(|e| OtherError(format!("graph 'falkor' readiness probe timed out: {}", e)))?;
+    match probe {
+        Ok(_) => {}
+        Err(e) => {
+            let msg = format!("{:?}", e);
+            if is_empty_graph_key(&msg) {
+                tokio::time::timeout(
+                    client_deadline,
+                    graph
+                        .query("RETURN 1")
+                        .with_timeout(config.server_timeout_ms)
+                        .execute(),
+                )
+                .await
+                .map_err(|e| OtherError(format!("graph 'falkor' instantiation timed out: {}", e)))?
+                .map_err(|e| {
+                    OtherError(format!("failed to instantiate graph 'falkor': {:?}", e))
+                })?;
+            } else {
+                return Err(OtherError(format!(
+                    "graph 'falkor' readiness probe failed: {}",
+                    msg
+                )));
+            }
+        }
     }
 
-    // Warm-up (discarded) primes the plan cache and connection.
-    for i in 0..config.warmup {
-        let q = config.op.build_query(i);
-        let _ = run_and_drain(
-            &mut graph,
-            config.op.kind(),
-            &q,
-            config.server_timeout_ms,
-            client_deadline,
-        )
-        .await?;
+    // Measure the operation under each requested plan-cache condition.
+    let mut cached_set: Option<crate::synthetic::report::MetricSet> = None;
+    let mut uncached_set: Option<crate::synthetic::report::MetricSet> = None;
+    for &mode in config.cache.modes() {
+        let set = measure_mode(&mut graph, config, mode, client_deadline).await?;
+        match mode {
+            CacheMode::Cached => cached_set = Some(set),
+            CacheMode::Uncached => uncached_set = Some(set),
+        }
     }
 
-    // Measurement.
-    let mut samples: Vec<OpSample> = Vec::with_capacity(config.samples);
-    for i in 0..config.samples {
-        let q = config.op.build_query(config.warmup + i);
-        let sample = run_and_drain(
-            &mut graph,
-            config.op.kind(),
-            &q,
-            config.server_timeout_ms,
-            client_deadline,
-        )
-        .await?;
-        samples.push(sample);
-    }
+    // Derived expression-compilation cost: how much slower an uncached (recompiled) run's server
+    // time is than a cached (plan-reused) one.
+    let compilation_ms_median = match (&cached_set, &uncached_set) {
+        (Some(c), Some(u)) => Some(u.server_ms.median - c.server_ms.median),
+        _ => None,
+    };
 
-    let op_report = summarize_samples(&samples)?;
+    let op_report = OperationReport {
+        cached: cached_set,
+        uncached: uncached_set,
+        compilation_ms_median,
+    };
     let mut operations = BTreeMap::new();
     operations.insert(config.op.as_str().to_string(), op_report);
 
@@ -242,14 +300,57 @@ pub async fn run(config: &Config) -> BenchmarkResult<Report> {
     })
 }
 
-/// Summarize a set of paired samples into an [`OperationReport`].
+/// Whether a query error string is FalkorDB's "graph key does not exist yet" condition.
+fn is_empty_graph_key(msg: &str) -> bool {
+    let m = msg.to_ascii_lowercase();
+    m.contains("empty key") || m.contains("invalid graph operation")
+}
+
+/// Warm up then measure `config.samples` invocations of `config.op` in one cache mode.
+async fn measure_mode(
+    graph: &mut falkordb::AsyncGraph,
+    config: &Config,
+    mode: CacheMode,
+    client_deadline: Duration,
+) -> BenchmarkResult<crate::synthetic::report::MetricSet> {
+    // Warm-up (discarded) primes the plan cache (cached mode) and the connection.
+    for i in 0..config.warmup {
+        let cypher = config.op.render_cypher(i, mode);
+        let _ = run_and_drain(
+            graph,
+            config.op.kind(),
+            &cypher,
+            config.server_timeout_ms,
+            client_deadline,
+        )
+        .await?;
+    }
+
+    let mut samples: Vec<OpSample> = Vec::with_capacity(config.samples);
+    for i in 0..config.samples {
+        let cypher = config.op.render_cypher(config.warmup + i, mode);
+        let sample = run_and_drain(
+            graph,
+            config.op.kind(),
+            &cypher,
+            config.server_timeout_ms,
+            client_deadline,
+        )
+        .await?;
+        samples.push(sample);
+    }
+
+    summarize_samples(&samples)
+}
+
+/// Summarize a set of paired samples into a [`MetricSet`].
 ///
 /// Outlier removal is *paired*: a sample is dropped if it is a severe outlier in **either**
 /// `server_ms` or `total_ms`, and all three summaries (server, total, and the paired residual) are
 /// computed over that single shared retained cohort. This keeps their sample counts identical and
 /// preserves the invariant that, since every raw pair has `total >= server`, the retained
-/// aggregates do too.
-fn summarize_samples(samples: &[OpSample]) -> BenchmarkResult<OperationReport> {
+/// aggregates do too. Cache-health stats are computed over the same retained cohort.
+fn summarize_samples(samples: &[OpSample]) -> BenchmarkResult<crate::synthetic::report::MetricSet> {
     let server: Vec<f64> = samples.iter().map(|s| s.server_ms).collect();
     let total: Vec<f64> = samples.iter().map(|s| s.total_ms).collect();
 
@@ -277,15 +378,16 @@ fn summarize_samples(samples: &[OpSample]) -> BenchmarkResult<OperationReport> {
     let non_internal_ms = stats::summarize_kept(&kept_residual, removed)
         .ok_or_else(|| OtherError("no non_internal_ms samples to summarize".to_string()))?;
 
-    let cached_unknown = samples.iter().filter(|s| s.cached.is_none()).count();
-    let known: Vec<bool> = samples.iter().filter_map(|s| s.cached).collect();
+    // Cache health over the same retained cohort (not the raw samples).
+    let cached_unknown = kept.iter().filter(|s| s.cached.is_none()).count();
+    let known: Vec<bool> = kept.iter().filter_map(|s| s.cached).collect();
     let cached_false_rate = if known.is_empty() {
         0.0
     } else {
         known.iter().filter(|&&c| !c).count() as f64 / known.len() as f64
     };
 
-    Ok(OperationReport {
+    Ok(crate::synthetic::report::MetricSet {
         server_ms,
         total_ms,
         non_internal_ms,
@@ -327,6 +429,46 @@ mod tests {
         assert_eq!(q0.params.len(), 1);
         // Different invocation index ⇒ different parameter value.
         assert_ne!(q0.params.get("i"), q1.params.get("i"));
+    }
+
+    #[test]
+    fn uncached_render_is_unique_per_invocation_cached_is_stable() {
+        // Cached mode: no per-invocation uniqueness token, so FalkorDB caches by the parameterized
+        // query body (it strips the leading `CYPHER <params>` prefix from the cache key), and the
+        // plan is reused across invocations.
+        let c0 = OpName::ReturnConst.render_cypher(0, CacheMode::Cached);
+        let c1 = OpName::ReturnConst.render_cypher(1, CacheMode::Cached);
+        assert!(!c0.contains("/* co"));
+        assert!(!c1.contains("/* co"));
+        assert!(c0.contains("RETURN $i AS x"));
+        assert!(c1.contains("RETURN $i AS x"));
+
+        // Uncached mode: a unique trailing token per `i` ⇒ distinct plan-cache key each run.
+        let u0 = OpName::ReturnConst.render_cypher(0, CacheMode::Uncached);
+        let u1 = OpName::ReturnConst.render_cypher(1, CacheMode::Uncached);
+        assert_ne!(u0, u1);
+        assert!(u0.contains("/* co0 */"));
+        assert!(u1.contains("/* co1 */"));
+    }
+
+    #[test]
+    fn cache_selection_expands_to_modes() {
+        assert_eq!(CacheSelection::Cached.modes(), &[CacheMode::Cached]);
+        assert_eq!(CacheSelection::Uncached.modes(), &[CacheMode::Uncached]);
+        assert_eq!(
+            CacheSelection::Both.modes(),
+            &[CacheMode::Cached, CacheMode::Uncached]
+        );
+    }
+
+    #[test]
+    fn empty_graph_key_detection() {
+        assert!(is_empty_graph_key("Invalid graph operation on empty key"));
+        assert!(is_empty_graph_key(
+            "RedisError(\"Invalid graph operation on empty key\")"
+        ));
+        assert!(!is_empty_graph_key("Password authentication failed"));
+        assert!(!is_empty_graph_key("connection refused"));
     }
 
     #[test]

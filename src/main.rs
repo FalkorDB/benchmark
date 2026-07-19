@@ -349,6 +349,7 @@ async fn main() -> BenchmarkResult<()> {
                 op,
                 samples,
                 warmup,
+                cache,
                 server_timeout_ms,
                 client_deadline_ms,
                 out,
@@ -361,6 +362,7 @@ async fn main() -> BenchmarkResult<()> {
                     warmup,
                     server_timeout_ms,
                     client_deadline_ms,
+                    cache,
                     out,
                     server_image,
                 };

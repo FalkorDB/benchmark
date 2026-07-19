@@ -19,8 +19,13 @@ pub async fn collect(
     redis_url: &str,
     server_image: Option<String>,
 ) -> BenchmarkResult<ServerInfo> {
-    let client = redis::Client::open(redis_url)
-        .map_err(|e| OtherError(format!("provenance: bad redis url '{}': {}", redis_url, e)))?;
+    let client = redis::Client::open(redis_url).map_err(|e| {
+        OtherError(format!(
+            "provenance: bad redis url '{}': {}",
+            redact_redis_url(redis_url),
+            e
+        ))
+    })?;
     let mut conn = client
         .get_multiplexed_async_connection()
         .await
@@ -57,7 +62,27 @@ pub async fn collect(
         Err(e) => warn!("provenance: MODULE LIST failed: {}", e),
     }
 
+    // The plan-cache size gives context for the cached-vs-uncached comparison.
+    match redis::cmd("GRAPH.CONFIG")
+        .arg("GET")
+        .arg("CACHE_SIZE")
+        .query_async::<redis::Value>(&mut conn)
+        .await
+    {
+        Ok(v) => info.cache_size = parse_config_get_u64(&v),
+        Err(e) => warn!("provenance: GRAPH.CONFIG GET CACHE_SIZE failed: {}", e),
+    }
+
     Ok(info)
+}
+
+/// Parse a `GRAPH.CONFIG GET <name>` reply (`[name, value]`) into the numeric value.
+fn parse_config_get_u64(value: &redis::Value) -> Option<u64> {
+    match value {
+        redis::Value::Array(items) if items.len() >= 2 => redis_value_as_u64(&items[1]),
+        redis::Value::Map(pairs) => pairs.first().and_then(|(_, v)| redis_value_as_u64(v)),
+        _ => None,
+    }
 }
 
 /// Extract a `key:value` field from a redis `INFO` text blob.
@@ -168,6 +193,19 @@ pub fn decode_module_version(ver: u64) -> String {
     let minor = (ver / 100) % 100;
     let patch = ver % 100;
     format!("{}.{}.{}", major, minor, patch)
+}
+
+/// Strip any password from a `redis://user:pass@host` URL so it never appears in error logs.
+fn redact_redis_url(url: &str) -> String {
+    match url::Url::parse(url) {
+        Ok(mut u) => {
+            if u.password().is_some() {
+                let _ = u.set_password(None);
+            }
+            u.to_string()
+        }
+        Err(_) => "<redacted>".to_string(),
+    }
 }
 
 #[cfg(test)]

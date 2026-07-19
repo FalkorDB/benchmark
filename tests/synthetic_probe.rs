@@ -23,6 +23,7 @@ async fn probe_produces_valid_report() {
         warmup: 50,
         server_timeout_ms: 5_000,
         client_deadline_ms: 6_000,
+        cache: benchmark::synthetic::CacheSelection::Both,
         out: "synthetic-report.json".to_string(),
         server_image: None,
     };
@@ -34,21 +35,24 @@ async fn probe_produces_valid_report() {
         .get("return_const")
         .expect("report should contain the measured op");
 
-    // Every sample is accounted for (retained + severe-outliers removed).
-    assert_eq!(
-        op.server_ms.n + op.server_ms.removed,
-        samples,
-        "server_ms samples should sum to the requested count"
-    );
-    assert_eq!(op.total_ms.n + op.total_ms.removed, samples);
+    // Both cache modes were measured.
+    let cached = op.cached.as_ref().expect("cached metrics present");
+    let uncached = op.uncached.as_ref().expect("uncached metrics present");
 
-    // The server reported a positive internal execution time, and the round-trip is at least as
-    // long as the server time (the residual can't be negative in aggregate).
-    assert!(op.server_ms.median > 0.0, "server_ms should be positive");
-    assert!(op.total_ms.median > 0.0, "total_ms should be positive");
+    // Every sample is accounted for (retained + severe-outliers removed) in each mode.
+    assert_eq!(cached.server_ms.n + cached.server_ms.removed, samples);
+    assert_eq!(uncached.server_ms.n + uncached.server_ms.removed, samples);
+
+    // Positive server + total time, and total >= server within each mode.
+    assert!(cached.server_ms.median > 0.0);
+    assert!(cached.total_ms.median >= cached.server_ms.median);
+    assert!(uncached.total_ms.median >= uncached.server_ms.median);
+
+    // The uncached mode forces plan-cache misses: most invocations report cached_execution=false.
     assert!(
-        op.total_ms.median >= op.server_ms.median,
-        "total time should be >= server time"
+        uncached.cached_false_rate > 0.5,
+        "uncached mode should mostly miss the plan cache (got {})",
+        uncached.cached_false_rate
     );
 
     // Provenance was captured from the live server.
