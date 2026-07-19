@@ -241,7 +241,10 @@ mod tests {
 
     #[test]
     fn console_contains_key_fields() {
-        let out = sample_report().to_console();
+        let mut r = sample_report();
+        r.meta.server.server_image =
+            Some("falkordb/falkordb:v4.2.1@sha256:deadbeef".to_string());
+        let out = r.to_console();
         assert!(out.contains("return_const"));
         assert!(out.contains("server_ms"));
         assert!(out.contains("total_ms"));
@@ -249,6 +252,8 @@ mod tests {
         assert!(out.contains("cached"));
         assert!(out.contains("compilation_ms"));
         assert!(out.contains("CACHE_SIZE 25"));
+        // The operator-supplied image identity is echoed when present.
+        assert!(out.contains("server image: falkordb/falkordb:v4.2.1@sha256:deadbeef"));
     }
 
     #[test]

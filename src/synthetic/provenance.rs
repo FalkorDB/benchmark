@@ -242,6 +242,9 @@ mod tests {
             redis::Value::Array(vec![
                 redis::Value::BulkString(b"name".to_vec()),
                 redis::Value::BulkString(b"graph".to_vec()),
+                // An unrelated field is skipped rather than mis-parsed.
+                redis::Value::BulkString(b"path".to_vec()),
+                redis::Value::BulkString(b"/lib/graph.so".to_vec()),
                 redis::Value::BulkString(b"ver".to_vec()),
                 redis::Value::Int(42001),
             ]),
@@ -274,6 +277,11 @@ mod tests {
                 redis::Value::BulkString(b"name".to_vec()),
                 redis::Value::BulkString(b"graph".to_vec()),
             ),
+            // An unrelated field is skipped rather than mis-parsed.
+            (
+                redis::Value::BulkString(b"path".to_vec()),
+                redis::Value::BulkString(b"/lib/graph.so".to_vec()),
+            ),
             (
                 redis::Value::BulkString(b"ver".to_vec()),
                 redis::Value::Int(42001),
@@ -283,9 +291,145 @@ mod tests {
     }
 
     #[test]
+    fn parses_graph_module_version_skips_non_string_keys() {
+        // A stray non-string key element must be skipped, not treated as a field name.
+        let modules = redis::Value::Array(vec![redis::Value::Array(vec![
+            redis::Value::Int(999),
+            redis::Value::Int(999),
+            redis::Value::BulkString(b"name".to_vec()),
+            redis::Value::BulkString(b"graph".to_vec()),
+            redis::Value::BulkString(b"ver".to_vec()),
+            redis::Value::Int(42001),
+        ])]);
+        assert_eq!(parse_graph_module_version(&modules), Some(42001));
+    }
+
+    #[test]
     fn decode_version_examples() {
         assert_eq!(decode_module_version(42001), "4.20.1");
         assert_eq!(decode_module_version(999_999), "99.99.99");
         assert_eq!(decode_module_version(40200), "4.2.0");
+    }
+
+    #[test]
+    fn parse_graph_module_version_top_level_map() {
+        // RESP3 can report a single module directly as a top-level Map.
+        let modules = redis::Value::Map(vec![
+            (
+                redis::Value::BulkString(b"name".to_vec()),
+                redis::Value::BulkString(b"graph".to_vec()),
+            ),
+            (
+                redis::Value::BulkString(b"ver".to_vec()),
+                redis::Value::Int(42001),
+            ),
+        ]);
+        assert_eq!(parse_graph_module_version(&modules), Some(42001));
+    }
+
+    #[test]
+    fn parse_graph_module_version_handles_odd_shapes() {
+        // A non-array / non-map reply yields None.
+        assert_eq!(parse_graph_module_version(&redis::Value::Nil), None);
+        // An array whose entries are neither arrays nor maps is skipped, not panicked on.
+        let modules = redis::Value::Array(vec![redis::Value::Nil, redis::Value::Int(7)]);
+        assert_eq!(parse_graph_module_version(&modules), None);
+    }
+
+    #[test]
+    fn module_field_pairs_matches_only_wanted_name() {
+        let pairs = vec![
+            (
+                redis::Value::BulkString(b"name".to_vec()),
+                redis::Value::BulkString(b"graph".to_vec()),
+            ),
+            // An unrelated field is skipped rather than mis-parsed.
+            (
+                redis::Value::BulkString(b"path".to_vec()),
+                redis::Value::BulkString(b"/lib/graph.so".to_vec()),
+            ),
+            (
+                redis::Value::BulkString(b"ver".to_vec()),
+                redis::Value::Int(123),
+            ),
+        ];
+        assert_eq!(module_field_pairs(&pairs, "graph"), Some(123));
+        assert_eq!(module_field_pairs(&pairs, "search"), None);
+    }
+
+    #[test]
+    fn parse_config_get_handles_array_map_and_other() {
+        // RESP2: `[name, value]`.
+        let array = redis::Value::Array(vec![
+            redis::Value::BulkString(b"CACHE_SIZE".to_vec()),
+            redis::Value::Int(25),
+        ]);
+        assert_eq!(parse_config_get_u64(&array), Some(25));
+        // RESP3: a map of name → value.
+        let map = redis::Value::Map(vec![(
+            redis::Value::BulkString(b"CACHE_SIZE".to_vec()),
+            redis::Value::Int(25),
+        )]);
+        assert_eq!(parse_config_get_u64(&map), Some(25));
+        // Anything else → None.
+        assert_eq!(parse_config_get_u64(&redis::Value::Nil), None);
+        assert_eq!(
+            parse_config_get_u64(&redis::Value::Array(vec![redis::Value::Int(1)])),
+            None
+        );
+    }
+
+    #[test]
+    fn redis_value_as_string_covers_every_string_shape() {
+        assert_eq!(
+            redis_value_as_string(&redis::Value::BulkString(b"a".to_vec())).as_deref(),
+            Some("a")
+        );
+        assert_eq!(
+            redis_value_as_string(&redis::Value::SimpleString("b".to_string())).as_deref(),
+            Some("b")
+        );
+        assert_eq!(
+            redis_value_as_string(&redis::Value::VerbatimString {
+                format: redis::VerbatimFormat::Text,
+                text: "c".to_string(),
+            })
+            .as_deref(),
+            Some("c")
+        );
+        assert_eq!(redis_value_as_string(&redis::Value::Int(1)), None);
+    }
+
+    #[test]
+    fn redis_value_as_u64_parses_int_and_string() {
+        assert_eq!(redis_value_as_u64(&redis::Value::Int(7)), Some(7));
+        // A negative integer is not a valid u64.
+        assert_eq!(redis_value_as_u64(&redis::Value::Int(-1)), None);
+        // Numeric strings are parsed; non-numeric strings are not.
+        assert_eq!(
+            redis_value_as_u64(&redis::Value::BulkString(b"42".to_vec())),
+            Some(42)
+        );
+        assert_eq!(
+            redis_value_as_u64(&redis::Value::BulkString(b"nope".to_vec())),
+            None
+        );
+    }
+
+    #[test]
+    fn redact_redis_url_strips_password_and_survives_garbage() {
+        // A password in the URL is stripped.
+        let redacted = redact_redis_url("redis://user:secret@host:6379");
+        assert!(!redacted.contains("secret"), "password leaked: {redacted}");
+        // A URL without a password is returned (roughly) intact.
+        assert!(redact_redis_url("redis://host:6379").contains("host"));
+        // Unparseable input degrades to a fixed placeholder rather than echoing the raw string.
+        assert_eq!(redact_redis_url("not a url"), "<redacted>");
+    }
+
+    #[tokio::test]
+    async fn collect_errors_on_bad_redis_url() {
+        // A malformed redis URL fails at client-open, before any network use.
+        assert!(collect("not a url", None).await.is_err());
     }
 }

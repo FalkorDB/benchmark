@@ -65,12 +65,29 @@ test-one *args:
 # === Coverage ================================================================
 
 # Generate Codecov JSON coverage for the benchmark crate (matches the `coverage` CI job).
+# Runs unit tests AND the `#[ignore]`d integration tests (`--include-ignored`), so the
+# server-backed code paths are measured — this needs a reachable FalkorDB (see `coverage-local`,
+# or the coverage CI job's FalkorDB service). FALKORDB_HOST/FALKORDB_PORT select it (default
+# 127.0.0.1:6379).
 coverage:
-    cargo llvm-cov --package benchmark --all-features --codecov --output-path codecov.json
+    cargo llvm-cov --package benchmark --all-features --codecov --output-path codecov.json -- --include-ignored
 
-# Generate an HTML coverage report and open it in a browser.
+# Spin up a Docker FalkorDB, collect coverage, then tear it down (no manual server needed).
+coverage-local:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    docker rm -f falkordb-cov >/dev/null 2>&1 || true
+    docker run -d --name falkordb-cov -p 6379:6379 falkordb/falkordb:latest >/dev/null
+    trap 'docker rm -f falkordb-cov >/dev/null 2>&1 || true' EXIT
+    for i in $(seq 1 30); do
+        if docker exec falkordb-cov redis-cli ping >/dev/null 2>&1; then break; fi
+        sleep 1
+    done
+    just coverage
+
+# Generate an HTML coverage report and open it in a browser (needs a reachable FalkorDB too).
 coverage-html:
-    cargo llvm-cov --package benchmark --all-features --html --open
+    cargo llvm-cov --package benchmark --all-features --html --open -- --include-ignored
 
 # === Rust: run ===============================================================
 

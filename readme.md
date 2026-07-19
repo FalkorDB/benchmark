@@ -123,12 +123,19 @@ just ci               # everything the Rust CI runs: build + clippy + test
 ### Code coverage
 
 ```bash
-just coverage         # generate codecov.json via cargo-llvm-cov (as the coverage CI job does)
-just coverage-html    # open a browsable HTML coverage report
+just coverage-local   # spin up a Docker FalkorDB, generate codecov.json, tear it down
+just coverage         # generate codecov.json via cargo-llvm-cov (needs a reachable FalkorDB)
+just coverage-html    # open a browsable HTML coverage report (needs a reachable FalkorDB)
 ```
 
+`just coverage` runs the unit tests **and** the `#[ignore]`d integration tests
+(`--include-ignored`) so server-backed code is measured, so it needs a reachable FalkorDB — set
+`FALKORDB_HOST`/`FALKORDB_PORT`, or use `just coverage-local` to spin one up in Docker. The
+`coverage` CI job provides a FalkorDB service container.
+
 Coverage is uploaded to [Codecov](https://codecov.io/gh/FalkorDB/benchmark) by the `coverage`
-workflow. Please cover new code with tests and keep coverage high.
+workflow. Please cover new code with tests and keep coverage high — **patch coverage must stay
+≥ 90%** (enforced by `codecov.yml`).
 
 ### Synthetic per-operation benchmark (experimental)
 

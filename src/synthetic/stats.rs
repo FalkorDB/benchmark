@@ -62,6 +62,12 @@ pub fn severe_fence(samples: &[f64]) -> Option<(f64, f64)> {
     let q1 = percentile_sorted(&values, 25.0);
     let q3 = percentile_sorted(&values, 75.0);
     let iqr = q3 - q1;
+    // A zero-width IQR (Q1 == Q3) gives a degenerate fence that would classify every value not
+    // exactly at the quartiles as a severe outlier — pathological for quantized/low-resolution
+    // distributions (common for very fast ops). Treat it as "no meaningful fence".
+    if iqr <= 0.0 {
+        return None;
+    }
     Some((
         q1 - SEVERE_IQR_MULTIPLIER * iqr,
         q3 + SEVERE_IQR_MULTIPLIER * iqr,
@@ -176,6 +182,18 @@ mod tests {
         let s = summarize(&[1.0, 1000.0, 2.0]).unwrap();
         assert_eq!(s.removed, 0);
         assert_eq!(s.n, 3);
+    }
+
+    #[test]
+    fn zero_width_iqr_keeps_everything() {
+        // A quantized distribution where Q1 == Q3 (IQR == 0) must not classify the off-quartile
+        // values as severe outliers and discard most of the sample.
+        let mut data = vec![0.01; 90];
+        data.extend(std::iter::repeat_n(0.02, 10));
+        assert!(severe_fence(&data).is_none());
+        let s = summarize(&data).unwrap();
+        assert_eq!(s.removed, 0);
+        assert_eq!(s.n, 100);
     }
 
     #[test]

@@ -31,8 +31,9 @@ Key recipes:
 | `just build` | Build all targets/features (the `build` CI gate). |
 | `just test` | Unit + integration tests (the `test` CI gate). |
 | `just test-one <filter>` | Run a single test by name filter. |
-| `just coverage` | Codecov JSON coverage via cargo-llvm-cov (the `coverage` CI job). |
-| `just coverage-html` | Open a browsable HTML coverage report locally. |
+| `just coverage` | Codecov JSON coverage via cargo-llvm-cov, including the `#[ignore]`d integration tests (the `coverage` CI job). Needs a reachable FalkorDB — set `FALKORDB_HOST`/`FALKORDB_PORT` or use `just coverage-local`. |
+| `just coverage-local` | Spin up a Docker FalkorDB, run `just coverage`, then tear it down. |
+| `just coverage-html` | Open a browsable HTML coverage report locally (also needs a FalkorDB). |
 | `just synthetic-bench` | Run the synthetic per-operation latency probe (needs a live FalkorDB). |
 | `just synthetic-ops` | List the synthetic operations. |
 | `just synthetic-it` | Run the synthetic integration test against a live FalkorDB. |
@@ -88,11 +89,15 @@ treat "the docs match the code" as part of the definition of done, not a follow-
 ## Coverage
 
 Write **as much test coverage as possible** — cover new code with unit tests and keep patch
-coverage high. Measure it with the exact CI command, **`just coverage`** (cargo-llvm-cov →
-`codecov.json`), not an ad-hoc line count; **`just coverage-html`** opens a browsable report.
+coverage high. **Patch coverage must be ≥ 90%** (enforced by Codecov via `codecov.yml`): any diff
+that drops below fails the `codecov/patch` check, so cover new lines before you push. Measure it
+with the exact CI command, **`just coverage`** (cargo-llvm-cov → `codecov.json`), not an ad-hoc
+line count; **`just coverage-html`** opens a browsable report. `just coverage` runs the
+`#[ignore]`d integration tests too (`--include-ignored`), so it needs a reachable FalkorDB — use
+**`just coverage-local`** to spin one up in Docker automatically (CI provides a FalkorDB service).
 Coverage is uploaded to Codecov by the `coverage` workflow (see `codecov.yml` for thresholds).
-Prefer testing real logic (parsing, query building, scheduling, aggregation) over I/O paths that
-would need a live database.
+Prefer testing real logic (parsing, query building, scheduling, aggregation) with unit tests, and
+cover server-backed paths with integration tests that run under coverage against that FalkorDB.
 
 ## Flaky tests are a hard no
 

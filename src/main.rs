@@ -343,35 +343,9 @@ async fn main() -> BenchmarkResult<()> {
             debug_memgraph_queries(dataset, endpoint, name).await?;
         }
 
-        Commands::Synthetic { command } => match command {
-            benchmark::cli::SyntheticCommands::Run {
-                endpoint,
-                op,
-                samples,
-                warmup,
-                cache,
-                server_timeout_ms,
-                client_deadline_ms,
-                out,
-                server_image,
-            } => {
-                let config = benchmark::synthetic::Config {
-                    endpoint,
-                    op,
-                    samples,
-                    warmup,
-                    server_timeout_ms,
-                    client_deadline_ms,
-                    cache,
-                    out,
-                    server_image,
-                };
-                benchmark::synthetic::run_and_report(&config).await?;
-            }
-            benchmark::cli::SyntheticCommands::ListOps => {
-                print!("{}", benchmark::synthetic::list_ops());
-            }
-        },
+        Commands::Synthetic { command } => {
+            benchmark::synthetic::run_command(command).await?;
+        }
     }
     Ok(())
 }

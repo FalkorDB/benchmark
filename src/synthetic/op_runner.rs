@@ -64,18 +64,7 @@ pub async fn run_and_drain(
 
         let cached = query_result.get_cached_execution();
         // A missing server-time stat is a hard error — never fold it into the numbers as NaN/0.
-        let server_ms = query_result.get_internal_execution_time().ok_or_else(|| {
-            OtherError(format!(
-                "response for '{}' had no internal execution time statistic",
-                cypher
-            ))
-        })?;
-        if !server_ms.is_finite() || server_ms < 0.0 {
-            return Err(OtherError(format!(
-                "response for '{}' reported an invalid internal execution time: {}",
-                cypher, server_ms
-            )));
-        }
+        let server_ms = validate_server_ms(query_result.get_internal_execution_time(), cypher)?;
 
         // Drain every row so `total_ms` reflects full client-side consumption and any row-decode
         // error surfaces here rather than being silently skipped.
@@ -108,4 +97,47 @@ pub async fn run_and_drain(
         rows,
         cached,
     })
+}
+
+/// Validate FalkorDB's reported internal execution time: it must be present, finite and
+/// non-negative. A missing or garbage statistic becomes a hard error rather than poisoning the
+/// summary with a `NaN`/`0`.
+fn validate_server_ms(
+    reported: Option<f64>,
+    cypher: &str,
+) -> BenchmarkResult<f64> {
+    let server_ms = reported.ok_or_else(|| {
+        OtherError(format!(
+            "response for '{}' had no internal execution time statistic",
+            cypher
+        ))
+    })?;
+    if !server_ms.is_finite() || server_ms < 0.0 {
+        return Err(OtherError(format!(
+            "response for '{}' reported an invalid internal execution time: {}",
+            cypher, server_ms
+        )));
+    }
+    Ok(server_ms)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_server_ms_accepts_finite_non_negative() {
+        assert_eq!(validate_server_ms(Some(0.0), "q").unwrap(), 0.0);
+        assert_eq!(validate_server_ms(Some(1.5), "q").unwrap(), 1.5);
+    }
+
+    #[test]
+    fn validate_server_ms_rejects_missing_and_invalid() {
+        // Absent statistic.
+        assert!(validate_server_ms(None, "q").is_err());
+        // Non-finite and negative values are both rejected.
+        assert!(validate_server_ms(Some(f64::NAN), "q").is_err());
+        assert!(validate_server_ms(Some(f64::INFINITY), "q").is_err());
+        assert!(validate_server_ms(Some(-0.001), "q").is_err());
+    }
 }

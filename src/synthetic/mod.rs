@@ -176,6 +176,32 @@ fn redact_endpoint(endpoint: &str) -> String {
     }
 }
 
+/// Open a single-connection [`AsyncGraph`] handle for `endpoint` on graph `graph_name`.
+///
+/// Uses a one-socket pool so latency is honest single-flight (the client otherwise defaults to 8
+/// multiplexed sockets). A malformed `endpoint` is reported as an error with credentials redacted.
+pub async fn open_graph(
+    endpoint: &str,
+    graph_name: &str,
+) -> BenchmarkResult<falkordb::AsyncGraph> {
+    let connection_info = endpoint.try_into().map_err(|e| {
+        OtherError(format!(
+            "invalid endpoint '{}': {:?}",
+            redact_endpoint(endpoint),
+            e
+        ))
+    })?;
+
+    let client = FalkorClientBuilder::new_async()
+        .with_connection_info(connection_info)
+        .with_connection_strategy(ConnectionStrategy::Pooled {
+            size: nonzero::nonzero!(1u8),
+        })
+        .build()
+        .await?;
+    Ok(client.select_graph(graph_name))
+}
+
 /// Run the probe: connect (single connection), collect server provenance, warm up, measure, then
 /// build the [`Report`]. Writing the report to disk is the caller's responsibility (see
 /// [`run_and_report`]).
@@ -189,28 +215,8 @@ pub async fn run(config: &Config) -> BenchmarkResult<Report> {
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
-    let connection_info = config
-        .endpoint
-        .as_str()
-        .try_into()
-        .map_err(|e| {
-            OtherError(format!(
-                "invalid endpoint '{}': {:?}",
-                redact_endpoint(&config.endpoint),
-                e
-            ))
-        })?;
-
-    // A single dedicated connection: honest single-flight latency (the client otherwise defaults
-    // to 8 multiplexed sockets).
-    let client = FalkorClientBuilder::new_async()
-        .with_connection_info(connection_info)
-        .with_connection_strategy(ConnectionStrategy::Pooled {
-            size: nonzero::nonzero!(1u8),
-        })
-        .build()
-        .await?;
-    let mut graph = client.select_graph("falkor");
+    // A single dedicated connection: honest single-flight latency.
+    let mut graph = open_graph(&config.endpoint, "falkor").await?;
 
     // Server provenance (best-effort: log and continue on failure).
     let redis_url = falkor_endpoint_to_redis_url(Some(&config.endpoint));
@@ -425,6 +431,41 @@ pub async fn run_and_report(config: &Config) -> BenchmarkResult<()> {
     Ok(())
 }
 
+/// Execute a parsed `synthetic` subcommand. This keeps `main.rs` a thin shell: it maps the CLI
+/// [`SyntheticCommands`] onto a [`Config`] and runs the probe, or prints the operation catalog.
+pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkResult<()> {
+    match command {
+        crate::cli::SyntheticCommands::Run {
+            endpoint,
+            op,
+            samples,
+            warmup,
+            cache,
+            server_timeout_ms,
+            client_deadline_ms,
+            out,
+            server_image,
+        } => {
+            let config = Config {
+                endpoint,
+                op,
+                samples,
+                warmup,
+                server_timeout_ms,
+                client_deadline_ms,
+                cache,
+                out,
+                server_image,
+            };
+            run_and_report(&config).await
+        }
+        crate::cli::SyntheticCommands::ListOps => {
+            print!("{}", list_ops());
+            Ok(())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -486,6 +527,54 @@ mod tests {
         assert!(!is_empty_graph_key("connection refused"));
     }
 
+    #[tokio::test]
+    async fn run_rejects_zero_samples() {
+        // Guarded before any network use, so this needs no server.
+        let config = Config {
+            samples: 0,
+            ..Config::default()
+        };
+        assert!(run(&config).await.is_err());
+        assert!(run_and_report(&config).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn run_rejects_malformed_endpoint() {
+        // A connection string that fails to parse errors at `try_into`, before any network use,
+        // so this needs no server.
+        let config = Config {
+            endpoint: "falkor://host:notaport".to_string(),
+            samples: 10,
+            ..Config::default()
+        };
+        assert!(run(&config).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn run_command_list_ops_needs_no_server() {
+        // The catalog path is pure output.
+        assert!(run_command(crate::cli::SyntheticCommands::ListOps)
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn run_command_run_maps_args_and_validates() {
+        // Exercises the CLI→Config mapping without a server: samples==0 is rejected up front.
+        let command = crate::cli::SyntheticCommands::Run {
+            endpoint: "falkor://127.0.0.1:6379".to_string(),
+            op: OpName::ReturnConst,
+            samples: 0,
+            warmup: 0,
+            cache: CacheSelection::Both,
+            server_timeout_ms: 5_000,
+            client_deadline_ms: 6_000,
+            out: "unused.json".to_string(),
+            server_image: None,
+        };
+        assert!(run_command(command).await.is_err());
+    }
+
     #[test]
     fn list_ops_mentions_each_op() {
         let listing = list_ops();
@@ -528,6 +617,22 @@ mod tests {
         assert_eq!(r.total_ms.n, r.non_internal_ms.n);
         assert_eq!(r.total_ms.removed, 1);
         assert!(r.total_ms.median >= r.server_ms.median);
+    }
+
+    #[test]
+    fn summarize_samples_tiny_all_unknown_cache() {
+        // A tiny sample set: `severe_fence` returns None (nothing removed → the `within` no-fence
+        // path), and with every `cached` unknown the false-rate collapses to 0.0.
+        let samples = vec![
+            OpSample { server_ms: 0.10, total_ms: 0.40, rows: 1, cached: None },
+            OpSample { server_ms: 0.12, total_ms: 0.45, rows: 1, cached: None },
+            OpSample { server_ms: 0.11, total_ms: 0.42, rows: 1, cached: None },
+        ];
+        let r = summarize_samples(&samples).unwrap();
+        assert_eq!(r.server_ms.n, 3);
+        assert_eq!(r.server_ms.removed, 0);
+        assert_eq!(r.cached_unknown, 3);
+        assert_eq!(r.cached_false_rate, 0.0);
     }
 
     #[test]
