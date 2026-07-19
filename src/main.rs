@@ -342,6 +342,34 @@ async fn main() -> BenchmarkResult<()> {
             // Lightweight debug helper: run each Memgraph query type once and report failures.
             debug_memgraph_queries(dataset, endpoint, name).await?;
         }
+
+        Commands::Synthetic { command } => match command {
+            benchmark::cli::SyntheticCommands::Run {
+                endpoint,
+                op,
+                samples,
+                warmup,
+                server_timeout_ms,
+                client_deadline_ms,
+                out,
+                server_image,
+            } => {
+                let config = benchmark::synthetic::Config {
+                    endpoint,
+                    op,
+                    samples,
+                    warmup,
+                    server_timeout_ms,
+                    client_deadline_ms,
+                    out,
+                    server_image,
+                };
+                benchmark::synthetic::run_and_report(&config).await?;
+            }
+            benchmark::cli::SyntheticCommands::ListOps => {
+                print!("{}", benchmark::synthetic::list_ops());
+            }
+        },
     }
     Ok(())
 }

@@ -83,6 +83,23 @@ run *args:
     if [ "${1:-}" = "--" ]; then shift; fi
     cargo run --bin benchmark -- "$@"
 
+# === Synthetic per-operation benchmark =======================================
+
+# Needs a reachable FalkorDB, e.g. `docker run -d -p 6379:6379 falkordb/falkordb:latest`. Example:
+# `just synthetic-bench --samples 1000 --op return_const`.
+# Run the synthetic single-operation latency probe (forwards args to `synthetic run`).
+synthetic-bench *args:
+    cargo run --release --bin benchmark -- synthetic run "$@"
+
+# List the available synthetic operations.
+synthetic-ops:
+    cargo run --quiet --bin benchmark -- synthetic list-ops
+
+# FALKORDB_HOST/PORT select the server (default 127.0.0.1:6379); these `#[ignore]`d tests need one.
+# Run the synthetic integration test against a live FalkorDB.
+synthetic-it:
+    cargo test --test synthetic_probe -- --ignored --nocapture
+
 # === UI (Next.js dashboard in ui/) ===========================================
 
 # Install UI dependencies from the lockfile.

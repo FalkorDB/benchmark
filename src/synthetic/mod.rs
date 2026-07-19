@@ -1,0 +1,303 @@
+//! Synthetic per-operation benchmark — Part 1: a single-operation latency probe.
+//!
+//! Measures one Cypher operation in isolation against a FalkorDB endpoint, capturing on every
+//! invocation the paired *server time* (FalkorDB's reported internal execution time) and *total
+//! time* (end-to-end client round-trip), then summarizes them with severe-outlier removal and
+//! writes a JSON report + console summary. This is the foundation the rest of the epic builds on.
+
+pub mod op_runner;
+pub mod provenance;
+pub mod report;
+pub mod stats;
+
+use crate::error::BenchmarkError::OtherError;
+use crate::error::BenchmarkResult;
+use crate::falkor::falkor_endpoint_to_redis_url;
+use crate::query::{Query, QueryBuilder};
+use crate::queries_repository::QueryType;
+use crate::synthetic::op_runner::{run_and_drain, OpSample};
+use crate::synthetic::report::{Meta, OperationReport, Report};
+use clap::ValueEnum;
+use falkordb::{ConnectionStrategy, FalkorClientBuilder};
+use std::collections::BTreeMap;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tracing::{info, warn};
+
+/// The set of operations the probe can run. Part 1 ships a single dataset-free baseline; later
+/// parts extend this enum and the catalog together (it stays the single source of truth so
+/// `--help`, shell completion and the catalog never drift).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[value(rename_all = "snake_case")]
+pub enum OpName {
+    /// `RETURN $i` — a pure round-trip / server parse+exec baseline that needs no dataset.
+    ReturnConst,
+}
+
+impl OpName {
+    /// The stable string id used in reports and on the CLI.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OpName::ReturnConst => "return_const",
+        }
+    }
+
+    /// Whether this operation reads or writes (selects `RO_QUERY` vs `QUERY`).
+    pub fn kind(self) -> QueryType {
+        match self {
+            OpName::ReturnConst => QueryType::Read,
+        }
+    }
+
+    /// A one-line description for `list-ops`.
+    pub fn description(self) -> &'static str {
+        match self {
+            OpName::ReturnConst => "RETURN $i — pure round-trip baseline (no dataset required)",
+        }
+    }
+
+    /// Build the query for invocation `i` (parameterized; content varies so we don't measure a
+    /// single trivially-cached literal).
+    pub fn build_query(
+        self,
+        i: usize,
+    ) -> Query {
+        match self {
+            OpName::ReturnConst => QueryBuilder::new()
+                .text("RETURN $i AS x")
+                .param("i", i as i32)
+                .build(),
+        }
+    }
+}
+
+/// Configuration for a single-operation probe run.
+#[derive(Debug, Clone)]
+pub struct Config {
+    pub endpoint: String,
+    pub op: OpName,
+    pub samples: usize,
+    pub warmup: usize,
+    pub server_timeout_ms: i64,
+    pub client_deadline_ms: u64,
+    pub out: String,
+    pub server_image: Option<String>,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            endpoint: "falkor://127.0.0.1:6379".to_string(),
+            op: OpName::ReturnConst,
+            samples: 1000,
+            warmup: 200,
+            server_timeout_ms: 5_000,
+            client_deadline_ms: 6_000,
+            out: "synthetic-report.json".to_string(),
+            server_image: None,
+        }
+    }
+}
+
+/// Print the available operations (for `synthetic list-ops`).
+pub fn list_ops() -> String {
+    let mut out = String::from("Available operations:\n");
+    for op in OpName::value_variants() {
+        out.push_str(&format!("  {:<16} {}\n", op.as_str(), op.description()));
+    }
+    out
+}
+
+/// Run the probe: connect (single connection), collect server provenance, warm up, measure, then
+/// build the [`Report`]. Writing the report to disk is the caller's responsibility (see
+/// [`run_and_report`]).
+pub async fn run(config: &Config) -> BenchmarkResult<Report> {
+    let connection_info = config
+        .endpoint
+        .as_str()
+        .try_into()
+        .map_err(|e| OtherError(format!("invalid endpoint '{}': {:?}", config.endpoint, e)))?;
+
+    // A single dedicated connection: honest single-flight latency (the client otherwise defaults
+    // to 8 multiplexed sockets).
+    let client = FalkorClientBuilder::new_async()
+        .with_connection_info(connection_info)
+        .with_connection_strategy(ConnectionStrategy::Pooled {
+            size: nonzero::nonzero!(1u8),
+        })
+        .build()
+        .await?;
+    let mut graph = client.select_graph("falkor");
+
+    // Server provenance (best-effort: log and continue on failure).
+    let redis_url = falkor_endpoint_to_redis_url(Some(&config.endpoint));
+    let server = match provenance::collect(&redis_url, config.server_image.clone()).await {
+        Ok(info) => info,
+        Err(e) => {
+            warn!("could not collect server provenance: {}", e);
+            crate::synthetic::report::ServerInfo {
+                server_image: config.server_image.clone(),
+                ..Default::default()
+            }
+        }
+    };
+    if server.is_placeholder() {
+        warn!(
+            "FalkorDB module version is the {} dev placeholder — use a tagged image for version comparisons",
+            crate::synthetic::report::ServerInfo::PLACEHOLDER_VER
+        );
+    }
+
+    let client_deadline = Duration::from_millis(config.client_deadline_ms);
+
+    // Ensure the graph key exists: a read (`RO_QUERY`) against a never-written graph fails with
+    // "Invalid graph operation on empty key", so instantiate it once with a trivial write.
+    graph
+        .query("RETURN 1")
+        .with_timeout(config.server_timeout_ms)
+        .execute()
+        .await
+        .map_err(|e| OtherError(format!("failed to instantiate graph 'falkor': {:?}", e)))?;
+
+    // Warm-up (discarded) primes the plan cache and connection.
+    for i in 0..config.warmup {
+        let q = config.op.build_query(i);
+        let _ = run_and_drain(
+            &mut graph,
+            config.op.kind(),
+            &q,
+            config.server_timeout_ms,
+            client_deadline,
+        )
+        .await?;
+    }
+
+    // Measurement.
+    let mut samples: Vec<OpSample> = Vec::with_capacity(config.samples);
+    for i in 0..config.samples {
+        let q = config.op.build_query(config.warmup + i);
+        let sample = run_and_drain(
+            &mut graph,
+            config.op.kind(),
+            &q,
+            config.server_timeout_ms,
+            client_deadline,
+        )
+        .await?;
+        samples.push(sample);
+    }
+
+    let op_report = summarize_samples(&samples)?;
+    let mut operations = BTreeMap::new();
+    operations.insert(config.op.as_str().to_string(), op_report);
+
+    let started_at_epoch_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    Ok(Report {
+        meta: Meta {
+            tool_version: env!("CARGO_PKG_VERSION").to_string(),
+            endpoint: config.endpoint.clone(),
+            samples: config.samples,
+            warmup: config.warmup,
+            server_timeout_ms: config.server_timeout_ms,
+            client_deadline_ms: config.client_deadline_ms,
+            connection: "pool(size=1)".to_string(),
+            started_at_epoch_secs,
+            server,
+        },
+        operations,
+    })
+}
+
+/// Summarize a set of paired samples into an [`OperationReport`].
+fn summarize_samples(samples: &[OpSample]) -> BenchmarkResult<OperationReport> {
+    let server: Vec<f64> = samples.iter().map(|s| s.server_ms).collect();
+    let total: Vec<f64> = samples.iter().map(|s| s.total_ms).collect();
+    let non_internal: Vec<f64> = samples.iter().map(|s| s.total_ms - s.server_ms).collect();
+
+    let server_ms = stats::summarize(&server)
+        .ok_or_else(|| OtherError("no server_ms samples to summarize".to_string()))?;
+    let total_ms = stats::summarize(&total)
+        .ok_or_else(|| OtherError("no total_ms samples to summarize".to_string()))?;
+    let non_internal_ms = stats::summarize(&non_internal)
+        .ok_or_else(|| OtherError("no non_internal_ms samples to summarize".to_string()))?;
+
+    let cached_unknown = samples.iter().filter(|s| s.cached.is_none()).count();
+    let known: Vec<bool> = samples.iter().filter_map(|s| s.cached).collect();
+    let cached_false_rate = if known.is_empty() {
+        0.0
+    } else {
+        known.iter().filter(|&&c| !c).count() as f64 / known.len() as f64
+    };
+
+    Ok(OperationReport {
+        server_ms,
+        total_ms,
+        non_internal_ms,
+        cached_false_rate,
+        cached_unknown,
+    })
+}
+
+/// Run the probe, print the console summary, and write the JSON report to `config.out`.
+pub async fn run_and_report(config: &Config) -> BenchmarkResult<()> {
+    if config.samples == 0 {
+        return Err(OtherError("--samples must be greater than 0".to_string()));
+    }
+    let report = run(config).await?;
+    println!("{}", report.to_console());
+    let json = report.to_json()?;
+    tokio::fs::write(&config.out, json).await?;
+    info!("wrote {}", config.out);
+    println!("report written to {}", config.out);
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn op_name_maps_are_consistent() {
+        assert_eq!(OpName::ReturnConst.as_str(), "return_const");
+        assert_eq!(OpName::ReturnConst.kind(), QueryType::Read);
+        assert!(!OpName::ReturnConst.description().is_empty());
+    }
+
+    #[test]
+    fn build_query_is_parameterized_and_varies() {
+        let q0 = OpName::ReturnConst.build_query(0);
+        let q1 = OpName::ReturnConst.build_query(1);
+        assert!(q0.text.contains("$i"));
+        assert_eq!(q0.params.len(), 1);
+        // Different invocation index ⇒ different parameter value.
+        assert_ne!(q0.params.get("i"), q1.params.get("i"));
+    }
+
+    #[test]
+    fn list_ops_mentions_each_op() {
+        let listing = list_ops();
+        for op in OpName::value_variants() {
+            assert!(listing.contains(op.as_str()));
+        }
+    }
+
+    #[test]
+    fn summarize_samples_computes_paired_residual_and_cache() {
+        let samples = vec![
+            OpSample { server_ms: 0.10, total_ms: 0.40, rows: 1, cached: Some(true) },
+            OpSample { server_ms: 0.12, total_ms: 0.45, rows: 1, cached: Some(false) },
+            OpSample { server_ms: 0.11, total_ms: 0.42, rows: 1, cached: None },
+            OpSample { server_ms: 0.13, total_ms: 0.44, rows: 1, cached: Some(true) },
+        ];
+        let r = summarize_samples(&samples).unwrap();
+        assert_eq!(r.server_ms.n, 4);
+        assert_eq!(r.cached_unknown, 1);
+        // 1 of 3 known-cache samples was false.
+        assert!((r.cached_false_rate - 1.0 / 3.0).abs() < 1e-9);
+        // non_internal median should be positive (total > server).
+        assert!(r.non_internal_ms.median > 0.0);
+    }
+}

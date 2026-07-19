@@ -33,6 +33,9 @@ Key recipes:
 | `just test-one <filter>` | Run a single test by name filter. |
 | `just coverage` | Codecov JSON coverage via cargo-llvm-cov (the `coverage` CI job). |
 | `just coverage-html` | Open a browsable HTML coverage report locally. |
+| `just synthetic-bench` | Run the synthetic per-operation latency probe (needs a live FalkorDB). |
+| `just synthetic-ops` | List the synthetic operations. |
+| `just synthetic-it` | Run the synthetic integration test against a live FalkorDB. |
 | `just fmt` / `just fmt-check` | Format Rust in place / check formatting. |
 | `just run -- <args>` | Run the benchmark binary (e.g. `just run -- --help`). |
 | `just ui-install` | `npm ci` in `ui/`. |
