@@ -1,0 +1,18 @@
+coverage:
+  status:
+    project:
+      default:
+        # Allow small dips in overall coverage between runs.
+        threshold: 2%
+    patch:
+      default:
+        # New code should be well covered, but allow some slack for diffs that
+        # include inherently hard-to-unit-test paths (network/IO error branches).
+        threshold: 5%
+
+# The Next.js dashboard (ui/) and the vendored FalkorDB client (vendor/) are not
+# part of the Rust crate's unit tests, so they're excluded from coverage reporting.
+ignore:
+  - "ui"
+  - "vendor"
+  - "scripts"

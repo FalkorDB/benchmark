@@ -13,48 +13,31 @@ jobs:
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.user.login != 'dependabot[bot]' || contains(github.head_ref, '/ui/') }}
     timeout-minutes: 10
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: ./ui
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: lts/*
           cache: npm
           cache-dependency-path: ui/package-lock.json
+      - name: Install just
+        uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2.83.4
+        with:
+          tool: just
+      # Both steps run a single `just` recipe so the exact command can be reproduced locally
+      # (see the Justfile / .github/copilot-instructions.md).
       - name: Install dependencies
         env:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
-        run: npm ci
-      - name: Set up environment and run minimal Playwright smoke test
+        run: just ui-install
+      - name: Run minimal Playwright smoke test
         env:
           NEXT_PUBLIC_HUBSPOT_PORTAL_ID: ${{ secrets.NEXT_PUBLIC_HUBSPOT_PORTAL_ID }}
           NEXT_PUBLIC_HUBSPOT_FORM_ID: ${{ secrets.NEXT_PUBLIC_HUBSPOT_FORM_ID }}
           PORT: 3000
-        run: |
-          if command -v google-chrome >/dev/null 2>&1; then
-            export PLAYWRIGHT_CHROMIUM_CHANNEL=chrome
-            google-chrome --version
-          elif command -v google-chrome-stable >/dev/null 2>&1; then
-            export PLAYWRIGHT_CHROMIUM_CHANNEL=chrome
-            google-chrome-stable --version
-          else
-            echo "System Chrome not found; installing Playwright Chromium headless shell fallback."
-            npx playwright install --only-shell chromium
-          fi
-          npm run dev &
-          echo "Waiting for Next.js to be ready on http://localhost:3000 ..."
-          for i in {1..120}; do
-            if curl -fsS http://localhost:3000/ >/dev/null; then
-              echo "Next.js is up."
-              break
-            fi
-            sleep 1
-          done
-          npx playwright test tests/tests/ci-smoke.spec.ts --project=chromium --retries=0 --workers=1 --reporter=dot
+        run: just ui-smoke
       - name: Upload Playwright report
         uses: actions/upload-artifact@v6
         if: ${{ always() }}

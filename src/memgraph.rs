@@ -171,8 +171,8 @@ impl Memgraph {
         }
 
         let home = self.memgraph_home.clone();
-        let data_dir = format!("{}/data", &home);
-        let log_dir = format!("{}/log", &home);
+        let data_dir = format!("{}/data", home);
+        let log_dir = format!("{}/log", home);
 
         let args = ["-rf", &data_dir, &log_dir];
         spawn_command("rm", &args).await

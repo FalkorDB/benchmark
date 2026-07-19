@@ -1,5 +1,7 @@
 [![Cargo Build & Test](https://github.com/FalkorDB/benchmark/actions/workflows/ci.yml/badge.svg)](https://github.com/FalkorDB/benchmark/actions/workflows/ci.yml)
-[![License](https://img.shields.io/github/license/falkordb/benchmark.svg)](https://github.com/falkordb/benchmark/blob/main/LICENSE)
+[![Code Coverage](https://github.com/FalkorDB/benchmark/actions/workflows/coverage.yml/badge.svg)](https://github.com/FalkorDB/benchmark/actions/workflows/coverage.yml)
+[![codecov](https://codecov.io/gh/FalkorDB/benchmark/graph/badge.svg)](https://codecov.io/gh/FalkorDB/benchmark)
+[![License](https://img.shields.io/github/license/falkordb/benchmark.svg)](https://github.com/falkordb/benchmark/blob/master/LICENSE)
 [![Discord](https://img.shields.io/discord/1146782921294884966.svg?style=social&logo=discord)](https://discord.com/invite/99y2Ubh6tg)
 [![Twitter](https://img.shields.io/twitter/follow/falkordb?style=social)](https://twitter.com/falkordb)
 
@@ -10,6 +12,7 @@
 - [System Requirements](#system-requirements)
   - [Prerequisites](#prerequisites)
   - [Installation Steps](#installation-steps)
+- [Development](#development)
 - [Run the benchmark](#run-the-benchmark)
   - [Run via helper scripts](#run-via-helper-scripts)
   - [CLI workflow](#cli-workflow)
@@ -95,6 +98,47 @@ from `~/`
 - build the benchmark `cargo build --release`
 - enable autocomplete `source <(./target/release/benchmark generate-auto-complete bash)`
 - copy the falkor shared lib to `cp ~/FalkorDB/bin/linux-x64-release/src/falkordb.so .`
+
+## Development
+
+Automation for this repo is driven by [`just`](https://github.com/casey/just) — run `just --list`
+to see every recipe. CI installs `just` and runs these same recipes, so whatever CI checks you can
+reproduce locally with the identical command.
+
+Install `just` (`cargo install just` or `brew install just`) and, for coverage,
+[`cargo-llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov) (`cargo install cargo-llvm-cov`).
+Building the Rust crate also needs `protoc` (`sudo apt-get install -y protobuf-compiler` or
+`brew install protobuf`).
+
+### Build, lint and test
+
+```bash
+just build            # build all targets/features
+just clippy           # strict clippy (warnings denied)
+just test             # run the unit + integration test suite
+just test-one <name>  # run a single test by name filter
+just ci               # everything the Rust CI runs: build + clippy + test
+```
+
+### Code coverage
+
+```bash
+just coverage         # generate codecov.json via cargo-llvm-cov (as the coverage CI job does)
+just coverage-html    # open a browsable HTML coverage report
+```
+
+Coverage is uploaded to [Codecov](https://codecov.io/gh/FalkorDB/benchmark) by the `coverage`
+workflow. Please cover new code with tests and keep coverage high.
+
+### UI dashboard (`ui/`)
+
+```bash
+just ui-install       # npm ci
+just ui-lint          # lint
+just ui-build         # production build
+just ui-dev           # start the dev server
+just ui-smoke         # Playwright smoke test (starts its own dev server)
+```
 
 #### run the benchmark
 ##### run via helper scripts
@@ -193,6 +237,11 @@ NOTE: It is possible to use the load command with externally run vendor endpoint
 - `cargo run --release --bin benchmark -- load --vendor neo4j -s small --endpoint neo4j://neo4j:benchmark123@127.0.0.1:7687`
 - `cargo run --release --bin benchmark -- load --vendor memgraph -s small --endpoint bolt://127.0.0.1:7687`
 
+Profile-aware loading (runs additional fixture/index setup when required):
+- `cargo run --release --bin benchmark -- load --vendor neo4j -s small --query-profile fixture-dependent`
+- `cargo run --release --bin benchmark -- load --vendor memgraph -s small --query-profile fixture-dependent`
+- `cargo run --release --bin benchmark -- load --vendor falkor -s small --query-profile fixture-dependent`
+
 ##### create a set of queries to be used with the run command
 
 -
@@ -202,6 +251,11 @@ NOTE: It is possible to use the load command with externally run vendor endpoint
 NOTE: preparing a smaller run of 1,000,000 queries:
 
 `cargo run --release --bin benchmark -- generate-queries  -s1000000 --dataset small --name=small-readonly --write-ratio 0.0`
+
+Generate with a broader coverage profile:
+
+- `cargo run --release --bin benchmark -- generate-queries -s1000000 --dataset small --name=small-extended --write-ratio 0.0 --vendor neo4j --query-profile extended-core`
+- `cargo run --release --bin benchmark -- generate-queries -s1000000 --dataset small --name=small-fixtures --write-ratio 0.0 --vendor memgraph --query-profile fixture-dependent`
 
 ##### run the benchmarks
 

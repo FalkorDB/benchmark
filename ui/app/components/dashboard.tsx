@@ -376,13 +376,24 @@ export default function DashBoard({
     }
 
     const selectedQuery = selectedOptions.Queries[0];
+    const normalizeHistogram = (histogram: number[] | undefined) => {
+      const source = Array.isArray(histogram) ? histogram : [];
+      if (source.length === 0) return [];
+      if (source.length >= 11) return source;
+
+      const padded = [...source];
+      while (padded.length < 11) {
+        padded.push(0);
+      }
+      return padded;
+    };
 
     if (data.unrealstic?.length) {
       setFilteredUnrealistic(
         data.unrealstic
           .map(({ vendor, histogram_for_type, memory }) => ({
             vendor,
-            histogram: histogram_for_type[selectedQuery] || [],
+            histogram: normalizeHistogram(histogram_for_type[selectedQuery]),
             memory,
           }))
           .filter((entry) => entry.histogram.length > 0)
@@ -396,7 +407,9 @@ export default function DashBoard({
         validRuns
           .map((run: Run) => ({
             vendor: run.vendor,
-            histogram: run?.result?.histogram_for_type?.[selectedQuery] || [],
+            histogram: normalizeHistogram(
+              run?.result?.histogram_for_type?.[selectedQuery]
+            ),
             memory: run?.result?.["ram-usage"] ?? "",
             baseDatasetBytes: run?.result?.["base-dataset-bytes"],
           }))
@@ -545,6 +558,13 @@ export default function DashBoard({
       return { labels: [], datasets: [] };
     }
 
+    const hasTimeoutData = filteredUnrealistic.some(
+      ({ histogram }) =>
+        histogram.length > 11 &&
+        Number.isFinite(histogram[11]) &&
+        histogram[11] > 0
+    );
+
     const labels = [
       "P10",
       "P20",
@@ -557,11 +577,12 @@ export default function DashBoard({
       "P90",
       "P95",
       "P99",
+      ...(hasTimeoutData ? ["Timeout %"] : []),
     ];
 
     const datasets = filteredUnrealistic.map(({ vendor, histogram }) => ({
       label: vendor,
-      data: histogram,
+      data: hasTimeoutData ? histogram.slice(0, 12) : histogram.slice(0, 11),
       backgroundColor: getBarColor(vendor),
       hoverBackgroundColor: getBarColor(vendor),
       borderRadius: 8,

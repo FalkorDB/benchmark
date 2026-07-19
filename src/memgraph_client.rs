@@ -18,13 +18,31 @@ use std::time::Duration;
 use tokio::fs::File;
 use tokio::io::{self, AsyncWriteExt};
 use tokio::time::Instant;
-use tracing::{error, info, trace};
+use tracing::{error, info, trace, warn};
 
 #[derive(Default, Debug, Clone)]
 struct MemgraphStorageInfo {
     memory_res_bytes: Option<i64>,
     peak_memory_res_bytes: Option<i64>,
     memory_tracked_bytes: Option<i64>,
+}
+
+fn memgraph_query_timeout_from_env() -> Duration {
+    const DEFAULT_TIMEOUT_MS: u64 = 900_000;
+
+    match std::env::var("MEMGRAPH_QUERY_TIMEOUT_MS") {
+        Ok(raw) => match raw.parse::<u64>() {
+            Ok(ms) if ms > 0 => Duration::from_millis(ms),
+            _ => {
+                warn!(
+                    "Invalid MEMGRAPH_QUERY_TIMEOUT_MS='{}', using default {}ms",
+                    raw, DEFAULT_TIMEOUT_MS
+                );
+                Duration::from_millis(DEFAULT_TIMEOUT_MS)
+            }
+        },
+        Err(_) => Duration::from_millis(DEFAULT_TIMEOUT_MS),
+    }
 }
 
 fn parse_human_bytes_to_i64(s: &str) -> Option<i64> {
@@ -87,6 +105,7 @@ fn get_row_i64(
 #[derive(Clone)]
 pub struct MemgraphClient {
     graph: Graph,
+    query_timeout: Duration,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -95,6 +114,13 @@ pub struct MemgraphAlgorithmCapabilities {
     pub has_max_flow_get_flow: bool,
     pub has_spanning_tree: bool,
     pub has_harmonic: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct MemgraphFixtureCapabilities {
+    pub has_vector_search: bool,
+    pub has_text_search_nodes: bool,
+    pub has_text_search_relationships: bool,
 }
 
 impl MemgraphClient {
@@ -114,8 +140,17 @@ impl MemgraphClient {
             .map_err(Neo4rsError)?;
 
         let graph = Graph::connect(config).await.map_err(Neo4rsError)?;
+        let query_timeout = memgraph_query_timeout_from_env();
 
-        Ok(MemgraphClient { graph })
+        info!(
+            "Memgraph per-query timeout configured to {}ms",
+            query_timeout.as_millis()
+        );
+
+        Ok(MemgraphClient {
+            graph,
+            query_timeout,
+        })
     }
 
     pub async fn execute_prepared_query<S: AsRef<str>>(
@@ -131,8 +166,8 @@ impl MemgraphClient {
 
         let worker_id = worker_id.as_ref();
         let q_name = q_name.as_str();
-        // Timeout for individual Memgraph queries (10 seconds)
-        let timeout = Duration::from_secs(10);
+        // Timeout for the full query lifecycle (execute + stream consumption).
+        let timeout = self.query_timeout;
         let offset = msg.compute_offset_ms();
 
         MEMGRAPH_MSG_DEADLINE_OFFSET_GAUGE.set(offset);
@@ -143,10 +178,20 @@ impl MemgraphClient {
 
         let bolt_query = bolt.query.as_str();
         let bolt_params = bolt.clone().params;
+        let memgraph_query = async {
+            let mut stream = self
+                .graph
+                .execute(neo4rs::query(bolt_query).params(bolt_params))
+                .await
+                .map_err(Neo4rsError)?;
 
-        let memgraph_result = self
-            .graph
-            .execute(neo4rs::query(bolt_query).params(bolt_params));
+            while let Ok(Some(row)) = stream.next().await {
+                trace!("Row: {:?}", row);
+                black_box(row);
+            }
+
+            Ok(())
+        };
 
         if let Some(delay) = simulate {
             if *delay > 0 {
@@ -156,28 +201,26 @@ impl MemgraphClient {
             return Ok(());
         }
 
-        let memgraph_result = tokio::time::timeout(timeout, memgraph_result).await;
+        let memgraph_result = tokio::time::timeout(timeout, memgraph_query).await;
         OPERATION_COUNTER
             .with_label_values(&["memgraph", worker_id, "", q_name, "", ""])
             .inc();
         match memgraph_result {
-            Ok(Ok(mut stream)) => {
-                while let Ok(Some(row)) = stream.next().await {
-                    trace!("Row: {:?}", row);
-                    black_box(row);
-                }
-            }
+            Ok(Ok(())) => {}
             Ok(Err(e)) => {
                 OPERATION_COUNTER
                     .with_label_values(&["memgraph", worker_id, "error", q_name, "", ""])
                     .inc();
-                return Err(Neo4rsError(e));
+                return Err(e);
             }
             Err(_) => {
                 OPERATION_COUNTER
                     .with_label_values(&["memgraph", worker_id, "timeout", q_name, "", ""])
                     .inc();
-                return Err(OtherError("Timeout".to_string()));
+                return Err(OtherError(format!(
+                    "Timeout after {}ms",
+                    timeout.as_millis()
+                )));
             }
         }
         Ok(())
@@ -214,6 +257,38 @@ RETURN
             has_max_flow_get_flow: max_flow_count > 0,
             has_spanning_tree: spanning_tree_count > 0,
             has_harmonic: harmonic_count > 0,
+        })
+    }
+
+    pub async fn detect_fixture_capabilities(
+        &self
+    ) -> BenchmarkResult<MemgraphFixtureCapabilities> {
+        let q = r#"
+CALL mg.procedures()
+YIELD name
+WITH collect(toLower(name)) AS names
+RETURN
+  size([n IN names WHERE n = 'vector_search.search']) AS vector_search_count,
+  size([n IN names WHERE n = 'text_search.search']) AS text_search_nodes_count,
+  size([n IN names WHERE n = 'text_search.search_edges']) AS text_search_relationships_count
+"#;
+
+        let mut result = self.graph.execute(query(q)).await.map_err(Neo4rsError)?;
+        let Some(row) = result.next().await.map_err(Neo4rsError)? else {
+            return Err(OtherError(
+                "Memgraph fixture capability probe returned no rows".to_string(),
+            ));
+        };
+
+        let vector_search_count = Self::read_row_i64(&row, "vector_search_count");
+        let text_search_nodes_count = Self::read_row_i64(&row, "text_search_nodes_count");
+        let text_search_relationships_count =
+            Self::read_row_i64(&row, "text_search_relationships_count");
+
+        Ok(MemgraphFixtureCapabilities {
+            has_vector_search: vector_search_count > 0,
+            has_text_search_nodes: text_search_nodes_count > 0,
+            has_text_search_relationships: text_search_relationships_count > 0,
         })
     }
 
@@ -281,6 +356,198 @@ RETURN
         }
 
         Ok(())
+    }
+
+    pub async fn ensure_post_phase1_fixtures_ready(&self) -> BenchmarkResult<()> {
+        // Required fixture indexes (Memgraph currently has no IF NOT EXISTS for these forms).
+        self.run_query_allowing_already_exists(
+            "create_text_index_user_ft",
+            "CREATE TEXT INDEX bench_user_ft_idx ON :User(ft_text)",
+        )
+        .await?;
+        self.run_query_allowing_already_exists(
+            "create_text_edge_index_friend_ft",
+            "CREATE TEXT EDGE INDEX bench_friend_ft_idx ON :Friend(ft_text)",
+        )
+        .await?;
+        self.run_query_allowing_already_exists(
+            "create_vector_index_user_embedding",
+            "CREATE VECTOR INDEX bench_user_embedding_idx ON :User(embedding) WITH CONFIG {\"dimension\": 3, \"capacity\": 1000000, \"metric\": \"cos\"}",
+        )
+        .await?;
+
+        // Deterministic fixture seeding (idempotent SET updates).
+        self.run_query_no_results(
+            "MATCH (u:User) \
+             WHERE toInteger(u.id) % 97 = 0 \
+             SET \
+                u.ft_text = 'fixture_alice user_' + toString(u.id), \
+                u.embedding = [ \
+                    toFloat((toInteger(u.id) % 10) + 1) / 10.0, \
+                    toFloat(((toInteger(u.id) + 3) % 10) + 1) / 10.0, \
+                    toFloat(((toInteger(u.id) + 6) % 10) + 1) / 10.0 \
+                ]",
+        )
+        .await?;
+        self.run_query_no_results(
+            "MATCH (s:User)-[r:Friend]->(d:User) \
+             WHERE toInteger(s.id) % 97 = 0 \
+             SET r.ft_text = 'fixture_blue edge_' + toString(s.id) + '_' + toString(d.id)",
+        )
+        .await?;
+
+        const MAX_ATTEMPTS: u32 = 18;
+        const DELAY_SECS: u64 = 5;
+
+        for attempt in 1..=MAX_ATTEMPTS {
+            let user_ft_count = match self
+                .query_single_u64(
+                    "MATCH (u:User) \
+                     WHERE u.ft_text CONTAINS 'fixture_alice' \
+                     RETURN count(u) AS count",
+                )
+                .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    info!(
+                        "Error while checking Memgraph user fulltext fixture readiness (attempt {}/{}): {}",
+                        attempt, MAX_ATTEMPTS, e
+                    );
+                    tokio::time::sleep(Duration::from_secs(DELAY_SECS)).await;
+                    continue;
+                }
+            };
+            let rel_ft_count = match self
+                .query_single_u64(
+                    "MATCH ()-[r:Friend]->() \
+                     WHERE r.ft_text CONTAINS 'fixture_blue' \
+                     RETURN count(r) AS count",
+                )
+                .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    info!(
+                        "Error while checking Memgraph relationship fulltext fixture readiness (attempt {}/{}): {}",
+                        attempt, MAX_ATTEMPTS, e
+                    );
+                    tokio::time::sleep(Duration::from_secs(DELAY_SECS)).await;
+                    continue;
+                }
+            };
+            let embedding_count = match self
+                .query_single_u64(
+                    "MATCH (u:User) \
+                     WHERE u.embedding IS NOT NULL \
+                     RETURN count(u) AS count",
+                )
+                .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    info!(
+                        "Error while checking Memgraph vector fixture readiness (attempt {}/{}): {}",
+                        attempt, MAX_ATTEMPTS, e
+                    );
+                    tokio::time::sleep(Duration::from_secs(DELAY_SECS)).await;
+                    continue;
+                }
+            };
+
+            let vector_hits = match self
+                .query_single_u64(
+                    "CALL vector_search.search('bench_user_embedding_idx', 1, [0.1, 0.2, 0.3]) \
+                     YIELD node, similarity \
+                     RETURN count(node) AS count",
+                )
+                .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    info!(
+                        "Error while probing Memgraph vector index readiness (attempt {}/{}): {}",
+                        attempt, MAX_ATTEMPTS, e
+                    );
+                    tokio::time::sleep(Duration::from_secs(DELAY_SECS)).await;
+                    continue;
+                }
+            };
+            let fulltext_node_hits = match self
+                .query_single_u64(
+                    "CALL text_search.search('bench_user_ft_idx', 'data.ft_text:fixture_alice') \
+                     YIELD node, score \
+                     RETURN count(node) AS count",
+                )
+                .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    info!(
+                        "Error while probing Memgraph fulltext node index readiness (attempt {}/{}): {}",
+                        attempt, MAX_ATTEMPTS, e
+                    );
+                    tokio::time::sleep(Duration::from_secs(DELAY_SECS)).await;
+                    continue;
+                }
+            };
+            let fulltext_rel_hits = match self
+                .query_single_u64(
+                    "CALL text_search.search_edges('bench_friend_ft_idx', 'data.ft_text:fixture_blue') \
+                     YIELD edge, score \
+                     RETURN count(edge) AS count",
+                )
+                .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    info!(
+                        "Error while probing Memgraph fulltext relationship index readiness (attempt {}/{}): {}",
+                        attempt, MAX_ATTEMPTS, e
+                    );
+                    tokio::time::sleep(Duration::from_secs(DELAY_SECS)).await;
+                    continue;
+                }
+            };
+
+            if user_ft_count > 0
+                && rel_ft_count > 0
+                && embedding_count > 0
+                && vector_hits > 0
+                && fulltext_node_hits > 0
+                && fulltext_rel_hits > 0
+            {
+                info!(
+                    "Memgraph post-phase fixtures ready after {} attempt(s): users_ft={}, rel_ft={}, embedding={}, vector_hits={}, fulltext_node_hits={}, fulltext_rel_hits={}",
+                    attempt,
+                    user_ft_count,
+                    rel_ft_count,
+                    embedding_count,
+                    vector_hits,
+                    fulltext_node_hits,
+                    fulltext_rel_hits
+                );
+                return Ok(());
+            }
+
+            info!(
+                "Memgraph post-phase fixtures not fully ready yet (attempt {}/{}): users_ft={}, rel_ft={}, embedding={}, vector_hits={}, fulltext_node_hits={}, fulltext_rel_hits={}",
+                attempt,
+                MAX_ATTEMPTS,
+                user_ft_count,
+                rel_ft_count,
+                embedding_count,
+                vector_hits,
+                fulltext_node_hits,
+                fulltext_rel_hits
+            );
+            tokio::time::sleep(Duration::from_secs(DELAY_SECS)).await;
+        }
+
+        Err(OtherError(
+            "Timed out waiting for Memgraph post-phase fixture indexes/procedures to become ready"
+                .to_string(),
+        ))
     }
 
     async fn query_single_u64(
@@ -555,6 +822,28 @@ RETURN
     ) -> BenchmarkResult<()> {
         self.graph.run(query(q)).await.map_err(Neo4rsError)?;
         Ok(())
+    }
+
+    async fn run_query_allowing_already_exists(
+        &self,
+        operation: &str,
+        q: &str,
+    ) -> BenchmarkResult<()> {
+        match self.graph.run(query(q)).await {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                let message = e.to_string().to_lowercase();
+                if message.contains("already exists") {
+                    info!(
+                        "Memgraph fixture setup: '{}' already exists, continuing",
+                        operation
+                    );
+                    Ok(())
+                } else {
+                    Err(Neo4rsError(e))
+                }
+            }
+        }
     }
 
     /// Fast-path loader for the Pokec "Users" dataset using UNWIND batches.

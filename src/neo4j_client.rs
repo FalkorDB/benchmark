@@ -31,6 +31,13 @@ pub struct Neo4jAlgorithmCapabilities {
     pub has_harmonic_stream: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct Neo4jFixtureCapabilities {
+    pub has_vector_query_nodes: bool,
+    pub has_fulltext_query_nodes: bool,
+    pub has_fulltext_query_relationships: bool,
+}
+
 impl Neo4jClient {
     pub async fn new(
         uri: String,
@@ -205,6 +212,36 @@ RETURN
         })
     }
 
+    pub async fn detect_fixture_capabilities(&self) -> BenchmarkResult<Neo4jFixtureCapabilities> {
+        let q = r#"
+SHOW PROCEDURES
+YIELD name
+WITH collect(toLower(name)) AS names
+RETURN
+  size([n IN names WHERE n = 'db.index.vector.querynodes']) AS vector_query_nodes_count,
+  size([n IN names WHERE n = 'db.index.fulltext.querynodes']) AS fulltext_query_nodes_count,
+  size([n IN names WHERE n = 'db.index.fulltext.queryrelationships']) AS fulltext_query_relationships_count
+"#;
+
+        let mut result = self.graph.execute(query(q)).await.map_err(Neo4rsError)?;
+        let Some(row) = result.next().await.map_err(Neo4rsError)? else {
+            return Err(OtherError(
+                "Neo4j fixture capability probe returned no rows".to_string(),
+            ));
+        };
+
+        let vector_query_nodes_count = Self::read_row_i64(&row, "vector_query_nodes_count");
+        let fulltext_query_nodes_count = Self::read_row_i64(&row, "fulltext_query_nodes_count");
+        let fulltext_query_relationships_count =
+            Self::read_row_i64(&row, "fulltext_query_relationships_count");
+
+        Ok(Neo4jFixtureCapabilities {
+            has_vector_query_nodes: vector_query_nodes_count > 0,
+            has_fulltext_query_nodes: fulltext_query_nodes_count > 0,
+            has_fulltext_query_relationships: fulltext_query_relationships_count > 0,
+        })
+    }
+
     pub async fn ensure_algorithm_projection(
         &self,
         graph_name: &str,
@@ -299,6 +336,207 @@ RETURN graphName
             )));
         }
 
+        Ok(())
+    }
+
+    pub async fn ensure_post_phase1_fixtures_ready(&self) -> BenchmarkResult<()> {
+        // Required fixture indexes (idempotent creation).
+        self.run_query_no_results(
+            "CREATE FULLTEXT INDEX bench_user_ft_idx IF NOT EXISTS \
+             FOR (u:User) ON EACH [u.ft_text]",
+        )
+        .await?;
+        self.run_query_no_results(
+            "CREATE FULLTEXT INDEX bench_friend_ft_idx IF NOT EXISTS \
+             FOR ()-[r:Friend]-() ON EACH [r.ft_text]",
+        )
+        .await?;
+        self.run_query_no_results(
+            "CREATE VECTOR INDEX bench_user_embedding_idx IF NOT EXISTS \
+             FOR (u:User) ON (u.embedding) \
+             OPTIONS {indexConfig: {`vector.dimensions`: 3, `vector.similarity_function`: 'cosine'}}",
+        )
+        .await?;
+
+        // Deterministic fixture seeding (idempotent SET updates).
+        self.run_query_no_results(
+            "MATCH (u:User) \
+             WHERE toInteger(u.id) % 97 = 0 \
+             SET \
+                u.ft_text = 'fixture_alice user_' + toString(u.id), \
+                u.embedding = [ \
+                    toFloat((toInteger(u.id) % 10) + 1) / 10.0, \
+                    toFloat(((toInteger(u.id) + 3) % 10) + 1) / 10.0, \
+                    toFloat(((toInteger(u.id) + 6) % 10) + 1) / 10.0 \
+                ]",
+        )
+        .await?;
+        self.run_query_no_results(
+            "MATCH (s:User)-[r:Friend]->(d:User) \
+             WHERE toInteger(s.id) % 97 = 0 \
+             SET r.ft_text = 'fixture_blue edge_' + toString(s.id) + '_' + toString(d.id)",
+        )
+        .await?;
+
+        const MAX_ATTEMPTS: u32 = 18;
+        const DELAY_SECS: u64 = 5;
+
+        for attempt in 1..=MAX_ATTEMPTS {
+            let user_ft_count = match self
+                .query_single_u64(
+                    "MATCH (u:User) \
+                     WHERE u.ft_text CONTAINS 'fixture_alice' \
+                     RETURN count(u) AS count",
+                )
+                .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    info!(
+                        "Error while checking Neo4j user fulltext fixture readiness (attempt {}/{}): {}",
+                        attempt, MAX_ATTEMPTS, e
+                    );
+                    tokio::time::sleep(Duration::from_secs(DELAY_SECS)).await;
+                    continue;
+                }
+            };
+            let rel_ft_count = match self
+                .query_single_u64(
+                    "MATCH ()-[r:Friend]->() \
+                     WHERE r.ft_text CONTAINS 'fixture_blue' \
+                     RETURN count(r) AS count",
+                )
+                .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    info!(
+                        "Error while checking Neo4j relationship fulltext fixture readiness (attempt {}/{}): {}",
+                        attempt, MAX_ATTEMPTS, e
+                    );
+                    tokio::time::sleep(Duration::from_secs(DELAY_SECS)).await;
+                    continue;
+                }
+            };
+            let embedding_count = match self
+                .query_single_u64(
+                    "MATCH (u:User) \
+                     WHERE u.embedding IS NOT NULL \
+                     RETURN count(u) AS count",
+                )
+                .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    info!(
+                        "Error while checking Neo4j vector fixture readiness (attempt {}/{}): {}",
+                        attempt, MAX_ATTEMPTS, e
+                    );
+                    tokio::time::sleep(Duration::from_secs(DELAY_SECS)).await;
+                    continue;
+                }
+            };
+
+            let vector_hits = match self
+                .query_single_u64(
+                    "CALL db.index.vector.queryNodes('bench_user_embedding_idx', 1, [0.1, 0.2, 0.3]) \
+                     YIELD node, score \
+                     RETURN count(node) AS count",
+                )
+                .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    info!(
+                        "Error while probing Neo4j vector index readiness (attempt {}/{}): {}",
+                        attempt, MAX_ATTEMPTS, e
+                    );
+                    tokio::time::sleep(Duration::from_secs(DELAY_SECS)).await;
+                    continue;
+                }
+            };
+            let fulltext_node_hits = match self
+                .query_single_u64(
+                    "CALL db.index.fulltext.queryNodes('bench_user_ft_idx', 'fixture_alice') \
+                     YIELD node, score \
+                     RETURN count(node) AS count",
+                )
+                .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    info!(
+                        "Error while probing Neo4j fulltext node index readiness (attempt {}/{}): {}",
+                        attempt, MAX_ATTEMPTS, e
+                    );
+                    tokio::time::sleep(Duration::from_secs(DELAY_SECS)).await;
+                    continue;
+                }
+            };
+            let fulltext_rel_hits = match self
+                .query_single_u64(
+                    "CALL db.index.fulltext.queryRelationships('bench_friend_ft_idx', 'fixture_blue') \
+                     YIELD relationship, score \
+                     RETURN count(relationship) AS count",
+                )
+                .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    info!(
+                        "Error while probing Neo4j fulltext relationship index readiness (attempt {}/{}): {}",
+                        attempt, MAX_ATTEMPTS, e
+                    );
+                    tokio::time::sleep(Duration::from_secs(DELAY_SECS)).await;
+                    continue;
+                }
+            };
+
+            if user_ft_count > 0
+                && rel_ft_count > 0
+                && embedding_count > 0
+                && vector_hits > 0
+                && fulltext_node_hits > 0
+                && fulltext_rel_hits > 0
+            {
+                info!(
+                    "Neo4j post-phase fixtures ready after {} attempt(s): users_ft={}, rel_ft={}, embedding={}, vector_hits={}, fulltext_node_hits={}, fulltext_rel_hits={}",
+                    attempt,
+                    user_ft_count,
+                    rel_ft_count,
+                    embedding_count,
+                    vector_hits,
+                    fulltext_node_hits,
+                    fulltext_rel_hits
+                );
+                return Ok(());
+            }
+
+            info!(
+                "Neo4j post-phase fixtures not fully ready yet (attempt {}/{}): users_ft={}, rel_ft={}, embedding={}, vector_hits={}, fulltext_node_hits={}, fulltext_rel_hits={}",
+                attempt,
+                MAX_ATTEMPTS,
+                user_ft_count,
+                rel_ft_count,
+                embedding_count,
+                vector_hits,
+                fulltext_node_hits,
+                fulltext_rel_hits
+            );
+            tokio::time::sleep(Duration::from_secs(DELAY_SECS)).await;
+        }
+
+        Err(OtherError(
+            "Timed out waiting for Neo4j post-phase fixture indexes/procedures to become ready"
+                .to_string(),
+        ))
+    }
+
+    async fn run_query_no_results(
+        &self,
+        q: &str,
+    ) -> BenchmarkResult<()> {
+        self.graph.run(query(q)).await.map_err(Neo4rsError)?;
         Ok(())
     }
 

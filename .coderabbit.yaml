@@ -1,0 +1,24 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+# CodeRabbit configuration — https://docs.coderabbit.ai/reference/configuration
+language: en-US
+reviews:
+  profile: chill
+  request_changes_workflow: false
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches:
+      - master
+  # Don't review vendored code or large generated/data artifacts — they aren't hand-maintained
+  # here (the FalkorDB Rust client lives in vendor/ via a Cargo [patch]; *.rdb/*.jsonl are fixtures).
+  path_filters:
+    - "!vendor/**"
+    - "!**/*.rdb"
+    - "!**/*.jsonl"
+    - "!Cargo.lock"
+    - "!ui/package-lock.json"
+  pre_merge_checks:
+    # Disable the docstring-coverage check: this repo has no docstring-coverage convention, so the
+    # check only produces false positives. Docs are enforced by review, not this pre-merge gate.
+    docstrings:
+      mode: "off"
