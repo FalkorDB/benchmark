@@ -33,14 +33,22 @@ jobs:
         run: rustup update ${{ matrix.toolchain }} && rustup default ${{ matrix.toolchain }}
 
       - name: Install protobuf compiler
-        # Kept explicit to ensure protoc is always available in CI.
+        # Kept explicit to ensure protoc is always available in CI (the prometheus crate's
+        # build script needs it).
         run: sudo apt-get install -y protobuf-compiler
 
+      - name: Install just
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just
+
+      # Every step runs a single `just` recipe so the exact command can be reproduced locally
+      # (see the Justfile / .github/copilot-instructions.md).
       - name: Build
-        run: cargo build --verbose --all-targets --all-features
+        run: just build
 
       - name: Run Clippy
-        run: cargo clippy --package benchmark --all-targets --all-features -- -D warnings
+        run: just clippy
 
       - name: Test
-        run: cargo test --verbose
+        run: just test
