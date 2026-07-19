@@ -66,7 +66,12 @@ test-one *args:
 
 # Run the benchmark binary, forwarding args, e.g. `just run -- --help` or `just run load ...`.
 run *args:
-    cargo run --bin benchmark "$@"
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Drop an optional leading `--` so both `just run --help` and `just run -- --help` forward
+    # the flags to the binary (not to cargo).
+    if [ "${1:-}" = "--" ]; then shift; fi
+    cargo run --bin benchmark -- "$@"
 
 # === UI (Next.js dashboard in ui/) ===========================================
 
