@@ -109,7 +109,7 @@ impl Report {
             .meta
             .server
             .module_graph_ver
-            .map(|v| v.to_string())
+            .map(crate::synthetic::provenance::decode_module_version)
             .unwrap_or_else(|| "unknown".to_string());
         let cache_size = self
             .meta
@@ -245,7 +245,7 @@ mod tests {
         assert!(out.contains("return_const"));
         assert!(out.contains("server_ms"));
         assert!(out.contains("total_ms"));
-        assert!(out.contains("42001"));
+        assert!(out.contains("4.20.1"));
         assert!(out.contains("cached"));
         assert!(out.contains("compilation_ms"));
         assert!(out.contains("CACHE_SIZE 25"));

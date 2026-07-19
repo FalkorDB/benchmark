@@ -175,7 +175,7 @@ Sample output:
 
 ```text
 synthetic benchmark — endpoint falkor://127.0.0.1:6379  samples 1000  warmup 200  connection pool(size=1)
-server — falkordb module ver 42001  redis 8.6.3  CACHE_SIZE 25
+server — falkordb module ver 4.20.1  redis 8.6.3  CACHE_SIZE 25
 server image: falkordb/falkordb@sha256:9042fdc4...
 
 return_const

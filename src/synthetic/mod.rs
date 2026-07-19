@@ -159,6 +159,8 @@ pub fn list_ops() -> String {
 
 /// Strip any password from an endpoint before it is recorded in the report or printed, so
 /// credentials passed in a `falkor://user:pass@host` URL never leak into `synthetic-report.json`.
+/// If the endpoint can't be parsed as a URL it's replaced with a placeholder (rather than echoed
+/// verbatim, which could still contain credentials).
 fn redact_endpoint(endpoint: &str) -> String {
     match url::Url::parse(endpoint) {
         Ok(mut url) => {
@@ -167,7 +169,7 @@ fn redact_endpoint(endpoint: &str) -> String {
             }
             url.to_string()
         }
-        Err(_) => endpoint.to_string(),
+        Err(_) => "<unparseable-endpoint>".to_string(),
     }
 }
 
@@ -175,6 +177,10 @@ fn redact_endpoint(endpoint: &str) -> String {
 /// build the [`Report`]. Writing the report to disk is the caller's responsibility (see
 /// [`run_and_report`]).
 pub async fn run(config: &Config) -> BenchmarkResult<Report> {
+    if config.samples == 0 {
+        return Err(OtherError("samples must be greater than 0".to_string()));
+    }
+
     let started_at_epoch_secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -524,5 +530,7 @@ mod tests {
         // No credentials → unchanged (modulo url normalization).
         assert!(redact_endpoint("falkor://127.0.0.1:6379").contains("127.0.0.1:6379"));
         assert!(!redact_endpoint("falkor://user:secret@host:6379").contains("secret"));
+        // Unparseable input is replaced with a placeholder, never echoed verbatim.
+        assert_eq!(redact_endpoint("not a url"), "<unparseable-endpoint>");
     }
 }
