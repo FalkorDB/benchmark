@@ -42,7 +42,7 @@ clippy:
 
 # Build every target with all features (matches the `build` CI gate).
 build:
-    cargo build --all-targets --all-features
+    cargo build --verbose --all-targets --all-features
 
 # Build the optimized release binary.
 build-release:
@@ -56,7 +56,7 @@ doc:
 
 # Run the unit + integration test suite (matches the `test` CI gate).
 test:
-    cargo test
+    cargo test --verbose
 
 # Run a single test by name filter, e.g. `just test-one aggregator`.
 test-one *args:
