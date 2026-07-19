@@ -7,6 +7,7 @@
 use crate::error::BenchmarkError::OtherError;
 use crate::error::BenchmarkResult;
 use crate::synthetic::report::ServerInfo;
+use tracing::warn;
 
 /// Query `INFO server` + `MODULE LIST` over a raw redis connection and assemble a [`ServerInfo`].
 ///
@@ -25,29 +26,38 @@ pub async fn collect(
         .await
         .map_err(|e| OtherError(format!("provenance: connect failed: {}", e)))?;
 
-    let info_server: String = redis::cmd("INFO")
-        .arg("server")
-        .query_async(&mut conn)
-        .await
-        .map_err(|e| OtherError(format!("provenance: INFO server failed: {}", e)))?;
-
-    // `MODULE LIST` returns an array of module maps; ask for it as raw values and scan for graph.
-    let modules: redis::Value = redis::cmd("MODULE")
-        .arg("LIST")
-        .query_async(&mut conn)
-        .await
-        .map_err(|e| OtherError(format!("provenance: MODULE LIST failed: {}", e)))?;
-
-    Ok(ServerInfo {
-        module_graph_ver: parse_graph_module_version(&modules),
-        redis_version: info_field(&info_server, "redis_version"),
-        redis_build_id: info_field(&info_server, "redis_build_id"),
-        redis_git_sha1: info_field(&info_server, "redis_git_sha1"),
-        run_id: info_field(&info_server, "run_id"),
-        os: info_field(&info_server, "os"),
-        arch_bits: info_field(&info_server, "arch_bits"),
+    // Collect the two commands independently so a failure of one still preserves the other's fields.
+    let mut info = ServerInfo {
         server_image,
-    })
+        ..Default::default()
+    };
+
+    match redis::cmd("INFO")
+        .arg("server")
+        .query_async::<String>(&mut conn)
+        .await
+    {
+        Ok(info_server) => {
+            info.redis_version = info_field(&info_server, "redis_version");
+            info.redis_build_id = info_field(&info_server, "redis_build_id");
+            info.redis_git_sha1 = info_field(&info_server, "redis_git_sha1");
+            info.run_id = info_field(&info_server, "run_id");
+            info.os = info_field(&info_server, "os");
+            info.arch_bits = info_field(&info_server, "arch_bits");
+        }
+        Err(e) => warn!("provenance: INFO server failed: {}", e),
+    }
+
+    match redis::cmd("MODULE")
+        .arg("LIST")
+        .query_async::<redis::Value>(&mut conn)
+        .await
+    {
+        Ok(modules) => info.module_graph_ver = parse_graph_module_version(&modules),
+        Err(e) => warn!("provenance: MODULE LIST failed: {}", e),
+    }
+
+    Ok(info)
 }
 
 /// Extract a `key:value` field from a redis `INFO` text blob.
@@ -63,34 +73,76 @@ fn info_field(
 
 /// Find the `graph` module's `ver` in a `MODULE LIST` reply.
 ///
-/// The reply is an array of maps; each map is a flat array of `[key, value, key, value, …]`. We
-/// look for the map whose `name` is `graph` and return its `ver` as a `u64`.
+/// The reply is an array of module entries. Depending on RESP2/RESP3 each entry is either a flat
+/// array of `[key, value, key, value, …]` or a `Map` of `key → value`. We look for the entry whose
+/// `name` is `graph` and return its `ver` as a `u64`.
 fn parse_graph_module_version(value: &redis::Value) -> Option<u64> {
-    let redis::Value::Array(modules) = value else {
-        return None;
-    };
-    for module in modules {
-        let redis::Value::Array(fields) = module else {
-            continue;
-        };
-        let mut name: Option<String> = None;
-        let mut ver: Option<u64> = None;
-        let mut i = 0;
-        while i + 1 < fields.len() {
-            if let Some(k) = redis_value_as_string(&fields[i]) {
-                match k.as_str() {
-                    "name" => name = redis_value_as_string(&fields[i + 1]),
-                    "ver" => ver = redis_value_as_u64(&fields[i + 1]),
-                    _ => {}
-                }
-            }
-            i += 2;
+    let entries = match value {
+        redis::Value::Array(entries) => entries,
+        redis::Value::Map(pairs) => {
+            // A single module reported directly as a map.
+            return module_field_pairs(pairs, "graph");
         }
+        _ => return None,
+    };
+    for entry in entries {
+        let (name, ver) = match entry {
+            redis::Value::Array(fields) => {
+                let mut name = None;
+                let mut ver = None;
+                let mut i = 0;
+                while i + 1 < fields.len() {
+                    if let Some(k) = redis_value_as_string(&fields[i]) {
+                        match k.as_str() {
+                            "name" => name = redis_value_as_string(&fields[i + 1]),
+                            "ver" => ver = redis_value_as_u64(&fields[i + 1]),
+                            _ => {}
+                        }
+                    }
+                    i += 2;
+                }
+                (name, ver)
+            }
+            redis::Value::Map(pairs) => {
+                let mut name = None;
+                let mut ver = None;
+                for (k, v) in pairs {
+                    match redis_value_as_string(k).as_deref() {
+                        Some("name") => name = redis_value_as_string(v),
+                        Some("ver") => ver = redis_value_as_u64(v),
+                        _ => {}
+                    }
+                }
+                (name, ver)
+            }
+            _ => (None, None),
+        };
         if name.as_deref() == Some("graph") {
             return ver;
         }
     }
     None
+}
+
+/// Extract `ver` from a single module's RESP3 key/value map if its `name` matches.
+fn module_field_pairs(
+    pairs: &[(redis::Value, redis::Value)],
+    want_name: &str,
+) -> Option<u64> {
+    let mut name = None;
+    let mut ver = None;
+    for (k, v) in pairs {
+        match redis_value_as_string(k).as_deref() {
+            Some("name") => name = redis_value_as_string(v),
+            Some("ver") => ver = redis_value_as_u64(v),
+            _ => {}
+        }
+    }
+    if name.as_deref() == Some(want_name) {
+        ver
+    } else {
+        None
+    }
 }
 
 fn redis_value_as_string(value: &redis::Value) -> Option<String> {
@@ -170,6 +222,22 @@ mod tests {
             redis::Value::Int(1),
         ])]);
         assert_eq!(parse_graph_module_version(&modules), None);
+    }
+
+    #[test]
+    fn parses_graph_module_version_resp3_map() {
+        // RESP3 returns each module entry as a Map.
+        let modules = redis::Value::Array(vec![redis::Value::Map(vec![
+            (
+                redis::Value::BulkString(b"name".to_vec()),
+                redis::Value::BulkString(b"graph".to_vec()),
+            ),
+            (
+                redis::Value::BulkString(b"ver".to_vec()),
+                redis::Value::Int(42001),
+            ),
+        ])]);
+        assert_eq!(parse_graph_module_version(&modules), Some(42001));
     }
 
     #[test]

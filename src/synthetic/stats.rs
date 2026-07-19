@@ -49,52 +49,66 @@ fn percentile_sorted(
     sorted[lo] + (sorted[hi] - sorted[lo]) * frac
 }
 
-/// Remove severe (`> 3·IQR` beyond the quartiles) outliers, returning the retained values (sorted)
-/// and the number removed. With fewer than 4 samples the IQR is not meaningful, so nothing is
-/// removed.
-fn remove_severe_outliers(mut values: Vec<f64>) -> (Vec<f64>, usize) {
-    values.retain(|v| v.is_finite());
+/// Compute the severe-outlier fence `[Q1 - 3·IQR, Q3 + 3·IQR]` for a set of samples.
+///
+/// Returns `None` when there are fewer than 4 finite samples (IQR is not meaningful), meaning
+/// "no fence — keep everything".
+pub fn severe_fence(samples: &[f64]) -> Option<(f64, f64)> {
+    let mut values: Vec<f64> = samples.iter().copied().filter(|v| v.is_finite()).collect();
     values.sort_by(|a, b| a.partial_cmp(b).expect("finite values sort"));
     if values.len() < 4 {
-        return (values, 0);
+        return None;
     }
     let q1 = percentile_sorted(&values, 25.0);
     let q3 = percentile_sorted(&values, 75.0);
     let iqr = q3 - q1;
-    let lower = q1 - SEVERE_IQR_MULTIPLIER * iqr;
-    let upper = q3 + SEVERE_IQR_MULTIPLIER * iqr;
-    let before = values.len();
-    let kept: Vec<f64> = values
-        .into_iter()
-        .filter(|&v| v >= lower && v <= upper)
-        .collect();
-    let removed = before - kept.len();
-    (kept, removed)
+    Some((
+        q1 - SEVERE_IQR_MULTIPLIER * iqr,
+        q3 + SEVERE_IQR_MULTIPLIER * iqr,
+    ))
+}
+
+/// Summarize an already-filtered set of `kept` values, recording `removed` (the number of samples
+/// excluded before this call). Returns `None` when `kept` has no finite values.
+pub fn summarize_kept(
+    kept: &[f64],
+    removed: usize,
+) -> Option<Summary> {
+    let mut vals: Vec<f64> = kept.iter().copied().filter(|v| v.is_finite()).collect();
+    if vals.is_empty() {
+        return None;
+    }
+    vals.sort_by(|a, b| a.partial_cmp(b).expect("finite values sort"));
+    let n = vals.len();
+    let sum: f64 = vals.iter().sum();
+    let mean = sum / n as f64;
+    let variance = vals.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / n as f64;
+    Some(Summary {
+        n,
+        removed,
+        min: vals[0],
+        mean,
+        median: percentile_sorted(&vals, 50.0),
+        p90: percentile_sorted(&vals, 90.0),
+        p99: percentile_sorted(&vals, 99.0),
+        max: vals[n - 1],
+        stddev: variance.sqrt(),
+    })
 }
 
 /// Compute a [`Summary`] over `samples`, removing severe outliers first.
 ///
 /// Returns `None` when no finite samples remain (nothing meaningful to summarize).
 pub fn summarize(samples: &[f64]) -> Option<Summary> {
-    let (kept, removed) = remove_severe_outliers(samples.to_vec());
-    if kept.is_empty() {
-        return None;
+    let finite: Vec<f64> = samples.iter().copied().filter(|v| v.is_finite()).collect();
+    match severe_fence(&finite) {
+        Some((lo, hi)) => {
+            let kept: Vec<f64> = finite.iter().copied().filter(|&v| v >= lo && v <= hi).collect();
+            let removed = finite.len() - kept.len();
+            summarize_kept(&kept, removed)
+        }
+        None => summarize_kept(&finite, 0),
     }
-    let n = kept.len();
-    let sum: f64 = kept.iter().sum();
-    let mean = sum / n as f64;
-    let variance = kept.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / n as f64;
-    Some(Summary {
-        n,
-        removed,
-        min: kept[0],
-        mean,
-        median: percentile_sorted(&kept, 50.0),
-        p90: percentile_sorted(&kept, 90.0),
-        p99: percentile_sorted(&kept, 99.0),
-        max: kept[n - 1],
-        stddev: variance.sqrt(),
-    })
 }
 
 #[cfg(test)]

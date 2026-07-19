@@ -107,10 +107,29 @@ pub fn list_ops() -> String {
     out
 }
 
+/// Strip any password from an endpoint before it is recorded in the report or printed, so
+/// credentials passed in a `falkor://user:pass@host` URL never leak into `synthetic-report.json`.
+fn redact_endpoint(endpoint: &str) -> String {
+    match url::Url::parse(endpoint) {
+        Ok(mut url) => {
+            if url.password().is_some() {
+                let _ = url.set_password(None);
+            }
+            url.to_string()
+        }
+        Err(_) => endpoint.to_string(),
+    }
+}
+
 /// Run the probe: connect (single connection), collect server provenance, warm up, measure, then
 /// build the [`Report`]. Writing the report to disk is the caller's responsibility (see
 /// [`run_and_report`]).
 pub async fn run(config: &Config) -> BenchmarkResult<Report> {
+    let started_at_epoch_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
     let connection_info = config
         .endpoint
         .as_str()
@@ -150,13 +169,30 @@ pub async fn run(config: &Config) -> BenchmarkResult<Report> {
     let client_deadline = Duration::from_millis(config.client_deadline_ms);
 
     // Ensure the graph key exists: a read (`RO_QUERY`) against a never-written graph fails with
-    // "Invalid graph operation on empty key", so instantiate it once with a trivial write.
-    graph
-        .query("RETURN 1")
-        .with_timeout(config.server_timeout_ms)
-        .execute()
+    // "Invalid graph operation on empty key". Probe with a read first and only write to
+    // instantiate it when absent, so a read-only replica whose graph already exists still works.
+    // Both are bounded by the client deadline so a stuck socket can't hang setup.
+    let probe = tokio::time::timeout(
+        client_deadline,
+        graph
+            .ro_query("RETURN 1")
+            .with_timeout(config.server_timeout_ms)
+            .execute(),
+    )
+    .await;
+    let needs_instantiation = !matches!(probe, Ok(Ok(_)));
+    if needs_instantiation {
+        tokio::time::timeout(
+            client_deadline,
+            graph
+                .query("RETURN 1")
+                .with_timeout(config.server_timeout_ms)
+                .execute(),
+        )
         .await
+        .map_err(|e| OtherError(format!("graph 'falkor' instantiation timed out: {}", e)))?
         .map_err(|e| OtherError(format!("failed to instantiate graph 'falkor': {:?}", e)))?;
+    }
 
     // Warm-up (discarded) primes the plan cache and connection.
     for i in 0..config.warmup {
@@ -190,15 +226,10 @@ pub async fn run(config: &Config) -> BenchmarkResult<Report> {
     let mut operations = BTreeMap::new();
     operations.insert(config.op.as_str().to_string(), op_report);
 
-    let started_at_epoch_secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-
     Ok(Report {
         meta: Meta {
             tool_version: env!("CARGO_PKG_VERSION").to_string(),
-            endpoint: config.endpoint.clone(),
+            endpoint: redact_endpoint(&config.endpoint),
             samples: config.samples,
             warmup: config.warmup,
             server_timeout_ms: config.server_timeout_ms,
@@ -212,16 +243,38 @@ pub async fn run(config: &Config) -> BenchmarkResult<Report> {
 }
 
 /// Summarize a set of paired samples into an [`OperationReport`].
+///
+/// Outlier removal is *paired*: a sample is dropped if it is a severe outlier in **either**
+/// `server_ms` or `total_ms`, and all three summaries (server, total, and the paired residual) are
+/// computed over that single shared retained cohort. This keeps their sample counts identical and
+/// preserves the invariant that, since every raw pair has `total >= server`, the retained
+/// aggregates do too.
 fn summarize_samples(samples: &[OpSample]) -> BenchmarkResult<OperationReport> {
     let server: Vec<f64> = samples.iter().map(|s| s.server_ms).collect();
     let total: Vec<f64> = samples.iter().map(|s| s.total_ms).collect();
-    let non_internal: Vec<f64> = samples.iter().map(|s| s.total_ms - s.server_ms).collect();
 
-    let server_ms = stats::summarize(&server)
+    let server_fence = stats::severe_fence(&server);
+    let total_fence = stats::severe_fence(&total);
+    let within = |v: f64, fence: Option<(f64, f64)>| match fence {
+        Some((lo, hi)) => v >= lo && v <= hi,
+        None => true,
+    };
+
+    let kept: Vec<&OpSample> = samples
+        .iter()
+        .filter(|s| within(s.server_ms, server_fence) && within(s.total_ms, total_fence))
+        .collect();
+    let removed = samples.len() - kept.len();
+
+    let kept_server: Vec<f64> = kept.iter().map(|s| s.server_ms).collect();
+    let kept_total: Vec<f64> = kept.iter().map(|s| s.total_ms).collect();
+    let kept_residual: Vec<f64> = kept.iter().map(|s| s.total_ms - s.server_ms).collect();
+
+    let server_ms = stats::summarize_kept(&kept_server, removed)
         .ok_or_else(|| OtherError("no server_ms samples to summarize".to_string()))?;
-    let total_ms = stats::summarize(&total)
+    let total_ms = stats::summarize_kept(&kept_total, removed)
         .ok_or_else(|| OtherError("no total_ms samples to summarize".to_string()))?;
-    let non_internal_ms = stats::summarize(&non_internal)
+    let non_internal_ms = stats::summarize_kept(&kept_residual, removed)
         .ok_or_else(|| OtherError("no non_internal_ms samples to summarize".to_string()))?;
 
     let cached_unknown = samples.iter().filter(|s| s.cached.is_none()).count();
@@ -299,5 +352,35 @@ mod tests {
         assert!((r.cached_false_rate - 1.0 / 3.0).abs() < 1e-9);
         // non_internal median should be positive (total > server).
         assert!(r.non_internal_ms.median > 0.0);
+    }
+
+    #[test]
+    fn paired_summaries_share_one_retained_cohort() {
+        // 20 well-behaved pairs (total = server + 0.3) plus one pair whose TOTAL is a severe
+        // outlier. That pair must be dropped from *all three* summaries, so their `n` matches and
+        // total.median stays >= server.median.
+        let mut samples: Vec<OpSample> = (0..20)
+            .map(|i| {
+                let s = 0.10 + i as f64 * 0.001;
+                OpSample { server_ms: s, total_ms: s + 0.3, rows: 1, cached: Some(true) }
+            })
+            .collect();
+        samples.push(OpSample { server_ms: 0.11, total_ms: 500.0, rows: 1, cached: Some(true) });
+        let r = summarize_samples(&samples).unwrap();
+        assert_eq!(r.server_ms.n, r.total_ms.n);
+        assert_eq!(r.total_ms.n, r.non_internal_ms.n);
+        assert_eq!(r.total_ms.removed, 1);
+        assert!(r.total_ms.median >= r.server_ms.median);
+    }
+
+    #[test]
+    fn redact_endpoint_strips_password() {
+        assert_eq!(
+            redact_endpoint("falkor://user:secret@host:6379"),
+            "falkor://user@host:6379"
+        );
+        // No credentials → unchanged (modulo url normalization).
+        assert!(redact_endpoint("falkor://127.0.0.1:6379").contains("127.0.0.1:6379"));
+        assert!(!redact_endpoint("falkor://user:secret@host:6379").contains("secret"));
     }
 }

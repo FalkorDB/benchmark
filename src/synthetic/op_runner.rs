@@ -83,6 +83,13 @@ pub async fn run_and_drain(
             cypher
         ))
     })?;
+    // Guard against a non-finite or negative server time slipping through into the summary.
+    if !server_ms.is_finite() || server_ms < 0.0 {
+        return Err(OtherError(format!(
+            "response for '{}' reported an invalid internal execution time: {}",
+            cypher, server_ms
+        )));
+    }
 
     // Drain every row so `total_ms` reflects full client-side consumption and any row-decode
     // error surfaces here rather than being silently skipped.
