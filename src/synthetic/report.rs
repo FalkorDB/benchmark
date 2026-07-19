@@ -8,10 +8,11 @@ use std::collections::BTreeMap;
 /// Server build/provenance captured from `INFO server` + `MODULE LIST`, plus the operator-supplied
 /// image reference. FalkorDB does not expose a graph-module git SHA to clients, so the reproducible
 /// identity is `module_graph_ver` (real for tagged releases, a `999999` placeholder on `:edge`)
-/// together with `server_image` when provided.
+/// together with `server_image` when provided. The version is the numeric encoding
+/// `major*10000 + minor*100 + patch` (e.g. `42001` → `4.20.1`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ServerInfo {
-    /// FalkorDB graph-module version (e.g. `42001` for v4.2.1), or `None` if it couldn't be read.
+    /// FalkorDB graph-module version (e.g. `42001` for v4.20.1), or `None` if it couldn't be read.
     pub module_graph_ver: Option<u64>,
     pub redis_version: Option<String>,
     pub redis_build_id: Option<String>,
@@ -57,7 +58,8 @@ pub struct OperationReport {
     pub total_ms: Summary,
     /// Paired `total − server` per invocation (everything outside the DB's internal timer).
     pub non_internal_ms: Summary,
-    /// Fraction of measured invocations that reported an un-cached execution plan.
+    /// Fraction of invocations *with a known cache stat* that reported an un-cached execution plan
+    /// (denominator excludes `cached_unknown`).
     pub cached_false_rate: f64,
     /// Count of invocations whose response omitted the cache statistic.
     pub cached_unknown: usize,

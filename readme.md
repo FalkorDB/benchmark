@@ -167,7 +167,7 @@ server — falkordb module ver 42001  redis 8.6.3
 server image: falkordb/falkordb@sha256:9042fdc4...
 
 return_const
-  server_ms  median 0.017  mean 0.018  p99 0.030  (n=983, removed 17)
+  server_ms  median 0.017  mean 0.018  p99 0.030  (n=982, removed 18)
   total_ms   median 0.397  mean 0.403  p99 0.519  (n=982, removed 18)
   non_internal_ms (paired total-server)  median 0.379
   cached_execution=false: 0.0%  (unknown 0)
