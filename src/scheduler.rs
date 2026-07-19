@@ -79,3 +79,36 @@ pub fn spawn_scheduler<Payload: Send + Sync + 'static>(
         info!("All messages sent");
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn intended_start_anchors_at_scheduled_time() {
+        let start_time = Instant::now();
+        let msg = Msg {
+            start_time,
+            offset: 250,
+            payload: (),
+        };
+        // The anchor is the predetermined scheduled instant (start_time + offset ms),
+        // independent of when the message is actually dequeued — this is what makes
+        // latency measured from it coordinated-omission-correct.
+        assert_eq!(
+            msg.intended_start(),
+            start_time + Duration::from_millis(250)
+        );
+    }
+
+    #[test]
+    fn intended_start_with_zero_offset_is_start_time() {
+        let start_time = Instant::now();
+        let msg = Msg {
+            start_time,
+            offset: 0,
+            payload: (),
+        };
+        assert_eq!(msg.intended_start(), start_time);
+    }
+}
