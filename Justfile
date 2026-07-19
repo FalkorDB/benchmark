@@ -62,6 +62,16 @@ test:
 test-one *args:
     cargo test "$@"
 
+# === Coverage ================================================================
+
+# Generate Codecov JSON coverage for the benchmark crate (matches the `coverage` CI job).
+coverage:
+    cargo llvm-cov --package benchmark --all-features --codecov --output-path codecov.json
+
+# Generate an HTML coverage report and open it in a browser.
+coverage-html:
+    cargo llvm-cov --package benchmark --all-features --html --open
+
 # === Rust: run ===============================================================
 
 # Run the benchmark binary, forwarding args, e.g. `just run -- --help` or `just run load ...`.
@@ -89,7 +99,7 @@ ui-build:
 
 # Start the UI dev server on {{PORT}}.
 ui-dev:
-    cd ui && PORT={{PORT}} npm run dev
+    cd ui && PORT="{{PORT}}" npm run dev
 
 # Run `just ui-install` first. Set the NEXT_PUBLIC_HUBSPOT_* env vars (as CI does) if the
 # smoke path needs them. Mirrors the `playwright.yml` workflow.
@@ -157,7 +167,8 @@ ci: build clippy test
 
 # === Housekeeping ============================================================
 
-# Remove Rust build artifacts and the UI build/test output.
+# Remove Rust build artifacts, coverage output, and the UI build/test output.
 clean:
     cargo clean
+    rm -f codecov.json
     rm -rf ui/.next ui/playwright-report ui/test-results

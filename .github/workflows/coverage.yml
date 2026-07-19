@@ -1,0 +1,50 @@
+name: Code Coverage
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+# Generate code coverage with cargo-llvm-cov and upload it to Codecov.
+jobs:
+  coverage:
+    name: Code coverage
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Set up Rust
+        run: rustup update stable && rustup default stable
+
+      - name: Install protobuf compiler
+        # The prometheus crate's build script needs protoc.
+        run: sudo apt-get install -y protobuf-compiler
+
+      - name: Install just and cargo-llvm-cov
+        uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2.83.4
+        with:
+          tool: just,cargo-llvm-cov
+
+      # Runs the same recipe developers run locally (see the Justfile).
+      - name: Generate code coverage
+        run: just coverage
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@e53489f4d376d79066609109e7a95a29eb3740b1 # v7.0.0
+        with:
+          files: codecov.json
+          # Don't fail the build on a transient Codecov upload/token hiccup.
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
