@@ -1,8 +1,8 @@
 # Justfile — dev-cycle automation for the FalkorDB benchmark.
 #
-# Run `just` (or `just --list`) to see every available recipe. Every check CI performs
-# is a recipe here, so the exact command can be reproduced locally and CI and local stay
-# identical (see .github/workflows/ and .github/copilot-instructions.md).
+# Run `just` (or `just --list`) to see every available recipe. Every check CI performs is a
+# recipe here, so CI and local runs use the exact same command (see .github/workflows/ and
+# .github/copilot-instructions.md).
 #
 # This repo has two parts, each with its own recipes:
 #   * the Rust benchmark binary  -> `fmt`, `clippy`, `build`, `test`, `run`, …
@@ -33,7 +33,7 @@ fmt-check:
 
 # === Rust: lint ==============================================================
 
-# `--package benchmark` keeps the patched-in falkordb-rs vendor copy out of the lint.
+# `--package benchmark` selects this crate explicitly, exactly as the CI invocation does.
 # Strict clippy over all targets/features, warnings denied (matches the `clippy` CI gate).
 clippy:
     cargo clippy --package benchmark --all-targets --all-features -- -D warnings
@@ -91,8 +91,8 @@ ui-build:
 ui-dev:
     cd ui && PORT={{PORT}} npm run dev
 
-# Set the NEXT_PUBLIC_HUBSPOT_* env vars (as CI does) if the smoke path needs them. Run `just
-# ui-install` first. Mirrors the `playwright.yml` workflow.
+# Run `just ui-install` first. Set the NEXT_PUBLIC_HUBSPOT_* env vars (as CI does) if the
+# smoke path needs them. Mirrors the `playwright.yml` workflow.
 # Playwright CI smoke test: start the dev server, wait for it, run the smoke spec, tear it down.
 ui-smoke:
     #!/usr/bin/env bash
