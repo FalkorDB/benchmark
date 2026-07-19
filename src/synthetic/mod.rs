@@ -61,10 +61,13 @@ impl OpName {
         self,
         i: usize,
     ) -> Query {
+        // Keep the parameter value in the non-negative i32 range (the only integer QueryParam
+        // width) so a very large invocation index can't truncate to a negative value.
+        let param = (i % (i32::MAX as usize)) as i32;
         match self {
             OpName::ReturnConst => QueryBuilder::new()
                 .text("RETURN $i AS x")
-                .param("i", i as i32)
+                .param("i", param)
                 .build(),
         }
     }
