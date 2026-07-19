@@ -108,15 +108,21 @@ ui-smoke:
     fi
     PORT="$port" npm run dev &
     dev_pid=$!
-    trap 'kill "$dev_pid" 2>/dev/null || true' EXIT
+    trap 'kill "$dev_pid" 2>/dev/null || true; wait "$dev_pid" 2>/dev/null || true' EXIT
     echo "Waiting for Next.js to be ready on http://localhost:${port}/ ..."
+    ready=0
     for i in $(seq 1 120); do
-        if curl -fsS "http://localhost:${port}/" >/dev/null; then
+        if curl -fsS "http://localhost:${port}/" >/dev/null 2>&1; then
             echo "Next.js is up."
+            ready=1
             break
         fi
         sleep 1
     done
+    if [ "$ready" -ne 1 ]; then
+        echo "Next.js did not become ready on http://localhost:${port}/ within 120s" >&2
+        exit 1
+    fi
     npx playwright test tests/tests/ci-smoke.spec.ts --project=chromium --retries=0 --workers=1 --reporter=dot
 
 # === Benchmarks (helper-script wrappers) =====================================
