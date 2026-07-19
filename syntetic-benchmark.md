@@ -331,6 +331,177 @@ Per repo convention (drive everything through `just`; keep CI identical):
 5. **Report polish** (Markdown, metadata, `non_internal_ms`, cached-rate) + baseline `just` recipes.
 6. *(future)* Throughput/parallelism driver reusing catalog/dataset/runner.
 
+## 12. Worked example (input → output)
+
+### 12.1 Input — configuration (env / config file, not Criterion flags)
+
+```toml
+# synthetic-bench.toml
+seed               = 42
+nodes              = 100_000
+edges              = 1_000_000
+labels             = ["Person", "Movie"]
+rel_types          = ["ACTED_IN", "KNOWS"]
+warmup_secs        = 3
+sample_size        = 200        # min measured invocations per op
+server_timeout_ms  = 5_000      # FalkorDB-side guard (with_timeout)
+client_deadline_ms = 6_000      # Tokio-side guard (§2)
+connection         = "single"   # single | multiplexed
+reset_every        = 5_000      # write-scratch reset interval (untimed)
+operations         = ["match_by_index", "expand_hops_5", "create_node", "merge_miss"]
+```
+
+Run it:
+
+```bash
+just synthetic-bench                     # all configured ops
+just synthetic-bench-one match_by_index  # a single op
+just synthetic-baseline v4.2.1           # save a baseline (version comparison)
+just synthetic-compare  v4.2.1           # compare the current build against it
+```
+
+### 12.2 Input — an operation and its pre-generated corpus
+
+```rust
+OperationSpec {
+    name: "match_by_index",
+    kind: Read,
+    // generated ONCE, seeded, untimed — identical across samples/metrics/versions:
+    corpus: |rng, ds| ds.sample_ids("Person", 1000).into_iter().map(|id|
+        QueryBuilder::new()
+            .text("MATCH (p:Person {id: $id}) RETURN p")
+            .param("id", id)
+            .build()
+    ).collect(),
+    write: None,
+}
+// corpus (first rows): {id: 5123}, {id: 88134}, {id: 240}, {id: 61802}, …
+```
+
+A write op carries a `WritePlan` (scratch namespace + untimed hooks) instead:
+
+```rust
+OperationSpec {
+    name: "create_node", kind: Write,
+    corpus: |rng, ds| (0..1000).map(|_| /* props from seeded rng */ …).collect(),
+    write: Some(WritePlan { scratch_label: "_bench_scratch",
+                            key: KeySource::MonotonicCounter,   // fresh key per invocation
+                            reset: ResetEvery(5_000) }),        // untimed
+}
+```
+
+### 12.3 Output — console (per op)
+
+```
+match_by_index
+  total_ms   [criterion] mean 0.34  median 0.33  95% CI [0.32, 0.36]   outliers 6/200 (3%)
+  server_ms  [in-house ] median 0.081  mean 0.084  95% CI [0.079, 0.089]   removed 4 severe
+  non_internal_ms (paired total−server)  median 0.256
+  cached_execution=false: 0.5%
+```
+
+### 12.4 Output — `synthetic-report.json` (excerpt)
+
+```json
+{
+  "meta": {
+    "git_sha": "cd0e073",
+    "falkordb_version": "4.2.1",
+    "dataset": { "seed": 42, "nodes": 100000, "edges": 1000000, "corpus_hash": "9f3a1c…" },
+    "connection": "single",
+    "host": { "cpu": "…", "mem_gb": 32 },
+    "warmup_secs": 3, "sample_size": 200
+  },
+  "operations": {
+    "match_by_index": {
+      "server_ms":       { "median": 0.081, "mean": 0.084, "ci": [0.079, 0.089], "stddev": 0.02, "n": 200, "removed": 4 },
+      "total_ms":        { "median": 0.33,  "mean": 0.34,  "ci": [0.32, 0.36],   "stddev": 0.05, "n": 200, "outliers": 6 },
+      "non_internal_ms": { "median": 0.256 },
+      "cached_false_rate": 0.005
+    }
+  }
+}
+```
+
+### 12.5 Output — Markdown table (for humans / PRs)
+
+| op | server median (ms) | total median (ms) | non_internal (ms) | n | removed |
+|----|-----:|-----:|-----:|--:|--:|
+| match_by_index | 0.081 | 0.33 | 0.256 | 200 | 4 |
+| expand_hops_5  | 2.41  | 3.02 | 0.61  | 200 | 7 |
+| create_node    | 0.12  | 0.40 | 0.28  | 200 | 3 |
+| merge_miss     | 0.15  | 0.44 | 0.29  | 200 | 5 |
+
+### 12.6 Output — version comparison (total-time, Criterion baseline)
+
+```
+$ just synthetic-compare v4.2.1
+match_by_index/total_ms
+  time:   [0.302 ms 0.311 ms 0.320 ms]
+  change: [-9.4% -8.1% -6.7%] (p = 0.00 < 0.05)   Performance has improved.
+```
+
+## 13. Trade-offs of each option
+
+Each row is **chosen → alternative**, with the trade-off. The "chosen" column reflects the
+decisions locked in §1.
+
+### Harness — *Criterion + thin in-house pass* → fully in-house
+- **Chosen:** Criterion owns total-time (free warm-up, Tukey outliers, bootstrap CI, HTML plots,
+  **version baselines**); ~150 LOC in-house computes the paired server-time/residual.
+  - *Pros:* least code; free version comparison + plots; matches FalkorDB-org convention.
+  - *Cons:* two stats paths in one report; depends on Criterion's output schema (so we pin it); the
+    server metric isn't in Criterion's HTML.
+- **Alt — fully in-house:** one harness, one report, everything paired.
+  - *Pros:* single coherent report; full control; trivial to reuse for the concurrency phase.
+  - *Cons:* we re-implement bootstrap CIs, baselines, plots, regression — more code + maintenance.
+
+### Operation granularity — *primitives* → plan-operators (`GRAPH.PROFILE`)
+- **Primitives:** one Cypher statement per op; simple, stable, maps to user-facing operations.
+  - *Con:* `server_ms` is whole-query, not per-operator.
+- **PROFILE:** per-operator timings (Label Scan, Conditional Traverse, Aggregate…).
+  - *Pro:* true per-operator server cost. *Con:* more complex, PROFILE has its own overhead, hard to
+    isolate a single operator — deferred.
+
+### Dataset — *synthetic, seeded* → existing fixtures (IMDB/Pokec)
+- **Synthetic:** reproducible, size knobs, controlled distributions + indexes → comparable across
+  versions/machines. *Con:* must build/maintain the generator; may not mirror real-world skew.
+- **Existing:** realistic shape, already loaded. *Con:* not reproducible/parameterizable; harder to
+  isolate; fixture drift breaks version comparison.
+
+### Write isolation — *steady-state* → reset-each-sample
+- **Steady-state:** scratch namespace + fresh keys + periodic (untimed) reset; fast → high sample
+  counts. *Con:* sawtooth scratch size; doesn't perfectly restore allocator/index/cache state.
+- **Reset-each:** snapshot-restore before every sample; most isolated. *Con:* reset dominates
+  wall-time, tiny sample counts — usually impractical for ms-scale ops.
+
+### Cold vs warm — *warm* → cold / both
+- **Warm:** steady-state after warm-up; low variance; reflects hot-path production latency.
+  *Con:* hides first-execution/plan-compile cost.
+- **Both:** also measure cold (cache miss) to capture compile cost. *Con:* high variance, needs a
+  cache flush between samples, more runtime — deferred.
+
+### Outliers — *remove for server/residual, report for total* → remove-both / report-both
+- **Chosen:** total-time keeps Criterion's "report-and-resist"; server/residual physically drop
+  severe (>3×IQR). *Pro:* matches "outliers removed" for our metric while keeping Criterion's
+  headline standard. *Con:* two conventions in one report (documented).
+- **Remove-both:** also post-process Criterion's `sample.json`. *Con:* diverges from Criterion norms;
+  per-invocation outliers can't be recovered from its per-sample file.
+
+### Vendors — *FalkorDB-only* → all three now
+- **FalkorDB-only:** focused, one server-time source, fastest to ship.
+- **All:** cross-engine comparison, but each engine reports timing differently (Neo4j
+  `resultConsumedAfter`, Memgraph metadata…), 3× surface — deferred behind the vendor-agnostic runner.
+
+### Connection — *single* → multiplexed (client default is 8 sockets)
+- **Single:** honest single-flight latency (no client-side multiplexing/queuing effects).
+- **Multiplexed:** matches some production clients, but confounds *isolated* per-op latency — that
+  belongs in the throughput phase (§8).
+
+### Failure policy — *fatal* → tolerate-failures
+- **Fatal:** a timeout / missing server stats aborts the op → nothing silently biased into the mean.
+- **Tolerate (opt-in):** retry to N successes, report attempts/failures separately — for flaky envs.
+
 ---
 
 ### Appendix: why not a fully bespoke stats implementation?
