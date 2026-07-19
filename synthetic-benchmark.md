@@ -8,8 +8,8 @@ resolves the AI-review feedback on the PR. Correcting-detail notes from review a
 ## 1. Goal
 
 Measure the latency of individual Cypher **operations in isolation**, and how that latency behaves as
-**throughput scales up**. For each operation, on **every measured invocation** we capture a *paired*
-pair of numbers:
+**throughput scales up**. For each operation, on **every measured invocation** we capture a *pair* of
+numbers (paired, from the same invocation):
 
 - **server time** — the database's own reported execution time, read from the query response
   (FalkorDB's *internal execution time*). Excludes client, driver-parsing and network cost.
@@ -40,7 +40,7 @@ confidence intervals).
 | Dataset | **Dedicated synthetic dataset**, seeded + reproducible, size knobs |
 | Write isolation | **Steady-state**, per-worker scratch namespace, deterministic keys, periodic reset |
 | Cold vs warm | **Warm / steady-state** after warm-up (plan cache primed) |
-| Concurrency | First-class `--concurrency` level (default `1`, any positive int) + **sweep** for latency-vs-throughput |
+| Concurrency | First-class concurrency level (config knob; default `1`, any positive int) + **sweep** for latency-vs-throughput |
 | Output | Standalone **JSON + Markdown/console report** (UI later) |
 | Statistics | **Criterion-like** (warm-up, sampling, Tukey outliers, bootstrap CIs) + latency percentiles |
 | Harness | **In-house concurrency engine (primary; required for `C > 1`)**; Criterion optional for the `C = 1` headline + version baselines — see §4 |
@@ -74,8 +74,10 @@ Reads use `ro_query`, writes use `query` (mirroring `QueryType::{Read, Write}` i
 
 **[review] Connection & deadline**
 - The async client **defaults to 8 multiplexed sockets** (`vendor/falkordb-rs/src/client/builder.rs`).
-  For honest measurement we configure the connection explicitly and record it: **a single dedicated
-  connection at `C = 1`, and a pool of exactly `C` connections** for `C > 1` (one per worker).
+  For honest measurement we configure the connection explicitly and record it: **a connection pool of
+  exactly size `C`** (one connection per worker) — so `C = 1` is effectively a dedicated single
+  connection and `C > 1` uses `C` connections. (The report labels this strategy `pool` at every
+  level, including `C = 1`.)
 - `with_timeout(ms)` is a **server-side** guard; the client-side response timeout is disabled by
   default (`vendor/falkordb-rs/src/client/mod.rs`). We add a **Tokio client deadline** per call,
   mirroring `src/falkor/falkor_driver.rs` (`query_timeout_guard`), so a stuck socket can't hang a run.
@@ -155,8 +157,9 @@ async fn measure(op, c: usize, ds, warmup, window) -> LevelResult {
         let mut buf = Vec::new();
         for q in corpus.iter().cycle() {
             if stop.load() { break; }
-            op.write.as_ref().map(|p| p.before(&mut state))?;     // [review] untimed hook -> Result;
-                                                                  // propagate; do NOT time-on-failure
+            if let Some(p) = op.write.as_ref() { p.before(&mut state)?; }  // [review] untimed hook
+                                                                          // -> Result; propagate;
+                                                                          // do NOT time on failure
             let t0 = Instant::now();
             let r = run_and_drain(&mut conns[w], op.kind, q).await?;  // fatal on error (§5.1)
             buf.push(Sample { server_ms: r.server_ms, total_ms: t0.elapsed().as_secs_f64()*1e3,
@@ -219,7 +222,7 @@ that lets both the sweep engine and the optional Criterion path reuse them.
 async fn run_and_drain(conn, kind, query) -> Result<OpSample> {
     let started = Instant::now();
     let result  = with_client_deadline(                       // Tokio guard, §2
-        match kind { Read => conn.ro_query(q), Write => conn.query(q) }
+        match kind { Read => conn.ro_query(query), Write => conn.query(query) }
             .with_timeout(server_timeout_ms).execute()).await?;
     let cached    = result.get_cached_execution();            // Option<bool>: None -> cached_unknown
     let server_ms = result.get_internal_execution_time().ok_or(MissingServerStats)?;  // no NaN
@@ -440,7 +443,7 @@ match_by_index/total_ms   change: [-9.4% -8.1% -6.7%] (p = 0.00 < 0.05)   Perfor
 | **Cold/warm** | **Warm** | Cold / both | Warm = low variance, hot-path latency, but hides plan-compile cost; both captures compile cost but is high-variance and slower. |
 | **Outliers** | **Remove** severe for the reported latency | Report-and-resist (Criterion default) | Removal matches the "outliers removed" ask; the optional Criterion `C = 1` path keeps its own convention (documented). |
 | **Vendors** | **FalkorDB only** | All three now | Focused/fast; multi-engine needs per-engine timing + 3× surface — deferred behind the vendor-agnostic runner. |
-| **Connection** | **1 conn at `C = 1`, pool of `C` otherwise** | Multiplexed default (8 sockets) | Explicit pooling gives honest per-level behavior; the multiplexed default would confound isolation and per-`C` accounting. |
+| **Connection** | **Pool of size `C`** (`C = 1` = one dedicated conn) | Multiplexed default (8 sockets) | Explicit pooling gives honest per-level behavior; the multiplexed default would confound isolation and per-`C` accounting. |
 | **Failure policy** | **Fatal** on error/timeout/missing-stats | Opt-in tolerate-failures | Fatal avoids biased means; tolerate (retry-to-successes, report failures) helps flaky envs. |
 
 ---
