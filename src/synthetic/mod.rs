@@ -166,19 +166,19 @@ pub enum CacheMode {
 /// FalkorDB keys its plan cache on the query **body** (the text after the `CYPHER <params>` prefix
 /// that [`Query::to_cypher`] emits). [`CacheMode::Cached`] uses the body verbatim, so a corpus of
 /// varying parameter values still reuses one cached plan → *execution only*. [`CacheMode::Uncached`]
-/// appends a unique trailing comment `/* co<nonce>-<i> */`, making every invocation a distinct
-/// cache key that FalkorDB must recompile → *execution + compilation*. The per-run `nonce` keeps a
+/// appends a unique trailing comment `/* co<run_token>-<i> */`, making every invocation a distinct
+/// cache key that FalkorDB must recompile → *execution + compilation*. The per-run `run_token` keeps a
 /// previous run's uncached comments from being served from cache.
 fn render_cypher(
     query: &Query,
     mode: CacheMode,
-    nonce: u64,
+    run_token: u64,
     i: usize,
 ) -> String {
     let base = query.to_cypher();
     match mode {
         CacheMode::Cached => base,
-        CacheMode::Uncached => format!("{} /* co{:x}-{} */", base, nonce, i),
+        CacheMode::Uncached => format!("{} /* co{:x}-{} */", base, run_token, i),
     }
 }
 
@@ -326,9 +326,9 @@ pub async fn run(config: &Config) -> BenchmarkResult<Report> {
         DatasetHandle::default()
     };
 
-    // A fresh OS-random nonce per run keeps uncached-mode comments globally unique, so a small
+    // A fresh OS-random run_token per run keeps uncached-mode comments globally unique, so a small
     // run's uncached queries can never be served from a previous run's plan cache.
-    let nonce = rand::random_range(0..=u64::MAX);
+    let run_token = rand::random_range(0..=u64::MAX);
 
     let mut operations = BTreeMap::new();
     for op in ops {
@@ -337,7 +337,7 @@ pub async fn run(config: &Config) -> BenchmarkResult<Report> {
         let mut rng = StdRng::seed_from_u64(config.seed ^ op.salt());
         let corpus = op_spec.build_corpus(&mut rng, &dataset, 0, 1)?;
         let op_report =
-            measure_op(&mut graph, config, &op_spec, &corpus, nonce, client_deadline).await?;
+            measure_op(&mut graph, config, &op_spec, &corpus, run_token, client_deadline).await?;
         operations.insert(op.as_str().to_string(), op_report);
     }
 
@@ -471,13 +471,13 @@ async fn measure_op(
     config: &Config,
     op_spec: &OperationSpec,
     corpus: &[Query],
-    nonce: u64,
+    run_token: u64,
     client_deadline: Duration,
 ) -> BenchmarkResult<OperationReport> {
     let mut cached_set: Option<crate::synthetic::report::MetricSet> = None;
     let mut uncached_set: Option<crate::synthetic::report::MetricSet> = None;
     for &mode in config.cache.modes() {
-        let set = measure_mode(graph, config, op_spec, corpus, mode, nonce, client_deadline).await?;
+        let set = measure_mode(graph, config, op_spec, corpus, mode, run_token, client_deadline).await?;
         match mode {
             CacheMode::Cached => cached_set = Some(set),
             CacheMode::Uncached => uncached_set = Some(set),
@@ -507,7 +507,7 @@ async fn measure_mode(
     op_spec: &OperationSpec,
     corpus: &[Query],
     mode: CacheMode,
-    nonce: u64,
+    run_token: u64,
     client_deadline: Duration,
 ) -> BenchmarkResult<crate::synthetic::report::MetricSet> {
     let kind = op_spec.kind;
@@ -516,14 +516,14 @@ async fn measure_mode(
     // first-touch compilation on its first sample. (No help for uncached, whose every query is
     // unique by design.)
     if config.warmup == 0 && mode == CacheMode::Cached {
-        let cypher = render_cypher(&corpus[0], mode, nonce, 0);
+        let cypher = render_cypher(&corpus[0], mode, run_token, 0);
         let _ = run_and_drain(graph, kind, &cypher, config.server_timeout_ms, client_deadline)
             .await?;
     }
 
     // Warm-up (discarded) primes the plan cache (cached mode) and the connection.
     for i in 0..config.warmup {
-        let cypher = render_cypher(&corpus[i % corpus.len()], mode, nonce, i);
+        let cypher = render_cypher(&corpus[i % corpus.len()], mode, run_token, i);
         let _ = run_and_drain(graph, kind, &cypher, config.server_timeout_ms, client_deadline)
             .await?;
     }
@@ -532,7 +532,7 @@ async fn measure_mode(
     for i in 0..config.samples {
         // Continue the uncached comment counter past warm-up so every key stays unique.
         let idx = config.warmup + i;
-        let cypher = render_cypher(&corpus[idx % corpus.len()], mode, nonce, idx);
+        let cypher = render_cypher(&corpus[idx % corpus.len()], mode, run_token, idx);
         let sample =
             run_and_drain(graph, kind, &cypher, config.server_timeout_ms, client_deadline).await?;
         samples.push(sample);
@@ -771,7 +771,7 @@ mod tests {
         assert_eq!(c0, c1);
         assert!(!c0.contains("/* co"));
         assert!(c0.contains("RETURN n.id"));
-        // Uncached: a unique per-invocation comment ⇒ distinct cache key; the nonce keeps it apart
+        // Uncached: a unique per-invocation comment ⇒ distinct cache key; the run_token keeps it apart
         // from other runs.
         let u0 = render_cypher(&q, CacheMode::Uncached, 0xABCD, 0);
         let u1 = render_cypher(&q, CacheMode::Uncached, 0xABCD, 1);
