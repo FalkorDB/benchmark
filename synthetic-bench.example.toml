@@ -1,0 +1,31 @@
+# Example configuration for the synthetic per-operation benchmark.
+#
+# Copy this to `synthetic-bench.toml` (auto-detected in the working directory) or pass it with
+# `--config <path>`. Every key is optional; any CLI flag overrides the value here, which in turn
+# overrides the built-in defaults. Unknown keys and misspelled operation names are rejected.
+#
+# NOTE: generating the dataset drops and rewrites the target graph, so it is only performed when you
+# pass the explicit `--generate` flag on the command line — this file only supplies the dimensions.
+
+# Seed for the dataset AND the per-operation corpora: the same seed reproduces the exact same
+# workload (graph + parameters) on any machine.
+seed = 42
+
+# Dataset dimensions (used with `--generate`). `edges` must be >= `nodes` and counts relationships.
+nodes = 100000
+edges = 1000000
+
+# Operations to measure, using the same names as `--op` (see `benchmark synthetic list-ops`).
+operations = ["match_by_index", "expand_hops_5", "aggregate_count"]
+
+# Measurement knobs (all optional; shown with their defaults).
+samples = 1000
+warmup = 200
+cache = "both"              # cached | uncached | both
+
+# Connection / output (all optional).
+# endpoint = "falkor://127.0.0.1:6379"
+# graph = "falkor"
+# server_timeout_ms = 5000
+# client_deadline_ms = 6000
+# out = "synthetic-report.json"

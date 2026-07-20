@@ -143,9 +143,9 @@ Measures a curated suite of **read operations in isolation** — one at a time, 
 on every invocation both the **server time** (FalkorDB's reported internal execution time) and the
 **total time** (end-to-end client round-trip), then summarizing them with severe-outlier removal
 (Tukey fences, like Criterion.rs) and writing a JSON report with one block per operation. It uses a
-single dedicated connection for honest single-flight latency. This is Part 2 of a larger tool (see
-[`synthetic-benchmark.md`](synthetic-benchmark.md)); later parts add a generated synthetic dataset,
-a concurrency sweep, and write operations.
+single dedicated connection for honest single-flight latency. This is Part 3 of a larger tool (see
+the design epic [#200](https://github.com/FalkorDB/benchmark/issues/200)); it can now **generate its
+own reproducible dataset**, with a concurrency sweep and write operations still to come.
 
 Each operation is measured under two plan-cache conditions so you can see the cost of expression
 **compilation** separately from execution:
@@ -166,9 +166,10 @@ ops except `return_const` target the benchmark's `:User {id, age}` / `(:User)-[:
 schema (with an index on `:User(id)`). Most draw their parameters from `:User` ids sampled out of
 `--graph` (`shortest_path` needs two, `match_by_index`/`expand_*`/`aggregate_*`/`property_projection`
 one); `return_const` and `match_by_label_scan` need no seed ids (they vary a constant / a scan
-modulus). A reproducible generated dataset arrives in Part 3, so for now point `--graph` at a graph
-that already holds that schema. Every query projects **scalars** (never whole nodes) and is
-parameterized; the corpus is seeded (`--seed`) so the same seed yields an identical corpus.
+modulus). Either point `--graph` at a graph that already holds that schema, or let the tool
+**generate a reproducible one** (see [Generating a dataset](#generating-a-reproducible-dataset)
+below). Every query projects **scalars** (never whole nodes) and is parameterized; the corpus is
+seeded (`--seed`) so the same seed yields an identical corpus.
 
 | Operation | What it measures | Cypher (body) |
 |---|---|---|
@@ -236,6 +237,54 @@ The report's `meta.server` block records the FalkorDB module version, `redis_ver
 `CACHE_SIZE`, and the operator-supplied `--server-image` (FalkorDB does not expose a graph-module
 git SHA to clients, so the image digest is the reproducible build identity). A `:edge` image reports
 a `999999` placeholder version and the tool warns you to use a tagged image for comparisons.
+
+#### Generating a reproducible dataset
+
+Instead of measuring whatever graph the endpoint already holds, the tool can **generate its own**
+seeded `:User {id, age}` / `(:User)-[:Friend]->(:User)` graph so results are controlled and
+comparable across runs, machines and FalkorDB versions. Pass `--generate` with `--nodes`/`--edges`:
+
+```bash
+just synthetic-bench --graph bench --generate --nodes 100000 --edges 1000000 \
+    --op match_by_index,expand_hops_5,aggregate_count --samples 500 --seed 42
+```
+
+- `--generate` is **destructive**: it drops and rewrites `--graph` (so it's opt-in on the CLI and is
+  never authorized by a config file alone). It creates the `:User(id)` index, then bulk-loads the
+  nodes and edges via `UNWIND` batches.
+- The graph is generated deterministically from `--seed`: `edges` must be `≥ nodes` (a ring backbone
+  guarantees connectivity for expansions/shortest paths); `edges` counts relationships. The same
+  seed + knobs reproduce the exact same graph and the same operation corpora everywhere.
+- When a dataset is generated, the report's `meta.dataset` records `{seed, nodes, edges,
+  corpus_hash}`. **`corpus_hash`** (`sha256:…`) is a stable fingerprint of the whole workload — the
+  dataset knobs, the selected operations (in order) and their query bodies, and the sampled input
+  pools. **Only compare runs whose `corpus_hash` matches**; a different hash means a different
+  workload. (For an externally-supplied graph the tool can't fingerprint the data, so no
+  `corpus_hash` is emitted.)
+
+#### Config file (`synthetic-bench.toml`)
+
+For a growing knob set you can put the configuration in a `synthetic-bench.toml` file (auto-detected
+in the working directory, or pass `--config <path>`). Any CLI flag **overrides** the file, which in
+turn overrides the built-in defaults; generation still requires the explicit `--generate` flag.
+
+```toml
+# synthetic-bench.toml
+seed = 42
+nodes = 100000
+edges = 1000000
+operations = ["match_by_index", "expand_hops_5", "aggregate_count"]
+samples = 500
+cache = "both"           # cached | uncached | both
+# endpoint / graph / warmup / server_timeout_ms / client_deadline_ms / out are all optional
+```
+
+```bash
+just synthetic-bench --generate     # reads synthetic-bench.toml, builds the dataset, runs the ops
+```
+
+Unknown keys and misspelled operation names are rejected with a clear error, and operation names use
+the same spelling as `--op` (e.g. `expand_1_hop`).
 
 To run the integration test against a live server:
 

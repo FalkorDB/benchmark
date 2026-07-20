@@ -22,12 +22,20 @@ pub const CORPUS_SIZE: usize = 256;
 
 /// A minimal, seed-independent snapshot of the live graph that operation corpora draw from.
 ///
-/// Part 2 reads this from whatever graph the endpoint already has (Part 3 will generate a
-/// reproducible dataset). `node_ids` is sorted ascending for a stable, reproducible sample.
+/// In Part 2 this is sampled from whatever graph the endpoint already has; Part 3's generator
+/// ([`crate::synthetic::dataset`]) builds it directly from a seeded [`DatasetSpec`]. `node_ids` is
+/// sorted ascending for a stable sample; `connected_pairs` holds `(from, to)` pairs known to be
+/// reachable within the bounded `shortest_path` hop limit (empty when sampled from an external
+/// graph whose connectivity we can't assume).
+///
+/// [`DatasetSpec`]: crate::synthetic::dataset::DatasetSpec
 #[derive(Debug, Clone, Default)]
 pub struct DatasetHandle {
     /// A sample of existing `:User` ids, ascending. Empty if the graph has no `:User` nodes.
     pub node_ids: Vec<i32>,
+    /// Seeded `(from, to)` pairs guaranteed connected within the shortest-path hop bound. Empty for
+    /// externally-probed graphs (Part 2), populated by the Part 3 generator.
+    pub connected_pairs: Vec<(i32, i32)>,
 }
 
 impl DatasetHandle {
@@ -324,12 +332,30 @@ fn corpus_shortest_path(
     _worker: usize,
     _workers: usize,
 ) -> BenchmarkResult<Vec<Query>> {
-    let ids = &dataset.node_ids;
     // FalkorDB's shortestPath form is `WITH shortestPath(...) AS p` and requires a *directed*
     // pattern; bound the search to 6 hops and `coalesce` a missing path to -1 so an unreachable
     // pair returns a row instead of erroring.
     let text = "MATCH (s:User {id: $from}), (t:User {id: $to}) \
                 WITH shortestPath((s)-[:Friend*1..6]->(t)) AS p RETURN coalesce(length(p), -1) AS len";
+
+    // Prefer the generator's connected pairs (guaranteed to have a bounded path, so we measure real
+    // path-finding rather than mostly-unreachable misses). Fall back to two distinct sampled ids
+    // for an externally-probed graph whose connectivity we can't assume.
+    if !dataset.connected_pairs.is_empty() {
+        let pairs = &dataset.connected_pairs;
+        return Ok((0..CORPUS_SIZE)
+            .map(|_| {
+                let (from, to) = pairs[rng.random_range(0..pairs.len())];
+                QueryBuilder::new()
+                    .text(text)
+                    .param("from", from)
+                    .param("to", to)
+                    .build()
+            })
+            .collect());
+    }
+
+    let ids = &dataset.node_ids;
     Ok((0..CORPUS_SIZE)
         .map(|_| {
             // Pick two *distinct* indices (ids are unique) so `from != to`: choose `to` from the
@@ -389,9 +415,10 @@ mod tests {
 
     #[test]
     fn shortest_path_corpus_uses_two_distinct_params() {
-        // The tightest case: exactly two ids. Every entry must use both params with from != to.
+        // The tightest case: exactly two ids and no connected-pair pool (external-graph path).
         let ds = DatasetHandle {
             node_ids: vec![1, 2],
+            ..Default::default()
         };
         let mut rng = StdRng::seed_from_u64(9);
         let corpus = spec(OpName::ShortestPath)
@@ -406,6 +433,36 @@ mod tests {
                 format!("{from:?}"),
                 format!("{to:?}"),
                 "shortest_path endpoints must be distinct"
+            );
+        }
+    }
+
+    #[test]
+    fn shortest_path_prefers_connected_pairs_when_present() {
+        use crate::query::QueryParam;
+        // With a connected-pair pool, every query must draw its (from, to) from that pool.
+        let ds = DatasetHandle {
+            node_ids: (1..=1000).collect(),
+            connected_pairs: vec![(10, 11), (20, 25), (30, 33)],
+        };
+        let allowed: std::collections::HashSet<(i32, i32)> =
+            ds.connected_pairs.iter().copied().collect();
+        let mut rng = StdRng::seed_from_u64(5);
+        let corpus = spec(OpName::ShortestPath)
+            .build_corpus(&mut rng, &ds, 0, 1)
+            .expect("shortest_path corpus");
+        for q in &corpus {
+            let from = match q.params.get("from") {
+                Some(QueryParam::Integer(i)) => *i,
+                other => panic!("from not an integer: {other:?}"),
+            };
+            let to = match q.params.get("to") {
+                Some(QueryParam::Integer(i)) => *i,
+                other => panic!("to not an integer: {other:?}"),
+            };
+            assert!(
+                allowed.contains(&(from, to)),
+                "pair ({from},{to}) not from the connected-pair pool"
             );
         }
     }

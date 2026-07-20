@@ -13,6 +13,8 @@
 //! on a matched workload.
 
 pub mod catalog;
+pub mod config;
+pub mod dataset;
 pub mod op_runner;
 pub mod provenance;
 pub mod report;
@@ -24,13 +26,16 @@ use crate::falkor::falkor_endpoint_to_redis_url;
 use crate::queries_repository::QueryType;
 use crate::query::Query;
 use crate::synthetic::catalog::{spec, DatasetHandle, DatasetRequirement, OperationSpec, CORPUS_SIZE};
+use crate::synthetic::dataset::DatasetSpec;
 use crate::synthetic::op_runner::{run_and_drain, OpSample};
-use crate::synthetic::report::{Meta, OperationReport, Report};
+use crate::synthetic::report::{DatasetInfo, Meta, OperationReport, Report};
 use clap::ValueEnum;
 use falkordb::{ConnectionStrategy, FalkorClientBuilder};
 use futures::StreamExt;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
+use serde::de::{self, Deserializer};
+use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{info, warn};
@@ -38,8 +43,11 @@ use tracing::{info, warn};
 /// The default graph key the probe targets when `--graph` isn't given.
 pub const DEFAULT_GRAPH: &str = "falkor";
 
-/// How many `:User` ids to sample from the live graph to seed operation corpora.
+/// How many `:User` ids to sample from the live graph to seed operation corpora (Part 2 path).
 const DATASET_SAMPLE_SIZE: usize = 512;
+
+/// `UNWIND` batch size used when the generator bulk-loads a synthetic dataset.
+const DATASET_LOAD_BATCH: usize = 1000;
 
 /// The set of operations the probe can measure. `OpName` is the single source of truth: it's a
 /// clap `ValueEnum` (so `--op`, `--help` and shell completion list exactly these), and every
@@ -128,11 +136,37 @@ impl OpName {
             OpName::PropertyProjection => 0x5052_4f50_5f50_524a,
         }
     }
+
+    /// Parse an op from its canonical [`Self::as_str`] name (the CLI/config spelling).
+    pub fn from_cli_str(s: &str) -> Option<OpName> {
+        OpName::all().iter().copied().find(|op| op.as_str() == s)
+    }
+}
+
+/// Deserialize an `OpName` from its canonical [`OpName::as_str`] name, so a `synthetic-bench.toml`
+/// `operations = ["expand_1_hop", ...]` list uses the exact same spelling as the CLI (a plain
+/// `rename_all = "snake_case"` derive would produce `expand1_hop`).
+impl<'de> Deserialize<'de> for OpName {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        OpName::from_cli_str(&s).ok_or_else(|| {
+            let names: Vec<&str> = OpName::all().iter().map(|op| op.as_str()).collect();
+            de::Error::custom(format!(
+                "unknown operation '{}' (expected one of: {})",
+                s,
+                names.join(", ")
+            ))
+        })
+    }
 }
 
 /// Which plan-cache condition to measure an operation under.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, ValueEnum)]
 #[value(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum CacheSelection {
     /// Warm plan cache: identical query **body** every run (only the stripped `CYPHER <params>`
     /// prefix varies), so the plan is reused → execution only.
@@ -199,6 +233,9 @@ pub struct Config {
     pub cache: CacheSelection,
     pub out: String,
     pub server_image: Option<String>,
+    /// When `Some`, generate a reproducible synthetic dataset (Part 3) into `graph`, **replacing**
+    /// its contents, before measuring. Gated behind explicit CLI consent (`--generate`).
+    pub dataset: Option<DatasetSpec>,
 }
 
 impl Default for Config {
@@ -215,6 +252,7 @@ impl Default for Config {
             cache: CacheSelection::Both,
             out: "synthetic-report.json".to_string(),
             server_image: None,
+            dataset: None,
         }
     }
 }
@@ -313,17 +351,35 @@ pub async fn run(config: &Config) -> BenchmarkResult<Report> {
     }
 
     let client_deadline = Duration::from_millis(config.client_deadline_ms);
-    ensure_graph_exists(&mut graph, config, client_deadline).await?;
 
-    // Only sample the graph if some selected op needs seed ids (return_const / label scan don't),
-    // so a return_const-only run doesn't fail on a graph that has no :User data.
-    let needs_dataset = ops
-        .iter()
-        .any(|op| spec(*op).requirement != DatasetRequirement::None);
-    let dataset = if needs_dataset {
-        probe_dataset(&mut graph, config, client_deadline).await?
+    // Dataset: either generate a reproducible one (Part 3) or sample the live graph (Part 2).
+    let dataset = if let Some(spec) = &config.dataset {
+        // Generation replaces the target graph, so it's gated behind explicit CLI consent upstream.
+        let load_deadline = Duration::from_millis(config.client_deadline_ms.max(60_000));
+        info!(
+            "generating synthetic dataset (seed {}, nodes {}, edges {}) into graph '{}'",
+            spec.seed, spec.nodes, spec.edges, config.graph
+        );
+        dataset::generate_and_load(
+            &mut graph,
+            spec,
+            DATASET_LOAD_BATCH,
+            load_deadline,
+            config.server_timeout_ms,
+        )
+        .await?
     } else {
-        DatasetHandle::default()
+        ensure_graph_exists(&mut graph, config, client_deadline).await?;
+        // Only sample the graph if some selected op needs seed ids (return_const / label scan
+        // don't), so a return_const-only run doesn't fail on a graph that has no :User data.
+        let needs_dataset = ops
+            .iter()
+            .any(|op| spec(*op).requirement != DatasetRequirement::None);
+        if needs_dataset {
+            probe_dataset(&mut graph, config, client_deadline).await?
+        } else {
+            DatasetHandle::default()
+        }
     };
 
     // A fresh OS-random run_token per run keeps uncached-mode comments globally unique, so a small
@@ -331,15 +387,28 @@ pub async fn run(config: &Config) -> BenchmarkResult<Report> {
     let run_token = rand::random_range(0..=u64::MAX);
 
     let mut operations = BTreeMap::new();
+    // Capture each op's cached query body (in execution order) so the corpus_hash reflects the
+    // exact workload, not just the op names.
+    let mut op_bodies: Vec<(OpName, String)> = Vec::with_capacity(ops.len());
     for op in ops {
         let op_spec = spec(op);
         // Seed each op's corpus deterministically (same --seed ⇒ byte-identical corpus).
         let mut rng = StdRng::seed_from_u64(config.seed ^ op.salt());
         let corpus = op_spec.build_corpus(&mut rng, &dataset, 0, 1)?;
+        op_bodies.push((op, corpus[0].text.clone()));
         let op_report =
             measure_op(&mut graph, config, &op_spec, &corpus, run_token, client_deadline).await?;
         operations.insert(op.as_str().to_string(), op_report);
     }
+
+    // Record dataset provenance + the workload's corpus_hash only when we generated the data (we
+    // can't fingerprint an externally-supplied graph, so comparing hashes would be misleading).
+    let dataset_info = config.dataset.as_ref().map(|spec| DatasetInfo {
+        seed: spec.seed,
+        nodes: spec.nodes,
+        edges: spec.edges,
+        corpus_hash: dataset::corpus_hash(spec, config.seed, CORPUS_SIZE, &op_bodies, &dataset),
+    });
 
     Ok(Report {
         meta: Meta {
@@ -355,6 +424,7 @@ pub async fn run(config: &Config) -> BenchmarkResult<Report> {
             connection: "pool(size=1)".to_string(),
             started_at_epoch_secs,
             server,
+            dataset: dataset_info,
         },
         operations,
     })
@@ -458,7 +528,10 @@ async fn probe_dataset(
     let node_ids = tokio::time::timeout(client_deadline, collect)
         .await
         .map_err(|e| OtherError(format!("dataset probe timed out: {}", e)))??;
-    Ok(DatasetHandle { node_ids })
+    Ok(DatasetHandle {
+        node_ids,
+        ..Default::default()
+    })
 }
 
 /// Whether a query error string is FalkorDB's "graph key does not exist yet" condition.
@@ -610,12 +683,13 @@ pub async fn run_and_report(config: &Config) -> BenchmarkResult<()> {
     Ok(())
 }
 
-/// Execute a parsed `synthetic` subcommand. This keeps `main.rs` a thin shell: it maps the CLI
-/// [`crate::cli::SyntheticCommands`] onto a [`Config`] and runs the probe, or prints the operation
-/// catalog.
+/// Execute a parsed `synthetic` subcommand. This keeps `main.rs` a thin shell: it loads the
+/// optional `synthetic-bench.toml`, merges it with the CLI overrides into a [`Config`] and runs the
+/// probe, or prints the operation catalog.
 pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkResult<()> {
     match command {
         crate::cli::SyntheticCommands::Run {
+            config: config_path,
             endpoint,
             graph,
             ops,
@@ -628,28 +702,29 @@ pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkRes
             client_deadline_ms,
             out,
             server_image,
+            generate,
+            nodes,
+            edges,
         } => {
-            // --all-reads expands to every read op; otherwise use the (deduplicated) --op list.
-            let ops = if all_reads { OpName::all_reads() } else { ops };
-            if ops.is_empty() {
-                return Err(OtherError(
-                    "no operations selected — pass --op <name> (repeatable/comma-separated) or --all-reads"
-                        .to_string(),
-                ));
-            }
-            let config = Config {
+            let overrides = config::CliOverrides {
                 endpoint,
                 graph,
                 ops,
+                all_reads,
                 samples,
                 warmup,
                 seed,
+                cache,
                 server_timeout_ms,
                 client_deadline_ms,
-                cache,
                 out,
                 server_image,
+                generate,
+                nodes,
+                edges,
             };
+            let file = config::FileConfig::load(config_path.as_deref())?;
+            let config = config::resolve(overrides, file)?;
             run_and_report(&config).await
         }
         crate::cli::SyntheticCommands::ListOps => {
@@ -691,6 +766,7 @@ mod tests {
         // A dataset with enough ids for every op (incl. shortest_path's TwoIds).
         let dataset = DatasetHandle {
             node_ids: (1..=50).collect(),
+            ..Default::default()
         };
         for op in OpName::all() {
             let s = spec(*op);
@@ -715,6 +791,7 @@ mod tests {
         use crate::synthetic::catalog::{spec, DatasetHandle};
         let dataset = DatasetHandle {
             node_ids: (1..=100).collect(),
+            ..Default::default()
         };
         let build = |seed: u64| {
             let s = spec(OpName::MatchByIndex);
@@ -742,7 +819,10 @@ mod tests {
             .build_corpus(&mut StdRng::seed_from_u64(1), &empty, 0, 1)
             .is_err());
         // shortest_path needs two ids: one is not enough.
-        let one = DatasetHandle { node_ids: vec![1] };
+        let one = DatasetHandle {
+            node_ids: vec![1],
+            ..Default::default()
+        };
         assert!(spec(OpName::ShortestPath)
             .build_corpus(&mut StdRng::seed_from_u64(1), &one, 0, 1)
             .is_err());
@@ -837,38 +917,47 @@ mod tests {
     async fn run_command_run_maps_args_and_validates() {
         // Exercises the CLI→Config mapping without a server: samples==0 is rejected up front.
         let command = crate::cli::SyntheticCommands::Run {
-            endpoint: "falkor://127.0.0.1:6379".to_string(),
-            graph: "falkor".to_string(),
+            config: None,
+            endpoint: Some("falkor://127.0.0.1:6379".to_string()),
+            graph: Some("falkor".to_string()),
             ops: vec![OpName::ReturnConst],
             all_reads: false,
-            samples: 0,
-            warmup: 0,
-            seed: 0,
-            cache: CacheSelection::Both,
-            server_timeout_ms: 5_000,
-            client_deadline_ms: 6_000,
-            out: "unused.json".to_string(),
+            samples: Some(0),
+            warmup: Some(0),
+            seed: Some(0),
+            cache: Some(CacheSelection::Both),
+            server_timeout_ms: Some(5_000),
+            client_deadline_ms: Some(6_000),
+            out: Some("unused.json".to_string()),
             server_image: None,
+            generate: false,
+            nodes: None,
+            edges: None,
         };
         assert!(run_command(command).await.is_err());
     }
 
     #[tokio::test]
     async fn run_command_run_requires_an_op() {
-        // Neither --op nor --all-reads ⇒ a clear error before any network use.
+        // Neither --op nor --all-reads nor a config ⇒ a clear error before any network use.
+        // (Uses a config path that doesn't exist so no ambient synthetic-bench.toml is picked up.)
         let command = crate::cli::SyntheticCommands::Run {
-            endpoint: "falkor://127.0.0.1:6379".to_string(),
-            graph: "falkor".to_string(),
+            config: Some("/nonexistent/synthetic-bench.toml".to_string()),
+            endpoint: Some("falkor://127.0.0.1:6379".to_string()),
+            graph: Some("falkor".to_string()),
             ops: vec![],
             all_reads: false,
-            samples: 100,
-            warmup: 0,
-            seed: 0,
-            cache: CacheSelection::Both,
-            server_timeout_ms: 5_000,
-            client_deadline_ms: 6_000,
-            out: "unused.json".to_string(),
+            samples: Some(100),
+            warmup: Some(0),
+            seed: Some(0),
+            cache: Some(CacheSelection::Both),
+            server_timeout_ms: Some(5_000),
+            client_deadline_ms: Some(6_000),
+            out: Some("unused.json".to_string()),
             server_image: None,
+            generate: false,
+            nodes: None,
+            edges: None,
         };
         assert!(run_command(command).await.is_err());
     }
