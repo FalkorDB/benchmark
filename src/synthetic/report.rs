@@ -185,8 +185,13 @@ fn default_schema_version() -> u32 {
 /// The full report written to `synthetic-report.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Report {
-    /// On-disk schema version (see [`SCHEMA_VERSION`]); lets later tooling (baseline comparison)
-    /// detect an incompatible older report instead of silently misreading it.
+    /// On-disk schema version (see [`SCHEMA_VERSION`]). Because the `operations[].levels[]` shape
+    /// changed in v2, a v1 report that actually contains operation data will **not** deserialize
+    /// into this struct — so tooling cannot rely on parsing a full [`Report`] to detect an old
+    /// version. Instead, read `schema_version` from the raw JSON first (a tiny
+    /// `{ "schema_version": u32 }` probe) and branch/migrate on it; the `serde` default of `1` only
+    /// covers reports that predate the field on otherwise-compatible reads (e.g. metadata-only or
+    /// an empty `operations` map).
     #[serde(default = "default_schema_version")]
     pub schema_version: u32,
     pub meta: Meta,
