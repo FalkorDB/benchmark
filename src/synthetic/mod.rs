@@ -941,9 +941,16 @@ mod tests {
     async fn run_command_run_requires_an_op() {
         // Neither --op nor --all-reads nor any config `operations` ⇒ a clear error before any
         // network use. Point --config at a real but empty config file so the file *loads* fine and
-        // the failure comes from the no-operations validation (not a missing-file read error).
+        // the failure comes from the no-operations validation (not a missing-file read error). The
+        // filename mixes pid + a process-unique counter so parallel tests can't collide.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
         let dir = std::env::temp_dir();
-        let cfg_path = dir.join(format!("syn-noops-{}.toml", std::process::id()));
+        let cfg_path = dir.join(format!(
+            "syn-noops-{}-{}.toml",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
         std::fs::write(&cfg_path, "# empty config, no operations\n").unwrap();
         let command = crate::cli::SyntheticCommands::Run {
             config: Some(cfg_path.to_string_lossy().into_owned()),

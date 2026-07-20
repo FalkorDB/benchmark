@@ -299,12 +299,20 @@ mod tests {
 
     #[test]
     fn load_reads_explicit_path_and_errors_on_missing() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+
         // An explicitly-requested but missing path is an error.
         assert!(FileConfig::load(Some("/nonexistent/synthetic-bench.toml")).is_err());
 
-        // A real file loads.
+        // A real file loads. The name mixes pid + a process-unique counter so parallel tests can't
+        // collide on the same path.
         let dir = std::env::temp_dir();
-        let path = dir.join(format!("syn-load-{}.toml", std::process::id()));
+        let path = dir.join(format!(
+            "syn-load-{}-{}.toml",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
         std::fs::write(&path, "seed = 9\nnodes = 20\nedges = 100\n").unwrap();
         let cfg = FileConfig::load(Some(path.to_str().unwrap()))
             .unwrap()
