@@ -1,6 +1,6 @@
 use crate::queries_repository::QueryCoverageProfile;
 use crate::scenario::Vendor;
-use crate::synthetic::{CacheSelection, OpName};
+use crate::synthetic::{CacheSelection, OpName, DEFAULT_GRAPH};
 use clap::{Parser, Subcommand};
 use clap_complete::Shell;
 
@@ -260,7 +260,7 @@ pub enum SyntheticCommands {
         endpoint: String,
         #[arg(
             long,
-            default_value = "falkor",
+            default_value_t = DEFAULT_GRAPH.to_string(),
             help = "graph key to measure against"
         )]
         graph: String,
