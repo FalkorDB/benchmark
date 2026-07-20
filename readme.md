@@ -172,12 +172,12 @@ parameterized; the corpus is seeded (`--seed`) so the same seed yields an identi
 |---|---|---|
 | `return_const` | round-trip / parse+exec baseline (no dataset) | `RETURN $i AS x` |
 | `match_by_index` | point lookup on the `:User(id)` index | `MATCH (n:User {id: $id}) RETURN n.id` |
-| `match_by_label_scan` | full `:User` label scan (non-indexable predicate) | `MATCH (n:User) WHERE n.id % $modulus = 0 RETURN count(n)` |
+| `match_by_label_scan` | full `:User` label scan (non-indexable predicate) | `MATCH (n:User) WHERE n.id % $modulus = 0 RETURN count(n) AS c` |
 | `expand_1_hop` | 1-hop `:Friend` expansion | `MATCH (s:User {id: $id})-[:Friend]->(n:User) RETURN n.id` |
 | `expand_hops_5` | fixed 5-hop `:Friend` expansion | `MATCH (s:User {id: $id})-[:Friend*5..5]->(n:User) RETURN DISTINCT n.id LIMIT 100` |
-| `aggregate_count` | count a node's 1-hop neighbours | `MATCH (s:User {id: $id})-[:Friend]->(n:User) RETURN count(n)` |
+| `aggregate_count` | count a node's 1-hop neighbours | `MATCH (s:User {id: $id})-[:Friend]->(n:User) RETURN count(n) AS c` |
 | `aggregate_group` | group neighbours by age with counts | `MATCH (s:User {id: $id})-[:Friend]->(n:User) RETURN n.age AS age, count(*) AS c ORDER BY c DESC LIMIT 10` |
-| `shortest_path` | bounded shortest `:Friend` path between two nodes | `MATCH (s:User {id: $from}),(t:User {id: $to}) WITH shortestPath((s)-[:Friend*1..6]->(t)) AS p RETURN coalesce(length(p), -1)` |
+| `shortest_path` | bounded shortest `:Friend` path between two nodes | `MATCH (s:User {id: $from}),(t:User {id: $to}) WITH shortestPath((s)-[:Friend*1..6]->(t)) AS p RETURN coalesce(length(p), -1) AS len` |
 | `property_projection` | project scalar properties of an indexed node | `MATCH (n:User {id: $id}) RETURN n.id, n.age` |
 
 Because `OpName` is a clap `ValueEnum`, `--op <TAB>` completes the operation names once you've
