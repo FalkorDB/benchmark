@@ -38,6 +38,7 @@ Key recipes:
 | `just coverage-local` | Spin up a Docker FalkorDB, run `just coverage`, then tear it down. |
 | `just coverage-html` | Open a browsable HTML coverage report locally (also needs a FalkorDB). |
 | `just synthetic-bench` | Run the synthetic per-operation latency probe (needs a live FalkorDB). |
+| `just synthetic-bench-one <op>` | Sweep one operation over the concurrency curve (needs a live FalkorDB). |
 | `just synthetic-ops` | List the synthetic operations. |
 | `just synthetic-it` | Run the synthetic integration test against a live FalkorDB. |
 | `just fmt` / `just fmt-check` | Format Rust in place / check formatting. |

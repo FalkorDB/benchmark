@@ -25,6 +25,8 @@ pub struct FileConfig {
     pub operations: Option<Vec<OpName>>,
     pub samples: Option<usize>,
     pub warmup: Option<usize>,
+    /// Concurrency sweep (closed-loop worker counts). Defaults to the built-in sweep when omitted.
+    pub concurrency: Option<Vec<usize>>,
     pub seed: Option<u64>,
     pub cache: Option<CacheSelection>,
     pub server_timeout_ms: Option<i64>,
@@ -75,6 +77,8 @@ pub struct CliOverrides {
     pub all_reads: bool,
     pub samples: Option<usize>,
     pub warmup: Option<usize>,
+    /// Explicit `--concurrency` sweep (empty = not passed).
+    pub concurrency: Vec<usize>,
     pub seed: Option<u64>,
     pub cache: Option<CacheSelection>,
     pub server_timeout_ms: Option<i64>,
@@ -116,6 +120,16 @@ pub fn resolve(
 
     let seed = cli.seed.or(file.seed).unwrap_or(defaults.seed);
 
+    // Concurrency sweep: explicit `--concurrency` wins, else the file's, else the built-in sweep.
+    // Validation (non-empty, ≥1, dedup/sort) happens in `run()` via `normalize_concurrency`.
+    let concurrency = if !cli.concurrency.is_empty() {
+        cli.concurrency.clone()
+    } else {
+        file.concurrency
+            .clone()
+            .unwrap_or_else(|| defaults.concurrency.clone())
+    };
+
     let dataset = if cli.generate {
         let nodes = cli.nodes.or(file.nodes).ok_or_else(|| {
             OtherError("--generate needs --nodes (or `nodes` in the config)".to_string())
@@ -152,6 +166,7 @@ pub fn resolve(
         ops,
         samples: cli.samples.or(file.samples).unwrap_or(default_samples),
         warmup: cli.warmup.or(file.warmup).unwrap_or(default_warmup),
+        concurrency,
         seed,
         server_timeout_ms: cli
             .server_timeout_ms
@@ -201,10 +216,12 @@ mod tests {
             graph: Some("from_file".to_string()),
             operations: Some(vec![OpName::MatchByIndex]),
             cache: Some(CacheSelection::Cached),
+            concurrency: Some(vec![2, 8]),
             ..Default::default()
         };
         let cli = CliOverrides {
-            samples: Some(999), // overrides file's 50
+            samples: Some(999),          // overrides file's 50
+            concurrency: vec![1, 4, 16], // overrides file's [2, 8]
             ..Default::default()
         };
         let cfg = resolve(cli, Some(file)).unwrap();
@@ -213,6 +230,27 @@ mod tests {
         assert_eq!(cfg.warmup, Config::default().warmup); // default (unset anywhere)
         assert_eq!(cfg.ops, vec![OpName::MatchByIndex]); // from file
         assert_eq!(cfg.cache, CacheSelection::Cached);
+        assert_eq!(cfg.concurrency, vec![1, 4, 16]); // CLI wins over file
+    }
+
+    #[test]
+    fn concurrency_falls_back_to_file_then_default() {
+        // No CLI concurrency ⇒ the file's sweep is used.
+        let file = FileConfig {
+            operations: Some(vec![OpName::ReturnConst]),
+            concurrency: Some(vec![4, 32]),
+            ..Default::default()
+        };
+        let cfg = resolve(CliOverrides::default(), Some(file)).unwrap();
+        assert_eq!(cfg.concurrency, vec![4, 32]);
+
+        // Neither CLI nor file ⇒ the built-in default sweep.
+        let file2 = FileConfig {
+            operations: Some(vec![OpName::ReturnConst]),
+            ..Default::default()
+        };
+        let cfg2 = resolve(CliOverrides::default(), Some(file2)).unwrap();
+        assert_eq!(cfg2.concurrency, Config::default().concurrency);
     }
 
     #[test]
@@ -254,7 +292,10 @@ mod tests {
             ..Default::default()
         };
         let cfg = resolve(CliOverrides::default(), Some(file.clone())).unwrap();
-        assert!(cfg.dataset.is_none(), "file alone must not authorize generation");
+        assert!(
+            cfg.dataset.is_none(),
+            "file alone must not authorize generation"
+        );
 
         // --generate + file dimensions ⇒ a validated DatasetSpec.
         let cli = CliOverrides {

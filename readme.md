@@ -161,10 +161,12 @@ workflow. Please cover new code with tests and keep coverage high — **patch co
 Measures a curated suite of **read operations in isolation** — one at a time, selectable — capturing
 on every invocation both the **server time** (FalkorDB's reported internal execution time) and the
 **total time** (end-to-end client round-trip), then summarizing them with severe-outlier removal
-(Tukey fences, like Criterion.rs) and writing a JSON report with one block per operation. It uses a
-single dedicated connection for honest single-flight latency. This is Part 3 of a larger tool (see
-the design epic [#200](https://github.com/FalkorDB/benchmark/issues/200)); it can now **generate its
-own reproducible dataset**, with a concurrency sweep and write operations still to come.
+(Tukey fences, like Criterion.rs) and writing a JSON report with one block per operation. For each
+operation it sweeps a list of **concurrency levels**, so the report traces how latency (including the
+p99 tail) changes as achieved throughput rises — the latency-vs-throughput curve and its saturation
+"knee". This is Part 4 of a larger tool (see the design epic
+[#200](https://github.com/FalkorDB/benchmark/issues/200)); it can **generate its own reproducible
+dataset** and sweep concurrency, with write operations still to come.
 
 Each operation is measured under two plan-cache conditions so you can see the cost of expression
 **compilation** separately from execution:
@@ -177,6 +179,24 @@ Each operation is measured under two plan-cache conditions so you can see the co
 is load-time only, so the uncached condition is produced client-side and verified via the response's
 `cached_execution` flag; the server's actual `CACHE_SIZE` is recorded in the report.) Use `--cache
 cached|uncached|both` (default `both`).
+
+#### Concurrency sweep (latency vs throughput)
+
+Every operation is measured at each level of a configurable **concurrency sweep** (`--concurrency`,
+default `1,2,4,8,16,32`). Each level `C` runs a **closed-loop** engine: `C` worker tasks, each with
+its own dedicated connection, fire one query, await it to completion (row draining included), then
+immediately fire the next — so there are always exactly `C` requests in flight. After a discarded
+warm-up window, every worker measures in a shared window; the level reports the pooled latency
+percentiles (p50/p90/p95/p99) and the **achieved throughput** (`completed ÷ window`, ops/sec).
+
+Because a new request is issued only after the previous one *completes*, the reported throughput is
+**achieved, not offered** — it can never exceed the server's own service rate, so it is immune to
+[coordinated omission](https://www.scylladb.com/2021/04/22/on-coordinated-omission/) but also can't
+model a fixed external arrival rate (open-loop / arrival-rate load is future work). Read the curve by
+following latency as `C` (and throughput) rise: throughput climbs until the server saturates, after
+which extra concurrency mostly inflates the tail — the highest-throughput level is flagged as the
+`<- knee`. A single-level sweep (`--concurrency 1`) reproduces the classic single-connection latency
+measurement plus its achieved throughput.
 
 #### Operation catalog
 
@@ -222,30 +242,35 @@ just synthetic-ops
 IMAGE=$(docker inspect --format '{{index .RepoDigests 0}}' falkordb/falkordb:latest)
 just synthetic-bench --endpoint falkor://127.0.0.1:6379 --graph main \
     --op match_by_index,expand_1_hop,aggregate_count --samples 500 --warmup 100 \
-    --cache both --seed 42 --server-image "$IMAGE" --out synthetic-report.json
+    --concurrency 1,4,16,32 --cache both --seed 42 --server-image "$IMAGE" \
+    --out synthetic-report.json
 # ...or measure the whole read catalog at once:
 just synthetic-bench --graph main --all-reads --samples 500
+# ...or sweep a single operation (uses the default 1,2,4,8,16,32 concurrency sweep):
+just synthetic-bench-one match_by_index
 ```
 
-Sample output (one block per selected op):
+Sample output (one block per selected op; one table row per concurrency level, per cache mode):
 
 ```text
-synthetic benchmark — endpoint falkor://127.0.0.1:6379  graph main  samples 500  warmup 100  seed 42  connection pool(size=1)
+synthetic benchmark — endpoint falkor://127.0.0.1:6379  graph main  samples 500  warmup 100  concurrency [1,4,16,32]  seed 42  connection pool(size=1) per worker
 server — falkordb module ver 4.20.1  redis 8.6.3  CACHE_SIZE 25
 server image: falkordb/falkordb@sha256:9042fdc4...
 
 match_by_index
   [cached — plan reused, execution only]
-    server_ms  median 0.033  mean 0.034  p99 0.059  (n=487, removed 13)
-    total_ms   median 0.427  mean 0.440  p99 0.596  (n=487, removed 13)
-    non_internal_ms (paired total-server)  median 0.394
-    cached_execution=false: 0.0%  (unknown 0)
+    C    throughput(ops/s)   server p50/p90/p99        total p50/p90/p99         miss%
+    1              2950     0.081 / 0.150 / 0.200     0.330 / 0.500 / 0.900     0.0
+    4             11800     0.090 / 0.170 / 0.260     0.340 / 0.520 / 1.100     0.0
+   16             30400     0.180 / 0.900 / 1.900     0.600 / 2.100 / 4.200     0.0
+   32             41200     0.350 / 1.700 / 3.400     0.780 / 3.900 / 7.900     0.0  <- knee
   [uncached — plan-cache miss each run, execution + compilation]
-    server_ms  median 0.058  mean 0.063  p99 0.093  (n=497, removed 3)
-    total_ms   median 0.452  mean 0.461  p99 0.604  (n=497, removed 3)
-    non_internal_ms (paired total-server)  median 0.391
-    cached_execution=false: 100.0%  (unknown 0)
-  compilation_ms (median uncached-cached server time)  0.025
+    C    throughput(ops/s)   server p50/p90/p99        total p50/p90/p99         miss%
+    1              2100     0.106 / 0.180 / 0.240     0.360 / 0.540 / 0.960   100.0
+   ...
+  compilation_ms (median uncached-cached server time) by level:
+    C=1    0.025
+    C=32   0.040
 
 expand_1_hop
   ...
@@ -294,6 +319,7 @@ nodes = 100000
 edges = 1000000
 operations = ["match_by_index", "expand_hops_5", "aggregate_count"]
 samples = 500
+concurrency = [1, 4, 16, 32]   # closed-loop worker counts to sweep (default 1,2,4,8,16,32)
 cache = "both"           # cached | uncached | both
 # endpoint / graph / warmup / server_timeout_ms / client_deadline_ms / out are all optional
 ```

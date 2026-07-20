@@ -9,6 +9,7 @@
 use benchmark::queries_repository::QueryType;
 use benchmark::synthetic::dataset::DatasetSpec;
 use benchmark::synthetic::op_runner::run_and_drain;
+use benchmark::synthetic::report::{LevelReport, OperationReport};
 use benchmark::synthetic::{
     list_ops, open_graph, run, run_and_report, CacheSelection, Config, OpName,
 };
@@ -27,6 +28,7 @@ fn base_config(graph: &str) -> Config {
         ops: vec![OpName::ReturnConst],
         samples: 300,
         warmup: 50,
+        concurrency: vec![1],
         seed: 1,
         server_timeout_ms: 5_000,
         client_deadline_ms: 6_000,
@@ -35,6 +37,18 @@ fn base_config(graph: &str) -> Config {
         server_image: None,
         dataset: None,
     }
+}
+
+/// Assert an operation was measured at exactly one concurrency level (the single-level default the
+/// non-sweep integration tests use) and return that [`LevelReport`].
+fn only_level(op: &OperationReport) -> &LevelReport {
+    assert_eq!(
+        op.levels.len(),
+        1,
+        "expected exactly one concurrency level, got {}",
+        op.levels.len()
+    );
+    &op.levels[0]
 }
 
 /// Drop `graph` if it exists (ignore "missing key" errors).
@@ -47,9 +61,14 @@ async fn drop_graph(graph: &str) {
 /// Seed a tiny `:User {id, age}` graph wired with `:Friend` edges (a `+1` ring plus longer skip
 /// edges) so the read primitives (index lookup, expansion, aggregation, shortest path) have data to
 /// touch.
-async fn seed_user_graph(graph: &str, users: i64) {
+async fn seed_user_graph(
+    graph: &str,
+    users: i64,
+) {
     drop_graph(graph).await;
-    let mut g = open_graph(&endpoint(), graph).await.expect("open seed graph");
+    let mut g = open_graph(&endpoint(), graph)
+        .await
+        .expect("open seed graph");
     // Any query instantiates the (freshly dropped) graph key; index first so lookups use it.
     g.query("CREATE INDEX FOR (u:User) ON (u.id)")
         .execute()
@@ -93,12 +112,22 @@ async fn probe_produces_valid_report() {
         .operations
         .get("return_const")
         .expect("report should contain the measured op");
-    let cached = op.cached.as_ref().expect("cached metrics present");
-    let uncached = op.uncached.as_ref().expect("uncached metrics present");
+    let lvl = only_level(op);
+    let cached_lm = lvl.cached.as_ref().expect("cached metrics present");
+    let uncached_lm = lvl.uncached.as_ref().expect("uncached metrics present");
+    let cached = &cached_lm.metrics;
+    let uncached = &uncached_lm.metrics;
 
     // Every sample is accounted for (retained + severe-outliers removed) in each mode.
     assert_eq!(cached.server_ms.n + cached.server_ms.removed, samples);
     assert_eq!(uncached.server_ms.n + uncached.server_ms.removed, samples);
+
+    // The single-connection level still records an achieved throughput.
+    assert!(
+        cached_lm.throughput_ops_per_sec > 0.0,
+        "throughput should be positive, got {}",
+        cached_lm.throughput_ops_per_sec
+    );
 
     // Positive server + total time, and total >= server within each mode.
     assert!(cached.server_ms.median > 0.0);
@@ -111,7 +140,7 @@ async fn probe_produces_valid_report() {
         "uncached mode should mostly miss the plan cache (got {})",
         uncached.cached_false_rate
     );
-    assert!(op.compilation_ms_median.is_some());
+    assert!(lvl.compilation_ms_median.is_some());
 
     // Provenance + run metadata were captured.
     assert!(report.meta.server.redis_version.is_some());
@@ -148,10 +177,12 @@ async fn read_catalog_runs_against_seeded_graph() {
             .operations
             .get(op.as_str())
             .unwrap_or_else(|| panic!("report missing op {}", op.as_str()));
-        let cached = r
+        let lvl = only_level(r);
+        let cached = &lvl
             .cached
             .as_ref()
-            .unwrap_or_else(|| panic!("op {} missing cached metrics", op.as_str()));
+            .unwrap_or_else(|| panic!("op {} missing cached metrics", op.as_str()))
+            .metrics;
         assert!(cached.server_ms.n > 0, "op {} has no samples", op.as_str());
         assert!(
             cached.server_ms.median >= 0.0 && cached.server_ms.median.is_finite(),
@@ -165,7 +196,7 @@ async fn read_catalog_runs_against_seeded_graph() {
             op.as_str()
         );
         assert!(
-            r.compilation_ms_median.is_some(),
+            lvl.compilation_ms_median.is_some(),
             "op {} lacks compilation",
             op.as_str()
         );
@@ -223,6 +254,8 @@ async fn run_and_report_writes_json_file() {
 
     let written = std::fs::read_to_string(&out).expect("report file should exist");
     assert!(written.contains("return_const"));
+    assert!(written.contains("\"levels\""));
+    assert!(written.contains("\"throughput_ops_per_sec\""));
     assert!(written.contains("\"cached\""));
     assert!(written.contains("\"uncached\""));
     assert!(written.contains("\"corpus_size\""));
@@ -246,9 +279,10 @@ async fn cached_only_and_uncached_only_modes() {
     .await
     .expect("cached-only run should succeed");
     let cop = cached_report.operations.get("return_const").unwrap();
-    assert!(cop.cached.is_some());
-    assert!(cop.uncached.is_none());
-    assert!(cop.compilation_ms_median.is_none());
+    let clvl = only_level(cop);
+    assert!(clvl.cached.is_some());
+    assert!(clvl.uncached.is_none());
+    assert!(clvl.compilation_ms_median.is_none());
 
     // Uncached-only: no cached block, and it misses the plan cache.
     let uncached_report = run(&Config {
@@ -261,8 +295,9 @@ async fn cached_only_and_uncached_only_modes() {
     .await
     .expect("uncached-only run should succeed");
     let uop = uncached_report.operations.get("return_const").unwrap();
-    assert!(uop.cached.is_none());
-    let uncached = uop.uncached.as_ref().unwrap();
+    let ulvl = only_level(uop);
+    assert!(ulvl.cached.is_none());
+    let uncached = &ulvl.uncached.as_ref().unwrap().metrics;
     assert!(uncached.cached_false_rate > 0.5);
     drop_graph(graph).await;
 }
@@ -306,7 +341,7 @@ async fn warmup_zero_still_primes_cached_plan() {
     .await
     .expect("warmup=0 cached run should succeed");
     let op = report.operations.get("return_const").unwrap();
-    let cached = op.cached.as_ref().unwrap();
+    let cached = &only_level(op).cached.as_ref().unwrap().metrics;
     assert_eq!(cached.server_ms.n + cached.server_ms.removed, 40);
     // The pre-measurement prime means every measured sample is a cache hit.
     assert_eq!(
@@ -474,7 +509,7 @@ async fn generated_dataset_has_exact_counts_index_and_hash() {
 
     // shortest_path produced measured samples (the connected-pair pool guarantees a bounded path).
     let op = report.operations.get("shortest_path").unwrap();
-    assert!(op.cached.as_ref().unwrap().server_ms.n > 0);
+    assert!(only_level(op).cached.as_ref().unwrap().metrics.server_ms.n > 0);
     drop_graph(graph).await;
 }
 
@@ -506,13 +541,79 @@ async fn generation_is_reproducible_across_runs() {
     drop_graph(graph).await;
 }
 
+#[tokio::test]
+#[ignore = "requires a running FalkorDB server"]
+async fn concurrency_sweep_produces_per_level_throughput_and_percentiles() {
+    // Sweep one op over [1, 4, 8]; every level must report achieved throughput and a full set of
+    // percentiles, and throughput must rise with concurrency somewhere (monotonic-ish up) — the
+    // whole point of the latency-vs-throughput curve.
+    let graph = "syn_it_sweep";
+    seed_user_graph(graph, 200).await;
+
+    let report = run(&Config {
+        graph: graph.to_string(),
+        ops: vec![OpName::MatchByIndex],
+        samples: 120,
+        warmup: 20,
+        concurrency: vec![1, 4, 8],
+        cache: CacheSelection::Cached,
+        ..base_config(graph)
+    })
+    .await
+    .expect("concurrency sweep should succeed");
+
+    let op = report.operations.get("match_by_index").expect("op present");
+    assert_eq!(
+        op.levels.iter().map(|l| l.concurrency).collect::<Vec<_>>(),
+        vec![1, 4, 8],
+        "levels are the swept concurrencies, sorted ascending"
+    );
+    assert_eq!(report.meta.concurrency, vec![1, 4, 8]);
+
+    let mut throughputs = Vec::new();
+    for lvl in &op.levels {
+        let m = lvl
+            .cached
+            .as_ref()
+            .unwrap_or_else(|| panic!("level C={} missing cached metrics", lvl.concurrency));
+        assert!(
+            m.throughput_ops_per_sec > 0.0,
+            "level C={} has non-positive throughput {}",
+            lvl.concurrency,
+            m.throughput_ops_per_sec
+        );
+        // Every level carries a full percentile set, correctly ordered.
+        let s = &m.metrics.server_ms;
+        assert!(s.n > 0, "level C={} has no samples", lvl.concurrency);
+        assert!(
+            s.median <= s.p90 && s.p90 <= s.p95 && s.p95 <= s.p99 && s.p99.is_finite(),
+            "level C={} percentiles must be ordered p50<=p90<=p95<=p99 (got {:?})",
+            lvl.concurrency,
+            (s.median, s.p90, s.p95, s.p99)
+        );
+        throughputs.push(m.throughput_ops_per_sec);
+    }
+
+    // Closed-loop achieved throughput should climb with concurrency at least somewhere before it
+    // saturates (a loose, non-flaky check for "monotonic-ish up").
+    assert!(
+        throughputs[1..].iter().any(|&t| t > throughputs[0]),
+        "throughput should rise above the C=1 baseline as concurrency grows: {throughputs:?}"
+    );
+    drop_graph(graph).await;
+}
+
 /// Read a single-row `RETURN count(...)`/scalar i64.
 async fn scalar_i64(
     graph: &mut falkordb::AsyncGraph,
     cypher: &str,
 ) -> i64 {
     use futures::StreamExt;
-    let mut result = graph.ro_query(cypher).execute().await.expect("scalar query");
+    let mut result = graph
+        .ro_query(cypher)
+        .execute()
+        .await
+        .expect("scalar query");
     match result.data.next().await {
         Some(Ok(row)) => row.try_get_at::<i64>(0).expect("i64 scalar"),
         other => panic!("unexpected scalar response: {other:?}"),

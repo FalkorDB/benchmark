@@ -140,6 +140,11 @@ synthetic-bench *args:
     if [ "${1:-}" = "--" ]; then shift; fi
     cargo run --release --bin benchmark -- synthetic run "$@"
 
+# Sweep a single operation over the concurrency curve (default 1,2,4,8,16,32); extra flags forward
+# to `synthetic run`, e.g. `just synthetic-bench-one match_by_index --concurrency 1,8,32`.
+synthetic-bench-one op *args:
+    cargo run --release --bin benchmark -- synthetic run --op {{op}} {{args}}
+
 # List the available synthetic operations.
 synthetic-ops:
     cargo run --quiet --bin benchmark -- synthetic list-ops

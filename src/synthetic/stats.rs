@@ -1,6 +1,6 @@
 //! Robust latency statistics for the synthetic benchmark.
 //!
-//! Computes the summary each measured metric reports (min/mean/median/p90/p99/std-dev) after
+//! Computes the summary each measured metric reports (min/mean/median/p90/p95/p99/std-dev) after
 //! removing *severe* outliers with Tukey fences (values outside `[Q1 - 3·IQR, Q3 + 3·IQR]`), the
 //! same idea Criterion.rs uses to keep a few pathological samples from dominating an estimate.
 
@@ -18,6 +18,7 @@ pub struct Summary {
     pub mean: f64,
     pub median: f64,
     pub p90: f64,
+    pub p95: f64,
     pub p99: f64,
     pub max: f64,
     /// Population standard deviation of the retained samples.
@@ -96,6 +97,7 @@ pub fn summarize_kept(
         mean,
         median: percentile_sorted(&vals, 50.0),
         p90: percentile_sorted(&vals, 90.0),
+        p95: percentile_sorted(&vals, 95.0),
         p99: percentile_sorted(&vals, 99.0),
         max: vals[n - 1],
         stddev: variance.sqrt(),
@@ -109,7 +111,11 @@ pub fn summarize(samples: &[f64]) -> Option<Summary> {
     let finite: Vec<f64> = samples.iter().copied().filter(|v| v.is_finite()).collect();
     match severe_fence(&finite) {
         Some((lo, hi)) => {
-            let kept: Vec<f64> = finite.iter().copied().filter(|&v| v >= lo && v <= hi).collect();
+            let kept: Vec<f64> = finite
+                .iter()
+                .copied()
+                .filter(|&v| v >= lo && v <= hi)
+                .collect();
             let removed = finite.len() - kept.len();
             summarize_kept(&kept, removed)
         }
@@ -137,6 +143,8 @@ mod tests {
         assert!(approx(percentile_sorted(&v, 50.0), 5.5));
         // p90 interpolates between the 9th and 10th values: 9 + 0.1*(10-9) = 9.1.
         assert!(approx(percentile_sorted(&v, 90.0), 9.1));
+        // p95 interpolates 9 + 0.55*(10-9) = 9.55.
+        assert!(approx(percentile_sorted(&v, 95.0), 9.55));
     }
 
     #[test]
