@@ -10,6 +10,7 @@
 
 use crate::error::BenchmarkError::OtherError;
 use crate::error::BenchmarkResult;
+use crate::query::Query;
 use crate::synthetic::catalog::DatasetHandle;
 use crate::synthetic::OpName;
 use falkordb::AsyncGraph;
@@ -20,7 +21,7 @@ use std::time::Duration;
 
 /// Bumped whenever the generator algorithm or the operation catalog's query bodies change, so a
 /// [`corpus_hash`] from an older build never compares equal to a newer, differently-generated one.
-pub const GENERATOR_VERSION: &str = "synthbench/v1";
+pub const GENERATOR_VERSION: &str = "synthbench/v2";
 
 /// Max distinct `:User` ids sampled into the [`DatasetHandle`] id pool.
 const POOL_IDS: usize = 4096;
@@ -48,12 +49,16 @@ pub fn splitmix64(mut x: u64) -> u64 {
 }
 
 /// One reproducible draw keyed by `(seed, domain, index)`.
+///
+/// Non-commutative in `(domain, index)`: the domain keys an independent stream and the index
+/// offsets it, so two different domains can't alias by swapping roles with an index.
 fn mix(
     seed: u64,
     domain: u64,
     index: u64,
 ) -> u64 {
-    splitmix64(seed ^ splitmix64(domain) ^ splitmix64(index))
+    let keyed = splitmix64(seed ^ domain);
+    splitmix64(keyed.wrapping_add(index.wrapping_mul(0x9E37_79B9_7F4A_7C15)))
 }
 
 /// The knobs that fully determine a synthetic dataset.
@@ -124,25 +129,32 @@ impl DatasetSpec {
     }
 
     /// A deterministic, sorted sample of up to [`POOL_IDS`] distinct `:User` ids.
+    ///
+    /// Uses Floyd's algorithm so it always returns exactly `min(nodes, POOL_IDS)` *distinct* ids
+    /// (no rejection-sampling under-fill), deterministically from the seed.
     fn node_id_pool(&self) -> Vec<i32> {
-        if self.nodes <= POOL_IDS {
-            return (1..=self.nodes as i32).collect();
+        let n = self.nodes;
+        let k = POOL_IDS.min(n);
+        if n <= POOL_IDS {
+            return (1..=n as i32).collect();
         }
-        let n = self.nodes as u64;
-        let mut ids = BTreeSet::new();
-        let mut i: u64 = 0;
-        // Bounded attempts; distinct fills quickly since nodes > POOL_IDS.
-        let cap = (POOL_IDS as u64) * 8;
-        while ids.len() < POOL_IDS && i < cap {
-            ids.insert(1 + (mix(self.seed, DOMAIN_POOL_ID, i) % n) as i32);
-            i += 1;
+        // Floyd's algorithm: pick k distinct values from [0, n) in O(k), then map to 1-based ids.
+        let mut chosen = BTreeSet::<u64>::new();
+        for (step, j) in ((n - k) as u64..n as u64).enumerate() {
+            let t = mix(self.seed, DOMAIN_POOL_ID, step as u64) % (j + 1);
+            let pick = if chosen.contains(&t) { j } else { t };
+            chosen.insert(pick);
         }
-        ids.into_iter().collect()
+        chosen.into_iter().map(|v| (v + 1) as i32).collect()
     }
 
     /// A deterministic sample of up to [`POOL_PAIRS`] `(from, to)` pairs that are guaranteed
     /// reachable within `MAX_PAIR_HOPS` directed ring hops (so bounded shortest-path finds a path).
+    /// Returns empty for a degenerate (`nodes < 2`) spec so [`Self::handle`] never panics.
     fn connected_pair_pool(&self) -> Vec<(i32, i32)> {
+        if self.nodes < 2 {
+            return Vec::new();
+        }
         let n = self.nodes as u64;
         let max_k = MAX_PAIR_HOPS.min(self.nodes - 1) as u64; // >= 1 since nodes >= 2
         let count = POOL_PAIRS.min(self.nodes);
@@ -156,7 +168,8 @@ impl DatasetSpec {
             .collect()
     }
 
-    /// Build the seeded [`DatasetHandle`] pools this spec implies (no server access).
+    /// Build the seeded [`DatasetHandle`] pools this spec implies (no server access). Safe for any
+    /// spec: a degenerate (`nodes < 2`) spec yields empty pools rather than panicking.
     pub fn handle(&self) -> DatasetHandle {
         DatasetHandle {
             node_ids: self.node_id_pool(),
@@ -165,15 +178,28 @@ impl DatasetSpec {
     }
 }
 
+/// A canonical fingerprint of an operation's fully-rendered parameter corpus: a SHA-256 over every
+/// query's `CYPHER <params> <body>` string, in order. Because it captures the actual parameter
+/// *values* (not just the query body), a change in how the corpus is sampled — e.g. a different RNG
+/// — changes the fingerprint, so [`corpus_hash`] can never equate two genuinely different workloads.
+pub fn corpus_fingerprint(corpus: &[Query]) -> String {
+    let mut h = Sha256::new();
+    for q in corpus {
+        h.update(q.to_cypher().as_bytes());
+        h.update(b"\n");
+    }
+    format!("{:x}", h.finalize())
+}
+
 /// Compute the workload's `corpus_hash`: an algorithm-tagged SHA-256 over everything that defines
 /// the measured workload — generator version, dataset knobs, the corpus seed & size, each selected
-/// operation (in execution order) with its cached query body, and a digest of the sampled pools.
-/// Two runs are only comparable when their `corpus_hash` matches.
+/// operation (in execution order) paired with a [`corpus_fingerprint`] of its rendered queries, and
+/// a digest of the sampled pools. Two runs are only comparable when their `corpus_hash` matches.
 pub fn corpus_hash(
     spec: &DatasetSpec,
     corpus_seed: u64,
     corpus_size: usize,
-    op_bodies: &[(OpName, String)],
+    op_fingerprints: &[(OpName, String)],
     handle: &DatasetHandle,
 ) -> String {
     let mut h = Sha256::new();
@@ -182,8 +208,8 @@ pub fn corpus_hash(
         "\ndataset:seed={},nodes={},edges={}\ncorpus:seed={},size={}\n",
         spec.seed, spec.nodes, spec.edges, corpus_seed, corpus_size
     ));
-    for (op, body) in op_bodies {
-        h.update(format!("op={}\nbody={}\n", op.as_str(), body));
+    for (op, fp) in op_fingerprints {
+        h.update(format!("op={}\ncorpus={}\n", op.as_str(), fp));
     }
     // Pool digest guards against a generator change that alters sampled inputs without a version
     // bump.
@@ -213,9 +239,30 @@ pub async fn generate_and_load(
         return Err(OtherError("dataset batch_size must be greater than 0".to_string()));
     }
 
-    // Clean slate: drop the graph key (ignore "doesn't exist yet"), then (re)create the id index
-    // before any data so every insert maintains it and it's operational throughout.
-    let _ = graph.delete().await;
+    // Clean slate: drop the graph key so we don't load on top of stale data. A "graph doesn't
+    // exist yet" error is expected and ignored; anything else (auth/network/wrong type) must abort
+    // rather than silently loading into a graph we couldn't clear. Bounded by the load deadline.
+    match tokio::time::timeout(load_deadline, graph.delete()).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => {
+            let msg = format!("{:?}", e);
+            if !crate::synthetic::is_empty_graph_key(&msg) {
+                return Err(OtherError(format!(
+                    "failed to drop graph before generating dataset: {}",
+                    msg
+                )));
+            }
+        }
+        Err(e) => {
+            return Err(OtherError(format!(
+                "dropping graph before generating dataset timed out: {}",
+                e
+            )))
+        }
+    }
+
+    // (Re)create the id index before any data so every insert maintains it and it's operational
+    // throughout.
     exec_drain(
         graph,
         "CREATE INDEX FOR (u:User) ON (u.id)",
@@ -469,6 +516,51 @@ mod tests {
     }
 
     #[test]
+    fn handle_is_panic_free_for_degenerate_specs() {
+        // handle() must not panic even for invalid specs (validate() gates the real path, but
+        // direct callers shouldn't hit a modulo-by-zero / underflow).
+        for nodes in [0usize, 1] {
+            let h = DatasetSpec {
+                seed: 1,
+                nodes,
+                edges: 0,
+            }
+            .handle();
+            assert!(h.connected_pairs.is_empty());
+        }
+    }
+
+    #[test]
+    fn corpus_fingerprint_is_deterministic_and_param_sensitive() {
+        use crate::query::QueryBuilder;
+        let q = |id: i32| {
+            QueryBuilder::new()
+                .text("MATCH (n:User {id: $id}) RETURN n.id")
+                .param("id", id)
+                .build()
+        };
+        let a = vec![q(1), q(2), q(3)];
+        let b = vec![q(1), q(2), q(3)];
+        let c = vec![q(1), q(2), q(4)]; // one different parameter value
+        assert_eq!(corpus_fingerprint(&a), corpus_fingerprint(&b));
+        assert_ne!(corpus_fingerprint(&a), corpus_fingerprint(&c));
+    }
+
+    #[test]
+    fn node_pool_fills_exactly_when_nodes_just_exceed_cap() {
+        // The Floyd sampler returns exactly POOL_IDS distinct ids even when nodes barely exceeds it
+        // (the old rejection sampler could under-fill here).
+        let h = DatasetSpec {
+            seed: 3,
+            nodes: POOL_IDS + 1,
+            edges: POOL_IDS + 1,
+        }
+        .handle();
+        assert_eq!(h.node_ids.len(), POOL_IDS);
+        assert!(h.node_ids.windows(2).all(|w| w[0] < w[1])); // distinct + sorted
+    }
+
+    #[test]
     fn corpus_hash_golden_value_is_pinned() {
         // A fixed config must always hash to the same value, on any machine/toolchain — this is the
         // cross-process/version stability the comparability gate depends on. If this ever changes,
@@ -484,7 +576,7 @@ mod tests {
         )];
         assert_eq!(
             corpus_hash(&s, 0, 256, &bodies, &s.handle()),
-            "sha256:89279c54669ecb881391168b6b67e4b51af13c1a4eb0331fbccd0938527e43ee"
+            "sha256:daa1d6d9810babea1faf1871e1884b8803e8b83259430ddecfc0a926bddbbb28"
         );
     }
 }

@@ -387,15 +387,15 @@ pub async fn run(config: &Config) -> BenchmarkResult<Report> {
     let run_token = rand::random_range(0..=u64::MAX);
 
     let mut operations = BTreeMap::new();
-    // Capture each op's cached query body (in execution order) so the corpus_hash reflects the
-    // exact workload, not just the op names.
-    let mut op_bodies: Vec<(OpName, String)> = Vec::with_capacity(ops.len());
+    // Capture each op's corpus fingerprint (in execution order) so the corpus_hash reflects the
+    // exact rendered workload — parameter values included — not just the op names.
+    let mut op_fingerprints: Vec<(OpName, String)> = Vec::with_capacity(ops.len());
     for op in ops {
         let op_spec = spec(op);
         // Seed each op's corpus deterministically (same --seed ⇒ byte-identical corpus).
         let mut rng = StdRng::seed_from_u64(config.seed ^ op.salt());
         let corpus = op_spec.build_corpus(&mut rng, &dataset, 0, 1)?;
-        op_bodies.push((op, corpus[0].text.clone()));
+        op_fingerprints.push((op, dataset::corpus_fingerprint(&corpus)));
         let op_report =
             measure_op(&mut graph, config, &op_spec, &corpus, run_token, client_deadline).await?;
         operations.insert(op.as_str().to_string(), op_report);
@@ -407,7 +407,7 @@ pub async fn run(config: &Config) -> BenchmarkResult<Report> {
         seed: spec.seed,
         nodes: spec.nodes,
         edges: spec.edges,
-        corpus_hash: dataset::corpus_hash(spec, config.seed, CORPUS_SIZE, &op_bodies, &dataset),
+        corpus_hash: dataset::corpus_hash(spec, config.seed, CORPUS_SIZE, &op_fingerprints, &dataset),
     });
 
     Ok(Report {
@@ -535,7 +535,7 @@ async fn probe_dataset(
 }
 
 /// Whether a query error string is FalkorDB's "graph key does not exist yet" condition.
-fn is_empty_graph_key(msg: &str) -> bool {
+pub(crate) fn is_empty_graph_key(msg: &str) -> bool {
     let m = msg.to_ascii_lowercase();
     m.contains("empty key") || m.contains("invalid graph operation")
 }
