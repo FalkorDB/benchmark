@@ -89,7 +89,10 @@ pub struct WriteScratch {
     /// This worker's index in the level (`0..concurrency`). Private (see [`WriteScratch::new`]'s i32
     /// key-band bound); read via [`WriteScratch::worker_id`].
     worker_id: usize,
-    reset_every: usize,
+    /// The reset cadence, which also defines the width of this worker's key band. Composed (rather
+    /// than storing a bare `reset_every`) so the positive-cadence invariant lives only in
+    /// [`ResetSchedule::new`].
+    schedule: ResetSchedule,
 }
 
 /// The canonical (run-independent) scratch label used when fingerprinting a write workload, so the
@@ -106,9 +109,9 @@ impl WriteScratch {
         worker_id: usize,
         reset_every: usize,
     ) -> BenchmarkResult<Self> {
-        if reset_every == 0 {
-            return Err(OtherError("reset_every must be >= 1".to_string()));
-        }
+        // The reset cadence carries the positive-cadence invariant (rejects 0) and doubles as this
+        // worker's key-band width.
+        let schedule = ResetSchedule::new(reset_every)?;
         // The highest key is `(worker_id + 1) * reset_every - 1`, computed with the multiplication
         // guarded against usize overflow. `reset_every >= 1` here, so `upper >= 1` and the `- 1`
         // can't underflow.
@@ -129,7 +132,7 @@ impl WriteScratch {
         Ok(Self {
             run_token,
             worker_id,
-            reset_every,
+            schedule,
         })
     }
 
@@ -148,14 +151,19 @@ impl WriteScratch {
         seq: u64,
     ) -> i32 {
         // Bounds were validated in `new`, so these fit i32.
-        let base = self.worker_id * self.reset_every;
-        let pos = (seq % self.reset_every as u64) as usize;
+        let base = self.worker_id * self.schedule.reset_every();
+        let pos = self.schedule.window_pos(seq) as usize;
         (base + pos) as i32
     }
 
     /// The configured reset cadence (the width of this worker's key band).
     pub fn reset_every(&self) -> usize {
-        self.reset_every
+        self.schedule.reset_every()
+    }
+
+    /// This worker's [`ResetSchedule`] (the reset cadence over the global invocation sequence).
+    pub fn schedule(&self) -> ResetSchedule {
+        self.schedule
     }
 
     /// This worker's index in the level (`0..concurrency`).
@@ -327,6 +335,17 @@ mod tests {
         for seq in 0..5 {
             assert_eq!(w.window_key(seq), w.window_key(seq + 5));
         }
+    }
+
+    #[test]
+    fn scratch_exposes_its_composed_reset_schedule() {
+        let w = WriteScratch::new(0, 1, 8).unwrap();
+        assert_eq!(w.reset_every(), 8);
+        assert_eq!(w.schedule().reset_every(), 8);
+        assert!(w.schedule().should_reset(8));
+        assert!(!w.schedule().should_reset(0));
+        // A zero cadence is rejected once, in ResetSchedule::new (no duplicated check).
+        assert!(WriteScratch::new(0, 0, 0).is_err());
     }
 
     #[test]
