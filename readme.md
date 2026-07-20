@@ -116,9 +116,25 @@ Building the Rust crate also needs `protoc` (`sudo apt-get install -y protobuf-c
 just build            # build all targets/features
 just clippy           # strict clippy (warnings denied)
 just test             # run the unit + integration test suite
-just test-one <name>  # run a single test by name filter
+just test-one aggregator  # run a single test by name filter
 just ci               # everything the Rust CI runs: build + clippy + test
 ```
+
+### Documentation checks
+
+Markdown docs are validated in CI (the `Docs validation` workflow) and locally with the same recipe:
+
+```bash
+just doc-check        # all doc checks: links + shell examples
+just doc-links        # offline broken-link + anchor check (lychee) over tracked *.md
+just doc-shell        # bash -n syntax-check the shell (bash/sh) examples in the docs
+```
+
+`just doc-links` runs [`lychee`](https://github.com/lycheeverse/lychee) in `--offline` mode, so it
+verifies relative and same-file anchor links without network access (external URLs are skipped to
+keep CI stable). Rust code blocks in the docs are compiled as doctests by `just test` (via
+`src/doc_examples.rs`); tag an illustrative snippet that should not compile with `rust,ignore` or a
+non-Rust language so it is skipped.
 
 ### Code coverage
 
@@ -144,8 +160,8 @@ on every invocation both the **server time** (FalkorDB's reported internal execu
 **total time** (end-to-end client round-trip), then summarizing them with severe-outlier removal
 (Tukey fences, like Criterion.rs) and writing a JSON report with one block per operation. It uses a
 single dedicated connection for honest single-flight latency. This is Part 2 of a larger tool (see
-[`synthetic-benchmark.md`](synthetic-benchmark.md)); later parts add a generated synthetic dataset,
-a concurrency sweep, and write operations.
+the design epic [#200](https://github.com/FalkorDB/benchmark/issues/200)); later parts add a
+generated synthetic dataset, a concurrency sweep, and write operations.
 
 Each operation is measured under two plan-cache conditions so you can see the cost of expression
 **compilation** separately from execution:
@@ -322,7 +338,7 @@ docker-compose up
 
 The benchmark is a cli tool that can be used to run the benchmarks
 
-```bash
+```text
 ➜  cargo run  --bin benchmark -- --help                                                                  git:(prometheus|✚7…3
     
 Usage: benchmark <COMMAND>

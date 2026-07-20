@@ -62,6 +62,29 @@ test:
 test-one *args:
     cargo test "$@"
 
+# === Docs: validate Markdown =================================================
+# Validate the prose Markdown docs (readme, copilot-instructions, …). `just doc` (above) builds
+# the Rust API docs; these recipes check the docs' links and embedded examples. Rust fenced
+# examples are compiled as doctests by `just test` (see src/doc_examples.rs), so they are not
+# repeated here.
+
+# Every Markdown doc check (matches the `Docs validation` workflow): links + shell examples.
+doc-check: doc-links doc-shell
+
+# `--offline` skips network requests, so only relative and same-file anchor links are verified
+# (external URLs are excluded) — no network-flaky CI. Needs `lychee` (CI installs it via
+# taiki-e/install-action, exactly like `just`).
+# Offline broken-link + anchor check (lychee) over every tracked *.md except vendor/.
+doc-links:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    git ls-files '*.md' | grep -v '^vendor/' \
+        | xargs lychee --offline --include-fragments --no-progress
+
+# Syntax-check (`bash -n`, nothing is executed) the bash/sh fenced examples in the Markdown docs.
+doc-shell:
+    ./scripts/check_doc_shell.sh
+
 # === Coverage ================================================================
 
 # Generate Codecov JSON coverage for the benchmark crate (matches the `coverage` CI job).
