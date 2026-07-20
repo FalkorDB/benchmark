@@ -163,9 +163,11 @@ cached|uncached|both` (default `both`).
 
 Select operations with `--op <name>` (repeatable and comma-separated) or `--all-reads`. All read
 ops except `return_const` target the benchmark's `:User {id, age}` / `(:User)-[:Friend]->(:User)`
-schema (with an index on `:User(id)`); their parameter corpora are seeded from ids sampled out of
-`--graph` (a reproducible generated dataset arrives in Part 3, so for now point `--graph` at a graph
-that already holds that schema). Every query projects **scalars** (never whole nodes) and is
+schema (with an index on `:User(id)`). Most draw their parameters from `:User` ids sampled out of
+`--graph` (`shortest_path` needs two, `match_by_index`/`expand_*`/`aggregate_*`/`property_projection`
+one); `return_const` and `match_by_label_scan` need no seed ids (they vary a constant / a scan
+modulus). A reproducible generated dataset arrives in Part 3, so for now point `--graph` at a graph
+that already holds that schema. Every query projects **scalars** (never whole nodes) and is
 parameterized; the corpus is seeded (`--seed`) so the same seed yields an identical corpus.
 
 | Operation | What it measures | Cypher (body) |
