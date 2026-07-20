@@ -14,11 +14,6 @@
 //! for expansions), so the summary trims only *severe* outliers (beyond 3×IQR) and both cache
 //! modes cycle the same corpus in the same order, keeping the cached-vs-uncached medians comparable
 //! on a matched workload.
-//!
-//! Note that per-operation latency distributions can be right-skewed (e.g. high-degree seed nodes
-//! for expansions), so the summary trims only *severe* outliers (beyond 3×IQR) and both cache
-//! modes cycle the same corpus in the same order, keeping the cached-vs-uncached medians comparable
-//! on a matched workload.
 
 pub mod catalog;
 pub mod config;
@@ -369,7 +364,7 @@ pub async fn run(config: &Config) -> BenchmarkResult<Report> {
         let load_deadline = Duration::from_millis(config.client_deadline_ms.max(60_000));
         let load_server_timeout_ms = config
             .server_timeout_ms
-            .max(load_deadline.as_millis() as i64);
+            .max(i64::try_from(load_deadline.as_millis()).unwrap_or(i64::MAX));
         info!(
             "generating synthetic dataset (seed {}, nodes {}, edges {}) into graph '{}'",
             spec.seed, spec.nodes, spec.edges, config.graph
