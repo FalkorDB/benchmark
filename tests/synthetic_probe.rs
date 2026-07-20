@@ -452,12 +452,12 @@ async fn generated_dataset_has_exact_counts_index_and_hash() {
     assert_eq!(edge_count, 2000);
 
     // The :User(id) index exists and is OPERATIONAL...
-    let idx = scalar_i64(
+    let operational = scalar_i64(
         &mut g,
-        "CALL db.indexes() YIELD label WHERE label = 'User' RETURN count(*)",
+        "CALL db.indexes() YIELD label, status WHERE label = 'User' AND status = 'OPERATIONAL' RETURN count(*)",
     )
     .await;
-    assert!(idx >= 1, "expected a :User index");
+    assert!(operational >= 1, "expected an OPERATIONAL :User index");
 
     // ...and the point-lookup op uses it (Node By Index Scan in the plan).
     let plan = explain(&mut g, "MATCH (n:User {id: 7}) RETURN n.id").await;
