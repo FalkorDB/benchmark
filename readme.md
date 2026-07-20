@@ -200,6 +200,9 @@ saturates, after which extra concurrency mostly inflates the tail — the highes
 flagged as the `<- knee`. A single-level sweep (`--concurrency 1`) reproduces the classic
 single-connection latency measurement plus its achieved throughput.
 
+See [`synthetic-benchmark.md`](synthetic-benchmark.md) for the concurrency model, the report schema
+(`operations[].levels[]`), and how to read the curve in depth.
+
 #### Operation catalog
 
 Select operations with `--op <name>` (repeatable and comma-separated) or `--all-reads`. All read
