@@ -195,23 +195,55 @@ pub enum ExpectedMutation {
 
 /// Verify a sample's [`MutationStats`] match the operation's [`ExpectedMutation`], returning a clear
 /// error naming the mismatch so an operation that silently benchmarks the wrong thing fails loudly.
+///
+/// Each variant asserts its **primary** counter *and* that no **conflicting structural** mutation
+/// happened (a `create_node` that also deleted a node or created a relationship is rejected, not
+/// just one that created zero nodes). `properties_set` is deliberately left unconstrained for the
+/// create/edge variants because inline properties (`{id: $id}`, `{eid: $eid}`) legitimately count
+/// toward it, and FalkorDB's exact accounting for inline-vs-`SET` properties is pinned per operation
+/// against a live server in the Part 5b integration tests; the non-create variants, which set no
+/// inline properties, do assert `properties_set == 0`.
 pub fn verify_mutation(
     expected: ExpectedMutation,
     stats: &MutationStats,
 ) -> BenchmarkResult<()> {
     let ok = match expected {
-        ExpectedMutation::NodeCreated => stats.nodes_created == 1,
-        ExpectedMutation::NodeDeleted => stats.nodes_deleted == 1,
-        ExpectedMutation::RelationshipCreated => stats.relationships_created == 1,
-        ExpectedMutation::PropertySet => stats.properties_set == 1,
-        ExpectedMutation::NodeMatched => stats.nodes_created == 0,
+        ExpectedMutation::NodeCreated => {
+            stats.nodes_created == 1
+                && stats.nodes_deleted == 0
+                && stats.relationships_created == 0
+        }
+        ExpectedMutation::NodeDeleted => {
+            stats.nodes_deleted == 1
+                && stats.nodes_created == 0
+                && stats.relationships_created == 0
+                && stats.properties_set == 0
+        }
+        ExpectedMutation::RelationshipCreated => {
+            stats.relationships_created == 1
+                && stats.nodes_created == 0
+                && stats.nodes_deleted == 0
+        }
+        ExpectedMutation::PropertySet => {
+            stats.properties_set == 1
+                && stats.nodes_created == 0
+                && stats.nodes_deleted == 0
+                && stats.relationships_created == 0
+        }
+        ExpectedMutation::NodeMatched => {
+            stats.nodes_created == 0
+                && stats.nodes_deleted == 0
+                && stats.relationships_created == 0
+                && stats.properties_set == 0
+        }
     };
     if ok {
         Ok(())
     } else {
         Err(OtherError(format!(
             "write operation expected {:?} but the server reported {:?} — the operation is not \
-             doing what it should (e.g. a delete matched nothing, or a merge hit instead of missed)",
+             doing what it should (e.g. a delete matched nothing, a merge hit instead of missed, or \
+             a create also mutated something it shouldn't have)",
             expected, stats
         )))
     }
@@ -338,6 +370,26 @@ mod tests {
         .is_ok());
         // merge_hit: a match, so nothing created.
         assert!(verify_mutation(ExpectedMutation::NodeMatched, &MutationStats::default()).is_ok());
+        // A create's inline property (`{id: $id}`) legitimately bumps properties_set, so it is not
+        // constrained for the create/edge variants.
+        assert!(verify_mutation(
+            ExpectedMutation::NodeCreated,
+            &MutationStats {
+                nodes_created: 1,
+                properties_set: 1,
+                ..Default::default()
+            }
+        )
+        .is_ok());
+        assert!(verify_mutation(
+            ExpectedMutation::RelationshipCreated,
+            &MutationStats {
+                relationships_created: 1,
+                properties_set: 1,
+                ..Default::default()
+            }
+        )
+        .is_ok());
     }
 
     #[test]
@@ -351,6 +403,60 @@ mod tests {
             ExpectedMutation::NodeMatched,
             &MutationStats {
                 nodes_created: 1,
+                ..Default::default()
+            }
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn verify_mutation_rejects_a_noisy_op() {
+        // A create that ALSO deleted a node — a conflicting structural mutation, not just a
+        // wrong-count no-op — must be rejected even though it created one node.
+        assert!(verify_mutation(
+            ExpectedMutation::NodeCreated,
+            &MutationStats {
+                nodes_created: 1,
+                nodes_deleted: 1,
+                ..Default::default()
+            }
+        )
+        .is_err());
+        // A create that also created a relationship.
+        assert!(verify_mutation(
+            ExpectedMutation::NodeCreated,
+            &MutationStats {
+                nodes_created: 1,
+                relationships_created: 1,
+                ..Default::default()
+            }
+        )
+        .is_err());
+        // A delete that also created a node.
+        assert!(verify_mutation(
+            ExpectedMutation::NodeDeleted,
+            &MutationStats {
+                nodes_deleted: 1,
+                nodes_created: 1,
+                ..Default::default()
+            }
+        )
+        .is_err());
+        // A set_property that also created a node.
+        assert!(verify_mutation(
+            ExpectedMutation::PropertySet,
+            &MutationStats {
+                properties_set: 1,
+                nodes_created: 1,
+                ..Default::default()
+            }
+        )
+        .is_err());
+        // A merge_hit that unexpectedly set a property.
+        assert!(verify_mutation(
+            ExpectedMutation::NodeMatched,
+            &MutationStats {
+                properties_set: 1,
                 ..Default::default()
             }
         )
