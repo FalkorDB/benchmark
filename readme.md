@@ -132,9 +132,11 @@ just doc-shell        # bash -n syntax-check the shell (bash/sh) examples in the
 
 `just doc-links` runs [`lychee`](https://github.com/lycheeverse/lychee) in `--offline` mode, so it
 verifies relative and same-file anchor links without network access (external URLs are skipped to
-keep CI stable). Rust code blocks in the docs are compiled as doctests by `just test` (via
-`src/doc_examples.rs`); tag an illustrative snippet that should not compile with `rust,ignore` or a
-non-Rust language so it is skipped.
+keep CI stable). It needs the `lychee` binary on your `PATH` — install it locally with
+`cargo install lychee` or `brew install lychee` (CI installs it automatically via
+`taiki-e/install-action`). Rust code blocks in the docs are compiled as doctests by `just test`
+(via `src/doc_examples.rs`); tag an illustrative snippet that should not compile with `rust,ignore`
+or a non-Rust language so it is skipped.
 
 ### Code coverage
 
