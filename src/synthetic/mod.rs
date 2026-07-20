@@ -368,10 +368,12 @@ fn dedup_ops(ops: &[OpName]) -> Vec<OpName> {
 }
 
 /// Ensure the target graph key exists: a read (`RO_QUERY`) against a never-written graph fails with
-/// "Invalid graph operation on empty key". Probe with a read first and only write to instantiate
-/// the graph when the error is exactly that empty-key condition — so a read-only replica whose
-/// graph already exists still works, and any other error (auth/network) is surfaced rather than
-/// masked. Both are bounded by the client deadline.
+/// "Invalid graph operation on empty key". Probe with a read first; only when the error is exactly
+/// that empty-key condition, re-run the same trivial `RETURN 1` over the writable `GRAPH.QUERY`
+/// command (not `RO_QUERY`) — which instantiates the empty graph key even though the query itself
+/// mutates nothing. So a read-only replica whose graph already exists still works via the read
+/// path, and any other error (auth/network) is surfaced rather than masked. Both are bounded by the
+/// client deadline.
 async fn ensure_graph_exists(
     graph: &mut falkordb::AsyncGraph,
     config: &Config,
