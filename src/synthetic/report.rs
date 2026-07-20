@@ -285,7 +285,7 @@ fn render_op_levels(
         }
         out.push_str(&format!("  [{}]\n", mode_label));
         out.push_str(
-            "    C    throughput(ops/s)   server p50/p90/p99        total p50/p90/p99         miss%\n",
+            "    C    throughput(ops/s)   server p50/p90/p95/p99             total p50/p90/p95/p99              miss%\n",
         );
         for level in &op.levels {
             let Some(m) = pick(level) else { continue };
@@ -295,14 +295,16 @@ fn render_op_levels(
                 ""
             };
             out.push_str(&format!(
-                "  {:>3}   {:>15.0}   {:>7.3} /{:>6.3} /{:>6.3}   {:>7.3} /{:>6.3} /{:>6.3}   {:>5.1}{}\n",
+                "  {:>3}   {:>15.0}   {:>7.3} /{:>6.3} /{:>6.3} /{:>6.3}   {:>7.3} /{:>6.3} /{:>6.3} /{:>6.3}   {:>5.1}{}\n",
                 level.concurrency,
                 m.throughput_ops_per_sec,
                 m.metrics.server_ms.median,
                 m.metrics.server_ms.p90,
+                m.metrics.server_ms.p95,
                 m.metrics.server_ms.p99,
                 m.metrics.total_ms.median,
                 m.metrics.total_ms.p90,
+                m.metrics.total_ms.p95,
                 m.metrics.total_ms.p99,
                 m.metrics.cached_false_rate * 100.0,
                 knee_mark,
@@ -450,8 +452,8 @@ mod tests {
         assert!(out.contains("return_const"));
         // The latency-vs-throughput table headers and both cache-mode sections.
         assert!(out.contains("throughput(ops/s)"));
-        assert!(out.contains("server p50/p90/p99"));
-        assert!(out.contains("total p50/p90/p99"));
+        assert!(out.contains("server p50/p90/p95/p99"));
+        assert!(out.contains("total p50/p90/p95/p99"));
         assert!(out.contains("cached — plan reused"));
         assert!(out.contains("uncached — plan-cache miss"));
         assert!(out.contains("compilation_ms"));

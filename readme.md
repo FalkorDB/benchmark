@@ -259,14 +259,14 @@ server image: falkordb/falkordb@sha256:9042fdc4...
 
 match_by_index
   [cached — plan reused, execution only]
-    C    throughput(ops/s)   server p50/p90/p99        total p50/p90/p99         miss%
-    1              2950     0.081 / 0.150 / 0.200     0.330 / 0.500 / 0.900     0.0
-    4             11800     0.090 / 0.170 / 0.260     0.340 / 0.520 / 1.100     0.0
-   16             30400     0.180 / 0.900 / 1.900     0.600 / 2.100 / 4.200     0.0
-   32             41200     0.350 / 1.700 / 3.400     0.780 / 3.900 / 7.900     0.0  <- knee
+    C    throughput(ops/s)   server p50/p90/p95/p99             total p50/p90/p95/p99              miss%
+    1              2950     0.081 / 0.130 / 0.150 / 0.200     0.330 / 0.470 / 0.500 / 0.900     0.0
+    4             11800     0.090 / 0.160 / 0.170 / 0.260     0.340 / 0.500 / 0.520 / 1.100     0.0
+   16             30400     0.180 / 0.700 / 0.900 / 1.900     0.600 / 1.800 / 2.100 / 4.200     0.0
+   32             41200     0.350 / 1.400 / 1.700 / 3.400     0.780 / 3.400 / 3.900 / 7.900     0.0  <- knee
   [uncached — plan-cache miss each run, execution + compilation]
-    C    throughput(ops/s)   server p50/p90/p99        total p50/p90/p99         miss%
-    1              2100     0.106 / 0.180 / 0.240     0.360 / 0.540 / 0.960   100.0
+    C    throughput(ops/s)   server p50/p90/p95/p99             total p50/p90/p95/p99              miss%
+    1              2100     0.106 / 0.160 / 0.180 / 0.240     0.360 / 0.500 / 0.540 / 0.960   100.0
    ...
   compilation_ms (median uncached-cached server time) by level:
     C=1    0.025
