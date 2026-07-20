@@ -58,7 +58,7 @@ doc:
 test:
     cargo test --verbose
 
-# Run a single test by name filter, e.g. `just test-one aggregator`.
+# Run a single test by name filter, e.g. `just test-one query_builder`.
 test-one *args:
     cargo test "$@"
 

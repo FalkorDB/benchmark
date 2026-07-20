@@ -116,7 +116,7 @@ Building the Rust crate also needs `protoc` (`sudo apt-get install -y protobuf-c
 just build            # build all targets/features
 just clippy           # strict clippy (warnings denied)
 just test             # run the unit + integration test suite
-just test-one aggregator  # run a single test by name filter
+just test-one query_builder  # run a single test by name filter
 just ci               # everything the Rust CI runs: build + clippy + test
 ```
 
@@ -135,8 +135,9 @@ verifies relative and same-file anchor links without network access (external UR
 keep CI stable). It needs the `lychee` binary on your `PATH` — install it locally with
 `cargo install lychee` or `brew install lychee` (CI installs it automatically via
 `taiki-e/install-action`). Rust code blocks in the docs are compiled as doctests by `just test`
-(via `src/doc_examples.rs`); tag an illustrative snippet that should not compile with `rust,ignore`
-or a non-Rust language so it is skipped.
+(via `src/doc_examples.rs`). Because doctests are run as well as compiled, fence an example that
+should type-check but not execute with `rust,no_run`, and one that should not compile at all with
+`rust,ignore` (or a non-Rust language) so it is skipped.
 
 ### Code coverage
 
