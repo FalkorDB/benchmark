@@ -17,6 +17,7 @@ use falkordb::AsyncGraph;
 use futures::StreamExt;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
+use std::fmt::Write as _;
 use std::time::Duration;
 
 /// Bumped whenever the generator algorithm or the operation catalog's query bodies change, so a
@@ -279,7 +280,8 @@ pub async fn generate_and_load(
         if in_batch > 0 {
             batch.push(',');
         }
-        batch.push_str(&format!("{{id:{},age:{}}}", id, spec.node_age(id)));
+        // write! appends directly into the batch buffer (no per-row temporary String).
+        let _ = write!(batch, "{{id:{},age:{}}}", id, spec.node_age(id));
         in_batch += 1;
         if in_batch == batch_size {
             flush_nodes(graph, &batch, server_timeout_ms, load_deadline).await?;
@@ -299,7 +301,7 @@ pub async fn generate_and_load(
         if in_batch > 0 {
             batch.push(',');
         }
-        batch.push_str(&format!("{{src:{},dst:{}}}", src, dst));
+        let _ = write!(batch, "{{src:{},dst:{}}}", src, dst);
         in_batch += 1;
         if in_batch == batch_size {
             flush_edges(graph, &batch, server_timeout_ms, load_deadline).await?;

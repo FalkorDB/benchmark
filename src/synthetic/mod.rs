@@ -939,10 +939,14 @@ mod tests {
 
     #[tokio::test]
     async fn run_command_run_requires_an_op() {
-        // Neither --op nor --all-reads nor a config ⇒ a clear error before any network use.
-        // (Uses a config path that doesn't exist so no ambient synthetic-bench.toml is picked up.)
+        // Neither --op nor --all-reads nor any config `operations` ⇒ a clear error before any
+        // network use. Point --config at a real but empty config file so the file *loads* fine and
+        // the failure comes from the no-operations validation (not a missing-file read error).
+        let dir = std::env::temp_dir();
+        let cfg_path = dir.join(format!("syn-noops-{}.toml", std::process::id()));
+        std::fs::write(&cfg_path, "# empty config, no operations\n").unwrap();
         let command = crate::cli::SyntheticCommands::Run {
-            config: Some("/nonexistent/synthetic-bench.toml".to_string()),
+            config: Some(cfg_path.to_string_lossy().into_owned()),
             endpoint: Some("falkor://127.0.0.1:6379".to_string()),
             graph: Some("falkor".to_string()),
             ops: vec![],
@@ -959,7 +963,12 @@ mod tests {
             nodes: None,
             edges: None,
         };
-        assert!(run_command(command).await.is_err());
+        let err = run_command(command).await.expect_err("no ops ⇒ error");
+        assert!(
+            format!("{err:?}").contains("no operations selected"),
+            "expected a no-operations error, got: {err:?}"
+        );
+        let _ = std::fs::remove_file(&cfg_path);
     }
 
     #[test]
