@@ -235,7 +235,7 @@ fn corpus_match_by_index(
     _worker: usize,
     _workers: usize,
 ) -> BenchmarkResult<Vec<Query>> {
-    let ids = dataset.ids("match_by_index", 1)?;
+    let ids = &dataset.node_ids;
     Ok(one_id_corpus(
         rng,
         ids,
@@ -267,7 +267,7 @@ fn corpus_expand_1_hop(
     _worker: usize,
     _workers: usize,
 ) -> BenchmarkResult<Vec<Query>> {
-    let ids = dataset.ids("expand_1_hop", 1)?;
+    let ids = &dataset.node_ids;
     Ok(one_id_corpus(
         rng,
         ids,
@@ -281,7 +281,7 @@ fn corpus_expand_hops_5(
     _worker: usize,
     _workers: usize,
 ) -> BenchmarkResult<Vec<Query>> {
-    let ids = dataset.ids("expand_hops_5", 1)?;
+    let ids = &dataset.node_ids;
     // Exactly five typed hops; `DISTINCT` + `LIMIT` bound the fan-out payload.
     Ok(one_id_corpus(
         rng,
@@ -296,7 +296,7 @@ fn corpus_aggregate_count(
     _worker: usize,
     _workers: usize,
 ) -> BenchmarkResult<Vec<Query>> {
-    let ids = dataset.ids("aggregate_count", 1)?;
+    let ids = &dataset.node_ids;
     Ok(one_id_corpus(
         rng,
         ids,
@@ -310,7 +310,7 @@ fn corpus_aggregate_group(
     _worker: usize,
     _workers: usize,
 ) -> BenchmarkResult<Vec<Query>> {
-    let ids = dataset.ids("aggregate_group", 1)?;
+    let ids = &dataset.node_ids;
     Ok(one_id_corpus(
         rng,
         ids,
@@ -324,7 +324,7 @@ fn corpus_shortest_path(
     _worker: usize,
     _workers: usize,
 ) -> BenchmarkResult<Vec<Query>> {
-    let ids = dataset.ids("shortest_path", 2)?;
+    let ids = &dataset.node_ids;
     // FalkorDB's shortestPath form is `WITH shortestPath(...) AS p` and requires a *directed*
     // pattern; bound the search to 6 hops and `coalesce` a missing path to -1 so an unreachable
     // pair returns a row instead of erroring.
@@ -355,7 +355,7 @@ fn corpus_property_projection(
     _worker: usize,
     _workers: usize,
 ) -> BenchmarkResult<Vec<Query>> {
-    let ids = dataset.ids("property_projection", 1)?;
+    let ids = &dataset.node_ids;
     Ok(one_id_corpus(
         rng,
         ids,

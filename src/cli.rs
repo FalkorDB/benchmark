@@ -269,6 +269,7 @@ pub enum SyntheticCommands {
             value_enum,
             value_delimiter = ',',
             num_args = 1..,
+            required_unless_present = "all_reads",
             help = "operation(s) to measure; repeatable and comma-separated (e.g. --op match_by_index --op expand_1_hop or --op match_by_index,expand_1_hop)"
         )]
         ops: Vec<OpName>,
