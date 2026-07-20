@@ -99,8 +99,8 @@ pub const CANONICAL_SCRATCH_LABEL: &str = "BenchScratch_RUN";
 impl WriteScratch {
     /// Build a worker's scratch, validating that its key band fits in an `i32` (FalkorDB query
     /// parameters are `i32`). The highest key this worker can emit is
-    /// `worker_id · reset_every + (reset_every - 1)`, so `(worker_id + 1) · reset_every` must not
-    /// exceed [`i32::MAX`]; otherwise a large sweep × cadence would silently overflow.
+    /// `max_key = worker_id · reset_every + (reset_every - 1) = (worker_id + 1) · reset_every - 1`,
+    /// which must not exceed [`i32::MAX`]; otherwise a large sweep × cadence would silently overflow.
     pub fn new(
         run_token: u64,
         worker_id: usize,
@@ -109,17 +109,20 @@ impl WriteScratch {
         if reset_every == 0 {
             return Err(OtherError("reset_every must be >= 1".to_string()));
         }
-        // (worker_id + 1) * reset_every, guarded against usize *and* i32 overflow.
+        // The highest key is `(worker_id + 1) * reset_every - 1`, computed with the multiplication
+        // guarded against usize overflow. `reset_every >= 1` here, so `upper >= 1` and the `- 1`
+        // can't underflow.
         let upper = worker_id
             .checked_add(1)
             .and_then(|w| w.checked_mul(reset_every))
             .ok_or_else(|| OtherError("scratch key band overflows usize".to_string()))?;
-        if upper > i32::MAX as usize {
+        let max_key = upper - 1;
+        if max_key > i32::MAX as usize {
             return Err(OtherError(format!(
-                "scratch key band overflows i32: worker {} × reset_every {} exceeds {} — reduce \
+                "scratch key band overflows i32: worker {}'s highest key {} exceeds {} — reduce \
                  reset_every or the worker count",
                 worker_id,
-                reset_every,
+                max_key,
                 i32::MAX
             )));
         }
@@ -332,6 +335,14 @@ mod tests {
         let huge = (i32::MAX as usize / 1000) + 1;
         assert!(WriteScratch::new(0, huge, 1000).is_err());
         assert!(WriteScratch::new(0, 0, 1000).is_ok());
+
+        // Exact boundary: the highest key is `(worker_id + 1) * reset_every - 1`. With
+        // `reset_every == 1` and `worker_id == i32::MAX`, the highest key is exactly `i32::MAX` —
+        // a valid i32, so it must be ACCEPTED (guards against an off-by-one that rejects it)…
+        let at_max = WriteScratch::new(0, i32::MAX as usize, 1).unwrap();
+        assert_eq!(at_max.window_key(0), i32::MAX);
+        // …while one worker higher pushes the highest key to `i32::MAX + 1`, which is rejected.
+        assert!(WriteScratch::new(0, i32::MAX as usize + 1, 1).is_err());
     }
 
     #[test]
