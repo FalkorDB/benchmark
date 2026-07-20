@@ -190,13 +190,15 @@ warm-up window, every worker measures in a shared window; the level reports the 
 percentiles (p50/p90/p95/p99) and the **achieved throughput** (`completed ÷ window`, ops/sec).
 
 Because a new request is issued only after the previous one *completes*, the reported throughput is
-**achieved, not offered** — it can never exceed the server's own service rate, so it is immune to
-[coordinated omission](https://www.scylladb.com/2021/04/22/on-coordinated-omission/) but also can't
-model a fixed external arrival rate (open-loop / arrival-rate load is future work). Read the curve by
-following latency as `C` (and throughput) rise: throughput climbs until the server saturates, after
-which extra concurrency mostly inflates the tail — the highest-throughput level is flagged as the
-`<- knee`. A single-level sweep (`--concurrency 1`) reproduces the classic single-connection latency
-measurement plus its achieved throughput.
+**achieved, not offered** — it can never exceed the server's own service rate. The measured
+latencies therefore describe behaviour *at that achieved rate*: a closed loop does not model a fixed
+external arrival rate, so it neither reproduces nor corrects for
+[coordinated omission](https://www.scylladb.com/2021/04/22/on-coordinated-omission/) — quantifying
+the tail under a target offered load needs open-loop / arrival-rate testing (future work). Read the
+curve by following latency as `C` (and throughput) rise: throughput climbs until the server
+saturates, after which extra concurrency mostly inflates the tail — the highest-throughput level is
+flagged as the `<- knee`. A single-level sweep (`--concurrency 1`) reproduces the classic
+single-connection latency measurement plus its achieved throughput.
 
 #### Operation catalog
 

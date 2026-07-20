@@ -5,8 +5,11 @@
 //! fires the next from its pre-generated sequence — a **closed loop**: there is always exactly one
 //! outstanding request per worker, so at most `C` are in flight. Because a new request is issued
 //! only after the previous one *completes*, the throughput it reports is **achieved** (what the
-//! server actually served), not **offered** (a target arrival rate) — so it cannot suffer
-//! coordinated omission, but it also can't push past the server's own service rate.
+//! server actually served), not **offered** (a target arrival rate), and it can't push past the
+//! server's own service rate. The measured latencies therefore describe behaviour *at that achieved
+//! rate*: a closed loop does not model a fixed offered load, so it neither reproduces nor corrects
+//! for coordinated omission — quantifying the tail under a target arrival rate needs open-loop
+//! testing (out of scope for this engine).
 //!
 //! ## Windowing
 //! Every worker runs `warmup` discarded invocations, then all workers cross a [`Barrier`] together
@@ -168,7 +171,9 @@ where
         _ => Duration::ZERO,
     };
 
-    let mut samples_all: Vec<OpSample> = Vec::new();
+    // Every worker produces exactly `samples` measured invocations on the success path, so the
+    // pooled length is known up front — preallocate to keep aggregation allocation-free.
+    let mut samples_all: Vec<OpSample> = Vec::with_capacity(concurrency * samples);
     for output in outputs {
         samples_all.extend(output.samples);
     }
