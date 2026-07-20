@@ -185,7 +185,8 @@ cached|uncached|both` (default `both`).
 Every operation is measured at each level of a configurable **concurrency sweep** (`--concurrency`,
 default `1,2,4,8,16,32`). Each level `C` runs a **closed-loop** engine: `C` worker tasks, each with
 its own dedicated connection, fire one query, await it to completion (row draining included), then
-immediately fire the next — so there are always exactly `C` requests in flight. After a discarded
+immediately fire the next — so there are at most `C` requests in flight (one outstanding per active
+worker). After a discarded
 warm-up window, every worker measures in a shared window; the level reports the pooled latency
 percentiles (p50/p90/p95/p99) and the **achieved throughput** (`completed ÷ window`, ops/sec).
 

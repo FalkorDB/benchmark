@@ -19,8 +19,9 @@ default `1,2,4,8,16,32`). A level `C` runs a **closed-loop** engine:
 - `C` worker tasks, each owning its **own dedicated connection** (an independent single-socket
   client — not a clone of one handle, which would share a schema cache).
 - Each worker fires one query, **awaits it to completion** (row draining included), then immediately
-  fires the next from its pre-generated sequence — so there are always **exactly `C` requests in
-  flight**.
+  fires the next from its pre-generated sequence — so there are at most **`C` requests in flight**
+  (one outstanding request per active worker; the exactly-`C` test asserts the *maximum* observed
+  concurrency equals `C`).
 - After a discarded **warm-up** window, all workers cross a barrier together so the measurement
   window opens with every worker active; each records when its first measured invocation *started*
   and its last one *completed*.
@@ -103,26 +104,47 @@ match_by_index
 
 ## Report schema
 
-The JSON report groups each operation's measurements by concurrency level:
+The JSON report groups each operation's measurements by concurrency level. Abridged example (one
+level shown; `levels[]` has one entry per swept concurrency, and each `metrics.*_ms` summary carries
+the full `min`/`mean`/`median`/`p90`/`p95`/`p99`/`max`/`stddev` set):
 
-```text
-operations["match_by_index"] = {
-  "levels": [
-    {
-      "concurrency": 1,
-      "cached":   { "throughput_ops_per_sec": 2950.0, "metrics": { server_ms, total_ms, non_internal_ms, cached_false_rate, cached_unknown } },
-      "uncached": { "throughput_ops_per_sec": 2100.0, "metrics": { … } },
-      "compilation_ms_median": 0.025
-    },
-    { "concurrency": 4,  … },
-    …
-  ]
+```json
+{
+  "schema_version": 2,
+  "meta": { "concurrency": [1, 4, 16, 32] },
+  "operations": {
+    "match_by_index": {
+      "levels": [
+        {
+          "concurrency": 1,
+          "cached": {
+            "throughput_ops_per_sec": 2950.0,
+            "metrics": {
+              "server_ms": { "n": 487, "removed": 13, "median": 0.081, "p90": 0.130, "p95": 0.150, "p99": 0.200 },
+              "total_ms": { "median": 0.330, "p95": 0.500, "p99": 0.900 },
+              "non_internal_ms": { "median": 0.249 },
+              "cached_false_rate": 0.0,
+              "cached_unknown": 0
+            }
+          },
+          "uncached": {
+            "throughput_ops_per_sec": 2100.0,
+            "metrics": {
+              "server_ms": { "median": 0.106, "p95": 0.180, "p99": 0.240 },
+              "cached_false_rate": 1.0,
+              "cached_unknown": 0
+            }
+          },
+          "compilation_ms_median": 0.025
+        }
+      ]
+    }
+  }
 }
 ```
 
-Each `metrics.*_ms` summary carries `min/mean/median/p90/p95/p99/max/stddev` (plus `n` retained and
-`removed` severe outliers). The top-level report also records `schema_version` (`2` since Part 4)
-and `meta.concurrency` (the sweep that was run).
+The top-level report also records `schema_version` (`2` since Part 4) and `meta.concurrency` (the
+sweep that was run).
 
 > [!NOTE]
 > The Part 4 report shape is a **breaking change** from earlier versions: an operation's stats moved
