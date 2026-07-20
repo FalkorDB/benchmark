@@ -1,11 +1,19 @@
-//! Synthetic per-operation benchmark — Part 2: a selectable catalog of read operations.
+//! Synthetic per-operation benchmark — a selectable catalog of read operations over a controlled
+//! dataset.
 //!
-//! Measures one or more Cypher read operations in isolation against a FalkorDB endpoint. For each
-//! selected operation it pre-generates a seeded corpus of parameterized queries (see
-//! [`catalog`]), then, under each plan-cache condition, captures on every invocation the paired
-//! *server time* (FalkorDB's reported internal execution time) and *total time* (end-to-end client
-//! round-trip), summarizes them with severe-outlier removal, and derives the expression
-//! *compilation cost* (uncached − cached). One JSON block is written per operation.
+//! Measures one or more Cypher read operations in isolation against a FalkorDB endpoint. The graph
+//! is either sampled from the live endpoint or **generated reproducibly** from a seed (see
+//! [`dataset`]). For each selected operation it pre-generates a seeded corpus of parameterized
+//! queries (see [`catalog`]), then, under each plan-cache condition, captures on every invocation
+//! the paired *server time* (FalkorDB's reported internal execution time) and *total time*
+//! (end-to-end client round-trip), summarizes them with severe-outlier removal, and derives the
+//! expression *compilation cost* (uncached − cached). One JSON block is written per operation; when
+//! the dataset was generated, a `corpus_hash` fingerprints the whole workload for comparability.
+//!
+//! Note that per-operation latency distributions can be right-skewed (e.g. high-degree seed nodes
+//! for expansions), so the summary trims only *severe* outliers (beyond 3×IQR) and both cache
+//! modes cycle the same corpus in the same order, keeping the cached-vs-uncached medians comparable
+//! on a matched workload.
 //!
 //! Note that per-operation latency distributions can be right-skewed (e.g. high-degree seed nodes
 //! for expansions), so the summary trims only *severe* outliers (beyond 3×IQR) and both cache
@@ -355,7 +363,13 @@ pub async fn run(config: &Config) -> BenchmarkResult<Report> {
     // Dataset: either generate a reproducible one (Part 3) or sample the live graph (Part 2).
     let dataset = if let Some(spec) = &config.dataset {
         // Generation replaces the target graph, so it's gated behind explicit CLI consent upstream.
+        // Bulk-load batches do real server-side work, so give them a generous deadline *and* a
+        // matching server-side per-query timeout (the default measurement timeout — often 5s — is
+        // too small for a large UNWIND batch and would trip before the client deadline).
         let load_deadline = Duration::from_millis(config.client_deadline_ms.max(60_000));
+        let load_server_timeout_ms = config
+            .server_timeout_ms
+            .max(load_deadline.as_millis() as i64);
         info!(
             "generating synthetic dataset (seed {}, nodes {}, edges {}) into graph '{}'",
             spec.seed, spec.nodes, spec.edges, config.graph
@@ -365,7 +379,7 @@ pub async fn run(config: &Config) -> BenchmarkResult<Report> {
             spec,
             DATASET_LOAD_BATCH,
             load_deadline,
-            config.server_timeout_ms,
+            load_server_timeout_ms,
         )
         .await?
     } else {

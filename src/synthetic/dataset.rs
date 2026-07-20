@@ -466,7 +466,9 @@ mod tests {
         // node_ids are distinct, sorted and in range.
         assert!(h1.node_ids.windows(2).all(|w| w[0] < w[1]));
         assert!(h1.node_ids.iter().all(|&id| (1..=10_000).contains(&id)));
-        // Every connected pair is distinct and within MAX_PAIR_HOPS ring steps.
+        // Each connected pair has distinct endpoints (from != to) and is within MAX_PAIR_HOPS ring
+        // steps. (Pairs are sampled independently, so the pool may contain repeats — that's fine;
+        // corpus_hash fingerprints the actual sampled pairs, so it stays reproducible regardless.)
         for (a, b) in &h1.connected_pairs {
             assert_ne!(a, b);
             let n = 10_000i64;
