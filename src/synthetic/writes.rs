@@ -1,6 +1,6 @@
 //! Write-operation lifecycle primitives: per-worker scratch isolation, a reset cadence, and
 //! per-sample mutation verification. (Part 5 of the synthetic benchmark — see
-//! [`synthetic-benchmark.md`](../../synthetic-benchmark.md).)
+//! [`synthetic-benchmark.md`](https://github.com/FalkorDB/benchmark/blob/master/synthetic-benchmark.md).)
 //!
 //! Write operations mutate the graph, so three problems must be solved before their latency is
 //! meaningful:
@@ -116,8 +116,8 @@ impl WriteScratch {
             .ok_or_else(|| OtherError("scratch key band overflows usize".to_string()))?;
         if upper > i32::MAX as usize {
             return Err(OtherError(format!(
-                "scratch key band overflows i32: worker {} × reset_every {} exceeds {} — lower \
-                 --reset-every or the concurrency",
+                "scratch key band overflows i32: worker {} × reset_every {} exceeds {} — reduce \
+                 reset_every or the worker count",
                 worker_id,
                 reset_every,
                 i32::MAX
