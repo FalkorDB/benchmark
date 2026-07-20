@@ -2,8 +2,8 @@
 //!
 //! A *level* runs `C` worker tasks against a connection pool of size `C` (one connection per
 //! worker). Each worker fires an operation, awaits it to completion (row draining included), then
-//! fires the next from its pre-generated sequence — a **closed loop**: there is always exactly one
-//! outstanding request per worker, so at most `C` are in flight. Because a new request is issued
+//! fires the next from its pre-generated sequence — a **closed loop**: each worker keeps at most one
+//! outstanding request, so at most `C` are in flight. Because a new request is issued
 //! only after the previous one *completes*, the throughput it reports is **achieved** (what the
 //! server actually served), not **offered** (a target arrival rate), and it can't push past the
 //! server's own service rate. The measured latencies therefore describe behaviour *at that achieved
@@ -246,7 +246,7 @@ mod tests {
         assert_eq!(
             max_in_flight.load(Ordering::Relaxed),
             C,
-            "closed loop must hold exactly C requests in flight"
+            "closed loop must reach C concurrent requests in flight (observed peak)"
         );
         assert_eq!(
             in_flight.load(Ordering::Relaxed),

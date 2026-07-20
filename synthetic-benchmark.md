@@ -154,8 +154,10 @@ sweep that was run).
 
 ## What the tests guarantee
 
-- **Exactly `C` in flight** — an instrumented fake worker asserts the observed maximum concurrency
-  equals `C` (a barrier makes it deterministic, not scheduler-dependent).
+- **Peak concurrency reaches `C`** — an instrumented fake worker asserts the observed *maximum*
+  in-flight count equals `C` (a barrier makes it deterministic, not scheduler-dependent), confirming
+  the closed loop actually saturates all `C` workers even though the steady-state invariant is *at
+  most* `C`.
 - **Throughput math** — with a fake fixed-latency op under a paused clock, `throughput ≈ C / latency`.
 - **Warm-up excluded & pooled** — measured samples pool across workers with warm-up invocations
   omitted.
