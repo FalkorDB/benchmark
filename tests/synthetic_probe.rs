@@ -375,13 +375,15 @@ async fn op_runner_reads_writes_and_reports_errors() {
     .await
     .is_err());
 
-    // An impossibly small client deadline trips the whole-operation timeout guard.
+    // A tiny client deadline against a query that does real server-side work reliably trips the
+    // whole-operation timeout guard. (A trivial query like `RETURN 1` can finish within tokio's
+    // ~1ms timer resolution on a fast localhost server, so use a query that takes many ms.)
     assert!(run_and_drain(
         &mut graph,
         QueryType::Read,
-        "RETURN 1",
+        "UNWIND range(1, 5000000) AS x RETURN count(x)",
         5_000,
-        Duration::from_nanos(1)
+        Duration::from_millis(1)
     )
     .await
     .is_err());
