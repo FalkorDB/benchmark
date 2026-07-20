@@ -130,29 +130,39 @@ pub fn resolve(
         None
     };
 
+    // Destructure the defaults once so each field is a plain local (no partial moves out of a
+    // struct that's still in use below).
+    let Config {
+        endpoint: default_endpoint,
+        samples: default_samples,
+        warmup: default_warmup,
+        server_timeout_ms: default_server_timeout_ms,
+        client_deadline_ms: default_client_deadline_ms,
+        cache: default_cache,
+        out: default_out,
+        ..
+    } = defaults;
+
     Ok(Config {
-        endpoint: cli
-            .endpoint
-            .or(file.endpoint)
-            .unwrap_or(defaults.endpoint),
+        endpoint: cli.endpoint.or(file.endpoint).unwrap_or(default_endpoint),
         graph: cli
             .graph
             .or(file.graph)
             .unwrap_or_else(|| DEFAULT_GRAPH.to_string()),
         ops,
-        samples: cli.samples.or(file.samples).unwrap_or(defaults.samples),
-        warmup: cli.warmup.or(file.warmup).unwrap_or(defaults.warmup),
+        samples: cli.samples.or(file.samples).unwrap_or(default_samples),
+        warmup: cli.warmup.or(file.warmup).unwrap_or(default_warmup),
         seed,
         server_timeout_ms: cli
             .server_timeout_ms
             .or(file.server_timeout_ms)
-            .unwrap_or(defaults.server_timeout_ms),
+            .unwrap_or(default_server_timeout_ms),
         client_deadline_ms: cli
             .client_deadline_ms
             .or(file.client_deadline_ms)
-            .unwrap_or(defaults.client_deadline_ms),
-        cache: cli.cache.or(file.cache).unwrap_or(defaults.cache),
-        out: cli.out.or(file.out).unwrap_or(defaults.out),
+            .unwrap_or(default_client_deadline_ms),
+        cache: cli.cache.or(file.cache).unwrap_or(default_cache),
+        out: cli.out.or(file.out).unwrap_or(default_out),
         server_image: cli.server_image,
         dataset,
     })
