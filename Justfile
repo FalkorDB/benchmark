@@ -65,12 +65,29 @@ test-one *args:
 # === Coverage ================================================================
 
 # Generate Codecov JSON coverage for the benchmark crate (matches the `coverage` CI job).
+# Runs unit tests AND the `#[ignore]`d integration tests (`--include-ignored`), so the
+# server-backed code paths are measured — this needs a reachable FalkorDB (see `coverage-local`,
+# or the coverage CI job's FalkorDB service). FALKORDB_HOST/FALKORDB_PORT select it (default
+# 127.0.0.1:6379).
 coverage:
-    cargo llvm-cov --package benchmark --all-features --codecov --output-path codecov.json
+    cargo llvm-cov --package benchmark --all-features --codecov --output-path codecov.json -- --include-ignored
 
-# Generate an HTML coverage report and open it in a browser.
+# Spin up a Docker FalkorDB, collect coverage, then tear it down (no manual server needed).
+coverage-local:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    docker rm -f falkordb-cov >/dev/null 2>&1 || true
+    docker run -d --name falkordb-cov -p 6379:6379 falkordb/falkordb:latest >/dev/null
+    trap 'docker rm -f falkordb-cov >/dev/null 2>&1 || true' EXIT
+    for i in $(seq 1 30); do
+        if docker exec falkordb-cov redis-cli ping >/dev/null 2>&1; then break; fi
+        sleep 1
+    done
+    just coverage
+
+# Generate an HTML coverage report and open it in a browser (needs a reachable FalkorDB too).
 coverage-html:
-    cargo llvm-cov --package benchmark --all-features --html --open
+    cargo llvm-cov --package benchmark --all-features --html --open -- --include-ignored
 
 # === Rust: run ===============================================================
 
@@ -82,6 +99,28 @@ run *args:
     # the flags to the binary (not to cargo).
     if [ "${1:-}" = "--" ]; then shift; fi
     cargo run --bin benchmark -- "$@"
+
+# === Synthetic per-operation benchmark =======================================
+
+# Needs a reachable FalkorDB, e.g. `docker run -d -p 6379:6379 falkordb/falkordb:latest`. Example:
+# `just synthetic-bench --samples 1000 --op return_const`.
+# Run the synthetic single-operation latency probe (forwards args to `synthetic run`).
+synthetic-bench *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Drop an optional leading `--` so both `just synthetic-bench --samples 5` and
+    # `just synthetic-bench -- --samples 5` forward the flags to the probe (matches `just run`).
+    if [ "${1:-}" = "--" ]; then shift; fi
+    cargo run --release --bin benchmark -- synthetic run "$@"
+
+# List the available synthetic operations.
+synthetic-ops:
+    cargo run --quiet --bin benchmark -- synthetic list-ops
+
+# FALKORDB_HOST/PORT select the server (default 127.0.0.1:6379); these `#[ignore]`d tests need one.
+# Run the synthetic integration test against a live FalkorDB.
+synthetic-it:
+    cargo test --test synthetic_probe -- --ignored --nocapture
 
 # === UI (Next.js dashboard in ui/) ===========================================
 

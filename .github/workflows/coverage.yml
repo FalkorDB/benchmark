@@ -25,6 +25,18 @@ jobs:
   coverage:
     name: Code coverage
     runs-on: ubuntu-latest
+    # A FalkorDB service so `just coverage` can run the server-backed integration tests
+    # (`--include-ignored`) and measure those code paths.
+    services:
+      falkordb:
+        image: falkordb/falkordb:latest
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
@@ -41,8 +53,12 @@ jobs:
         with:
           tool: just,cargo-llvm-cov
 
-      # Runs the same recipe developers run locally (see the Justfile).
+      # Runs the same recipe developers run locally (see the Justfile). FALKORDB_HOST/PORT point
+      # the integration tests at the service container above.
       - name: Generate code coverage
+        env:
+          FALKORDB_HOST: 127.0.0.1
+          FALKORDB_PORT: 6379
         run: just coverage
 
       - name: Upload coverage to Codecov

@@ -123,12 +123,93 @@ just ci               # everything the Rust CI runs: build + clippy + test
 ### Code coverage
 
 ```bash
-just coverage         # generate codecov.json via cargo-llvm-cov (as the coverage CI job does)
-just coverage-html    # open a browsable HTML coverage report
+just coverage-local   # spin up a Docker FalkorDB, generate codecov.json, tear it down
+just coverage         # generate codecov.json via cargo-llvm-cov (needs a reachable FalkorDB)
+just coverage-html    # open a browsable HTML coverage report (needs a reachable FalkorDB)
 ```
 
+`just coverage` runs the unit tests **and** the `#[ignore]`d integration tests
+(`--include-ignored`) so server-backed code is measured, so it needs a reachable FalkorDB — set
+`FALKORDB_HOST`/`FALKORDB_PORT`, or use `just coverage-local` to spin one up in Docker. The
+`coverage` CI job provides a FalkorDB service container.
+
 Coverage is uploaded to [Codecov](https://codecov.io/gh/FalkorDB/benchmark) by the `coverage`
-workflow. Please cover new code with tests and keep coverage high.
+workflow. Please cover new code with tests and keep coverage high — **patch coverage must stay
+≥ 90%** (enforced by `codecov.yml`).
+
+### Synthetic per-operation benchmark (experimental)
+
+Measures a single Cypher operation **in isolation**, capturing on every invocation both the
+**server time** (FalkorDB's reported internal execution time) and the **total time** (end-to-end
+client round-trip), then summarizes them with severe-outlier removal (Tukey fences, like
+Criterion.rs) and writes a JSON report. It uses a single dedicated connection for honest
+single-flight latency. This is the first slice of a larger tool (see the design in
+[`synthetic-benchmark.md`](synthetic-benchmark.md)); later parts add an operation catalog, a
+synthetic dataset, and a concurrency sweep.
+
+Each operation is measured under two plan-cache conditions so you can see the cost of expression
+**compilation** separately from execution:
+
+- **cached** — the plan is reused (warm cache), so only execution is measured;
+- **uncached** — every invocation is forced to miss the plan cache (a unique query-text token), so
+  it recompiles each time, exposing compilation cost.
+
+`compilation_ms ≈ uncached − cached` server time. (FalkorDB's `CACHE_SIZE` can't be set to `0` and
+is load-time only, so the uncached condition is produced client-side and verified via the response's
+`cached_execution` flag; the server's actual `CACHE_SIZE` is recorded in the report.) Use `--cache
+cached|uncached|both` (default `both`).
+
+Set up and run, start to end:
+
+```bash
+# 1. start a FalkorDB server (use a tagged image, not :edge, for meaningful version numbers)
+docker run -d --rm -p 6379:6379 falkordb/falkordb:latest
+
+# 2. build the tool (needs protoc; see Prerequisites)
+just build
+
+# 3. list the available operations
+just synthetic-ops
+
+# 4. run the probe (records the exact server image so results are reproducible)
+IMAGE=$(docker inspect --format '{{index .RepoDigests 0}}' falkordb/falkordb:latest)
+just synthetic-bench --endpoint falkor://127.0.0.1:6379 \
+    --op return_const --samples 1000 --warmup 200 --cache both \
+    --server-image "$IMAGE" --out synthetic-report.json
+```
+
+Sample output:
+
+```text
+synthetic benchmark — endpoint falkor://127.0.0.1:6379  samples 1000  warmup 200  connection pool(size=1)
+server — falkordb module ver 4.20.1  redis 8.6.3  CACHE_SIZE 25
+server image: falkordb/falkordb@sha256:9042fdc4...
+
+return_const
+  [cached — plan reused, execution only]
+    server_ms  median 0.018  mean 0.019  p99 0.031  (n=983, removed 17)
+    total_ms   median 0.391  mean 0.397  p99 0.514  (n=983, removed 17)
+    non_internal_ms (paired total-server)  median 0.374
+    cached_execution=false: 0.0%  (unknown 0)
+  [uncached — plan-cache miss each run, execution + compilation]
+    server_ms  median 0.029  mean 0.030  p99 0.047  (n=977, removed 23)
+    total_ms   median 0.388  mean 0.392  p99 0.490  (n=977, removed 23)
+    non_internal_ms (paired total-server)  median 0.358
+    cached_execution=false: 100.0%  (unknown 0)
+  compilation_ms (median uncached-cached server time)  0.011
+report written to synthetic-report.json
+```
+
+The report's `meta.server` block records the FalkorDB module version, `redis_version`/`build_id`,
+`CACHE_SIZE`, and the operator-supplied `--server-image` (FalkorDB does not expose a graph-module
+git SHA to clients, so the image digest is the reproducible build identity). A `:edge` image reports
+a `999999` placeholder version and the tool warns you to use a tagged image for comparisons.
+
+To run the integration test against a live server:
+
+```bash
+just synthetic-it     # uses FALKORDB_HOST/FALKORDB_PORT, default 127.0.0.1:6379
+```
 
 ### UI dashboard (`ui/`)
 

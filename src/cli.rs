@@ -1,5 +1,6 @@
 use crate::queries_repository::QueryCoverageProfile;
 use crate::scenario::Vendor;
+use crate::synthetic::{CacheSelection, OpName};
 use clap::{Parser, Subcommand};
 use clap_complete::Shell;
 
@@ -236,6 +237,80 @@ pub enum Commands {
         )]
         name: String,
     },
+
+    #[command(
+        about = "synthetic per-operation latency probe (measures server + total time in isolation)"
+    )]
+    Synthetic {
+        #[command(subcommand)]
+        command: SyntheticCommands,
+    },
+}
+
+/// Subcommands of `benchmark synthetic`.
+#[derive(Subcommand, Debug)]
+pub enum SyntheticCommands {
+    #[command(about = "run the single-operation latency probe")]
+    Run {
+        #[arg(
+            long,
+            default_value = "falkor://127.0.0.1:6379",
+            help = "FalkorDB endpoint (e.g., falkor://127.0.0.1:6379)"
+        )]
+        endpoint: String,
+        #[arg(
+            long,
+            value_enum,
+            default_value = "return_const",
+            help = "operation to measure"
+        )]
+        op: OpName,
+        #[arg(
+            long,
+            default_value_t = 1000,
+            help = "number of measured invocations"
+        )]
+        samples: usize,
+        #[arg(
+            long,
+            default_value_t = 200,
+            help = "number of warm-up invocations (discarded)"
+        )]
+        warmup: usize,
+        #[arg(
+            long,
+            value_enum,
+            default_value = "both",
+            help = "plan-cache condition: cached (plan reused), uncached (recompiled each run), or both (compare + expose compilation cost)"
+        )]
+        cache: CacheSelection,
+        #[arg(
+            long,
+            default_value_t = 5000,
+            help = "FalkorDB server-side per-query timeout (ms)"
+        )]
+        server_timeout_ms: i64,
+        #[arg(
+            long,
+            default_value_t = 6000,
+            help = "client-side deadline per query (ms)"
+        )]
+        client_deadline_ms: u64,
+        #[arg(
+            long,
+            default_value = "synthetic-report.json",
+            help = "path to write the JSON report"
+        )]
+        out: String,
+        #[arg(
+            long,
+            env = "FALKOR_SERVER_IMAGE",
+            help = "operator-supplied server image identity (e.g. falkordb/falkordb:v4.2.1@sha256:...), recorded verbatim"
+        )]
+        server_image: Option<String>,
+    },
+    #[command(about = "list the available operations")]
+    ListOps,
 }
 
 fn parse_write_ratio(val: &str) -> Result<f32, String> {

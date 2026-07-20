@@ -27,6 +27,7 @@ pub mod queries_repository;
 pub mod query;
 pub mod scenario;
 pub mod scheduler;
+pub mod synthetic;
 pub mod utils;
 
 pub(crate) const REDIS_DATA_DIR: &str = "./redis-data";

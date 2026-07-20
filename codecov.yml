@@ -6,9 +6,11 @@ coverage:
         threshold: 2%
     patch:
       default:
-        # New code should be well covered, but allow some slack for diffs that
-        # include inherently hard-to-unit-test paths (network/IO error branches).
-        threshold: 5%
+        # New code must be well covered: fail the patch check below 90% of changed
+        # lines. Server-backed paths are exercised by the coverage job's FalkorDB
+        # service (the integration tests run with `--include-ignored`).
+        target: 90%
+        threshold: 0%
 
 # The Next.js dashboard (ui/) and the vendored FalkorDB client (vendor/) are not
 # part of the Rust crate's unit tests, so they're excluded from coverage reporting.
