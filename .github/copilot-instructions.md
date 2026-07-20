@@ -15,11 +15,11 @@ The default branch is **`master`**. The FalkorDB Rust client is pulled in from
 
 ## Golden rule: drive everything through `just`
 
-For **any** check that CI performs — Rust `build`, `clippy`, `test`, `coverage`, and the Playwright
-UI smoke test — run the **exact same `just` recipe CI uses**, never a raw `cargo …` / `npm …`
-command (`just fmt-check`, `just ui-lint` and `just ui-build` are recommended local recipes but not
-CI gates). If a check needs changing, update the `just` recipe **and** the CI workflow together so
-they stay identical. Run `just --list` to see every recipe.
+For **any** check that CI performs — Rust `build`, `clippy`, `test`, `coverage`, the Markdown
+`doc-check`, and the Playwright UI smoke test — run the **exact same `just` recipe CI uses**, never
+a raw `cargo …` / `npm …` command (`just fmt-check`, `just ui-lint` and `just ui-build` are
+recommended local recipes but not CI gates). If a check needs changing, update the `just` recipe
+**and** the CI workflow together so they stay identical. Run `just --list` to see every recipe.
 
 Key recipes:
 
@@ -29,8 +29,11 @@ Key recipes:
 | `just ci` | Every Rust CI gate, in the same order CI runs them: `build clippy test`. |
 | `just clippy` | Strict clippy, warnings denied, scoped to the `benchmark` package (the `clippy` CI gate). |
 | `just build` | Build all targets/features (the `build` CI gate). |
-| `just test` | Unit + integration tests (the `test` CI gate). |
+| `just test` | Unit + integration tests (the `test` CI gate). Also compiles the Markdown Rust examples as doctests (see `src/doc_examples.rs`). |
 | `just test-one <filter>` | Run a single test by name filter. |
+| `just doc-check` | All Markdown doc checks (the `Docs validation` workflow): `doc-links` + `doc-shell`. |
+| `just doc-links` | Offline broken-link + anchor check (lychee) over every tracked `*.md` except `vendor/`. |
+| `just doc-shell` | Syntax-check (`bash -n`, no execution) the `bash`/`sh` examples in the Markdown docs. |
 | `just coverage` | Codecov JSON coverage via cargo-llvm-cov, including the `#[ignore]`d integration tests (the `coverage` CI job). Needs a reachable FalkorDB — set `FALKORDB_HOST`/`FALKORDB_PORT` or use `just coverage-local`. |
 | `just coverage-local` | Spin up a Docker FalkorDB, run `just coverage`, then tear it down. |
 | `just coverage-html` | Open a browsable HTML coverage report locally (also needs a FalkorDB). |
