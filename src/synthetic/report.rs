@@ -44,13 +44,19 @@ impl ServerInfo {
 pub struct Meta {
     pub tool_version: String,
     pub endpoint: String,
-    /// Graph key the probe measured against.
+    /// Graph key the probe measured against. `#[serde(default)]` so reports written before Part 2
+    /// (which lacked this field) still deserialize.
+    #[serde(default)]
     pub graph: String,
     pub samples: usize,
     pub warmup: usize,
     /// Seed used to generate the per-operation parameter corpora (for reproducibility).
+    /// `#[serde(default)]` for backward compatibility with pre-Part-2 reports.
+    #[serde(default)]
     pub seed: u64,
-    /// Number of distinct parameterizations pre-generated per operation.
+    /// Number of distinct parameterizations pre-generated per operation. `#[serde(default)]` for
+    /// backward compatibility with pre-Part-2 reports.
+    #[serde(default)]
     pub corpus_size: usize,
     pub server_timeout_ms: i64,
     pub client_deadline_ms: u64,
@@ -251,6 +257,28 @@ mod tests {
         assert_eq!(op.compilation_ms_median, Some(0.05));
         assert_eq!(back.meta.server.module_graph_ver, Some(42001));
         assert_eq!(back.meta.server.cache_size, Some(25));
+    }
+
+    #[test]
+    fn pre_part2_report_deserializes_with_defaults() {
+        // A report written before Part 2 has no graph/seed/corpus_size fields; `#[serde(default)]`
+        // must let it deserialize (falling back to empty/0) rather than erroring.
+        let old = r#"{
+            "meta": {
+                "tool_version": "0.1.0",
+                "endpoint": "falkor://127.0.0.1:6379",
+                "samples": 1000, "warmup": 200,
+                "server_timeout_ms": 5000, "client_deadline_ms": 6000,
+                "connection": "pool(size=1)", "started_at_epoch_secs": 42,
+                "server": {}
+            },
+            "operations": {}
+        }"#;
+        let report: Report = serde_json::from_str(old).expect("old report should deserialize");
+        assert_eq!(report.meta.graph, "");
+        assert_eq!(report.meta.seed, 0);
+        assert_eq!(report.meta.corpus_size, 0);
+        assert_eq!(report.meta.samples, 1000);
     }
 
     #[test]
