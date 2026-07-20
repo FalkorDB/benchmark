@@ -44,8 +44,14 @@ impl ServerInfo {
 pub struct Meta {
     pub tool_version: String,
     pub endpoint: String,
+    /// Graph key the probe measured against.
+    pub graph: String,
     pub samples: usize,
     pub warmup: usize,
+    /// Seed used to generate the per-operation parameter corpora (for reproducibility).
+    pub seed: u64,
+    /// Number of distinct parameterizations pre-generated per operation.
+    pub corpus_size: usize,
     pub server_timeout_ms: i64,
     pub client_deadline_ms: u64,
     /// Connection strategy, e.g. `"pool(size=1)"`.
@@ -102,8 +108,13 @@ impl Report {
     pub fn to_console(&self) -> String {
         let mut out = String::new();
         out.push_str(&format!(
-            "synthetic benchmark — endpoint {}  samples {}  warmup {}  connection {}\n",
-            self.meta.endpoint, self.meta.samples, self.meta.warmup, self.meta.connection
+            "synthetic benchmark — endpoint {}  graph {}  samples {}  warmup {}  seed {}  connection {}\n",
+            self.meta.endpoint,
+            self.meta.graph,
+            self.meta.samples,
+            self.meta.warmup,
+            self.meta.seed,
+            self.meta.connection
         ));
         let v = self
             .meta
@@ -207,8 +218,11 @@ mod tests {
             meta: Meta {
                 tool_version: "0.1.0".to_string(),
                 endpoint: "falkor://127.0.0.1:6379".to_string(),
+                graph: "falkor".to_string(),
                 samples: 1000,
                 warmup: 200,
+                seed: 0,
+                corpus_size: 256,
                 server_timeout_ms: 5000,
                 client_deadline_ms: 6000,
                 connection: "pool(size=1)".to_string(),

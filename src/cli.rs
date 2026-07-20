@@ -250,7 +250,7 @@ pub enum Commands {
 /// Subcommands of `benchmark synthetic`.
 #[derive(Subcommand, Debug)]
 pub enum SyntheticCommands {
-    #[command(about = "run the single-operation latency probe")]
+    #[command(about = "run the per-operation latency probe over one or more read operations")]
     Run {
         #[arg(
             long,
@@ -260,11 +260,24 @@ pub enum SyntheticCommands {
         endpoint: String,
         #[arg(
             long,
-            value_enum,
-            default_value = "return_const",
-            help = "operation to measure"
+            default_value = "falkor",
+            help = "graph key to measure against"
         )]
-        op: OpName,
+        graph: String,
+        #[arg(
+            long = "op",
+            value_enum,
+            value_delimiter = ',',
+            num_args = 1..,
+            help = "operation(s) to measure; repeatable and comma-separated (e.g. --op match_by_index --op expand_1_hop or --op match_by_index,expand_1_hop)"
+        )]
+        ops: Vec<OpName>,
+        #[arg(
+            long,
+            conflicts_with = "ops",
+            help = "measure every read operation (mutually exclusive with --op)"
+        )]
+        all_reads: bool,
         #[arg(
             long,
             default_value_t = 1000,
@@ -277,6 +290,12 @@ pub enum SyntheticCommands {
             help = "number of warm-up invocations (discarded)"
         )]
         warmup: usize,
+        #[arg(
+            long,
+            default_value_t = 0,
+            help = "seed for the per-operation parameter corpora (same seed ⇒ identical corpora)"
+        )]
+        seed: u64,
         #[arg(
             long,
             value_enum,

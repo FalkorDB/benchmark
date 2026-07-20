@@ -139,13 +139,13 @@ workflow. Please cover new code with tests and keep coverage high — **patch co
 
 ### Synthetic per-operation benchmark (experimental)
 
-Measures a single Cypher operation **in isolation**, capturing on every invocation both the
-**server time** (FalkorDB's reported internal execution time) and the **total time** (end-to-end
-client round-trip), then summarizes them with severe-outlier removal (Tukey fences, like
-Criterion.rs) and writes a JSON report. It uses a single dedicated connection for honest
-single-flight latency. This is the first slice of a larger tool (see the design in
-[`synthetic-benchmark.md`](synthetic-benchmark.md)); later parts add an operation catalog, a
-synthetic dataset, and a concurrency sweep.
+Measures a curated suite of **read operations in isolation** — one at a time, selectable — capturing
+on every invocation both the **server time** (FalkorDB's reported internal execution time) and the
+**total time** (end-to-end client round-trip), then summarizing them with severe-outlier removal
+(Tukey fences, like Criterion.rs) and writing a JSON report with one block per operation. It uses a
+single dedicated connection for honest single-flight latency. This is Part 2 of a larger tool (see
+[`synthetic-benchmark.md`](synthetic-benchmark.md)); later parts add a generated synthetic dataset,
+a concurrency sweep, and write operations.
 
 Each operation is measured under two plan-cache conditions so you can see the cost of expression
 **compilation** separately from execution:
@@ -159,6 +159,31 @@ is load-time only, so the uncached condition is produced client-side and verifie
 `cached_execution` flag; the server's actual `CACHE_SIZE` is recorded in the report.) Use `--cache
 cached|uncached|both` (default `both`).
 
+#### Operation catalog
+
+Select operations with `--op <name>` (repeatable and comma-separated) or `--all-reads`. All read
+ops except `return_const` target the benchmark's `:User {id, age}` / `(:User)-[:Friend]->(:User)`
+schema (with an index on `:User(id)`); their parameter corpora are seeded from ids sampled out of
+`--graph` (a reproducible generated dataset arrives in Part 3, so for now point `--graph` at a graph
+that already holds that schema). Every query projects **scalars** (never whole nodes) and is
+parameterized; the corpus is seeded (`--seed`) so the same seed yields an identical corpus.
+
+| Operation | What it measures | Cypher (body) |
+|---|---|---|
+| `return_const` | round-trip / parse+exec baseline (no dataset) | `RETURN $i AS x` |
+| `match_by_index` | point lookup on the `:User(id)` index | `MATCH (n:User {id: $id}) RETURN n.id` |
+| `match_by_label_scan` | full `:User` label scan (non-indexable predicate) | `MATCH (n:User) WHERE n.id % $modulus = 0 RETURN count(n)` |
+| `expand_1_hop` | 1-hop `:Friend` expansion | `MATCH (s:User {id: $id})-[:Friend]->(n:User) RETURN n.id` |
+| `expand_hops_5` | fixed 5-hop `:Friend` expansion | `MATCH (s:User {id: $id})-[:Friend*5..5]->(n:User) RETURN DISTINCT n.id LIMIT 100` |
+| `aggregate_count` | count a node's 1-hop neighbours | `MATCH (s:User {id: $id})-[:Friend]->(n:User) RETURN count(n)` |
+| `aggregate_group` | group neighbours by age with counts | `MATCH (s:User {id: $id})-[:Friend]->(n:User) RETURN n.age AS age, count(*) AS c ORDER BY c DESC LIMIT 10` |
+| `shortest_path` | bounded shortest `:Friend` path between two nodes | `MATCH (s:User {id: $from}),(t:User {id: $to}) WITH shortestPath((s)-[:Friend*1..6]->(t)) AS p RETURN coalesce(length(p), -1)` |
+| `property_projection` | project scalar properties of an indexed node | `MATCH (n:User {id: $id}) RETURN n.id, n.age` |
+
+Because `OpName` is a clap `ValueEnum`, `--op <TAB>` completes the operation names once you've
+installed completion (`benchmark generate-auto-complete <shell>`), and `just synthetic-ops` (or
+`benchmark synthetic list-ops`) prints the catalog.
+
 Set up and run, start to end:
 
 ```bash
@@ -171,32 +196,35 @@ just build
 # 3. list the available operations
 just synthetic-ops
 
-# 4. run the probe (records the exact server image so results are reproducible)
+# 4. run the probe over several ops (records the exact server image so results are reproducible)
 IMAGE=$(docker inspect --format '{{index .RepoDigests 0}}' falkordb/falkordb:latest)
-just synthetic-bench --endpoint falkor://127.0.0.1:6379 \
-    --op return_const --samples 1000 --warmup 200 --cache both \
-    --server-image "$IMAGE" --out synthetic-report.json
+just synthetic-bench --endpoint falkor://127.0.0.1:6379 --graph main \
+    --op match_by_index,expand_1_hop,aggregate_count --samples 500 --warmup 100 \
+    --cache both --seed 42 --server-image "$IMAGE" --out synthetic-report.json
+# ...or measure the whole read catalog at once:
+just synthetic-bench --graph main --all-reads --samples 500
 ```
 
-Sample output:
+Sample output (one block per selected op):
 
 ```text
-synthetic benchmark — endpoint falkor://127.0.0.1:6379  samples 1000  warmup 200  connection pool(size=1)
+synthetic benchmark — endpoint falkor://127.0.0.1:6379  graph main  samples 500  warmup 100  seed 42  connection pool(size=1)
 server — falkordb module ver 4.20.1  redis 8.6.3  CACHE_SIZE 25
 server image: falkordb/falkordb@sha256:9042fdc4...
 
-return_const
+match_by_index
   [cached — plan reused, execution only]
-    server_ms  median 0.018  mean 0.019  p99 0.031  (n=983, removed 17)
-    total_ms   median 0.391  mean 0.397  p99 0.514  (n=983, removed 17)
-    non_internal_ms (paired total-server)  median 0.374
+    server_ms  median 0.033  mean 0.034  p99 0.059  (n=487, removed 13)
+    total_ms   median 0.427  mean 0.440  p99 0.596  (n=487, removed 13)
+    non_internal_ms (paired total-server)  median 0.394
     cached_execution=false: 0.0%  (unknown 0)
   [uncached — plan-cache miss each run, execution + compilation]
-    server_ms  median 0.029  mean 0.030  p99 0.047  (n=977, removed 23)
-    total_ms   median 0.388  mean 0.392  p99 0.490  (n=977, removed 23)
-    non_internal_ms (paired total-server)  median 0.358
+    server_ms  median 0.058  mean 0.063  p99 0.093  (n=497, removed 3)
     cached_execution=false: 100.0%  (unknown 0)
-  compilation_ms (median uncached-cached server time)  0.011
+  compilation_ms (median uncached-cached server time)  0.025
+
+expand_1_hop
+  ...
 report written to synthetic-report.json
 ```
 
