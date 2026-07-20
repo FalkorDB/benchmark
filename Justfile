@@ -103,8 +103,9 @@ run *args:
 # === Synthetic per-operation benchmark =======================================
 
 # Needs a reachable FalkorDB, e.g. `docker run -d -p 6379:6379 falkordb/falkordb:latest`. Example:
-# `just synthetic-bench --samples 1000 --op return_const`.
-# Run the synthetic single-operation latency probe (forwards args to `synthetic run`).
+# `just synthetic-bench --graph demo --op match_by_index,expand_1_hop --samples 500` (or --all-reads).
+# Read primitives need a `:User {id}` / `:Friend` dataset in --graph; see the README catalog.
+# Run the synthetic per-operation latency probe (forwards args to `synthetic run`).
 synthetic-bench *args:
     #!/usr/bin/env bash
     set -euo pipefail

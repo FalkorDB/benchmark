@@ -1,10 +1,18 @@
-//! Synthetic per-operation benchmark — Part 1: a single-operation latency probe.
+//! Synthetic per-operation benchmark — Part 2: a selectable catalog of read operations.
 //!
-//! Measures one Cypher operation in isolation against a FalkorDB endpoint, capturing on every
-//! invocation the paired *server time* (FalkorDB's reported internal execution time) and *total
-//! time* (end-to-end client round-trip), then summarizes them with severe-outlier removal and
-//! writes a JSON report + console summary. This is the foundation the rest of the epic builds on.
+//! Measures one or more Cypher read operations in isolation against a FalkorDB endpoint. For each
+//! selected operation it pre-generates a seeded corpus of parameterized queries (see
+//! [`catalog`]), then, under each plan-cache condition, captures on every invocation the paired
+//! *server time* (FalkorDB's reported internal execution time) and *total time* (end-to-end client
+//! round-trip), summarizes them with severe-outlier removal, and derives the expression
+//! *compilation cost* (uncached − cached). One JSON block is written per operation.
+//!
+//! Note that per-operation latency distributions can be right-skewed (e.g. high-degree seed nodes
+//! for expansions), so the summary trims only *severe* outliers (beyond 3×IQR) and both cache
+//! modes cycle the same corpus in the same order, keeping the cached-vs-uncached medians comparable
+//! on a matched workload.
 
+pub mod catalog;
 pub mod op_runner;
 pub mod provenance;
 pub mod report;
@@ -13,86 +21,111 @@ pub mod stats;
 use crate::error::BenchmarkError::OtherError;
 use crate::error::BenchmarkResult;
 use crate::falkor::falkor_endpoint_to_redis_url;
-use crate::query::{Query, QueryBuilder};
 use crate::queries_repository::QueryType;
+use crate::query::Query;
+use crate::synthetic::catalog::{spec, DatasetHandle, DatasetRequirement, OperationSpec, CORPUS_SIZE};
 use crate::synthetic::op_runner::{run_and_drain, OpSample};
 use crate::synthetic::report::{Meta, OperationReport, Report};
 use clap::ValueEnum;
 use falkordb::{ConnectionStrategy, FalkorClientBuilder};
+use futures::StreamExt;
+use rand::rngs::StdRng;
+use rand::SeedableRng;
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{info, warn};
 
-/// The set of operations the probe can run. Part 1 ships a single dataset-free baseline; later
-/// parts extend this enum and the catalog together (it stays the single source of truth so
-/// `--help`, shell completion and the catalog never drift).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+/// The default graph key the probe targets when `--graph` isn't given.
+pub const DEFAULT_GRAPH: &str = "falkor";
+
+/// How many `:User` ids to sample from the live graph to seed operation corpora.
+const DATASET_SAMPLE_SIZE: usize = 512;
+
+/// The set of operations the probe can measure. `OpName` is the single source of truth: it's a
+/// clap `ValueEnum` (so `--op`, `--help` and shell completion list exactly these), and every
+/// variant maps to one [`catalog::OperationSpec`] via [`catalog::spec`] (an exhaustive match, so a
+/// new variant won't compile until it has a corpus). Read primitives target the benchmark's
+/// `:User {id, age}` / `(:User)-[:Friend]->(:User)` schema.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, ValueEnum)]
 #[value(rename_all = "snake_case")]
 pub enum OpName {
     /// `RETURN $i` — a pure round-trip / server parse+exec baseline that needs no dataset.
     ReturnConst,
+    /// Point lookup on the `:User(id)` index.
+    MatchByIndex,
+    /// Full `:User` label scan with a non-indexable predicate.
+    MatchByLabelScan,
+    /// 1-hop `:Friend` expansion from a seed node.
+    #[value(name = "expand_1_hop")]
+    Expand1Hop,
+    /// Fixed 5-hop `:Friend` expansion from a seed node.
+    #[value(name = "expand_hops_5")]
+    ExpandHops5,
+    /// Count a seed node's 1-hop `:Friend` neighbours.
+    AggregateCount,
+    /// Group a seed node's neighbours by age with counts.
+    AggregateGroup,
+    /// Bounded shortest `:Friend` path between two seed nodes.
+    ShortestPath,
+    /// Project scalar properties of an indexed node.
+    PropertyProjection,
 }
 
 impl OpName {
+    /// Every operation, in declaration order (the catalog's canonical order).
+    pub fn all() -> &'static [OpName] {
+        OpName::value_variants()
+    }
+
+    /// Every read operation (all of them, for now — writes arrive in Part 5). Used by
+    /// `--all-reads`.
+    pub fn all_reads() -> Vec<OpName> {
+        OpName::all()
+            .iter()
+            .copied()
+            .filter(|op| spec(*op).kind == QueryType::Read)
+            .collect()
+    }
+
     /// The stable string id used in reports and on the CLI.
     pub fn as_str(self) -> &'static str {
         match self {
             OpName::ReturnConst => "return_const",
+            OpName::MatchByIndex => "match_by_index",
+            OpName::MatchByLabelScan => "match_by_label_scan",
+            OpName::Expand1Hop => "expand_1_hop",
+            OpName::ExpandHops5 => "expand_hops_5",
+            OpName::AggregateCount => "aggregate_count",
+            OpName::AggregateGroup => "aggregate_group",
+            OpName::ShortestPath => "shortest_path",
+            OpName::PropertyProjection => "property_projection",
         }
     }
 
     /// Whether this operation reads or writes (selects `RO_QUERY` vs `QUERY`).
     pub fn kind(self) -> QueryType {
-        match self {
-            OpName::ReturnConst => QueryType::Read,
-        }
+        spec(self).kind
     }
 
-    /// A one-line description for `list-ops`.
+    /// A one-line description for `list-ops` and the report.
     pub fn description(self) -> &'static str {
-        match self {
-            OpName::ReturnConst => "RETURN $i — pure round-trip baseline (no dataset required)",
-        }
+        spec(self).description
     }
 
-    /// Build the query for invocation `i`: a parameterized query whose body is constant but whose
-    /// parameter *value* varies with `i`, so we exercise real parameter binding rather than a
-    /// single frozen literal (while the constant body still lets the plan cache work — see
-    /// [`Self::render_cypher`]).
-    pub fn build_query(
-        self,
-        i: usize,
-    ) -> Query {
-        // Keep the parameter value in the non-negative i32 range (the only integer QueryParam
-        // width) so a very large invocation index can't truncate to a negative value.
-        let param = (i % (i32::MAX as usize)) as i32;
+    /// A stable per-operation salt mixed into the RNG seed so two ops with the same corpus shape
+    /// don't draw identical parameter sequences from one `--seed`. Fixed constants (not the
+    /// declaration index) so reordering the enum can't shift an op's corpus.
+    pub fn salt(self) -> u64 {
         match self {
-            OpName::ReturnConst => QueryBuilder::new()
-                .text("RETURN $i AS x")
-                .param("i", param)
-                .build(),
-        }
-    }
-
-    /// Render the Cypher string for invocation `i` in the given cache mode.
-    ///
-    /// FalkorDB keys its plan cache on the query **body** — the text after the `CYPHER <params>`
-    /// prefix that [`Query::to_cypher`] emits — so varying only a parameter *value* still hits the
-    /// cache. In [`CacheMode::Cached`] the body (`RETURN $i AS x`) is therefore identical every
-    /// invocation (only the stripped `CYPHER i = <n>` prefix changes), so after warm-up the plan is
-    /// reused and only execution is measured. In [`CacheMode::Uncached`] a unique trailing comment
-    /// (`/* co<i> */`) is appended to the body, making every invocation a distinct cache key and
-    /// forcing FalkorDB to recompile each time (verified via the response's `cached_execution`
-    /// flag), which exposes expression-compilation cost.
-    pub fn render_cypher(
-        self,
-        i: usize,
-        mode: CacheMode,
-    ) -> String {
-        let base = self.build_query(i).to_cypher();
-        match mode {
-            CacheMode::Cached => base,
-            CacheMode::Uncached => format!("{} /* co{} */", base, i),
+            OpName::ReturnConst => 0x5259_5f43_4f4e_5354,
+            OpName::MatchByIndex => 0x4d54_4348_5f49_4458,
+            OpName::MatchByLabelScan => 0x4c41_4245_4c5f_5343,
+            OpName::Expand1Hop => 0x4558_5031_484f_5000,
+            OpName::ExpandHops5 => 0x4558_5035_484f_5053,
+            OpName::AggregateCount => 0x4147_475f_434e_5400,
+            OpName::AggregateGroup => 0x4147_475f_4752_5000,
+            OpName::ShortestPath => 0x5348_5254_5f50_5448,
+            OpName::PropertyProjection => 0x5052_4f50_5f50_524a,
         }
     }
 }
@@ -128,13 +161,39 @@ pub enum CacheMode {
     Uncached,
 }
 
-/// Configuration for a single-operation probe run.
+/// Render one corpus query to a Cypher string for the given cache mode.
+///
+/// FalkorDB keys its plan cache on the query **body** (the text after the `CYPHER <params>` prefix
+/// that [`Query::to_cypher`] emits). [`CacheMode::Cached`] uses the body verbatim, so a corpus of
+/// varying parameter values still reuses one cached plan → *execution only*. [`CacheMode::Uncached`]
+/// appends a unique trailing comment `/* co<run_token>-<i> */`, making every invocation a distinct
+/// cache key that FalkorDB must recompile → *execution + compilation*. The per-run `run_token` keeps a
+/// previous run's uncached comments from being served from cache.
+fn render_cypher(
+    query: &Query,
+    mode: CacheMode,
+    run_token: u64,
+    i: usize,
+) -> String {
+    let base = query.to_cypher();
+    match mode {
+        CacheMode::Cached => base,
+        CacheMode::Uncached => format!("{} /* co{:x}-{} */", base, run_token, i),
+    }
+}
+
+/// Configuration for a synthetic probe run over one or more operations.
 #[derive(Debug, Clone)]
 pub struct Config {
     pub endpoint: String,
-    pub op: OpName,
+    /// Graph key to measure against (default [`DEFAULT_GRAPH`]).
+    pub graph: String,
+    /// Operations to measure, in order. Deduplicated (first occurrence wins) before running.
+    pub ops: Vec<OpName>,
     pub samples: usize,
     pub warmup: usize,
+    /// Seed for the per-operation parameter corpora (same seed ⇒ identical corpora).
+    pub seed: u64,
     pub server_timeout_ms: i64,
     pub client_deadline_ms: u64,
     pub cache: CacheSelection,
@@ -146,9 +205,11 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             endpoint: "falkor://127.0.0.1:6379".to_string(),
-            op: OpName::ReturnConst,
+            graph: DEFAULT_GRAPH.to_string(),
+            ops: vec![OpName::ReturnConst],
             samples: 1000,
             warmup: 200,
+            seed: 0,
             server_timeout_ms: 5_000,
             client_deadline_ms: 6_000,
             cache: CacheSelection::Both,
@@ -161,8 +222,8 @@ impl Default for Config {
 /// Print the available operations (for `synthetic list-ops`).
 pub fn list_ops() -> String {
     let mut out = String::from("Available operations:\n");
-    for op in OpName::value_variants() {
-        out.push_str(&format!("  {:<16} {}\n", op.as_str(), op.description()));
+    for op in OpName::all() {
+        out.push_str(&format!("  {:<20} {}\n", op.as_str(), op.description()));
     }
     out
 }
@@ -209,12 +270,19 @@ pub async fn open_graph(
     Ok(client.select_graph(graph_name))
 }
 
-/// Run the probe: connect (single connection), collect server provenance, warm up, measure, then
-/// build the [`Report`]. Writing the report to disk is the caller's responsibility (see
-/// [`run_and_report`]).
+/// Run the probe: connect (single connection), collect server provenance, sample the graph to seed
+/// corpora, then measure each selected operation under each cache mode and build the [`Report`].
+/// Writing the report to disk is the caller's responsibility (see [`run_and_report`]).
 pub async fn run(config: &Config) -> BenchmarkResult<Report> {
     if config.samples == 0 {
         return Err(OtherError("samples must be greater than 0".to_string()));
+    }
+    let ops = dedup_ops(&config.ops);
+    if ops.is_empty() {
+        return Err(OtherError(
+            "no operations selected — pass --op <name> (repeatable/comma-separated) or --all-reads"
+                .to_string(),
+        ));
     }
 
     let started_at_epoch_secs = SystemTime::now()
@@ -223,7 +291,7 @@ pub async fn run(config: &Config) -> BenchmarkResult<Report> {
         .unwrap_or(0);
 
     // A single dedicated connection: honest single-flight latency.
-    let mut graph = open_graph(&config.endpoint, "falkor").await?;
+    let mut graph = open_graph(&config.endpoint, &config.graph).await?;
 
     // Server provenance (best-effort: log and continue on failure).
     let redis_url = falkor_endpoint_to_redis_url(Some(&config.endpoint));
@@ -245,12 +313,73 @@ pub async fn run(config: &Config) -> BenchmarkResult<Report> {
     }
 
     let client_deadline = Duration::from_millis(config.client_deadline_ms);
+    ensure_graph_exists(&mut graph, config, client_deadline).await?;
 
-    // Ensure the graph key exists: a read (`RO_QUERY`) against a never-written graph fails with
-    // "Invalid graph operation on empty key". Probe with a read first and only write to
-    // instantiate the graph when the error is exactly that empty-key condition — so a read-only
-    // replica whose graph already exists still works, and any other error (auth/network) is
-    // surfaced rather than masked. Both are bounded by the client deadline.
+    // Only sample the graph if some selected op needs seed ids (return_const / label scan don't),
+    // so a return_const-only run doesn't fail on a graph that has no :User data.
+    let needs_dataset = ops
+        .iter()
+        .any(|op| spec(*op).requirement != DatasetRequirement::None);
+    let dataset = if needs_dataset {
+        probe_dataset(&mut graph, config, client_deadline).await?
+    } else {
+        DatasetHandle::default()
+    };
+
+    // A fresh OS-random run_token per run keeps uncached-mode comments globally unique, so a small
+    // run's uncached queries can never be served from a previous run's plan cache.
+    let run_token = rand::random_range(0..=u64::MAX);
+
+    let mut operations = BTreeMap::new();
+    for op in ops {
+        let op_spec = spec(op);
+        // Seed each op's corpus deterministically (same --seed ⇒ byte-identical corpus).
+        let mut rng = StdRng::seed_from_u64(config.seed ^ op.salt());
+        let corpus = op_spec.build_corpus(&mut rng, &dataset, 0, 1)?;
+        let op_report =
+            measure_op(&mut graph, config, &op_spec, &corpus, run_token, client_deadline).await?;
+        operations.insert(op.as_str().to_string(), op_report);
+    }
+
+    Ok(Report {
+        meta: Meta {
+            tool_version: env!("CARGO_PKG_VERSION").to_string(),
+            endpoint: redact_endpoint(&config.endpoint),
+            graph: config.graph.clone(),
+            samples: config.samples,
+            warmup: config.warmup,
+            seed: config.seed,
+            corpus_size: CORPUS_SIZE,
+            server_timeout_ms: config.server_timeout_ms,
+            client_deadline_ms: config.client_deadline_ms,
+            connection: "pool(size=1)".to_string(),
+            started_at_epoch_secs,
+            server,
+        },
+        operations,
+    })
+}
+
+/// Deduplicate the selected ops, preserving first-occurrence order (so a repeated `--op` or an
+/// overlap between `--op` and `--all-reads` doesn't silently overwrite a report entry).
+fn dedup_ops(ops: &[OpName]) -> Vec<OpName> {
+    let mut seen = std::collections::HashSet::new();
+    ops.iter().copied().filter(|op| seen.insert(*op)).collect()
+}
+
+/// Ensure the target graph key exists: a read (`RO_QUERY`) against a never-written graph fails with
+/// "Invalid graph operation on empty key". Probe with a read first; only when the error is exactly
+/// that empty-key condition, re-run the same trivial `RETURN 1` over the writable `GRAPH.QUERY`
+/// command (not `RO_QUERY`) — which instantiates the empty graph key even though the query itself
+/// mutates nothing. So a read-only replica whose graph already exists still works via the read
+/// path, and any other error (auth/network) is surfaced rather than masked. Both are bounded by the
+/// client deadline.
+async fn ensure_graph_exists(
+    graph: &mut falkordb::AsyncGraph,
+    config: &Config,
+    client_deadline: Duration,
+) -> BenchmarkResult<()> {
+    let name = &config.graph;
     let probe = tokio::time::timeout(
         client_deadline,
         graph
@@ -259,9 +388,9 @@ pub async fn run(config: &Config) -> BenchmarkResult<Report> {
             .execute(),
     )
     .await
-    .map_err(|e| OtherError(format!("graph 'falkor' readiness probe timed out: {}", e)))?;
+    .map_err(|e| OtherError(format!("graph '{}' readiness probe timed out: {}", name, e)))?;
     match probe {
-        Ok(_) => {}
+        Ok(_) => Ok(()),
         Err(e) => {
             let msg = format!("{:?}", e);
             if is_empty_graph_key(&msg) {
@@ -273,59 +402,63 @@ pub async fn run(config: &Config) -> BenchmarkResult<Report> {
                         .execute(),
                 )
                 .await
-                .map_err(|e| OtherError(format!("graph 'falkor' instantiation timed out: {}", e)))?
                 .map_err(|e| {
-                    OtherError(format!("failed to instantiate graph 'falkor': {:?}", e))
+                    OtherError(format!("graph '{}' instantiation timed out: {}", name, e))
+                })?
+                .map_err(|e| {
+                    OtherError(format!("failed to instantiate graph '{}': {:?}", name, e))
                 })?;
+                Ok(())
             } else {
-                return Err(OtherError(format!(
-                    "graph 'falkor' readiness probe failed: {}",
-                    msg
-                )));
+                Err(OtherError(format!(
+                    "graph '{}' readiness probe failed: {}",
+                    name, msg
+                )))
             }
         }
     }
+}
 
-    // Measure the operation under each requested plan-cache condition.
-    let mut cached_set: Option<crate::synthetic::report::MetricSet> = None;
-    let mut uncached_set: Option<crate::synthetic::report::MetricSet> = None;
-    for &mode in config.cache.modes() {
-        let set = measure_mode(&mut graph, config, mode, client_deadline).await?;
-        match mode {
-            CacheMode::Cached => cached_set = Some(set),
-            CacheMode::Uncached => uncached_set = Some(set),
+/// Sample up to [`DATASET_SAMPLE_SIZE`] existing `:User` ids (ascending, for a stable reproducible
+/// sample) to seed operation corpora. A graph with no `:User` nodes yields an empty handle; ops
+/// that need seed ids then fail with a clear message (ops that don't, like `return_const` or the
+/// label scan, still run).
+async fn probe_dataset(
+    graph: &mut falkordb::AsyncGraph,
+    config: &Config,
+    client_deadline: Duration,
+) -> BenchmarkResult<DatasetHandle> {
+    let cypher = format!(
+        "MATCH (n:User) WHERE n.id >= {} AND n.id <= {} RETURN n.id AS id ORDER BY id LIMIT {}",
+        i32::MIN,
+        i32::MAX,
+        DATASET_SAMPLE_SIZE
+    );
+    let collect = async {
+        let mut result = graph
+            .ro_query(&cypher)
+            .with_timeout(config.server_timeout_ms)
+            .execute()
+            .await
+            .map_err(|e| OtherError(format!("dataset probe failed: {:?}", e)))?;
+        let mut node_ids = Vec::new();
+        while let Some(row) = result.data.next().await {
+            let row = row.map_err(|e| OtherError(format!("dataset probe row error: {:?}", e)))?;
+            // ids are read as i64 then narrowed; out-of-`i32`-range ids are skipped (QueryParam is
+            // i32) rather than clamped, so we never target a wrong/nonexistent node.
+            let id: i64 = row
+                .try_get_at(0)
+                .map_err(|e| OtherError(format!("dataset probe decode error: {:?}", e)))?;
+            if let Ok(id) = i32::try_from(id) {
+                node_ids.push(id);
+            }
         }
-    }
-
-    // Derived expression-compilation cost: how much slower an uncached (recompiled) run's server
-    // time is than a cached (plan-reused) one.
-    let compilation_ms_median = match (&cached_set, &uncached_set) {
-        (Some(c), Some(u)) => Some(u.server_ms.median - c.server_ms.median),
-        _ => None,
+        Ok::<Vec<i32>, crate::error::BenchmarkError>(node_ids)
     };
-
-    let op_report = OperationReport {
-        cached: cached_set,
-        uncached: uncached_set,
-        compilation_ms_median,
-    };
-    let mut operations = BTreeMap::new();
-    operations.insert(config.op.as_str().to_string(), op_report);
-
-    Ok(Report {
-        meta: Meta {
-            tool_version: env!("CARGO_PKG_VERSION").to_string(),
-            endpoint: redact_endpoint(&config.endpoint),
-            samples: config.samples,
-            warmup: config.warmup,
-            server_timeout_ms: config.server_timeout_ms,
-            client_deadline_ms: config.client_deadline_ms,
-            connection: "pool(size=1)".to_string(),
-            started_at_epoch_secs,
-            server,
-        },
-        operations,
-    })
+    let node_ids = tokio::time::timeout(client_deadline, collect)
+        .await
+        .map_err(|e| OtherError(format!("dataset probe timed out: {}", e)))??;
+    Ok(DatasetHandle { node_ids })
 }
 
 /// Whether a query error string is FalkorDB's "graph key does not exist yet" condition.
@@ -334,37 +467,76 @@ fn is_empty_graph_key(msg: &str) -> bool {
     m.contains("empty key") || m.contains("invalid graph operation")
 }
 
-/// Warm up then measure `config.samples` invocations of `config.op` in one cache mode.
+/// Measure one operation under every requested cache mode and derive its compilation cost.
+async fn measure_op(
+    graph: &mut falkordb::AsyncGraph,
+    config: &Config,
+    op_spec: &OperationSpec,
+    corpus: &[Query],
+    run_token: u64,
+    client_deadline: Duration,
+) -> BenchmarkResult<OperationReport> {
+    let mut cached_set: Option<crate::synthetic::report::MetricSet> = None;
+    let mut uncached_set: Option<crate::synthetic::report::MetricSet> = None;
+    for &mode in config.cache.modes() {
+        let set = measure_mode(graph, config, op_spec, corpus, mode, run_token, client_deadline).await?;
+        match mode {
+            CacheMode::Cached => cached_set = Some(set),
+            CacheMode::Uncached => uncached_set = Some(set),
+        }
+    }
+
+    // Derived expression-compilation cost: how much slower an uncached (recompiled) run's server
+    // time is than a cached (plan-reused) one. Both modes cycle the same corpus in the same order,
+    // so the medians compare a matched workload.
+    let compilation_ms_median = match (&cached_set, &uncached_set) {
+        (Some(c), Some(u)) => Some(u.server_ms.median - c.server_ms.median),
+        _ => None,
+    };
+
+    Ok(OperationReport {
+        cached: cached_set,
+        uncached: uncached_set,
+        compilation_ms_median,
+    })
+}
+
+/// Warm up then measure `config.samples` invocations of one operation in one cache mode, cycling
+/// through the pre-generated `corpus` (so parameter values vary while the body stays constant).
 async fn measure_mode(
     graph: &mut falkordb::AsyncGraph,
     config: &Config,
+    op_spec: &OperationSpec,
+    corpus: &[Query],
     mode: CacheMode,
+    run_token: u64,
     client_deadline: Duration,
 ) -> BenchmarkResult<crate::synthetic::report::MetricSet> {
+    let kind = op_spec.kind;
+
+    // Prime the plan cache once even when warmup==0, so a cached-mode measurement never pays
+    // first-touch compilation on its first sample. (No help for uncached, whose every query is
+    // unique by design.)
+    if config.warmup == 0 && mode == CacheMode::Cached {
+        let cypher = render_cypher(&corpus[0], mode, run_token, 0);
+        let _ = run_and_drain(graph, kind, &cypher, config.server_timeout_ms, client_deadline)
+            .await?;
+    }
+
     // Warm-up (discarded) primes the plan cache (cached mode) and the connection.
     for i in 0..config.warmup {
-        let cypher = config.op.render_cypher(i, mode);
-        let _ = run_and_drain(
-            graph,
-            config.op.kind(),
-            &cypher,
-            config.server_timeout_ms,
-            client_deadline,
-        )
-        .await?;
+        let cypher = render_cypher(&corpus[i % corpus.len()], mode, run_token, i);
+        let _ = run_and_drain(graph, kind, &cypher, config.server_timeout_ms, client_deadline)
+            .await?;
     }
 
     let mut samples: Vec<OpSample> = Vec::with_capacity(config.samples);
     for i in 0..config.samples {
-        let cypher = config.op.render_cypher(config.warmup + i, mode);
-        let sample = run_and_drain(
-            graph,
-            config.op.kind(),
-            &cypher,
-            config.server_timeout_ms,
-            client_deadline,
-        )
-        .await?;
+        // Continue the uncached comment counter past warm-up so every key stays unique.
+        let idx = config.warmup + i;
+        let cypher = render_cypher(&corpus[idx % corpus.len()], mode, run_token, idx);
+        let sample =
+            run_and_drain(graph, kind, &cypher, config.server_timeout_ms, client_deadline).await?;
         samples.push(sample);
     }
 
@@ -445,20 +617,33 @@ pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkRes
     match command {
         crate::cli::SyntheticCommands::Run {
             endpoint,
-            op,
+            graph,
+            ops,
+            all_reads,
             samples,
             warmup,
+            seed,
             cache,
             server_timeout_ms,
             client_deadline_ms,
             out,
             server_image,
         } => {
+            // --all-reads expands to every read op; otherwise use the (deduplicated) --op list.
+            let ops = if all_reads { OpName::all_reads() } else { ops };
+            if ops.is_empty() {
+                return Err(OtherError(
+                    "no operations selected — pass --op <name> (repeatable/comma-separated) or --all-reads"
+                        .to_string(),
+                ));
+            }
             let config = Config {
                 endpoint,
-                op,
+                graph,
+                ops,
                 samples,
                 warmup,
+                seed,
                 server_timeout_ms,
                 client_deadline_ms,
                 cache,
@@ -477,6 +662,7 @@ pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkRes
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::query::QueryBuilder;
 
     #[test]
     fn op_name_maps_are_consistent() {
@@ -486,33 +672,114 @@ mod tests {
     }
 
     #[test]
-    fn build_query_is_parameterized_and_varies() {
-        let q0 = OpName::ReturnConst.build_query(0);
-        let q1 = OpName::ReturnConst.build_query(1);
-        assert!(q0.text.contains("$i"));
-        assert_eq!(q0.params.len(), 1);
-        // Different invocation index ⇒ different parameter value.
-        assert_ne!(q0.params.get("i"), q1.params.get("i"));
+    fn clap_value_names_match_as_str() {
+        // The CLI value (used by --op, --help and shell completion) must equal `as_str()` so the
+        // catalog, reports and CLI never disagree (e.g. `expand_1_hop`, not `expand1_hop`).
+        for op in OpName::all() {
+            let cli = op
+                .to_possible_value()
+                .expect("every op is selectable")
+                .get_name()
+                .to_string();
+            assert_eq!(cli, op.as_str(), "clap name vs as_str mismatch");
+        }
     }
 
     #[test]
-    fn uncached_render_is_unique_per_invocation_cached_is_stable() {
-        // Cached mode: no per-invocation uniqueness token, so FalkorDB caches by the parameterized
-        // query body (it strips the leading `CYPHER <params>` prefix from the cache key), and the
-        // plan is reused across invocations.
-        let c0 = OpName::ReturnConst.render_cypher(0, CacheMode::Cached);
-        let c1 = OpName::ReturnConst.render_cypher(1, CacheMode::Cached);
-        assert!(!c0.contains("/* co"));
-        assert!(!c1.contains("/* co"));
-        assert!(c0.contains("RETURN $i AS x"));
-        assert!(c1.contains("RETURN $i AS x"));
+    fn every_op_builds_valid_parameterized_cypher() {
+        use crate::synthetic::catalog::{spec, DatasetHandle, CORPUS_SIZE};
+        // A dataset with enough ids for every op (incl. shortest_path's TwoIds).
+        let dataset = DatasetHandle {
+            node_ids: (1..=50).collect(),
+        };
+        for op in OpName::all() {
+            let s = spec(*op);
+            let mut rng = StdRng::seed_from_u64(7 ^ op.salt());
+            let corpus = s
+                .build_corpus(&mut rng, &dataset, 0, 1)
+                .unwrap_or_else(|e| panic!("corpus for {} should build: {}", op.as_str(), e));
+            assert_eq!(corpus.len(), CORPUS_SIZE, "op {}", op.as_str());
+            // Every corpus entry shares one identical body (required for cache correctness), is
+            // parameterized (no inlined literals beyond the body), and the rendered Cypher never
+            // returns a whole node/edge (scalar projections only).
+            let body0 = &corpus[0].text;
+            for q in &corpus {
+                assert_eq!(&q.text, body0, "op {} bodies must match", op.as_str());
+                assert!(q.text.contains("RETURN"), "op {} must RETURN", op.as_str());
+            }
+        }
+    }
 
-        // Uncached mode: a unique trailing token per `i` ⇒ distinct plan-cache key each run.
-        let u0 = OpName::ReturnConst.render_cypher(0, CacheMode::Uncached);
-        let u1 = OpName::ReturnConst.render_cypher(1, CacheMode::Uncached);
+    #[test]
+    fn corpus_is_deterministic_in_seed() {
+        use crate::synthetic::catalog::{spec, DatasetHandle};
+        let dataset = DatasetHandle {
+            node_ids: (1..=100).collect(),
+        };
+        let build = |seed: u64| {
+            let s = spec(OpName::MatchByIndex);
+            let mut rng = StdRng::seed_from_u64(seed);
+            s.build_corpus(&mut rng, &dataset, 0, 1).unwrap()
+        };
+        let params = |c: &[Query]| -> Vec<String> { c.iter().map(|q| q.to_cypher()).collect() };
+        // Same seed ⇒ byte-identical corpus; different seed ⇒ different corpus.
+        assert_eq!(params(&build(42)), params(&build(42)));
+        assert_ne!(params(&build(42)), params(&build(43)));
+    }
+
+    #[test]
+    fn ops_needing_seeds_error_on_empty_dataset() {
+        use crate::synthetic::catalog::{spec, DatasetHandle};
+        let empty = DatasetHandle::default();
+        // return_const and the label scan need no ids; the rest do.
+        assert!(spec(OpName::ReturnConst)
+            .build_corpus(&mut StdRng::seed_from_u64(1), &empty, 0, 1)
+            .is_ok());
+        assert!(spec(OpName::MatchByLabelScan)
+            .build_corpus(&mut StdRng::seed_from_u64(1), &empty, 0, 1)
+            .is_ok());
+        assert!(spec(OpName::MatchByIndex)
+            .build_corpus(&mut StdRng::seed_from_u64(1), &empty, 0, 1)
+            .is_err());
+        // shortest_path needs two ids: one is not enough.
+        let one = DatasetHandle { node_ids: vec![1] };
+        assert!(spec(OpName::ShortestPath)
+            .build_corpus(&mut StdRng::seed_from_u64(1), &one, 0, 1)
+            .is_err());
+    }
+
+    #[test]
+    fn all_reads_covers_the_catalog_and_dedups() {
+        let reads = OpName::all_reads();
+        assert_eq!(reads.len(), OpName::all().len(), "all ops are reads in Part 2");
+        // dedup_ops keeps first occurrence and drops duplicates / overlaps.
+        let deduped = dedup_ops(&[
+            OpName::MatchByIndex,
+            OpName::Expand1Hop,
+            OpName::MatchByIndex,
+        ]);
+        assert_eq!(deduped, vec![OpName::MatchByIndex, OpName::Expand1Hop]);
+    }
+
+    #[test]
+    fn render_cypher_cached_stable_uncached_unique() {
+        let q = QueryBuilder::new()
+            .text("MATCH (n:User {id: $id}) RETURN n.id")
+            .param("id", 7)
+            .build();
+        // Cached: body verbatim (plan reused), no uniqueness token.
+        let c0 = render_cypher(&q, CacheMode::Cached, 0xABCD, 0);
+        let c1 = render_cypher(&q, CacheMode::Cached, 0xABCD, 1);
+        assert_eq!(c0, c1);
+        assert!(!c0.contains("/* co"));
+        assert!(c0.contains("RETURN n.id"));
+        // Uncached: a unique per-invocation comment ⇒ distinct cache key; the run_token keeps it apart
+        // from other runs.
+        let u0 = render_cypher(&q, CacheMode::Uncached, 0xABCD, 0);
+        let u1 = render_cypher(&q, CacheMode::Uncached, 0xABCD, 1);
         assert_ne!(u0, u1);
-        assert!(u0.contains("/* co0 */"));
-        assert!(u1.contains("/* co1 */"));
+        assert!(u0.contains("/* coabcd-0 */"));
+        assert!(u1.contains("/* coabcd-1 */"));
     }
 
     #[test]
@@ -571,9 +838,32 @@ mod tests {
         // Exercises the CLI→Config mapping without a server: samples==0 is rejected up front.
         let command = crate::cli::SyntheticCommands::Run {
             endpoint: "falkor://127.0.0.1:6379".to_string(),
-            op: OpName::ReturnConst,
+            graph: "falkor".to_string(),
+            ops: vec![OpName::ReturnConst],
+            all_reads: false,
             samples: 0,
             warmup: 0,
+            seed: 0,
+            cache: CacheSelection::Both,
+            server_timeout_ms: 5_000,
+            client_deadline_ms: 6_000,
+            out: "unused.json".to_string(),
+            server_image: None,
+        };
+        assert!(run_command(command).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn run_command_run_requires_an_op() {
+        // Neither --op nor --all-reads ⇒ a clear error before any network use.
+        let command = crate::cli::SyntheticCommands::Run {
+            endpoint: "falkor://127.0.0.1:6379".to_string(),
+            graph: "falkor".to_string(),
+            ops: vec![],
+            all_reads: false,
+            samples: 100,
+            warmup: 0,
+            seed: 0,
             cache: CacheSelection::Both,
             server_timeout_ms: 5_000,
             client_deadline_ms: 6_000,

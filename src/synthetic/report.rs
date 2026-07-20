@@ -5,6 +5,11 @@ use crate::synthetic::stats::Summary;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+/// Serde default for [`Meta::graph`]: the graph a pre-Part-2 report was measured against.
+fn default_graph() -> String {
+    crate::synthetic::DEFAULT_GRAPH.to_string()
+}
+
 /// Server build/provenance captured from `INFO server` + `MODULE LIST`, plus the operator-supplied
 /// image reference. FalkorDB does not expose a graph-module git SHA to clients, so the reproducible
 /// identity is `module_graph_ver` (real for tagged releases, a `999999` placeholder on `:edge`)
@@ -44,8 +49,21 @@ impl ServerInfo {
 pub struct Meta {
     pub tool_version: String,
     pub endpoint: String,
+    /// Graph key the probe measured against. Defaults to [`crate::synthetic::DEFAULT_GRAPH`] when
+    /// deserializing a pre-Part-2 report (which lacked this field but always measured the default
+    /// graph), so an old report round-trips to its true graph rather than an empty string.
+    #[serde(default = "default_graph")]
+    pub graph: String,
     pub samples: usize,
     pub warmup: usize,
+    /// Seed used to generate the per-operation parameter corpora (for reproducibility).
+    /// `#[serde(default)]` for backward compatibility with pre-Part-2 reports.
+    #[serde(default)]
+    pub seed: u64,
+    /// Number of distinct parameterizations pre-generated per operation. `#[serde(default)]` for
+    /// backward compatibility with pre-Part-2 reports.
+    #[serde(default)]
+    pub corpus_size: usize,
     pub server_timeout_ms: i64,
     pub client_deadline_ms: u64,
     /// Connection strategy, e.g. `"pool(size=1)"`.
@@ -102,8 +120,13 @@ impl Report {
     pub fn to_console(&self) -> String {
         let mut out = String::new();
         out.push_str(&format!(
-            "synthetic benchmark — endpoint {}  samples {}  warmup {}  connection {}\n",
-            self.meta.endpoint, self.meta.samples, self.meta.warmup, self.meta.connection
+            "synthetic benchmark — endpoint {}  graph {}  samples {}  warmup {}  seed {}  connection {}\n",
+            self.meta.endpoint,
+            self.meta.graph,
+            self.meta.samples,
+            self.meta.warmup,
+            self.meta.seed,
+            self.meta.connection
         ));
         let v = self
             .meta
@@ -207,8 +230,11 @@ mod tests {
             meta: Meta {
                 tool_version: "0.1.0".to_string(),
                 endpoint: "falkor://127.0.0.1:6379".to_string(),
+                graph: "falkor".to_string(),
                 samples: 1000,
                 warmup: 200,
+                seed: 0,
+                corpus_size: 256,
                 server_timeout_ms: 5000,
                 client_deadline_ms: 6000,
                 connection: "pool(size=1)".to_string(),
@@ -237,6 +263,29 @@ mod tests {
         assert_eq!(op.compilation_ms_median, Some(0.05));
         assert_eq!(back.meta.server.module_graph_ver, Some(42001));
         assert_eq!(back.meta.server.cache_size, Some(25));
+    }
+
+    #[test]
+    fn pre_part2_report_deserializes_with_defaults() {
+        // A report written before Part 2 has no graph/seed/corpus_size fields; `#[serde(default)]`
+        // must let it deserialize (falling back to empty/0) rather than erroring.
+        let old = r#"{
+            "meta": {
+                "tool_version": "0.1.0",
+                "endpoint": "falkor://127.0.0.1:6379",
+                "samples": 1000, "warmup": 200,
+                "server_timeout_ms": 5000, "client_deadline_ms": 6000,
+                "connection": "pool(size=1)", "started_at_epoch_secs": 42,
+                "server": {}
+            },
+            "operations": {}
+        }"#;
+        let report: Report = serde_json::from_str(old).expect("old report should deserialize");
+        // A pre-Part-2 report always measured the default graph, so `graph` reconstructs to it.
+        assert_eq!(report.meta.graph, "falkor");
+        assert_eq!(report.meta.seed, 0);
+        assert_eq!(report.meta.corpus_size, 0);
+        assert_eq!(report.meta.samples, 1000);
     }
 
     #[test]
