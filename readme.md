@@ -116,9 +116,28 @@ Building the Rust crate also needs `protoc` (`sudo apt-get install -y protobuf-c
 just build            # build all targets/features
 just clippy           # strict clippy (warnings denied)
 just test             # run the unit + integration test suite
-just test-one <name>  # run a single test by name filter
+just test-one query_builder  # run a single test by name filter
 just ci               # everything the Rust CI runs: build + clippy + test
 ```
+
+### Documentation checks
+
+Markdown docs are validated in CI (the `Docs validation` workflow) and locally with the same recipe:
+
+```bash
+just doc-check        # all doc checks: links + shell examples
+just doc-links        # offline broken-link + anchor check (lychee) over tracked *.md
+just doc-shell        # bash -n syntax-check the shell (bash/sh) examples in the docs
+```
+
+`just doc-links` runs [`lychee`](https://github.com/lycheeverse/lychee) in `--offline` mode, so it
+verifies relative and same-file anchor links without network access (external URLs are skipped to
+keep CI stable). It needs the `lychee` binary on your `PATH` — install it locally with
+`cargo install lychee` or `brew install lychee` (CI installs it automatically via
+`taiki-e/install-action`). Rust code blocks in the docs are compiled as doctests by `just test`
+(via `src/doc_examples.rs`). Because doctests are run as well as compiled, fence an example that
+should type-check but not execute with `rust,no_run`, and one that should not compile at all with
+`rust,ignore` (or a non-Rust language) so it is skipped.
 
 ### Code coverage
 
@@ -371,7 +390,7 @@ docker-compose up
 
 The benchmark is a cli tool that can be used to run the benchmarks
 
-```bash
+```text
 ➜  cargo run  --bin benchmark -- --help                                                                  git:(prometheus|✚7…3
     
 Usage: benchmark <COMMAND>
