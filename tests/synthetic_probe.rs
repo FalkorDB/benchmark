@@ -113,7 +113,7 @@ async fn probe_produces_valid_report() {
     );
     assert!(op.compilation_ms_median.is_some());
 
-    // Provenance + Part 2 metadata were captured.
+    // Provenance + run metadata were captured.
     assert!(report.meta.server.redis_version.is_some());
     assert!(report.meta.server.cache_size.is_some());
     assert_eq!(report.meta.graph, "syn_it_return_const");
@@ -308,6 +308,11 @@ async fn warmup_zero_still_primes_cached_plan() {
     let op = report.operations.get("return_const").unwrap();
     let cached = op.cached.as_ref().unwrap();
     assert_eq!(cached.server_ms.n + cached.server_ms.removed, 40);
+    // The pre-measurement prime means every measured sample is a cache hit.
+    assert_eq!(
+        cached.cached_false_rate, 0.0,
+        "cached-mode run with a prime should report all cache hits"
+    );
     drop_graph(graph).await;
 }
 
@@ -467,7 +472,7 @@ async fn generated_dataset_has_exact_counts_index_and_hash() {
         plan.join("\n")
     );
 
-    // shortest_path measured real (non-negative) path lengths, not all misses.
+    // shortest_path produced measured samples (the connected-pair pool guarantees a bounded path).
     let op = report.operations.get("shortest_path").unwrap();
     assert!(op.cached.as_ref().unwrap().server_ms.n > 0);
     drop_graph(graph).await;

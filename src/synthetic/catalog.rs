@@ -401,7 +401,7 @@ mod tests {
         assert_eq!(all.len(), OpName::all().len());
         for (entry, op) in all.iter().zip(OpName::all()) {
             assert_eq!(entry.name, *op);
-            assert_eq!(entry.kind, QueryType::Read, "Part 2 ops are all reads");
+            assert_eq!(entry.kind, QueryType::Read, "all catalog ops are reads");
             assert!(!entry.description.is_empty());
         }
     }

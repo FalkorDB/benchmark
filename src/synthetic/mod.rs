@@ -840,7 +840,7 @@ mod tests {
     #[test]
     fn all_reads_covers_the_catalog_and_dedups() {
         let reads = OpName::all_reads();
-        assert_eq!(reads.len(), OpName::all().len(), "all ops are reads in Part 2");
+        assert_eq!(reads.len(), OpName::all().len(), "all catalog ops are reads");
         // dedup_ops keeps first occurrence and drops duplicates / overlaps.
         let deduped = dedup_ops(&[
             OpName::MatchByIndex,
@@ -925,8 +925,18 @@ mod tests {
     #[tokio::test]
     async fn run_command_run_maps_args_and_validates() {
         // Exercises the CLI→Config mapping without a server: samples==0 is rejected up front.
+        // Use an empty temp config (not `config: None`) so the test never auto-detects an ambient
+        // `synthetic-bench.toml` from the working directory.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let cfg_path = std::env::temp_dir().join(format!(
+            "syn-maps-{}-{}.toml",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::write(&cfg_path, "# empty\n").unwrap();
         let command = crate::cli::SyntheticCommands::Run {
-            config: None,
+            config: Some(cfg_path.to_string_lossy().into_owned()),
             endpoint: Some("falkor://127.0.0.1:6379".to_string()),
             graph: Some("falkor".to_string()),
             ops: vec![OpName::ReturnConst],
@@ -944,6 +954,7 @@ mod tests {
             edges: None,
         };
         assert!(run_command(command).await.is_err());
+        let _ = std::fs::remove_file(&cfg_path);
     }
 
     #[tokio::test]

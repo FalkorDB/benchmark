@@ -228,7 +228,7 @@ pub fn corpus_hash(
 /// was there (the graph key is dropped first). Creates the `:User(id)` index, loads nodes then
 /// edges in `batch_size` `UNWIND` batches, verifies the final counts, and returns the seeded
 /// [`DatasetHandle`] the operation corpora draw from. `load_deadline` bounds each batch.
-pub async fn generate_and_load(
+pub(crate) async fn generate_and_load(
     graph: &mut AsyncGraph,
     spec: &DatasetSpec,
     batch_size: usize,
@@ -271,7 +271,7 @@ pub async fn generate_and_load(
         load_deadline,
     )
     .await
-    .map_err(|e| OtherError(format!("failed to create :User(id) index: {:?}", e)))?;
+    .map_err(|e| OtherError(format!("failed to create :User(id) index: {}", e)))?;
 
     // Nodes: UNWIND [{id,age},...] AS row CREATE (u:User) SET u = row
     let mut batch = String::new();
