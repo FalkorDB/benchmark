@@ -23,6 +23,7 @@ pub mod op_runner;
 pub mod provenance;
 pub mod report;
 pub mod stats;
+pub mod writes;
 
 use crate::error::BenchmarkError::OtherError;
 use crate::error::BenchmarkResult;
