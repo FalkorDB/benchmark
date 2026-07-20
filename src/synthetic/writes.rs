@@ -83,9 +83,12 @@ impl ResetSchedule {
 #[derive(Debug, Clone)]
 pub struct WriteScratch {
     /// The per-run nonce that makes the scratch label unique (usually the run's `run_token`).
-    pub run_token: u64,
-    /// This worker's index in the level (`0..concurrency`).
-    pub worker_id: usize,
+    /// Private so the invariants proved in [`WriteScratch::new`] can't be broken after construction;
+    /// read via [`WriteScratch::run_token`].
+    run_token: u64,
+    /// This worker's index in the level (`0..concurrency`). Private (see [`WriteScratch::new`]'s i32
+    /// key-band bound); read via [`WriteScratch::worker_id`].
+    worker_id: usize,
     reset_every: usize,
 }
 
@@ -150,6 +153,16 @@ impl WriteScratch {
     /// The configured reset cadence (the width of this worker's key band).
     pub fn reset_every(&self) -> usize {
         self.reset_every
+    }
+
+    /// This worker's index in the level (`0..concurrency`).
+    pub fn worker_id(&self) -> usize {
+        self.worker_id
+    }
+
+    /// The per-run nonce baked into [`WriteScratch::label`].
+    pub fn run_token(&self) -> u64 {
+        self.run_token
     }
 }
 
