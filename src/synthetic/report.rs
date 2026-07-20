@@ -5,6 +5,11 @@ use crate::synthetic::stats::Summary;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+/// Serde default for [`Meta::graph`]: the graph a pre-Part-2 report was measured against.
+fn default_graph() -> String {
+    crate::synthetic::DEFAULT_GRAPH.to_string()
+}
+
 /// Server build/provenance captured from `INFO server` + `MODULE LIST`, plus the operator-supplied
 /// image reference. FalkorDB does not expose a graph-module git SHA to clients, so the reproducible
 /// identity is `module_graph_ver` (real for tagged releases, a `999999` placeholder on `:edge`)
@@ -44,9 +49,10 @@ impl ServerInfo {
 pub struct Meta {
     pub tool_version: String,
     pub endpoint: String,
-    /// Graph key the probe measured against. `#[serde(default)]` so reports written before Part 2
-    /// (which lacked this field) still deserialize.
-    #[serde(default)]
+    /// Graph key the probe measured against. Defaults to [`crate::synthetic::DEFAULT_GRAPH`] when
+    /// deserializing a pre-Part-2 report (which lacked this field but always measured the default
+    /// graph), so an old report round-trips to its true graph rather than an empty string.
+    #[serde(default = "default_graph")]
     pub graph: String,
     pub samples: usize,
     pub warmup: usize,
@@ -275,7 +281,8 @@ mod tests {
             "operations": {}
         }"#;
         let report: Report = serde_json::from_str(old).expect("old report should deserialize");
-        assert_eq!(report.meta.graph, "");
+        // A pre-Part-2 report always measured the default graph, so `graph` reconstructs to it.
+        assert_eq!(report.meta.graph, "falkor");
         assert_eq!(report.meta.seed, 0);
         assert_eq!(report.meta.corpus_size, 0);
         assert_eq!(report.meta.samples, 1000);

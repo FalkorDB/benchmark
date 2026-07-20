@@ -179,7 +179,7 @@ parameterized; the corpus is seeded (`--seed`) so the same seed yields an identi
 | `expand_hops_5` | fixed 5-hop `:Friend` expansion | `MATCH (s:User {id: $id})-[:Friend*5..5]->(n:User) RETURN DISTINCT n.id LIMIT 100` |
 | `aggregate_count` | count a node's 1-hop neighbours | `MATCH (s:User {id: $id})-[:Friend]->(n:User) RETURN count(n) AS c` |
 | `aggregate_group` | group neighbours by age with counts | `MATCH (s:User {id: $id})-[:Friend]->(n:User) RETURN n.age AS age, count(*) AS c ORDER BY c DESC LIMIT 10` |
-| `shortest_path` | bounded shortest `:Friend` path between two nodes | `MATCH (s:User {id: $from}),(t:User {id: $to}) WITH shortestPath((s)-[:Friend*1..6]->(t)) AS p RETURN coalesce(length(p), -1) AS len` |
+| `shortest_path` | bounded shortest `:Friend` path between two nodes | `MATCH (s:User {id: $from}), (t:User {id: $to}) WITH shortestPath((s)-[:Friend*1..6]->(t)) AS p RETURN coalesce(length(p), -1) AS len` |
 | `property_projection` | project scalar properties of an indexed node | `MATCH (n:User {id: $id}) RETURN n.id, n.age` |
 
 Because `OpName` is a clap `ValueEnum`, `--op <TAB>` completes the operation names once you've
@@ -222,6 +222,8 @@ match_by_index
     cached_execution=false: 0.0%  (unknown 0)
   [uncached — plan-cache miss each run, execution + compilation]
     server_ms  median 0.058  mean 0.063  p99 0.093  (n=497, removed 3)
+    total_ms   median 0.452  mean 0.461  p99 0.604  (n=497, removed 3)
+    non_internal_ms (paired total-server)  median 0.391
     cached_execution=false: 100.0%  (unknown 0)
   compilation_ms (median uncached-cached server time)  0.025
 
