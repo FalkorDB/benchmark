@@ -260,10 +260,7 @@ pub enum SyntheticCommands {
             help = "path to a synthetic-bench.toml config (auto-detected in the CWD if present); CLI flags override it"
         )]
         config: Option<String>,
-        #[arg(
-            long,
-            help = "FalkorDB endpoint (default falkor://127.0.0.1:6379)"
-        )]
+        #[arg(long, help = "FalkorDB endpoint (default falkor://127.0.0.1:6379)")]
         endpoint: Option<String>,
         #[arg(long, help = "graph key to measure against (default falkor)")]
         graph: Option<String>,
@@ -286,6 +283,13 @@ pub enum SyntheticCommands {
         #[arg(long, help = "number of warm-up invocations, discarded (default 200)")]
         warmup: Option<usize>,
         #[arg(
+            long = "concurrency",
+            value_delimiter = ',',
+            num_args = 1..,
+            help = "concurrency levels to sweep (closed-loop workers C), repeatable/comma-separated (e.g. --concurrency 1,4,16,32). Default 1,2,4,8,16,32."
+        )]
+        concurrency: Vec<usize>,
+        #[arg(
             long,
             help = "seed for the dataset and the per-operation corpora (same seed ⇒ identical workload; default 0)"
         )]
@@ -296,11 +300,17 @@ pub enum SyntheticCommands {
             help = "plan-cache condition: cached, uncached, or both (default both)"
         )]
         cache: Option<CacheSelection>,
-        #[arg(long, help = "FalkorDB server-side per-query timeout in ms (default 5000)")]
+        #[arg(
+            long,
+            help = "FalkorDB server-side per-query timeout in ms (default 5000)"
+        )]
         server_timeout_ms: Option<i64>,
         #[arg(long, help = "client-side deadline per query in ms (default 6000)")]
         client_deadline_ms: Option<u64>,
-        #[arg(long, help = "path to write the JSON report (default synthetic-report.json)")]
+        #[arg(
+            long,
+            help = "path to write the JSON report (default synthetic-report.json)"
+        )]
         out: Option<String>,
         #[arg(
             long,

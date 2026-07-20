@@ -23,6 +23,10 @@ samples = 1000
 warmup = 200
 cache = "both"              # cached | uncached | both
 
+# Concurrency sweep: the closed-loop worker counts to measure each op at, tracing the
+# latency-vs-throughput curve. Each level opens that many dedicated connections.
+concurrency = [1, 2, 4, 8, 16, 32]
+
 # Connection / output (all optional).
 # endpoint = "falkor://127.0.0.1:6379"
 # graph = "falkor"

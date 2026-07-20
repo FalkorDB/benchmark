@@ -62,6 +62,9 @@ path = "src/main.rs"
 
 
 [dev-dependencies]
+# `test-util` (not in tokio's `full`) enables `#[tokio::test(start_paused = true)]` so the
+# concurrency-engine throughput test drives a virtual clock deterministically.
+tokio = { version = "1.52.3", features = ["test-util"] }
 
 [profile.release]
 opt-level = 3  # This is the default

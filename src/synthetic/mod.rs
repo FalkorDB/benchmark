@@ -18,6 +18,7 @@
 pub mod catalog;
 pub mod config;
 pub mod dataset;
+pub mod engine;
 pub mod op_runner;
 pub mod provenance;
 pub mod report;
@@ -28,20 +29,32 @@ use crate::error::BenchmarkResult;
 use crate::falkor::falkor_endpoint_to_redis_url;
 use crate::queries_repository::QueryType;
 use crate::query::Query;
-use crate::synthetic::catalog::{spec, DatasetHandle, DatasetRequirement, OperationSpec, CORPUS_SIZE};
+use crate::synthetic::catalog::{
+    spec, DatasetHandle, DatasetRequirement, OperationSpec, CORPUS_SIZE,
+};
 use crate::synthetic::dataset::DatasetSpec;
+use crate::synthetic::engine::{run_closed_loop, OpInvoker};
 use crate::synthetic::op_runner::{run_and_drain, OpSample};
-use crate::synthetic::report::{DatasetInfo, Meta, OperationReport, Report};
+use crate::synthetic::report::{
+    DatasetInfo, LevelMetrics, LevelReport, Meta, OperationReport, Report,
+};
 use clap::ValueEnum;
-use falkordb::{ConnectionStrategy, FalkorClientBuilder};
+use falkordb::{AsyncGraph, ConnectionStrategy, FalkorClientBuilder};
 use futures::StreamExt;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 use serde::de::{self, Deserializer};
 use serde::Deserialize;
 use std::collections::BTreeMap;
+use std::future::Future;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{info, warn};
+
+/// The default concurrency sweep (closed-loop worker counts `C`) when none is configured: the
+/// canonical latency-vs-throughput curve from `1` to `32` workers.
+pub const DEFAULT_CONCURRENCY: &[usize] = &[1, 2, 4, 8, 16, 32];
 
 /// The default graph key the probe targets when `--graph` isn't given.
 pub const DEFAULT_GRAPH: &str = "falkor";
@@ -203,19 +216,21 @@ pub enum CacheMode {
 /// FalkorDB keys its plan cache on the query **body** (the text after the `CYPHER <params>` prefix
 /// that [`Query::to_cypher`] emits). [`CacheMode::Cached`] uses the body verbatim, so a corpus of
 /// varying parameter values still reuses one cached plan → *execution only*. [`CacheMode::Uncached`]
-/// appends a unique trailing comment `/* co<run_token>-<i> */`, making every invocation a distinct
-/// cache key that FalkorDB must recompile → *execution + compilation*. The per-run `run_token` keeps a
-/// previous run's uncached comments from being served from cache.
+/// appends a unique trailing comment `/* co<run_token>-<uid> */`, making every invocation a distinct
+/// cache key that FalkorDB must recompile → *execution + compilation*. The per-run `run_token` keeps
+/// a previous run's uncached comments from being served from cache; `uid` is a **run-global** unique
+/// invocation id (disjoint per worker and per concurrency level), so no two invocations anywhere in
+/// the sweep ever collide.
 fn render_cypher(
     query: &Query,
     mode: CacheMode,
     run_token: u64,
-    i: usize,
+    uid: u64,
 ) -> String {
     let base = query.to_cypher();
     match mode {
         CacheMode::Cached => base,
-        CacheMode::Uncached => format!("{} /* co{:x}-{} */", base, run_token, i),
+        CacheMode::Uncached => format!("{} /* co{:x}-{} */", base, run_token, uid),
     }
 }
 
@@ -229,6 +244,9 @@ pub struct Config {
     pub ops: Vec<OpName>,
     pub samples: usize,
     pub warmup: usize,
+    /// Concurrency levels to sweep (closed-loop worker counts `C`); each op is measured once per
+    /// level, tracing its latency-vs-throughput curve. Non-empty, each ≥ 1, deduped + sorted.
+    pub concurrency: Vec<usize>,
     /// Seed for the per-operation parameter corpora (same seed ⇒ identical corpora).
     pub seed: u64,
     pub server_timeout_ms: i64,
@@ -249,6 +267,7 @@ impl Default for Config {
             ops: vec![OpName::ReturnConst],
             samples: 1000,
             warmup: 200,
+            concurrency: DEFAULT_CONCURRENCY.to_vec(),
             seed: 0,
             server_timeout_ms: 5_000,
             client_deadline_ms: 6_000,
@@ -318,6 +337,7 @@ pub async fn run(config: &Config) -> BenchmarkResult<Report> {
     if config.samples == 0 {
         return Err(OtherError("samples must be greater than 0".to_string()));
     }
+    let concurrency = normalize_concurrency(&config.concurrency)?;
     let ops = dedup_ops(&config.ops);
     if ops.is_empty() {
         return Err(OtherError(
@@ -395,6 +415,14 @@ pub async fn run(config: &Config) -> BenchmarkResult<Report> {
     // run's uncached queries can never be served from a previous run's plan cache.
     let run_token = rand::random_range(0..=u64::MAX);
 
+    // The setup connection's work (provenance, dataset generation/probe) is done; drop it so it
+    // doesn't sit idle as a `C + 1`-th connection while the workers open their own pools.
+    drop(graph);
+
+    // Run-global allocator of disjoint invocation-id ranges: every worker claims a block so its
+    // uncached query text can never collide with another worker's or another level's.
+    let uid_alloc = AtomicU64::new(0);
+
     let mut operations = BTreeMap::new();
     // Capture each op's corpus fingerprint (in execution order) so the corpus_hash reflects the
     // exact rendered workload — parameter values included — not just the op names.
@@ -403,10 +431,18 @@ pub async fn run(config: &Config) -> BenchmarkResult<Report> {
         let op_spec = spec(op);
         // Seed each op's corpus deterministically (same --seed ⇒ byte-identical corpus).
         let mut rng = StdRng::seed_from_u64(config.seed ^ op.salt());
-        let corpus = op_spec.build_corpus(&mut rng, &dataset, 0, 1)?;
+        let corpus = Arc::new(op_spec.build_corpus(&mut rng, &dataset, 0, 1)?);
         op_fingerprints.push((op, dataset::corpus_fingerprint(&corpus)));
-        let op_report =
-            measure_op(&mut graph, config, &op_spec, &corpus, run_token, client_deadline).await?;
+        let op_report = measure_op(
+            config,
+            &concurrency,
+            &op_spec,
+            Arc::clone(&corpus),
+            run_token,
+            &uid_alloc,
+            client_deadline,
+        )
+        .await?;
         operations.insert(op.as_str().to_string(), op_report);
     }
 
@@ -416,27 +452,54 @@ pub async fn run(config: &Config) -> BenchmarkResult<Report> {
         seed: spec.seed,
         nodes: spec.nodes,
         edges: spec.edges,
-        corpus_hash: dataset::corpus_hash(spec, config.seed, CORPUS_SIZE, &op_fingerprints, &dataset),
+        corpus_hash: dataset::corpus_hash(
+            spec,
+            config.seed,
+            CORPUS_SIZE,
+            &op_fingerprints,
+            &dataset,
+        ),
     });
 
     Ok(Report {
+        schema_version: crate::synthetic::report::SCHEMA_VERSION,
         meta: Meta {
             tool_version: env!("CARGO_PKG_VERSION").to_string(),
             endpoint: redact_endpoint(&config.endpoint),
             graph: config.graph.clone(),
             samples: config.samples,
             warmup: config.warmup,
+            concurrency: concurrency.clone(),
             seed: config.seed,
             corpus_size: CORPUS_SIZE,
             server_timeout_ms: config.server_timeout_ms,
             client_deadline_ms: config.client_deadline_ms,
-            connection: "pool(size=1)".to_string(),
+            connection: "pool(size=1) per worker".to_string(),
             started_at_epoch_secs,
             server,
             dataset: dataset_info,
         },
         operations,
     })
+}
+
+/// Validate and canonicalize the configured concurrency sweep: non-empty, every level ≥ 1,
+/// deduplicated and sorted ascending (so the curve reads low → high and each `C` runs once).
+fn normalize_concurrency(concurrency: &[usize]) -> BenchmarkResult<Vec<usize>> {
+    if concurrency.is_empty() {
+        return Err(OtherError(
+            "concurrency must list at least one level (e.g. --concurrency 1,4,16)".to_string(),
+        ));
+    }
+    if concurrency.contains(&0) {
+        return Err(OtherError(
+            "concurrency levels must be >= 1 (0 workers can't measure anything)".to_string(),
+        ));
+    }
+    let mut levels: Vec<usize> = concurrency.to_vec();
+    levels.sort_unstable();
+    levels.dedup();
+    Ok(levels)
 }
 
 /// Deduplicate the selected ops, preserving first-occurrence order (so a repeated `--op` or an
@@ -549,80 +612,142 @@ pub(crate) fn is_empty_graph_key(msg: &str) -> bool {
     m.contains("empty key") || m.contains("invalid graph operation")
 }
 
-/// Measure one operation under every requested cache mode and derive its compilation cost.
-async fn measure_op(
-    graph: &mut falkordb::AsyncGraph,
-    config: &Config,
-    op_spec: &OperationSpec,
-    corpus: &[Query],
-    run_token: u64,
-    client_deadline: Duration,
-) -> BenchmarkResult<OperationReport> {
-    let mut cached_set: Option<crate::synthetic::report::MetricSet> = None;
-    let mut uncached_set: Option<crate::synthetic::report::MetricSet> = None;
-    for &mode in config.cache.modes() {
-        let set = measure_mode(graph, config, op_spec, corpus, mode, run_token, client_deadline).await?;
-        match mode {
-            CacheMode::Cached => cached_set = Some(set),
-            CacheMode::Uncached => uncached_set = Some(set),
-        }
-    }
-
-    // Derived expression-compilation cost: how much slower an uncached (recompiled) run's server
-    // time is than a cached (plan-reused) one. Both modes cycle the same corpus in the same order,
-    // so the medians compare a matched workload.
-    let compilation_ms_median = match (&cached_set, &uncached_set) {
-        (Some(c), Some(u)) => Some(u.server_ms.median - c.server_ms.median),
-        _ => None,
-    };
-
-    Ok(OperationReport {
-        cached: cached_set,
-        uncached: uncached_set,
-        compilation_ms_median,
-    })
-}
-
-/// Warm up then measure `config.samples` invocations of one operation in one cache mode, cycling
-/// through the pre-generated `corpus` (so parameter values vary while the body stays constant).
-async fn measure_mode(
-    graph: &mut falkordb::AsyncGraph,
-    config: &Config,
-    op_spec: &OperationSpec,
-    corpus: &[Query],
+/// A closed-loop worker for one operation, cache mode and connection: owns a single-socket
+/// `AsyncGraph` and drives one query at a time via [`run_and_drain`]. The worker cycles its corpus
+/// from a decorrelating `corpus_offset` (so concurrent workers don't march in lock-step) and claims
+/// a disjoint `uid_base` so its uncached query text is globally unique across the whole sweep.
+struct GraphWorker {
+    graph: AsyncGraph,
+    kind: QueryType,
+    corpus: Arc<Vec<Query>>,
     mode: CacheMode,
     run_token: u64,
+    corpus_offset: usize,
+    uid_base: u64,
+    server_timeout_ms: i64,
     client_deadline: Duration,
-) -> BenchmarkResult<crate::synthetic::report::MetricSet> {
-    let kind = op_spec.kind;
+}
 
+impl OpInvoker for GraphWorker {
+    fn invoke(
+        &mut self,
+        seq: u64,
+    ) -> impl Future<Output = BenchmarkResult<OpSample>> + Send {
+        let idx = (self.corpus_offset + seq as usize) % self.corpus.len();
+        let cypher = render_cypher(
+            &self.corpus[idx],
+            self.mode,
+            self.run_token,
+            self.uid_base + seq,
+        );
+        let kind = self.kind;
+        let server_timeout_ms = self.server_timeout_ms;
+        let client_deadline = self.client_deadline;
+        let graph = &mut self.graph;
+        async move { run_and_drain(graph, kind, &cypher, server_timeout_ms, client_deadline).await }
+    }
+}
+
+/// Measure one operation across the concurrency sweep, under every requested cache mode, and derive
+/// its per-level compilation cost.
+#[allow(clippy::too_many_arguments)]
+async fn measure_op(
+    config: &Config,
+    concurrency: &[usize],
+    op_spec: &OperationSpec,
+    corpus: Arc<Vec<Query>>,
+    run_token: u64,
+    uid_alloc: &AtomicU64,
+    client_deadline: Duration,
+) -> BenchmarkResult<OperationReport> {
+    let mut levels = Vec::with_capacity(concurrency.len());
+    for &c in concurrency {
+        let mut cached: Option<LevelMetrics> = None;
+        let mut uncached: Option<LevelMetrics> = None;
+        for &mode in config.cache.modes() {
+            let metrics = measure_level(
+                config,
+                c,
+                op_spec,
+                &corpus,
+                mode,
+                run_token,
+                uid_alloc,
+                client_deadline,
+            )
+            .await?;
+            match mode {
+                CacheMode::Cached => cached = Some(metrics),
+                CacheMode::Uncached => uncached = Some(metrics),
+            }
+        }
+
+        // Derived expression-compilation cost: how much slower an uncached (recompiled) run's
+        // server time is than a cached (plan-reused) one, at this concurrency level.
+        let compilation_ms_median = match (&cached, &uncached) {
+            (Some(cm), Some(um)) => Some(um.metrics.server_ms.median - cm.metrics.server_ms.median),
+            _ => None,
+        };
+
+        levels.push(LevelReport {
+            concurrency: c,
+            cached,
+            uncached,
+            compilation_ms_median,
+        });
+    }
+
+    Ok(OperationReport { levels })
+}
+
+/// Measure one operation at one concurrency level `C` in one cache mode via the closed-loop engine:
+/// open `C` single-socket connections (one per worker), drive them to completion, and summarize the
+/// pooled samples plus the achieved throughput.
+#[allow(clippy::too_many_arguments)]
+async fn measure_level(
+    config: &Config,
+    concurrency: usize,
+    op_spec: &OperationSpec,
+    corpus: &Arc<Vec<Query>>,
+    mode: CacheMode,
+    run_token: u64,
+    uid_alloc: &AtomicU64,
+    client_deadline: Duration,
+) -> BenchmarkResult<LevelMetrics> {
     // Prime the plan cache once even when warmup==0, so a cached-mode measurement never pays
     // first-touch compilation on its first sample. (No help for uncached, whose every query is
-    // unique by design.)
-    if config.warmup == 0 && mode == CacheMode::Cached {
-        let cypher = render_cypher(&corpus[0], mode, run_token, 0);
-        let _ = run_and_drain(graph, kind, &cypher, config.server_timeout_ms, client_deadline)
-            .await?;
+    // unique by design.) An untimed warm-up invocation does exactly that.
+    let effective_warmup = if config.warmup == 0 && mode == CacheMode::Cached {
+        1
+    } else {
+        config.warmup
+    };
+
+    // Each worker claims a disjoint id block wide enough for its warm-up + measured invocations, so
+    // no two workers (here or at any other level) ever render the same uncached query text.
+    let block = (effective_warmup + config.samples) as u64;
+    let mut workers = Vec::with_capacity(concurrency);
+    for w in 0..concurrency {
+        let graph = open_graph(&config.endpoint, &config.graph).await?;
+        workers.push(GraphWorker {
+            graph,
+            kind: op_spec.kind,
+            corpus: Arc::clone(corpus),
+            mode,
+            run_token,
+            corpus_offset: w % corpus.len(),
+            uid_base: uid_alloc.fetch_add(block, Ordering::Relaxed),
+            server_timeout_ms: config.server_timeout_ms,
+            client_deadline,
+        });
     }
 
-    // Warm-up (discarded) primes the plan cache (cached mode) and the connection.
-    for i in 0..config.warmup {
-        let cypher = render_cypher(&corpus[i % corpus.len()], mode, run_token, i);
-        let _ = run_and_drain(graph, kind, &cypher, config.server_timeout_ms, client_deadline)
-            .await?;
-    }
-
-    let mut samples: Vec<OpSample> = Vec::with_capacity(config.samples);
-    for i in 0..config.samples {
-        // Continue the uncached comment counter past warm-up so every key stays unique.
-        let idx = config.warmup + i;
-        let cypher = render_cypher(&corpus[idx % corpus.len()], mode, run_token, idx);
-        let sample =
-            run_and_drain(graph, kind, &cypher, config.server_timeout_ms, client_deadline).await?;
-        samples.push(sample);
-    }
-
-    summarize_samples(&samples)
+    let run = run_closed_loop(workers, effective_warmup, config.samples).await?;
+    let metrics = summarize_samples(&run.samples)?;
+    Ok(LevelMetrics {
+        throughput_ops_per_sec: run.throughput_ops_per_sec(),
+        metrics,
+    })
 }
 
 /// Summarize a set of paired samples into a [`MetricSet`].
@@ -705,6 +830,7 @@ pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkRes
             all_reads,
             samples,
             warmup,
+            concurrency,
             seed,
             cache,
             server_timeout_ms,
@@ -722,6 +848,7 @@ pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkRes
                 all_reads,
                 samples,
                 warmup,
+                concurrency,
                 seed,
                 cache,
                 server_timeout_ms,
@@ -840,7 +967,11 @@ mod tests {
     #[test]
     fn all_reads_covers_the_catalog_and_dedups() {
         let reads = OpName::all_reads();
-        assert_eq!(reads.len(), OpName::all().len(), "all catalog ops are reads");
+        assert_eq!(
+            reads.len(),
+            OpName::all().len(),
+            "all catalog ops are reads"
+        );
         // dedup_ops keeps first occurrence and drops duplicates / overlaps.
         let deduped = dedup_ops(&[
             OpName::MatchByIndex,
@@ -879,6 +1010,22 @@ mod tests {
             CacheSelection::Both.modes(),
             &[CacheMode::Cached, CacheMode::Uncached]
         );
+    }
+
+    #[test]
+    fn normalize_concurrency_sorts_dedups_and_validates() {
+        // Deduped + sorted ascending so the curve reads low → high.
+        assert_eq!(
+            normalize_concurrency(&[8, 1, 4, 1, 8]).unwrap(),
+            vec![1, 4, 8]
+        );
+        assert_eq!(
+            normalize_concurrency(DEFAULT_CONCURRENCY).unwrap(),
+            vec![1, 2, 4, 8, 16, 32]
+        );
+        // Empty and zero-containing sweeps are rejected.
+        assert!(normalize_concurrency(&[]).is_err());
+        assert!(normalize_concurrency(&[1, 0, 4]).is_err());
     }
 
     #[test]
@@ -943,6 +1090,7 @@ mod tests {
             all_reads: false,
             samples: Some(0),
             warmup: Some(0),
+            concurrency: vec![],
             seed: Some(0),
             cache: Some(CacheSelection::Both),
             server_timeout_ms: Some(5_000),
@@ -980,6 +1128,7 @@ mod tests {
             all_reads: false,
             samples: Some(100),
             warmup: Some(0),
+            concurrency: vec![],
             seed: Some(0),
             cache: Some(CacheSelection::Both),
             server_timeout_ms: Some(5_000),
@@ -1009,10 +1158,30 @@ mod tests {
     #[test]
     fn summarize_samples_computes_paired_residual_and_cache() {
         let samples = vec![
-            OpSample { server_ms: 0.10, total_ms: 0.40, rows: 1, cached: Some(true) },
-            OpSample { server_ms: 0.12, total_ms: 0.45, rows: 1, cached: Some(false) },
-            OpSample { server_ms: 0.11, total_ms: 0.42, rows: 1, cached: None },
-            OpSample { server_ms: 0.13, total_ms: 0.44, rows: 1, cached: Some(true) },
+            OpSample {
+                server_ms: 0.10,
+                total_ms: 0.40,
+                rows: 1,
+                cached: Some(true),
+            },
+            OpSample {
+                server_ms: 0.12,
+                total_ms: 0.45,
+                rows: 1,
+                cached: Some(false),
+            },
+            OpSample {
+                server_ms: 0.11,
+                total_ms: 0.42,
+                rows: 1,
+                cached: None,
+            },
+            OpSample {
+                server_ms: 0.13,
+                total_ms: 0.44,
+                rows: 1,
+                cached: Some(true),
+            },
         ];
         let r = summarize_samples(&samples).unwrap();
         assert_eq!(r.server_ms.n, 4);
@@ -1031,10 +1200,20 @@ mod tests {
         let mut samples: Vec<OpSample> = (0..20)
             .map(|i| {
                 let s = 0.10 + i as f64 * 0.001;
-                OpSample { server_ms: s, total_ms: s + 0.3, rows: 1, cached: Some(true) }
+                OpSample {
+                    server_ms: s,
+                    total_ms: s + 0.3,
+                    rows: 1,
+                    cached: Some(true),
+                }
             })
             .collect();
-        samples.push(OpSample { server_ms: 0.11, total_ms: 500.0, rows: 1, cached: Some(true) });
+        samples.push(OpSample {
+            server_ms: 0.11,
+            total_ms: 500.0,
+            rows: 1,
+            cached: Some(true),
+        });
         let r = summarize_samples(&samples).unwrap();
         assert_eq!(r.server_ms.n, r.total_ms.n);
         assert_eq!(r.total_ms.n, r.non_internal_ms.n);
@@ -1047,9 +1226,24 @@ mod tests {
         // A tiny sample set: `severe_fence` returns None (nothing removed → the `within` no-fence
         // path), and with every `cached` unknown the false-rate collapses to 0.0.
         let samples = vec![
-            OpSample { server_ms: 0.10, total_ms: 0.40, rows: 1, cached: None },
-            OpSample { server_ms: 0.12, total_ms: 0.45, rows: 1, cached: None },
-            OpSample { server_ms: 0.11, total_ms: 0.42, rows: 1, cached: None },
+            OpSample {
+                server_ms: 0.10,
+                total_ms: 0.40,
+                rows: 1,
+                cached: None,
+            },
+            OpSample {
+                server_ms: 0.12,
+                total_ms: 0.45,
+                rows: 1,
+                cached: None,
+            },
+            OpSample {
+                server_ms: 0.11,
+                total_ms: 0.42,
+                rows: 1,
+                cached: None,
+            },
         ];
         let r = summarize_samples(&samples).unwrap();
         assert_eq!(r.server_ms.n, 3);

@@ -140,6 +140,20 @@ synthetic-bench *args:
     if [ "${1:-}" = "--" ]; then shift; fi
     cargo run --release --bin benchmark -- synthetic run "$@"
 
+# Sweep a single operation over the concurrency curve (default 1,2,4,8,16,32); extra flags forward
+# to `synthetic run`, e.g. `just synthetic-bench-one match_by_index --concurrency 1,8,32`.
+synthetic-bench-one op *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # `op` is forwarded explicitly via `--op {{op}}`, so drop it from the positional args (just
+    # passes every recipe argument, the named `op` included, as `$@`). Then drop an optional leading
+    # `--` so both `just synthetic-bench-one <op> --concurrency 1,8` and
+    # `just synthetic-bench-one <op> -- --concurrency 1,8` forward the flags to the probe; otherwise
+    # a literal `--` reaches Clap and later flags become positional.
+    shift || true
+    if [ "${1:-}" = "--" ]; then shift; fi
+    cargo run --release --bin benchmark -- synthetic run --op {{op}} "$@"
+
 # List the available synthetic operations.
 synthetic-ops:
     cargo run --quiet --bin benchmark -- synthetic list-ops
