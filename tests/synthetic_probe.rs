@@ -42,8 +42,9 @@ async fn drop_graph(graph: &str) {
     }
 }
 
-/// Seed a tiny `:User {id, age}` graph wired with `:Friend` edges (a ring plus +7 skip edges) so
-/// the read primitives (index lookup, expansion, aggregation, shortest path) have data to touch.
+/// Seed a tiny `:User {id, age}` graph wired with `:Friend` edges (a `+1` ring plus longer skip
+/// edges) so the read primitives (index lookup, expansion, aggregation, shortest path) have data to
+/// touch.
 async fn seed_user_graph(graph: &str, users: i64) {
     drop_graph(graph).await;
     let mut g = open_graph(&endpoint(), graph).await.expect("open seed graph");
@@ -59,7 +60,8 @@ async fn seed_user_graph(graph: &str, users: i64) {
     .await
     .expect("create users");
     if users > 1 {
-        // Ring edges i -> (i mod N) + 1, plus skip edges i -> ((i+6) mod N) + 1.
+        // Ring edges i -> (i mod N) + 1 (a +1 step), plus skip edges i -> ((i + 6) mod N) + 1
+        // (a +7 step for these 1-based ids) to give expansions and shortest paths more structure.
         g.query(&format!(
             "MATCH (u:User) WITH u MATCH (v:User {{id: (u.id % {users}) + 1}}) CREATE (u)-[:Friend]->(v)"
         ))
