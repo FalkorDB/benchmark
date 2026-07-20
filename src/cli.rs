@@ -1,6 +1,6 @@
 use crate::queries_repository::QueryCoverageProfile;
 use crate::scenario::Vendor;
-use crate::synthetic::{CacheSelection, OpName, DEFAULT_GRAPH};
+use crate::synthetic::{CacheSelection, OpName};
 use clap::{Parser, Subcommand};
 use clap_complete::Shell;
 
@@ -248,29 +248,31 @@ pub enum Commands {
 }
 
 /// Subcommands of `benchmark synthetic`.
+// The `Run` variant carries many optional CLI knobs; this subcommand enum is parsed once at
+// startup, so the size gap versus the unit `ListOps` variant doesn't matter.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand, Debug)]
 pub enum SyntheticCommands {
     #[command(about = "run the per-operation latency probe over one or more read operations")]
     Run {
         #[arg(
-            long,
-            default_value = "falkor://127.0.0.1:6379",
-            help = "FalkorDB endpoint (e.g., falkor://127.0.0.1:6379)"
+            long = "config",
+            help = "path to a synthetic-bench.toml config (auto-detected in the CWD if present); CLI flags override it"
         )]
-        endpoint: String,
+        config: Option<String>,
         #[arg(
             long,
-            default_value_t = DEFAULT_GRAPH.to_string(),
-            help = "graph key to measure against"
+            help = "FalkorDB endpoint (default falkor://127.0.0.1:6379)"
         )]
-        graph: String,
+        endpoint: Option<String>,
+        #[arg(long, help = "graph key to measure against (default falkor)")]
+        graph: Option<String>,
         #[arg(
             long = "op",
             value_enum,
             value_delimiter = ',',
             num_args = 1..,
-            required_unless_present = "all_reads",
-            help = "operation(s) to measure; repeatable and comma-separated (e.g. --op match_by_index --op expand_1_hop or --op match_by_index,expand_1_hop)"
+            help = "operation(s) to measure; repeatable and comma-separated (e.g. --op match_by_index --op expand_1_hop or --op match_by_index,expand_1_hop). Overrides the config's operations."
         )]
         ops: Vec<OpName>,
         #[arg(
@@ -279,55 +281,42 @@ pub enum SyntheticCommands {
             help = "measure every read operation (mutually exclusive with --op)"
         )]
         all_reads: bool,
+        #[arg(long, help = "number of measured invocations (default 1000)")]
+        samples: Option<usize>,
+        #[arg(long, help = "number of warm-up invocations, discarded (default 200)")]
+        warmup: Option<usize>,
         #[arg(
             long,
-            default_value_t = 1000,
-            help = "number of measured invocations"
+            help = "seed for the dataset and the per-operation corpora (same seed ⇒ identical workload; default 0)"
         )]
-        samples: usize,
-        #[arg(
-            long,
-            default_value_t = 200,
-            help = "number of warm-up invocations (discarded)"
-        )]
-        warmup: usize,
-        #[arg(
-            long,
-            default_value_t = 0,
-            help = "seed for the per-operation parameter corpora (same seed ⇒ identical corpora)"
-        )]
-        seed: u64,
+        seed: Option<u64>,
         #[arg(
             long,
             value_enum,
-            default_value = "both",
-            help = "plan-cache condition: cached (plan reused), uncached (recompiled each run), or both (compare + expose compilation cost)"
+            help = "plan-cache condition: cached, uncached, or both (default both)"
         )]
-        cache: CacheSelection,
-        #[arg(
-            long,
-            default_value_t = 5000,
-            help = "FalkorDB server-side per-query timeout (ms)"
-        )]
-        server_timeout_ms: i64,
-        #[arg(
-            long,
-            default_value_t = 6000,
-            help = "client-side deadline per query (ms)"
-        )]
-        client_deadline_ms: u64,
-        #[arg(
-            long,
-            default_value = "synthetic-report.json",
-            help = "path to write the JSON report"
-        )]
-        out: String,
+        cache: Option<CacheSelection>,
+        #[arg(long, help = "FalkorDB server-side per-query timeout in ms (default 5000)")]
+        server_timeout_ms: Option<i64>,
+        #[arg(long, help = "client-side deadline per query in ms (default 6000)")]
+        client_deadline_ms: Option<u64>,
+        #[arg(long, help = "path to write the JSON report (default synthetic-report.json)")]
+        out: Option<String>,
         #[arg(
             long,
             env = "FALKOR_SERVER_IMAGE",
             help = "operator-supplied server image identity (e.g. falkordb/falkordb:v4.2.1@sha256:...), recorded verbatim"
         )]
         server_image: Option<String>,
+        #[arg(
+            long,
+            help = "GENERATE a reproducible dataset into --graph before measuring. DESTRUCTIVE: drops and rewrites the graph. Requires --nodes/--edges (or config)."
+        )]
+        generate: bool,
+        #[arg(long, help = "dataset node count (with --generate)")]
+        nodes: Option<usize>,
+        #[arg(long, help = "dataset edge count, must be >= nodes (with --generate)")]
+        edges: Option<usize>,
     },
     #[command(about = "list the available operations")]
     ListOps,

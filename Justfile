@@ -125,9 +125,12 @@ run *args:
 
 # === Synthetic per-operation benchmark =======================================
 
-# Needs a reachable FalkorDB, e.g. `docker run -d -p 6379:6379 falkordb/falkordb:latest`. Example:
-# `just synthetic-bench --graph demo --op match_by_index,expand_1_hop --samples 500` (or --all-reads).
-# Read primitives need a `:User {id}` / `:Friend` dataset in --graph; see the README catalog.
+# Needs a reachable FalkorDB, e.g. `docker run -d -p 6379:6379 falkordb/falkordb:latest`. Examples:
+# `just synthetic-bench --graph demo --op match_by_index,expand_1_hop --samples 500` (or --all-reads),
+# or generate a reproducible dataset first:
+# `just synthetic-bench --graph bench --generate --nodes 100000 --edges 1000000 --all-reads`.
+# Read primitives need a `:User {id}` / `:Friend` dataset in --graph (use --generate or a config
+# file, `synthetic-bench.toml`; see the README catalog + `synthetic-bench.example.toml`).
 # Run the synthetic per-operation latency probe (forwards args to `synthetic run`).
 synthetic-bench *args:
     #!/usr/bin/env bash

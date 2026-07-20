@@ -70,6 +70,22 @@ pub struct Meta {
     pub connection: String,
     pub started_at_epoch_secs: u64,
     pub server: ServerInfo,
+    /// Present only when the probe generated its own reproducible dataset (Part 3). Absent for an
+    /// externally-provided graph, whose contents we can't fingerprint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dataset: Option<DatasetInfo>,
+}
+
+/// Provenance for a generated synthetic dataset: its knobs and the `corpus_hash` that identifies
+/// the whole workload (dataset + selected operations + query bodies), so runs are only compared
+/// when they match.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DatasetInfo {
+    pub seed: u64,
+    pub nodes: usize,
+    pub edges: usize,
+    /// Algorithm-tagged hash (`sha256:…`) of the full workload; equal iff comparable.
+    pub corpus_hash: String,
 }
 
 /// Latency and cache-health stats for one (operation, cache-mode) measurement.
@@ -153,6 +169,12 @@ impl Report {
         ));
         if let Some(img) = &self.meta.server.server_image {
             out.push_str(&format!("server image: {}\n", img));
+        }
+        if let Some(d) = &self.meta.dataset {
+            out.push_str(&format!(
+                "dataset — seed {}  nodes {}  edges {}  corpus_hash {}\n",
+                d.seed, d.nodes, d.edges, d.corpus_hash
+            ));
         }
         for (name, op) in &self.operations {
             out.push_str(&format!("\n{}\n", name));
@@ -245,6 +267,7 @@ mod tests {
                     redis_version: Some("8.6.3".to_string()),
                     ..Default::default()
                 },
+                dataset: None,
             },
             operations,
         }
@@ -303,6 +326,21 @@ mod tests {
         assert!(out.contains("CACHE_SIZE 25"));
         // The operator-supplied image identity is echoed when present.
         assert!(out.contains("server image: falkordb/falkordb:v4.2.1@sha256:deadbeef"));
+    }
+
+    #[test]
+    fn console_shows_dataset_block_when_generated() {
+        let mut r = sample_report();
+        r.meta.dataset = Some(DatasetInfo {
+            seed: 42,
+            nodes: 1000,
+            edges: 5000,
+            corpus_hash: "sha256:abc123".to_string(),
+        });
+        let out = r.to_console();
+        assert!(out.contains("dataset — seed 42  nodes 1000  edges 5000  corpus_hash sha256:abc123"));
+        // Absent by default (externally-supplied graph).
+        assert!(!sample_report().to_console().contains("dataset —"));
     }
 
     #[test]

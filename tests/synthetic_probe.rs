@@ -7,6 +7,7 @@
 //! concurrently without clobbering each other.
 
 use benchmark::queries_repository::QueryType;
+use benchmark::synthetic::dataset::DatasetSpec;
 use benchmark::synthetic::op_runner::run_and_drain;
 use benchmark::synthetic::{
     list_ops, open_graph, run, run_and_report, CacheSelection, Config, OpName,
@@ -32,6 +33,7 @@ fn base_config(graph: &str) -> Config {
         cache: CacheSelection::Both,
         out: "synthetic-report.json".to_string(),
         server_image: None,
+        dataset: None,
     }
 }
 
@@ -111,7 +113,7 @@ async fn probe_produces_valid_report() {
     );
     assert!(op.compilation_ms_median.is_some());
 
-    // Provenance + Part 2 metadata were captured.
+    // Provenance + run metadata were captured.
     assert!(report.meta.server.redis_version.is_some());
     assert!(report.meta.server.cache_size.is_some());
     assert_eq!(report.meta.graph, "syn_it_return_const");
@@ -306,6 +308,11 @@ async fn warmup_zero_still_primes_cached_plan() {
     let op = report.operations.get("return_const").unwrap();
     let cached = op.cached.as_ref().unwrap();
     assert_eq!(cached.server_ms.n + cached.server_ms.removed, 40);
+    // The pre-measurement prime means every measured sample is a cache hit.
+    assert_eq!(
+        cached.cached_false_rate, 0.0,
+        "cached-mode run with a prime should report all cache hits"
+    );
     drop_graph(graph).await;
 }
 
@@ -412,4 +419,111 @@ async fn probe_instantiates_a_missing_graph() {
     .expect("probe should instantiate the missing graph and succeed");
     assert!(report.operations.contains_key("return_const"));
     drop_graph(graph).await;
+}
+
+#[tokio::test]
+#[ignore = "requires a running FalkorDB server"]
+async fn generated_dataset_has_exact_counts_index_and_hash() {
+    // Generate a small reproducible dataset, then assert node/edge counts, that the :User(id) index
+    // exists and is used, and that the report carries a dataset block with a corpus_hash.
+    let graph = "syn_it_gen";
+    let report = run(&Config {
+        graph: graph.to_string(),
+        ops: vec![OpName::MatchByIndex, OpName::ShortestPath],
+        samples: 40,
+        warmup: 10,
+        seed: 123,
+        cache: CacheSelection::Cached,
+        dataset: Some(DatasetSpec {
+            seed: 123,
+            nodes: 400,
+            edges: 2000,
+        }),
+        ..base_config(graph)
+    })
+    .await
+    .expect("generation run should succeed");
+
+    // The report records the generated dataset + a corpus_hash.
+    let ds = report.meta.dataset.as_ref().expect("dataset info present");
+    assert_eq!((ds.seed, ds.nodes, ds.edges), (123, 400, 2000));
+    assert!(ds.corpus_hash.starts_with("sha256:"));
+
+    // Exact counts in the graph.
+    let mut g = open_graph(&endpoint(), graph).await.expect("open graph");
+    let node_count = scalar_i64(&mut g, "MATCH (n:User) RETURN count(n)").await;
+    let edge_count = scalar_i64(&mut g, "MATCH (:User)-[e:Friend]->(:User) RETURN count(e)").await;
+    assert_eq!(node_count, 400);
+    assert_eq!(edge_count, 2000);
+
+    // The :User(id) index exists and is OPERATIONAL...
+    let operational = scalar_i64(
+        &mut g,
+        "CALL db.indexes() YIELD label, status WHERE label = 'User' AND status = 'OPERATIONAL' RETURN count(*)",
+    )
+    .await;
+    assert!(operational >= 1, "expected an OPERATIONAL :User index");
+
+    // ...and the point-lookup op uses it (Node By Index Scan in the plan).
+    let plan = explain(&mut g, "MATCH (n:User {id: 7}) RETURN n.id").await;
+    assert!(
+        plan.iter().any(|line| line.contains("Index Scan")),
+        "match_by_index should use the index, got plan:\n{}",
+        plan.join("\n")
+    );
+
+    // shortest_path produced measured samples (the connected-pair pool guarantees a bounded path).
+    let op = report.operations.get("shortest_path").unwrap();
+    assert!(op.cached.as_ref().unwrap().server_ms.n > 0);
+    drop_graph(graph).await;
+}
+
+#[tokio::test]
+#[ignore = "requires a running FalkorDB server"]
+async fn generation_is_reproducible_across_runs() {
+    // Same seed + knobs ⇒ identical corpus_hash, even though the graph is regenerated from scratch.
+    let graph = "syn_it_gen_repro";
+    let cfg = Config {
+        graph: graph.to_string(),
+        ops: vec![OpName::MatchByIndex, OpName::AggregateCount],
+        samples: 30,
+        warmup: 5,
+        seed: 77,
+        cache: CacheSelection::Cached,
+        dataset: Some(DatasetSpec {
+            seed: 77,
+            nodes: 300,
+            edges: 1500,
+        }),
+        ..base_config(graph)
+    };
+    let a = run(&cfg).await.expect("run a");
+    let b = run(&cfg).await.expect("run b");
+    assert_eq!(
+        a.meta.dataset.unwrap().corpus_hash,
+        b.meta.dataset.unwrap().corpus_hash
+    );
+    drop_graph(graph).await;
+}
+
+/// Read a single-row `RETURN count(...)`/scalar i64.
+async fn scalar_i64(
+    graph: &mut falkordb::AsyncGraph,
+    cypher: &str,
+) -> i64 {
+    use futures::StreamExt;
+    let mut result = graph.ro_query(cypher).execute().await.expect("scalar query");
+    match result.data.next().await {
+        Some(Ok(row)) => row.try_get_at::<i64>(0).expect("i64 scalar"),
+        other => panic!("unexpected scalar response: {other:?}"),
+    }
+}
+
+/// Return the `GRAPH.EXPLAIN` plan lines for `cypher`.
+async fn explain(
+    graph: &mut falkordb::AsyncGraph,
+    cypher: &str,
+) -> Vec<String> {
+    let plan = graph.explain(cypher).execute().await.expect("explain");
+    plan.plan().to_vec()
 }
