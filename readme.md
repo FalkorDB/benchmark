@@ -208,7 +208,8 @@ See [`synthetic-benchmark.md`](synthetic-benchmark.md) for the concurrency model
 #### Operation catalog
 
 Select operations with `--op <name>` (repeatable and comma-separated) or `--all-reads`. `--all-reads`
-selects every **read** op; **write** ops (`create_node`, `merge_miss`) are opt-in via `--op` so a
+selects every **read** op; **write** ops (`create_node`, `merge_miss`, `create_edge`, `set_property`,
+`delete_node`, `merge_hit`) are opt-in via `--op` so a
 sweep never mutates a graph unless you ask. All read ops except `return_const` target the benchmark's
 `:User {id, age}` / `(:User)-[:Friend]->(:User)` schema (with an index on `:User(id)`). Most draw
 their parameters from `:User` ids sampled out of
@@ -234,6 +235,10 @@ identical corpus.
 | `property_projection` | project scalar properties of an indexed node | `MATCH (n:User {id: $id}) RETURN n.id, n.age` |
 | `create_node` *(write)* | create a fresh scratch node each invocation | `CREATE (n:BenchScratch_<run> {id: $id}) RETURN n.id` |
 | `merge_miss` *(write)* | `MERGE` a fresh scratch node (always misses → creates) | `MERGE (n:BenchScratch_<run> {id: $id}) RETURN n.id` |
+| `create_edge` *(write)* | create a fresh edge between two scratch nodes | `MATCH (a:BenchScratch_<run> {id: $src}), (b:BenchScratch_<run> {id: $dst}) CREATE (a)-[:BenchEdge]->(b)` |
+| `set_property` *(write)* | set one property on a pre-created scratch node | `MATCH (n:BenchScratch_<run> {id: $id}) WHERE n.touched IS NULL SET n.touched = $id` |
+| `delete_node` *(write)* | delete a pre-created scratch node | `MATCH (n:BenchScratch_<run> {id: $id}) DELETE n` |
+| `merge_hit` *(write)* | `MERGE` an existing scratch node (always hits) | `MERGE (n:BenchScratch_<run> {id: $id}) RETURN n.id` |
 
 Because `OpName` is a clap `ValueEnum`, `--op <TAB>` completes the operation names once you've
 installed completion (`benchmark generate-auto-complete <shell>`), and `just synthetic-ops` (or
@@ -297,40 +302,58 @@ a `999999` placeholder version and the tool warns you to use a tagged image for 
 
 #### Write operations (steady-state isolation)
 
-Write ops (`create_node`, `merge_miss`, with more to come) measure mutation latency/throughput
-without the graph drifting between samples, so write numbers stay comparable across a long sweep.
-Only the operation itself is inside the timer; setup/reset/cleanup run in **untimed** hooks that
-abort the sample on failure. The isolation model:
+Write ops measure mutation latency/throughput without the graph drifting between samples, so write
+numbers stay comparable across a long sweep. Six ops are available: `create_node`, `merge_miss`,
+`create_edge`, `set_property`, `delete_node`, and `merge_hit`. Only the operation itself is inside
+the timer; setup/reset/cleanup run in **untimed** hooks that abort the sample on failure. The
+isolation model:
 
 - **Scratch namespace.** A run writes only to a **run-unique label** `BenchScratch_<run_token>` (a
   random per-run hex nonce), so a sweep never touches your real data or another run's scratch. The
   label is shared by all workers of a run (keeping the plan cache warm), and the run's scratch is
-  dropped on a fresh connection after each level — even if the level errored — so nothing leaks into
-  the next op/level.
+  dropped (`DETACH DELETE`, edges included) on a fresh connection after each level — even if the
+  level errored — so nothing leaks into the next op/level.
 - **Disjoint per-worker keys.** At concurrency `C`, worker `w` owns the key band
   `[w·reset_every, (w+1)·reset_every − 1]` and uses `window_key = w·reset_every + (seq mod
   reset_every)` for invocation `seq`. Bands never overlap, so concurrent writers never collide, and
-  within a window every key is unique — so `merge_miss` always misses (creates) and identities never
+  within a window every key is unique — so `merge_miss` always misses (creates), `delete_node`
+  deletes each node exactly once, `create_edge` never duplicates an edge, and identities never
   repeat. Keys are **run-independent** (only the label carries the nonce), so the workload stays
   comparable across runs; `(w+1)·reset_every` must fit `i32` (FalkorDB params), which bounds
   `reset_every × C`.
+- **Empty- vs populated-band ops.** `create_node`/`merge_miss` keep their band **empty** (they
+  create into it). The ops that need existing targets — `create_edge`, `set_property`, `delete_node`,
+  `merge_hit` — keep their band **populated**: an untimed setup pre-creates `reset_every` nodes (one
+  per key) so every invocation has a target.
 - **Run-level reset (sawtooth).** Every `reset_every` operations — counted over the **global**
-  warm-up + measured sequence — each worker runs an untimed reset that deletes its key band before
-  it is reused, bounding write drift to one sawtooth window. Tune the cadence with `--reset-every N`
-  (config `reset_every`, default 50000); a smaller `N` keeps the graph tighter but spends more time
-  resetting. `merge_miss` staying a miss across resets is the isolation guarantee: a shared key or a
-  missed reset would turn a `MERGE` into a hit, and the run would error.
+  warm-up + measured sequence — each worker runs an untimed reset before its band is reused, bounding
+  write drift to one sawtooth window. Empty-band ops clear the band; populated-band ops clear **and
+  refill** it with `reset_every` fresh clean nodes (so `delete_node` gets its nodes back and
+  `set_property` always writes a brand-new property). `merge_hit` never mutates, so its band is set
+  up once and its reset is a no-op. Tune the cadence with `--reset-every N` (config `reset_every`,
+  default 50000); a smaller `N` keeps the graph tighter but spends more time in setup/reset.
 - **Per-sample verification.** Each write checks FalkorDB's mutation counters against the operation's
-  intent (`create_node`/`merge_miss` ⇒ exactly one node created), so a silent no-op fails loudly
-  rather than producing a fast, misleading sample.
+  intent (`create_node`/`merge_miss` ⇒ one node created; `create_edge` ⇒ one relationship;
+  `set_property` ⇒ one property set; `delete_node` ⇒ one node deleted; `merge_hit` ⇒ **no** mutation
+  — a pure match), so a silent no-op fails loudly rather than producing a fast, misleading sample.
+  `set_property`'s `WHERE n.touched IS NULL` makes this self-checking: a broken reset would match
+  nothing and fail verification instead of silently measuring a redundant write.
 
-**Limitation:** this is closed-loop steady state, not a fixed arrival rate — the reset produces a
-sawtooth in graph size within each window; it bounds drift, it does not eliminate it.
+**Limitations.**
+- **Steady state, not a fixed arrival rate.** The reset produces a sawtooth in graph size within each
+  window; it bounds drift, it does not eliminate it.
+- **Reset is untimed but not free.** At high `C` a worker's reset (which can delete/recreate a whole
+  window of nodes) contends with other workers on the server and counts toward achieved throughput,
+  so keep `reset_every` modest for write sweeps.
+- **Scratch lookups are unindexed.** The populated-band ops (and `merge_miss`) match on the
+  run-unique label without an index, so they include a label-scoped lookup cost; a coordinated
+  run-level index is a possible future refinement.
 
 ```bash
-# measure the write ops over a concurrency sweep, resetting each worker's scratch every 50k ops
-just synthetic-bench --graph bench --op create_node,merge_miss \
-    --concurrency 1,8,32 --reset-every 50000 --samples 500
+# measure the write ops over a concurrency sweep, resetting each worker's scratch every 5k ops
+just synthetic-bench --graph bench \
+    --op create_node,merge_miss,create_edge,set_property,delete_node,merge_hit \
+    --concurrency 1,8,32 --reset-every 5000 --samples 500
 ```
 
 #### Generating a reproducible dataset

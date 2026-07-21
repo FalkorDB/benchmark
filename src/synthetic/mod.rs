@@ -98,6 +98,14 @@ pub enum OpName {
     CreateNode,
     /// (write) `MERGE` a fresh scratch node each invocation — always misses, so always creates.
     MergeMiss,
+    /// (write) `CREATE` a fresh edge between two of this worker's scratch nodes.
+    CreateEdge,
+    /// (write) `SET` a property on a pre-created scratch node each invocation.
+    SetProperty,
+    /// (write) `DELETE` a pre-created scratch node each invocation.
+    DeleteNode,
+    /// (write) `MERGE` an existing scratch node each invocation — always hits, so never creates.
+    MergeHit,
 }
 
 impl OpName {
@@ -129,6 +137,10 @@ impl OpName {
             OpName::PropertyProjection => "property_projection",
             OpName::CreateNode => "create_node",
             OpName::MergeMiss => "merge_miss",
+            OpName::CreateEdge => "create_edge",
+            OpName::SetProperty => "set_property",
+            OpName::DeleteNode => "delete_node",
+            OpName::MergeHit => "merge_hit",
         }
     }
 
@@ -158,6 +170,10 @@ impl OpName {
             OpName::PropertyProjection => 0x5052_4f50_5f50_524a,
             OpName::CreateNode => 0x4352_4541_5445_4e44,
             OpName::MergeMiss => 0x4d45_5247_455f_4d53,
+            OpName::CreateEdge => 0x4352_545f_4544_4745,
+            OpName::SetProperty => 0x5345_545f_5052_4f50,
+            OpName::DeleteNode => 0x4445_4c5f_4e4f_4445,
+            OpName::MergeHit => 0x4d45_5247_4548_4954,
         }
     }
 
@@ -863,52 +879,67 @@ async fn measure_level(
         .server_timeout_ms
         .max(i64::try_from(hook_deadline.as_millis()).unwrap_or(i64::MAX));
 
-    let mut workers = Vec::with_capacity(concurrency);
-    // One representative (plan, scratch) drives the post-level cleanup (the run label is shared, so
-    // any worker's scratch cleans the whole run).
-    let mut write_cleanup: Option<(WritePlan, WriteScratch)> = None;
-    for w in 0..concurrency {
-        let mut graph = open_graph(&config.endpoint, &config.graph).await?;
-        let uid_base = uid_alloc.fetch_add(block, Ordering::Relaxed);
-        let source = match &op_spec.write {
-            Some(plan) => {
-                let scratch = WriteScratch::new(run_token, w, config.reset_every)?;
-                // Untimed setup on this worker's own connection before the measurement window.
-                run_write_stmts(
-                    &mut graph,
-                    (plan.setup)(&scratch)?,
-                    hook_server_timeout_ms,
-                    hook_deadline,
-                )
-                .await?;
-                if write_cleanup.is_none() {
-                    write_cleanup = Some((*plan, scratch.clone()));
-                }
-                WorkerSource::Write {
-                    plan: *plan,
-                    scratch,
-                }
-            }
-            None => WorkerSource::Read {
-                corpus: Arc::clone(corpus),
-                corpus_offset: w % corpus.len(),
-            },
-        };
-        workers.push(GraphWorker {
-            graph,
-            kind: op_spec.kind,
-            mode,
-            run_token,
-            uid_base,
-            server_timeout_ms: config.server_timeout_ms,
-            client_deadline,
-            hook_server_timeout_ms,
-            hook_deadline,
-            source,
-        });
-    }
+    // For a write op, capture the cleanup handle up-front — *before* any worker's setup mutates the
+    // graph — so a mid-loop connection/setup failure still drops whatever scratch earlier workers
+    // created. The run label is shared, so worker 0's scratch cleans the whole run.
+    let write_cleanup: Option<(WritePlan, WriteScratch)> = match &op_spec.write {
+        Some(plan) => Some((*plan, WriteScratch::new(run_token, 0, config.reset_every)?)),
+        None => None,
+    };
 
-    let run = run_closed_loop(workers, effective_warmup, config.samples).await;
+    // Build the workers (opening a connection and running each write op's untimed setup). Collected
+    // into a Result so a partway failure routes through the scratch cleanup below instead of leaking
+    // the nodes earlier workers already created.
+    let build_workers = async {
+        let mut workers = Vec::with_capacity(concurrency);
+        for w in 0..concurrency {
+            let mut graph = open_graph(&config.endpoint, &config.graph).await?;
+            let uid_base = uid_alloc.fetch_add(block, Ordering::Relaxed);
+            let source = match &op_spec.write {
+                Some(plan) => {
+                    let scratch = WriteScratch::new(run_token, w, config.reset_every)?;
+                    // Untimed setup on this worker's own connection before the measurement window.
+                    run_write_stmts(
+                        &mut graph,
+                        (plan.setup)(&scratch)?,
+                        hook_server_timeout_ms,
+                        hook_deadline,
+                    )
+                    .await?;
+                    WorkerSource::Write {
+                        plan: *plan,
+                        scratch,
+                    }
+                }
+                None => WorkerSource::Read {
+                    corpus: Arc::clone(corpus),
+                    corpus_offset: w % corpus.len(),
+                },
+            };
+            workers.push(GraphWorker {
+                graph,
+                kind: op_spec.kind,
+                mode,
+                run_token,
+                uid_base,
+                server_timeout_ms: config.server_timeout_ms,
+                client_deadline,
+                hook_server_timeout_ms,
+                hook_deadline,
+                source,
+            });
+        }
+        Ok::<_, crate::error::BenchmarkError>(workers)
+    }
+    .await;
+
+    // Run the closed loop only if every worker built; otherwise carry the build/setup error forward
+    // so the single cleanup path below runs for both outcomes (a partially set-up populated band
+    // must never leak). The build/setup error is what we ultimately propagate.
+    let run = match build_workers {
+        Ok(workers) => run_closed_loop(workers, effective_warmup, config.samples).await,
+        Err(e) => Err(e),
+    };
 
     // Drop the run's scratch on a fresh connection, whether or not the level succeeded, so a write
     // level can't leave scratch behind for the next level/op. On the **success** path a cleanup
