@@ -326,40 +326,41 @@ impl Report {
         };
 
         out.push_str("| field | value |\n|---|---|\n");
-        out.push_str(&format!("| tool | v{} |\n", m.tool_version));
+        out.push_str(&format!("| tool | v{} |\n", md_cell(&m.tool_version)));
         out.push_str(&format!(
             "| endpoint / graph | `{}` / `{}` |\n",
-            m.endpoint, m.graph
+            md_cell(&m.endpoint),
+            md_cell(&m.graph)
         ));
         out.push_str(&format!(
             "| FalkorDB module | {}{} |\n",
             module_ver, module_note
         ));
         if let Some(redis) = &m.server.redis_version {
-            out.push_str(&format!("| redis | {} |\n", redis));
+            out.push_str(&format!("| redis | {} |\n", md_cell(redis)));
         }
         if let Some(cs) = m.server.cache_size {
             out.push_str(&format!("| CACHE_SIZE | {} |\n", cs));
         }
         if let Some(img) = &m.server.server_image {
-            out.push_str(&format!("| server image | `{}` |\n", img));
+            out.push_str(&format!("| server image | `{}` |\n", md_cell(img)));
         }
         // Client host: omit the hostname from the pasteable Markdown (it can be sensitive; it stays
         // in the JSON and console).
         let host_line = host_summary(&m.host, false);
         if !host_line.is_empty() {
-            out.push_str(&format!("| client host | {} |\n", host_line));
+            out.push_str(&format!("| client host | {} |\n", md_cell(&host_line)));
         }
         out.push_str(&format!("| samples / warmup | {} / {} |\n", m.samples, m.warmup));
         out.push_str(&format!("| concurrency | {} |\n", concurrency));
         out.push_str(&format!("| cache seed | {} |\n", m.seed));
-        out.push_str(&format!("| connection | {} |\n", m.connection));
+        out.push_str(&format!("| connection | {} |\n", md_cell(&m.connection)));
         if let Some(d) = &m.dataset {
             out.push_str(&format!(
                 "| dataset | seed {} · {} nodes · {} edges |\n",
                 d.seed, d.nodes, d.edges
             ));
-            out.push_str(&format!("| corpus_hash | `{}` |\n", d.corpus_hash));
+            out.push_str(&format!("| corpus_hash | `{}` |\n", md_cell(&d.corpus_hash)));
         }
 
         for (name, op) in &self.operations {
@@ -368,6 +369,13 @@ impl Report {
         }
         out
     }
+}
+
+/// Escape a value for a GitHub-flavoured Markdown **table cell**: an unescaped `|` ends the cell
+/// (even inside a code span) and a newline breaks the row, so escape the former and fold the latter
+/// to `<br>`. `\r` is dropped so a CRLF doesn't yield a doubled break.
+fn md_cell(s: &str) -> String {
+    s.replace('|', "\\|").replace('\r', "").replace('\n', "<br>")
 }
 
 /// A one-line client-host summary (` · `-joined, skipping unknown fields). With `with_hostname`,
@@ -817,6 +825,19 @@ mod tests {
         let md = r.to_markdown();
         assert!(md.contains("dev placeholder"));
         assert!(md.contains("| concurrency | 1 |"));
+    }
+
+    #[test]
+    fn markdown_escapes_pipe_and_newline_in_cells() {
+        let mut r = sample_report();
+        r.meta.graph = "a|b\nc".to_string();
+        r.meta.endpoint = "falkor://h|x".to_string();
+        let md = r.to_markdown();
+        // A raw `|`/newline in a user-provided value must not leak into the table (it would break
+        // the row/columns); it is escaped to `\|` and folded to `<br>`.
+        assert!(md.contains("a\\|b<br>c"), "graph pipe/newline escaped: {md}");
+        assert!(md.contains("falkor://h\\|x"));
+        assert!(!md.contains("a|b"), "no raw pipe survives in a cell");
     }
 
     #[test]
