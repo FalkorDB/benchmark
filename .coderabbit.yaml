@@ -4,11 +4,6 @@ language: en-US
 reviews:
   profile: chill
   request_changes_workflow: false
-  # A transient CodeRabbit review error (most often "Review rate limited") must not turn the
-  # "CodeRabbit" commit-status check red and fail the whole PR — CodeRabbit still reviews and
-  # comments, we just don't gate the PR on a rate-limit hiccup. (Overrides the org default, which
-  # currently fails the status on such errors.)
-  fail_commit_status: false
   auto_review:
     enabled: true
     drafts: false
