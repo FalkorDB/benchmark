@@ -19,6 +19,7 @@ pub mod catalog;
 pub mod config;
 pub mod dataset;
 pub mod engine;
+pub mod host;
 pub mod op_runner;
 pub mod provenance;
 pub mod report;
@@ -527,6 +528,7 @@ pub async fn run(config: &Config) -> BenchmarkResult<Report> {
             connection: "pool(size=1) per worker".to_string(),
             started_at_epoch_secs,
             server,
+            host: host::collect(),
             dataset: dataset_info,
         },
         operations,
@@ -1033,7 +1035,21 @@ pub async fn run_and_report(config: &Config) -> BenchmarkResult<()> {
     tokio::fs::write(&config.out, json).await?;
     info!("wrote {}", config.out);
     println!("report written to {}", config.out);
+    // A PR-pasteable Markdown report alongside the JSON: `<out>.md` (replacing a `.json` suffix).
+    let md_path = markdown_path(&config.out);
+    tokio::fs::write(&md_path, report.to_markdown()).await?;
+    info!("wrote {}", md_path);
+    println!("markdown written to {}", md_path);
     Ok(())
+}
+
+/// The Markdown report path for a JSON `out` path: swap a trailing `.json` for `.md`, else append
+/// `.md` (e.g. `synthetic-report.json` → `synthetic-report.md`, `report` → `report.md`).
+fn markdown_path(out: &str) -> String {
+    match out.strip_suffix(".json") {
+        Some(stem) => format!("{stem}.md"),
+        None => format!("{out}.md"),
+    }
 }
 
 /// Execute a parsed `synthetic` subcommand. This keeps `main.rs` a thin shell: it loads the
@@ -1393,6 +1409,15 @@ mod tests {
         for op in OpName::value_variants() {
             assert!(listing.contains(op.as_str()));
         }
+    }
+
+    #[test]
+    fn markdown_path_swaps_json_suffix_or_appends() {
+        assert_eq!(markdown_path("synthetic-report.json"), "synthetic-report.md");
+        assert_eq!(markdown_path("/tmp/out/report.json"), "/tmp/out/report.md");
+        assert_eq!(markdown_path("report"), "report.md");
+        // Only a trailing `.json` is swapped; anything else just gets `.md` appended.
+        assert_eq!(markdown_path("weird.jsonx"), "weird.jsonx.md");
     }
 
     #[tokio::test]
