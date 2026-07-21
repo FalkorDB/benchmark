@@ -740,6 +740,176 @@ async fn write_scratch_reset_reuses_its_band_without_duplicates() {
     drop_graph(graph).await;
 }
 
+#[tokio::test]
+#[ignore = "requires a running FalkorDB server"]
+async fn write_ops_5c_run_isolated_and_clean_up() {
+    // The four Part-5c write ops at C=8 over several reset windows. A green run is the isolation +
+    // correctness proof: every sample verifies its exact mutation (edge created / property set /
+    // node deleted / merge hit), so a cross-worker collision, a missed reset, a wrong target, or a
+    // broken refill would fail verification. Also assert the seeded data is untouched and the run's
+    // scratch (nodes *and* edges) is fully cleaned up.
+    let graph = "syn_it_writes_5c";
+    let seeded_users: i64 = 40;
+    seed_user_graph(graph, seeded_users).await;
+
+    let report = run(&Config {
+        graph: graph.to_string(),
+        ops: vec![
+            OpName::CreateEdge,
+            OpName::SetProperty,
+            OpName::DeleteNode,
+            OpName::MergeHit,
+        ],
+        samples: 150, // > reset_every ⇒ multiple sawtooth resets per worker
+        warmup: 20,
+        concurrency: vec![8],
+        reset_every: 40,
+        cache: CacheSelection::Cached,
+        ..base_config(graph)
+    })
+    .await
+    .expect("5c write sweep should succeed under isolation");
+
+    for name in ["create_edge", "set_property", "delete_node", "merge_hit"] {
+        let op = report
+            .operations
+            .get(name)
+            .unwrap_or_else(|| panic!("{name} missing from report"));
+        let lvl = only_level(op);
+        assert_eq!(lvl.concurrency, 8);
+        let m = lvl
+            .cached
+            .as_ref()
+            .unwrap_or_else(|| panic!("{name} missing cached metrics"));
+        assert!(
+            m.throughput_ops_per_sec > 0.0,
+            "{name} must report positive throughput"
+        );
+        assert!(m.metrics.server_ms.n > 0, "{name} must have samples");
+    }
+
+    // Isolation from real data + full cleanup: the seeded :User nodes are untouched, no scratch node
+    // of any label leaks, and no scratch :BenchEdge relationship survives the DETACH DELETE cleanup.
+    let mut g = open_graph(&endpoint(), graph).await.expect("reopen graph");
+    assert_eq!(
+        scalar_i64(&mut g, "MATCH (u:User) RETURN count(u)").await,
+        seeded_users,
+        "seeded :User data must be untouched"
+    );
+    assert_eq!(
+        scalar_i64(&mut g, "MATCH (n) RETURN count(n)").await,
+        seeded_users,
+        "no scratch nodes may remain after cleanup"
+    );
+    assert_eq!(
+        scalar_i64(&mut g, "MATCH ()-[r:BenchEdge]->() RETURN count(r)").await,
+        0,
+        "no scratch edges may remain after cleanup"
+    );
+    drop_graph(graph).await;
+}
+
+#[tokio::test]
+#[ignore = "requires a running FalkorDB server"]
+async fn create_edge_builds_band_internal_edges_and_reset_drops_them() {
+    // Counters alone can't prove edge topology, so pin it directly against the server: fill a
+    // worker's band, run one window of create_edge, and assert exactly R band-internal edges exist
+    // (each op created one edge and no node), then a band reset drops every edge and node.
+    use benchmark::synthetic::writes::WriteScratch;
+
+    let graph = "syn_it_create_edge";
+    drop_graph(graph).await;
+    let mut g = open_graph(&endpoint(), graph).await.expect("open graph");
+
+    let reset_every = 5usize;
+    let scratch = WriteScratch::new(0xED9E, 0, reset_every).expect("scratch");
+    let label = scratch.label();
+    let (lo, hi) = scratch.key_band();
+
+    // Setup: fill the band with R clean nodes and confirm one distinct node per key.
+    run_and_drain(
+        &mut g,
+        QueryType::Write,
+        &format!("UNWIND range({lo}, {hi}) AS i CREATE (:{label} {{id: i}})"),
+        5_000,
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("fill band");
+    assert_eq!(
+        scalar_i64(&mut g, &format!("MATCH (n:{label}) RETURN count(n)")).await,
+        reset_every as i64,
+        "fill creates one node per band key"
+    );
+    assert_eq!(
+        scalar_i64(&mut g, &format!("MATCH (n:{label}) RETURN count(DISTINCT n.id)")).await,
+        reset_every as i64,
+        "band keys are distinct (no duplicate merge-hit targets)"
+    );
+
+    // One window of create_edge: src → (src+1, wrapping the top back to the bottom).
+    for seq in 0..reset_every as u64 {
+        let src = scratch.window_key(seq);
+        let dst = if src == hi { lo } else { src + 1 };
+        let s = run_and_drain(
+            &mut g,
+            QueryType::Write,
+            &format!("MATCH (a:{label} {{id: {src}}}), (b:{label} {{id: {dst}}}) CREATE (a)-[:BenchEdge]->(b)"),
+            5_000,
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("create edge");
+        assert_eq!(s.mutations.relationships_created, 1, "one edge per invocation");
+        assert_eq!(s.mutations.nodes_created, 0, "endpoints pre-exist");
+    }
+
+    // R distinct edges, every endpoint inside this worker's band (no cross-band leakage).
+    assert_eq!(
+        scalar_i64(
+            &mut g,
+            &format!("MATCH (:{label})-[r:BenchEdge]->(:{label}) RETURN count(r)")
+        )
+        .await,
+        reset_every as i64,
+        "one band-internal edge per window invocation"
+    );
+    assert_eq!(
+        scalar_i64(
+            &mut g,
+            &format!(
+                "MATCH (a:{label})-[:BenchEdge]->(b:{label}) \
+                 WHERE a.id < {lo} OR a.id > {hi} OR b.id < {lo} OR b.id > {hi} RETURN count(*)"
+            )
+        )
+        .await,
+        0,
+        "no edge escapes the worker's band"
+    );
+
+    // A band reset (DETACH DELETE) drops the accumulated edges and the nodes together.
+    run_and_drain(
+        &mut g,
+        QueryType::Write,
+        &format!("MATCH (n:{label}) WHERE n.id >= {lo} AND n.id <= {hi} DETACH DELETE n"),
+        5_000,
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("reset detach-delete");
+    assert_eq!(
+        scalar_i64(&mut g, "MATCH ()-[r:BenchEdge]->() RETURN count(r)").await,
+        0,
+        "the reset drops every accumulated edge"
+    );
+    assert_eq!(
+        scalar_i64(&mut g, &format!("MATCH (n:{label}) RETURN count(n)")).await,
+        0,
+        "the reset clears the band nodes"
+    );
+    drop_graph(graph).await;
+}
+
 /// Read a single-row `RETURN count(...)`/scalar i64.
 async fn scalar_i64(
     graph: &mut falkordb::AsyncGraph,

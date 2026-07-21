@@ -239,6 +239,70 @@ pub fn spec(op: OpName) -> OperationSpec {
                 render: write_merge_miss_render,
             }),
         },
+        OpName::CreateEdge => OperationSpec {
+            name: op,
+            kind: QueryType::Write,
+            description: "create a fresh edge between two of this worker's scratch nodes",
+            requirement: DatasetRequirement::None,
+            corpus: write_corpus_stub,
+            write: Some(WritePlan {
+                expected: ExpectedMutation::RelationshipCreated,
+                plan_tag: "create_edge.v1",
+                default_reset_every: DEFAULT_RESET_EVERY,
+                setup: write_reset_populated,
+                reset: write_reset_populated,
+                cleanup: write_cleanup_run,
+                render: write_create_edge_render,
+            }),
+        },
+        OpName::SetProperty => OperationSpec {
+            name: op,
+            kind: QueryType::Write,
+            description: "set a property on a fresh scratch node each invocation",
+            requirement: DatasetRequirement::None,
+            corpus: write_corpus_stub,
+            write: Some(WritePlan {
+                expected: ExpectedMutation::PropertySet,
+                plan_tag: "set_property.v1",
+                default_reset_every: DEFAULT_RESET_EVERY,
+                setup: write_reset_populated,
+                reset: write_reset_populated,
+                cleanup: write_cleanup_run,
+                render: write_set_property_render,
+            }),
+        },
+        OpName::DeleteNode => OperationSpec {
+            name: op,
+            kind: QueryType::Write,
+            description: "delete a pre-created scratch node each invocation",
+            requirement: DatasetRequirement::None,
+            corpus: write_corpus_stub,
+            write: Some(WritePlan {
+                expected: ExpectedMutation::NodeDeleted,
+                plan_tag: "delete_node.v1",
+                default_reset_every: DEFAULT_RESET_EVERY,
+                setup: write_reset_populated,
+                reset: write_reset_populated,
+                cleanup: write_cleanup_run,
+                render: write_delete_node_render,
+            }),
+        },
+        OpName::MergeHit => OperationSpec {
+            name: op,
+            kind: QueryType::Write,
+            description: "MERGE an existing scratch node each invocation (always hits)",
+            requirement: DatasetRequirement::None,
+            corpus: write_corpus_stub,
+            write: Some(WritePlan {
+                expected: ExpectedMutation::NodeMatched,
+                plan_tag: "merge_hit.v1",
+                default_reset_every: DEFAULT_RESET_EVERY,
+                setup: write_reset_populated,
+                reset: write_noop,
+                cleanup: write_cleanup_run,
+                render: write_merge_hit_render,
+            }),
+        },
     }
 }
 
@@ -248,11 +312,12 @@ pub const DEFAULT_RESET_EVERY: usize = 50_000;
 /// Delete only this worker's scratch rows (its key band) — used as both **setup** (a clean start,
 /// self-healing over any stale rows in this run's namespace) and **reset** (undo a window's
 /// accumulation). Scoped by the run-unique label *and* the worker's id band, so it can never touch
-/// another worker's or another run's data.
+/// another worker's or another run's data. `DETACH DELETE` so it also drops any edges an op left on
+/// its band nodes (e.g. `create_edge`); harmless for the edgeless ops.
 fn write_clear_band(scratch: &WriteScratch) -> BenchmarkResult<Vec<Query>> {
     let (lo, hi) = scratch.key_band();
     let text = format!(
-        "MATCH (n:{}) WHERE n.id >= $lo AND n.id <= $hi DELETE n",
+        "MATCH (n:{}) WHERE n.id >= $lo AND n.id <= $hi DETACH DELETE n",
         scratch.label()
     );
     Ok(vec![QueryBuilder::new()
@@ -263,9 +328,10 @@ fn write_clear_band(scratch: &WriteScratch) -> BenchmarkResult<Vec<Query>> {
 }
 
 /// Drop the whole run's scratch (every worker's rows for the run-unique label) — the coordinator
-/// runs this once after a level, on a fresh connection.
+/// runs this once after a level, on a fresh connection. `DETACH DELETE` so a run that created edges
+/// (`create_edge`) is fully cleared, edges included.
 fn write_cleanup_run(scratch: &WriteScratch) -> BenchmarkResult<Vec<Query>> {
-    let text = format!("MATCH (n:{}) DELETE n", scratch.label());
+    let text = format!("MATCH (n:{}) DETACH DELETE n", scratch.label());
     Ok(vec![QueryBuilder::new().text(text).build()])
 }
 
@@ -291,6 +357,108 @@ fn write_merge_miss_render(
     Ok(QueryBuilder::new()
         .text(text)
         .param("id", scratch.window_key(seq))
+        .build())
+}
+
+/// Create this worker's band nodes (`id` `lo..=hi`, one per key) so ops that need existing targets
+/// (`delete_node`, `set_property`, `merge_hit`, `create_edge`) have a full, clean band. Precondition:
+/// the band is empty (it is paired with [`write_clear_band`] in [`write_reset_populated`]).
+fn write_fill_band(scratch: &WriteScratch) -> BenchmarkResult<Vec<Query>> {
+    let (lo, hi) = scratch.key_band();
+    let text = format!(
+        "UNWIND range($lo, $hi) AS i CREATE (:{} {{id: i}})",
+        scratch.label()
+    );
+    Ok(vec![QueryBuilder::new()
+        .text(text)
+        .param("lo", lo)
+        .param("hi", hi)
+        .build()])
+}
+
+/// Reset (and initial setup) for write ops that consume or mutate a **populated** band: clear the
+/// worker's band (dropping any nodes + edges the window accumulated) then refill it with `R` fresh
+/// clean nodes, so every window starts from an identical clean state. Bounds drift to one sawtooth
+/// window exactly like the empty-band ops, just around a full band instead of an empty one.
+fn write_reset_populated(scratch: &WriteScratch) -> BenchmarkResult<Vec<Query>> {
+    let mut stmts = write_clear_band(scratch)?;
+    stmts.extend(write_fill_band(scratch)?);
+    Ok(stmts)
+}
+
+/// A no-op reset for a drift-free op (`merge_hit` only matches, never mutates): its band is set up
+/// once and never needs refreshing, so refilling `R` nodes every window would be pure waste.
+fn write_noop(_scratch: &WriteScratch) -> BenchmarkResult<Vec<Query>> {
+    Ok(vec![])
+}
+
+/// `delete_node`: delete this invocation's pre-created band node — exactly one (`window_key` is
+/// unique within a window, so each of the window's `R` nodes is deleted once, then the reset
+/// refills the band).
+fn write_delete_node_render(
+    scratch: &WriteScratch,
+    seq: u64,
+) -> BenchmarkResult<Query> {
+    let text = format!("MATCH (n:{} {{id: $id}}) DELETE n", scratch.label());
+    Ok(QueryBuilder::new()
+        .text(text)
+        .param("id", scratch.window_key(seq))
+        .build())
+}
+
+/// `set_property`: set one property on a pre-created band node. `WHERE n.touched IS NULL` makes the
+/// sample self-checking — the band is refilled each window with `touched`-less nodes, so a genuine
+/// first-write always sets exactly one property; if a broken reset left `touched` set, the match
+/// finds nothing, zero properties are set, and mutation verification fails loudly.
+fn write_set_property_render(
+    scratch: &WriteScratch,
+    seq: u64,
+) -> BenchmarkResult<Query> {
+    let text = format!(
+        "MATCH (n:{} {{id: $id}}) WHERE n.touched IS NULL SET n.touched = $id",
+        scratch.label()
+    );
+    Ok(QueryBuilder::new()
+        .text(text)
+        .param("id", scratch.window_key(seq))
+        .build())
+}
+
+/// `merge_hit`: `MERGE` a band node that was pre-created in setup, so it always matches (never
+/// creates). The band is populated once and never mutated, so no reset is needed.
+fn write_merge_hit_render(
+    scratch: &WriteScratch,
+    seq: u64,
+) -> BenchmarkResult<Query> {
+    let text = format!("MERGE (n:{} {{id: $id}}) RETURN n.id", scratch.label());
+    Ok(QueryBuilder::new()
+        .text(text)
+        .param("id", scratch.window_key(seq))
+        .build())
+}
+
+/// `create_edge`: create one fresh edge between two distinct band nodes (`src → src+1`, wrapping the
+/// band's top back to its bottom). Over a window the `R` sources yield `R` distinct ordered pairs —
+/// no duplicate edges — and the reset drops the accumulated edges by clearing+refilling the band.
+/// With `R == 1` the single node gets a self-loop. Endpoints stay inside this worker's band, so a
+/// reset's `DETACH DELETE` never touches another worker's data.
+fn write_create_edge_render(
+    scratch: &WriteScratch,
+    seq: u64,
+) -> BenchmarkResult<Query> {
+    let (lo, hi) = scratch.key_band();
+    let src = scratch.window_key(seq);
+    // Wrap the top of the band back to the bottom without ever computing `R` as i32 (R may exceed
+    // i32 while every band key still fits it).
+    let dst = if src == hi { lo } else { src + 1 };
+    let text = format!(
+        "MATCH (a:{l} {{id: $src}}), (b:{l} {{id: $dst}}) CREATE (a)-[:BenchEdge]->(b)",
+        l = scratch.label()
+    );
+    Ok(QueryBuilder::new()
+        .text(text)
+        .param("src", src)
+        .param("dst", dst)
         .build())
 }
 
@@ -586,14 +754,26 @@ mod tests {
 
     #[test]
     fn write_ops_carry_a_write_plan_and_write_kind() {
-        for op in [OpName::CreateNode, OpName::MergeMiss] {
+        use ExpectedMutation::*;
+        let expected = [
+            (OpName::CreateNode, NodeCreated),
+            (OpName::MergeMiss, NodeCreated),
+            (OpName::CreateEdge, RelationshipCreated),
+            (OpName::SetProperty, PropertySet),
+            (OpName::DeleteNode, NodeDeleted),
+            (OpName::MergeHit, NodeMatched),
+        ];
+        for (op, mutation) in expected {
             let s = spec(op);
             assert_eq!(s.kind, QueryType::Write, "{} is a write op", op.as_str());
             let plan = s.write.expect("write op carries a WritePlan");
-            assert_eq!(plan.expected, ExpectedMutation::NodeCreated);
+            assert_eq!(plan.expected, mutation, "{} expected mutation", op.as_str());
             assert_eq!(plan.default_reset_every, DEFAULT_RESET_EVERY);
         }
-        // A read op carries no write plan and stays QueryType::Read.
+        // Every catalog op agrees on kind vs. the presence of a write plan.
+        assert!(OpName::all()
+            .iter()
+            .all(|op| { (spec(*op).kind == QueryType::Write) == spec(*op).write.is_some() }));
         let read = spec(OpName::MatchByIndex);
         assert!(read.write.is_none());
         assert_eq!(read.kind, QueryType::Read);
@@ -632,7 +812,7 @@ mod tests {
         let q = &stmts[0];
         assert_eq!(
             q.text,
-            "MATCH (n:BenchScratch_f) WHERE n.id >= $lo AND n.id <= $hi DELETE n"
+            "MATCH (n:BenchScratch_f) WHERE n.id >= $lo AND n.id <= $hi DETACH DELETE n"
         );
         assert!(matches!(q.params.get("lo"), Some(QueryParam::Integer(30))));
         assert!(matches!(q.params.get("hi"), Some(QueryParam::Integer(39))));
@@ -645,7 +825,7 @@ mod tests {
         let scratch = WriteScratch::new(0x2a, 5, 10).unwrap();
         let stmts = write_cleanup_run(&scratch).unwrap();
         assert_eq!(stmts.len(), 1);
-        assert_eq!(stmts[0].text, "MATCH (n:BenchScratch_2a) DELETE n");
+        assert_eq!(stmts[0].text, "MATCH (n:BenchScratch_2a) DETACH DELETE n");
         assert!(stmts[0].params.is_empty());
     }
 
@@ -658,5 +838,101 @@ mod tests {
             .build_corpus(&mut rng, &DatasetHandle::default(), 0, 4)
             .expect("stub corpus builds without a dataset");
         assert_eq!(corpus.len(), 1);
+    }
+
+    #[test]
+    fn delete_node_render_deletes_the_window_key_node() {
+        use crate::query::QueryParam;
+        let scratch = WriteScratch::new(0x7, 1, 10).unwrap(); // band [10, 19]
+        let q = write_delete_node_render(&scratch, 4).unwrap(); // window_key = 10 + 4 = 14
+        assert_eq!(q.text, "MATCH (n:BenchScratch_7 {id: $id}) DELETE n");
+        assert!(matches!(q.params.get("id"), Some(QueryParam::Integer(14))));
+    }
+
+    #[test]
+    fn set_property_render_guards_on_a_fresh_node() {
+        use crate::query::QueryParam;
+        // The `WHERE n.touched IS NULL` guard makes the sample self-checking: a broken reset that
+        // left `touched` set would match nothing, set zero properties, and fail verification.
+        let scratch = WriteScratch::new(0x8, 0, 100).unwrap();
+        let q = write_set_property_render(&scratch, 5).unwrap();
+        assert_eq!(
+            q.text,
+            "MATCH (n:BenchScratch_8 {id: $id}) WHERE n.touched IS NULL SET n.touched = $id"
+        );
+        assert!(matches!(q.params.get("id"), Some(QueryParam::Integer(5))));
+    }
+
+    #[test]
+    fn merge_hit_render_merges_the_window_key_node() {
+        use crate::query::QueryParam;
+        let scratch = WriteScratch::new(0x9, 2, 10).unwrap(); // band [20, 29]
+        let q = write_merge_hit_render(&scratch, 3).unwrap(); // window_key = 20 + 3 = 23
+        assert_eq!(q.text, "MERGE (n:BenchScratch_9 {id: $id}) RETURN n.id");
+        assert!(matches!(q.params.get("id"), Some(QueryParam::Integer(23))));
+    }
+
+    #[test]
+    fn create_edge_render_connects_distinct_band_nodes_and_wraps_at_the_top() {
+        use crate::query::QueryParam;
+        let scratch = WriteScratch::new(0xA, 0, 5).unwrap(); // band [0, 4]
+        // Mid-band: src = window_key(2) = 2 → dst = src + 1 = 3.
+        let q = write_create_edge_render(&scratch, 2).unwrap();
+        assert_eq!(
+            q.text,
+            "MATCH (a:BenchScratch_a {id: $src}), (b:BenchScratch_a {id: $dst}) CREATE (a)-[:BenchEdge]->(b)"
+        );
+        assert!(matches!(q.params.get("src"), Some(QueryParam::Integer(2))));
+        assert!(matches!(q.params.get("dst"), Some(QueryParam::Integer(3))));
+        // Top of the band wraps back to the bottom: src = hi = 4 → dst = lo = 0.
+        let top = write_create_edge_render(&scratch, 4).unwrap();
+        assert!(matches!(top.params.get("src"), Some(QueryParam::Integer(4))));
+        assert!(matches!(top.params.get("dst"), Some(QueryParam::Integer(0))));
+    }
+
+    #[test]
+    fn create_edge_self_loops_when_band_width_is_one() {
+        use crate::query::QueryParam;
+        let scratch = WriteScratch::new(0xB, 3, 1).unwrap(); // band [3, 3]
+        let q = write_create_edge_render(&scratch, 9).unwrap(); // window_key = 3
+        assert!(matches!(q.params.get("src"), Some(QueryParam::Integer(3))));
+        assert!(matches!(q.params.get("dst"), Some(QueryParam::Integer(3))));
+    }
+
+    #[test]
+    fn fill_band_creates_one_node_per_key_via_range() {
+        use crate::query::QueryParam;
+        let scratch = WriteScratch::new(0xC, 2, 10).unwrap(); // band [20, 29]
+        let stmts = write_fill_band(&scratch).unwrap();
+        assert_eq!(stmts.len(), 1);
+        assert_eq!(
+            stmts[0].text,
+            "UNWIND range($lo, $hi) AS i CREATE (:BenchScratch_c {id: i})"
+        );
+        assert!(matches!(
+            stmts[0].params.get("lo"),
+            Some(QueryParam::Integer(20))
+        ));
+        assert!(matches!(
+            stmts[0].params.get("hi"),
+            Some(QueryParam::Integer(29))
+        ));
+    }
+
+    #[test]
+    fn reset_populated_clears_then_refills_the_band() {
+        let scratch = WriteScratch::new(0xD, 0, 10).unwrap();
+        let stmts = write_reset_populated(&scratch).unwrap();
+        // Two statements, in order: DETACH DELETE the band, then recreate it clean.
+        assert_eq!(stmts.len(), 2);
+        assert!(stmts[0].text.contains("DETACH DELETE n"));
+        assert!(stmts[1].text.contains("CREATE (:BenchScratch_d {id: i})"));
+    }
+
+    #[test]
+    fn noop_reset_is_empty() {
+        // merge_hit is drift-free, so its reset issues no statements.
+        let scratch = WriteScratch::new(0xE, 0, 10).unwrap();
+        assert!(write_noop(&scratch).unwrap().is_empty());
     }
 }

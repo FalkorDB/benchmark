@@ -16,7 +16,8 @@ nodes = 100000
 edges = 1000000
 
 # Operations to measure, using the same names as `--op` (see `benchmark synthetic list-ops`).
-# Read ops and write ops (e.g. `create_node`, `merge_miss`) can be mixed here.
+# Read ops and write ops (create_node, merge_miss, create_edge, set_property, delete_node,
+# merge_hit) can be mixed here.
 operations = ["match_by_index", "expand_hops_5", "aggregate_count"]
 
 # Measurement knobs (all optional; shown with their defaults).
