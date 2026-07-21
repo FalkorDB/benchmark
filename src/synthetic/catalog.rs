@@ -448,8 +448,10 @@ fn write_create_edge_render(
 ) -> BenchmarkResult<Query> {
     let (lo, hi) = scratch.key_band();
     let src = scratch.window_key(seq);
-    // Wrap the top of the band back to the bottom without ever computing `R` as i32 (R may exceed
-    // i32 while every band key still fits it).
+    // Wrap the band's top back to its bottom. `src + 1` is only reached when `src < hi`, so it stays
+    // in `[lo, hi]` (≤ i32::MAX) and can't overflow — whereas a `% reset_every` form would need
+    // `reset_every` as i32, which isn't bounded to fit: `WriteScratch::new` caps the highest *key*
+    // `(worker_id + 1)·reset_every − 1` at i32::MAX, so at C=1 `reset_every` itself may be i32::MAX + 1.
     let dst = if src == hi { lo } else { src + 1 };
     let text = format!(
         "MATCH (a:{l} {{id: $src}}), (b:{l} {{id: $dst}}) CREATE (a)-[:BenchEdge]->(b)",
