@@ -258,7 +258,7 @@ pub fn spec(op: OpName) -> OperationSpec {
         OpName::SetProperty => OperationSpec {
             name: op,
             kind: QueryType::Write,
-            description: "set a property on a fresh scratch node each invocation",
+            description: "set a property on a pre-created scratch node each invocation",
             requirement: DatasetRequirement::None,
             corpus: write_corpus_stub,
             write: Some(WritePlan {

@@ -100,7 +100,7 @@ pub enum OpName {
     MergeMiss,
     /// (write) `CREATE` a fresh edge between two of this worker's scratch nodes.
     CreateEdge,
-    /// (write) `SET` a property on a fresh scratch node each invocation.
+    /// (write) `SET` a property on a pre-created scratch node each invocation.
     SetProperty,
     /// (write) `DELETE` a pre-created scratch node each invocation.
     DeleteNode,

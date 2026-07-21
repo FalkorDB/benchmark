@@ -236,7 +236,7 @@ identical corpus.
 | `create_node` *(write)* | create a fresh scratch node each invocation | `CREATE (n:BenchScratch_<run> {id: $id}) RETURN n.id` |
 | `merge_miss` *(write)* | `MERGE` a fresh scratch node (always misses → creates) | `MERGE (n:BenchScratch_<run> {id: $id}) RETURN n.id` |
 | `create_edge` *(write)* | create a fresh edge between two scratch nodes | `MATCH (a:BenchScratch_<run> {id: $src}), (b:BenchScratch_<run> {id: $dst}) CREATE (a)-[:BenchEdge]->(b)` |
-| `set_property` *(write)* | set one property on a fresh scratch node | `MATCH (n:BenchScratch_<run> {id: $id}) WHERE n.touched IS NULL SET n.touched = $id` |
+| `set_property` *(write)* | set one property on a pre-created scratch node | `MATCH (n:BenchScratch_<run> {id: $id}) WHERE n.touched IS NULL SET n.touched = $id` |
 | `delete_node` *(write)* | delete a pre-created scratch node | `MATCH (n:BenchScratch_<run> {id: $id}) DELETE n` |
 | `merge_hit` *(write)* | `MERGE` an existing scratch node (always hits) | `MERGE (n:BenchScratch_<run> {id: $id}) RETURN n.id` |
 
