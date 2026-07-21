@@ -274,6 +274,7 @@ Sample output (one block per selected op; one table row per concurrency level, p
 synthetic benchmark — endpoint falkor://127.0.0.1:6379  graph main  samples 500  warmup 100  concurrency [1,4,16,32]  seed 42  connection pool(size=1) per worker
 server — falkordb module ver 4.20.1  redis 8.6.3  CACHE_SIZE 25
 server image: falkordb/falkordb@sha256:9042fdc4...
+client host — bench-01 · Linux 6.8 Ubuntu 24.04 · Intel(R) Xeon(R) (8c/16t) · 32.0 GiB · x86_64
 
 match_by_index
   [cached — plan reused, execution only]
