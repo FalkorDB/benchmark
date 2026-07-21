@@ -420,6 +420,45 @@ To run the integration test against a live server:
 just synthetic-it     # uses FALKORDB_HOST/FALKORDB_PORT, default 127.0.0.1:6379
 ```
 
+#### Version-comparison baselines (Criterion, C=1)
+
+To track a **read** operation's latency **between FalkorDB versions**, save a
+[Criterion](https://github.com/bheisler/criterion.rs) C=1 single-flight baseline on one version and
+compare against it on another. The workload (dataset + operations) comes from `synthetic-bench.toml`,
+so both runs measure exactly the same thing — and `synthetic-compare` **guards** that with the
+`corpus_hash` before it will compare, refusing to put mismatched workloads side by side.
+
+```bash
+# on FalkorDB version A (needs a synthetic-bench.toml with nodes/edges/operations)
+just synthetic-baseline v4.2.1
+# ...upgrade FalkorDB, then on version B:
+just synthetic-compare v4.2.1
+```
+
+```text
+⚠ server image changed: falkordb@sha256:aaa… → falkordb@sha256:bbb…
+baseline guard: OK — same workload, safe to compare
+synthetic/match_by_index/total_ms
+    time:   [297 µs 303 µs 310 µs]
+    change: [-9.4% -8.1% -6.7%] (p = 0.00 < 0.05)   Performance has improved.
+```
+
+How it works:
+
+- **`just synthetic-baseline <name>`** (re)generates the dataset from `synthetic-bench.toml`, captures
+  that run's `corpus_hash` + FalkorDB module version into `baselines/<name>.json`, then saves the
+  Criterion baseline `<name>` (single-flight C=1 read latencies + browsable HTML plots under
+  `target/criterion/`).
+- **`just synthetic-compare <name>`** captures the current run's identity, runs the **guard**
+  (`benchmark synthetic baseline-guard`) — which **aborts** if the `corpus_hash` differs (or is
+  absent, i.e. an external, unfingerprintable graph) — then runs Criterion against the saved baseline.
+- The **FalkorDB version is the subject** of the comparison, so a version change is *recorded and
+  displayed*, never a reason to abort; the guard only warns when the two versions are identical (no
+  delta to measure) or the dev `999999` placeholder (use tagged images). The **workload** is the hard
+  gate. Baselines therefore require a **generated** dataset (so the workload is fingerprintable);
+  write ops are out of scope (their per-invocation reset lifecycle doesn't fit Criterion's model).
+- `synthetic-bench.toml` and `baselines/` are git-ignored (per-user config + local baselines).
+
 ### UI dashboard (`ui/`)
 
 ```bash

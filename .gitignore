@@ -32,3 +32,7 @@ prometheus.yml
 Results-*/
 csv_output/
 
+# synthetic per-operation benchmark: per-user config + saved version baselines (Part 6)
+synthetic-bench.toml
+/baselines/
+

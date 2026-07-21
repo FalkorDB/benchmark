@@ -1446,6 +1446,49 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn baseline_guard_command_gates_on_corpus_hash() {
+        // Hermetic: writes minimal report JSONs and drives the `baseline-guard` subcommand (which
+        // only reads files + applies the guard — no server).
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir();
+        let write_report = |hash: &str, ver: u64| -> String {
+            let p = dir.join(format!(
+                "bg-{}-{}.json",
+                std::process::id(),
+                SEQ.fetch_add(1, Ordering::Relaxed)
+            ));
+            let json = format!(
+                r#"{{"meta":{{"tool_version":"0.1.0","endpoint":"x","samples":1,"warmup":0,"server_timeout_ms":5000,"client_deadline_ms":6000,"connection":"c","started_at_epoch_secs":0,"server":{{"module_graph_ver":{ver}}},"dataset":{{"seed":1,"nodes":10,"edges":20,"corpus_hash":"{hash}"}}}},"operations":{{}}}}"#
+            );
+            std::fs::write(&p, json).unwrap();
+            p.to_string_lossy().into_owned()
+        };
+        let base = write_report("sha256:same", 42001);
+        // Same workload + same version ⇒ guard proceeds with an advisory warning (exercises the
+        // warning-print path).
+        let ok = write_report("sha256:same", 42001);
+        assert!(run_command(crate::cli::SyntheticCommands::BaselineGuard {
+            baseline: base.clone(),
+            current: ok.clone(),
+        })
+        .await
+        .is_ok());
+        // Different workload ⇒ guard aborts.
+        let bad = write_report("sha256:different", 42002);
+        let err = run_command(crate::cli::SyntheticCommands::BaselineGuard {
+            baseline: base.clone(),
+            current: bad.clone(),
+        })
+        .await
+        .expect_err("corpus_hash mismatch must abort");
+        assert!(format!("{err:?}").contains("corpus_hash mismatch"));
+        for p in [base, ok, bad] {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+
     #[test]
     fn markdown_path_swaps_json_suffix_or_appends() {
         assert_eq!(markdown_path("synthetic-report.json"), "synthetic-report.md");

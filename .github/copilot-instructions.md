@@ -41,6 +41,8 @@ Key recipes:
 | `just synthetic-bench-one <op>` | Sweep one operation over the concurrency curve (needs a live FalkorDB). |
 | `just synthetic-ops` | List the synthetic operations. |
 | `just synthetic-it` | Run the synthetic integration test against a live FalkorDB. |
+| `just synthetic-baseline <name>` | Save a Criterion C=1 latency baseline (per-op read latencies) for the current build/version (needs a live FalkorDB + `synthetic-bench.toml`). |
+| `just synthetic-compare <name>` | Compare the current build against a saved baseline — guards on `corpus_hash` (aborts on workload mismatch), then runs Criterion (needs a live FalkorDB). |
 | `just fmt` / `just fmt-check` | Format Rust in place / check formatting. |
 | `just run -- <args>` | Run the benchmark binary (e.g. `just run -- --help`). |
 | `just ui-install` | `npm ci` in `ui/`. |
