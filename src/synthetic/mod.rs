@@ -17,6 +17,7 @@
 
 pub mod catalog;
 pub mod config;
+pub mod baseline;
 pub mod dataset;
 pub mod engine;
 pub mod host;
@@ -1103,6 +1104,40 @@ pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkRes
         crate::cli::SyntheticCommands::ListOps => {
             print!("{}", list_ops());
             Ok(())
+        }
+        crate::cli::SyntheticCommands::BaselineGuard { baseline, current } => {
+            baseline_guard(&baseline, &current)
+        }
+    }
+}
+
+/// Guard a version comparison: load the saved baseline and current run reports, compare their
+/// workload identity, and **abort** (return an error ⇒ non-zero exit) when the workloads differ, so
+/// `synthetic-compare` never compares latencies across mismatched benchmarks. Advisory notes (a
+/// version/image change, an identical or placeholder version) are printed but do not abort.
+fn baseline_guard(
+    baseline_path: &str,
+    current_path: &str,
+) -> BenchmarkResult<()> {
+    let load = |path: &str| -> BenchmarkResult<crate::synthetic::report::Report> {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| OtherError(format!("could not read report '{}': {}", path, e)))?;
+        serde_json::from_str(&text)
+            .map_err(|e| OtherError(format!("invalid synthetic report '{}': {}", path, e)))
+    };
+    let baseline = baseline::BaselineKey::from_report(&load(baseline_path)?);
+    let current = baseline::BaselineKey::from_report(&load(current_path)?);
+
+    match baseline::guard(&baseline, &current) {
+        baseline::GuardOutcome::Proceed { warnings } => {
+            for w in &warnings {
+                eprintln!("⚠ {}", w);
+            }
+            println!("baseline guard: OK — same workload, safe to compare");
+            Ok(())
+        }
+        baseline::GuardOutcome::Abort { reason } => {
+            Err(OtherError(format!("baseline guard: ABORT — {}", reason)))
         }
     }
 }
