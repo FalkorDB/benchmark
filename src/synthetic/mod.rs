@@ -357,11 +357,21 @@ pub async fn run(config: &Config) -> BenchmarkResult<Report> {
                 .to_string(),
         ));
     }
-    // Write ops need a positive reset cadence; fail fast before opening any connection.
-    if config.reset_every == 0 && ops.iter().any(|op| spec(*op).write.is_some()) {
-        return Err(OtherError(
-            "reset_every must be >= 1 for write operations".to_string(),
-        ));
+    // Write ops need a positive reset cadence AND a per-worker key band that fits `i32` (FalkorDB
+    // params) at the widest concurrency level. Validate both up-front — before opening any
+    // connection or collecting provenance — so an invalid write config fails fast instead of after
+    // connection/provenance setup.
+    if ops.iter().any(|op| spec(*op).write.is_some()) {
+        if config.reset_every == 0 {
+            return Err(OtherError(
+                "reset_every must be >= 1 for write operations".to_string(),
+            ));
+        }
+        // The band bound grows with the worker id, so the largest level bounds every smaller one;
+        // reuse `WriteScratch::new`'s checked i32 arithmetic (its run_token doesn't affect the
+        // bound). `normalize_concurrency` guarantees a non-empty, ≥1 sweep, so `max_worker ≥ 0`.
+        let max_worker = concurrency.last().copied().unwrap_or(1).saturating_sub(1);
+        WriteScratch::new(0, max_worker, config.reset_every)?;
     }
 
     let started_at_epoch_secs = SystemTime::now()
@@ -1367,6 +1377,26 @@ mod tests {
         assert!(
             format!("{err:?}").contains("reset_every must be >= 1"),
             "expected a reset_every validation error, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_rejects_write_key_band_overflow_before_connecting() {
+        // A write op whose widest concurrency level × reset_every would overflow the i32 key range
+        // is rejected up-front, before any connection is opened (hermetic). Here worker 1's highest
+        // key is 2·(i32::MAX) − 1, well past i32::MAX.
+        let cfg = Config {
+            ops: vec![OpName::CreateNode],
+            reset_every: i32::MAX as usize,
+            concurrency: vec![2],
+            ..Config::default()
+        };
+        let err = run(&cfg)
+            .await
+            .expect_err("an overflowing key band must be rejected");
+        assert!(
+            format!("{err:?}").contains("overflows i32"),
+            "expected an i32 key-band overflow error, got: {err:?}"
         );
     }
 
