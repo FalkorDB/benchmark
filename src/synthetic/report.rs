@@ -565,7 +565,9 @@ fn render_op_levels_markdown(
             ));
         }
         if any_unknown {
-            out.push_str("\n> `~` miss% includes samples with no cache stat reported.\n");
+            out.push_str(
+                "\n> `~` some samples reported no cache stat (counted separately); the miss% is computed over the samples with a known cache stat only.\n",
+            );
         }
     }
     if op.levels.iter().any(|l| l.compilation_ms_median.is_some()) {
@@ -859,7 +861,7 @@ mod tests {
         assert!(md.contains("| dataset | seed 7 · 100 nodes · 200 edges |"));
         assert!(md.contains("| corpus_hash | `sha256:abc123` |"));
         assert!(md.contains('~'), "unknown-cache miss% is marked with ~");
-        assert!(md.contains("no cache stat reported"));
+        assert!(md.contains("known cache stat only"));
     }
 
     #[test]
