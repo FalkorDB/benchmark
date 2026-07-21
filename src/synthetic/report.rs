@@ -44,6 +44,30 @@ impl ServerInfo {
     }
 }
 
+/// The client host the probe ran on (best-effort via `sysinfo`). Every field is optional because
+/// `sysinfo` can't always determine them and availability varies by platform, so a missing value
+/// is `None`/`0` rather than an error. This is the **client** machine driving the benchmark, not
+/// the FalkorDB server (whose OS/arch live in [`ServerInfo`]).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HostInfo {
+    /// Client hostname (kept out of the pasteable Markdown, present in JSON/console).
+    pub hostname: Option<String>,
+    /// Long OS name, e.g. `"macOS 15.1"` / `"Linux 6.8 Ubuntu 24.04"`.
+    pub os: Option<String>,
+    /// Kernel version string.
+    pub kernel: Option<String>,
+    /// CPU architecture, e.g. `"aarch64"` / `"x86_64"`.
+    pub arch: Option<String>,
+    /// CPU brand string, e.g. `"Apple M2"` / `"Intel(R) Xeon(R) …"`.
+    pub cpu: Option<String>,
+    /// Physical core count (`None` if `sysinfo` can't determine it).
+    pub physical_cores: Option<usize>,
+    /// Logical CPU count.
+    pub logical_cores: usize,
+    /// Total physical memory in bytes.
+    pub total_memory_bytes: u64,
+}
+
 /// Run-level metadata: how and against what the probe ran.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Meta {
@@ -74,6 +98,10 @@ pub struct Meta {
     pub connection: String,
     pub started_at_epoch_secs: u64,
     pub server: ServerInfo,
+    /// The client host the probe ran on. `#[serde(default)]` so pre-Part-6 reports (which lacked it)
+    /// still deserialize, defaulting to an empty [`HostInfo`].
+    #[serde(default)]
+    pub host: HostInfo,
     /// Present only when the probe generated its own reproducible dataset (Part 3). Absent for an
     /// externally-provided graph, whose contents we can't fingerprint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -253,6 +281,10 @@ impl Report {
         if let Some(img) = &self.meta.server.server_image {
             out.push_str(&format!("server image: {}\n", img));
         }
+        let host_line = host_summary(&self.meta.host, true);
+        if !host_line.is_empty() {
+            out.push_str(&format!("client host — {}\n", host_line));
+        }
         if let Some(d) = &self.meta.dataset {
             out.push_str(&format!(
                 "dataset — seed {}  nodes {}  edges {}  corpus_hash {}\n",
@@ -265,6 +297,191 @@ impl Report {
         }
         out
     }
+
+    /// Render the report as GitHub-flavoured **Markdown** (a metadata table + one latency-vs-
+    /// throughput table per operation and cache mode), suitable for pasting into a PR. Shares the
+    /// numeric row model with [`Report::to_console`] so the two never disagree.
+    pub fn to_markdown(&self) -> String {
+        let m = &self.meta;
+        let mut out = String::from("# Synthetic per-operation benchmark\n\n");
+
+        let module_ver = m
+            .server
+            .module_graph_ver
+            .map(crate::synthetic::provenance::decode_module_version)
+            .unwrap_or_else(|| "unknown".to_string());
+        let module_note = if m.server.is_placeholder() {
+            " ⚠️ dev placeholder — use a tagged image for comparisons"
+        } else {
+            ""
+        };
+        let concurrency = if m.concurrency.is_empty() {
+            "1".to_string()
+        } else {
+            m.concurrency
+                .iter()
+                .map(|c| c.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+
+        out.push_str("| field | value |\n|---|---|\n");
+        out.push_str(&format!("| tool | v{} |\n", m.tool_version));
+        out.push_str(&format!(
+            "| endpoint / graph | `{}` / `{}` |\n",
+            m.endpoint, m.graph
+        ));
+        out.push_str(&format!(
+            "| FalkorDB module | {}{} |\n",
+            module_ver, module_note
+        ));
+        if let Some(redis) = &m.server.redis_version {
+            out.push_str(&format!("| redis | {} |\n", redis));
+        }
+        if let Some(cs) = m.server.cache_size {
+            out.push_str(&format!("| CACHE_SIZE | {} |\n", cs));
+        }
+        if let Some(img) = &m.server.server_image {
+            out.push_str(&format!("| server image | `{}` |\n", img));
+        }
+        // Client host: omit the hostname from the pasteable Markdown (it can be sensitive; it stays
+        // in the JSON and console).
+        let host_line = host_summary(&m.host, false);
+        if !host_line.is_empty() {
+            out.push_str(&format!("| client host | {} |\n", host_line));
+        }
+        out.push_str(&format!("| samples / warmup | {} / {} |\n", m.samples, m.warmup));
+        out.push_str(&format!("| concurrency | {} |\n", concurrency));
+        out.push_str(&format!("| cache seed | {} |\n", m.seed));
+        out.push_str(&format!("| connection | {} |\n", m.connection));
+        if let Some(d) = &m.dataset {
+            out.push_str(&format!(
+                "| dataset | seed {} · {} nodes · {} edges |\n",
+                d.seed, d.nodes, d.edges
+            ));
+            out.push_str(&format!("| corpus_hash | `{}` |\n", d.corpus_hash));
+        }
+
+        for (name, op) in &self.operations {
+            out.push_str(&format!("\n## `{}`\n", name));
+            render_op_levels_markdown(&mut out, op);
+        }
+        out
+    }
+}
+
+/// A one-line client-host summary (` · `-joined, skipping unknown fields). With `with_hostname`,
+/// the hostname is prefixed — used for the local console but not the pasteable Markdown.
+fn host_summary(
+    h: &crate::synthetic::report::HostInfo,
+    with_hostname: bool,
+) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if with_hostname {
+        if let Some(name) = &h.hostname {
+            parts.push(name.clone());
+        }
+    }
+    if let Some(os) = &h.os {
+        parts.push(os.clone());
+    }
+    if let Some(cpu) = &h.cpu {
+        let cores = match h.physical_cores {
+            Some(p) => format!("{}c/{}t", p, h.logical_cores),
+            None => format!("{}t", h.logical_cores),
+        };
+        parts.push(format!("{} ({})", cpu, cores));
+    } else if h.logical_cores > 0 {
+        parts.push(format!("{} threads", h.logical_cores));
+    }
+    if h.total_memory_bytes > 0 {
+        parts.push(format!(
+            "{:.1} GiB",
+            h.total_memory_bytes as f64 / (1024.0 * 1024.0 * 1024.0)
+        ));
+    }
+    if let Some(arch) = &h.arch {
+        parts.push(arch.clone());
+    }
+    parts.join(" · ")
+}
+
+/// One cache-plan condition a sweep is measured under. Selects the matching per-level metrics and
+/// its label in each renderer, so the console and Markdown tables share one source of truth.
+#[derive(Clone, Copy, PartialEq)]
+enum CacheView {
+    Cached,
+    Uncached,
+}
+
+impl CacheView {
+    fn pick(self, level: &LevelReport) -> Option<&LevelMetrics> {
+        match self {
+            CacheView::Cached => level.cached.as_ref(),
+            CacheView::Uncached => level.uncached.as_ref(),
+        }
+    }
+
+    fn console_label(self) -> &'static str {
+        match self {
+            CacheView::Cached => "cached — plan reused, execution only",
+            CacheView::Uncached => "uncached — plan-cache miss each run, execution + compilation",
+        }
+    }
+
+    fn markdown_label(self) -> &'static str {
+        match self {
+            CacheView::Cached => "cached — plan reused, execution only",
+            CacheView::Uncached => "uncached — plan-cache miss each run, execution + compilation",
+        }
+    }
+}
+
+/// One rendered row of an operation's latency-vs-throughput table: the numbers both the console and
+/// Markdown renderers format, extracted once so the two can't drift.
+struct LevelRow {
+    concurrency: usize,
+    throughput: f64,
+    /// server-time percentiles [p50, p90, p95, p99] (ms).
+    server: [f64; 4],
+    /// total round-trip percentiles [p50, p90, p95, p99] (ms).
+    total: [f64; 4],
+    miss_pct: f64,
+    /// Number of samples whose cache flag was absent (a `0.0` miss% may just mean "unknown").
+    cached_unknown: usize,
+    /// Whether this level is the sweep's saturation knee (highest achieved throughput across modes).
+    is_knee: bool,
+}
+
+/// The `(cache mode, rows)` tables present for an operation, cached before uncached. A mode with no
+/// measured level is omitted. The shared model behind both [`render_op_levels`] and
+/// [`render_op_levels_markdown`].
+fn op_mode_tables(op: &OperationReport) -> Vec<(CacheView, Vec<LevelRow>)> {
+    let knee = op.knee_concurrency();
+    [CacheView::Cached, CacheView::Uncached]
+        .into_iter()
+        .filter_map(|mode| {
+            let rows: Vec<LevelRow> = op
+                .levels
+                .iter()
+                .filter_map(|level| {
+                    let m = mode.pick(level)?;
+                    let s = &m.metrics.server_ms;
+                    let t = &m.metrics.total_ms;
+                    Some(LevelRow {
+                        concurrency: level.concurrency,
+                        throughput: m.throughput_ops_per_sec,
+                        server: [s.median, s.p90, s.p95, s.p99],
+                        total: [t.median, t.p90, t.p95, t.p99],
+                        miss_pct: m.metrics.cached_false_rate * 100.0,
+                        cached_unknown: m.metrics.cached_unknown,
+                        is_knee: knee == Some(level.concurrency),
+                    })
+                })
+                .collect();
+            (!rows.is_empty()).then_some((mode, rows))
+        })
+        .collect()
 }
 
 /// Render one operation's concurrency sweep as a latency-vs-throughput table per cache mode,
@@ -274,45 +491,26 @@ fn render_op_levels(
     out: &mut String,
     op: &OperationReport,
 ) {
-    let knee = op.knee_concurrency();
-    for (mode_label, pick) in [
-        (
-            "cached — plan reused, execution only",
-            (|l: &LevelReport| l.cached.as_ref()) as fn(&LevelReport) -> Option<&LevelMetrics>,
-        ),
-        (
-            "uncached — plan-cache miss each run, execution + compilation",
-            (|l: &LevelReport| l.uncached.as_ref()) as fn(&LevelReport) -> Option<&LevelMetrics>,
-        ),
-    ] {
-        if !op.levels.iter().any(|l| pick(l).is_some()) {
-            continue;
-        }
-        out.push_str(&format!("  [{}]\n", mode_label));
+    for (mode, rows) in op_mode_tables(op) {
+        out.push_str(&format!("  [{}]\n", mode.console_label()));
         out.push_str(
             "    C    throughput(ops/s)   server p50/p90/p95/p99             total p50/p90/p95/p99              miss%\n",
         );
-        for level in &op.levels {
-            let Some(m) = pick(level) else { continue };
-            let knee_mark = if knee == Some(level.concurrency) {
-                "  <- knee"
-            } else {
-                ""
-            };
+        for r in rows {
             out.push_str(&format!(
                 "  {:>3}   {:>15.0}   {:>7.3} /{:>6.3} /{:>6.3} /{:>6.3}   {:>7.3} /{:>6.3} /{:>6.3} /{:>6.3}   {:>5.1}{}\n",
-                level.concurrency,
-                m.throughput_ops_per_sec,
-                m.metrics.server_ms.median,
-                m.metrics.server_ms.p90,
-                m.metrics.server_ms.p95,
-                m.metrics.server_ms.p99,
-                m.metrics.total_ms.median,
-                m.metrics.total_ms.p90,
-                m.metrics.total_ms.p95,
-                m.metrics.total_ms.p99,
-                m.metrics.cached_false_rate * 100.0,
-                knee_mark,
+                r.concurrency,
+                r.throughput,
+                r.server[0],
+                r.server[1],
+                r.server[2],
+                r.server[3],
+                r.total[0],
+                r.total[1],
+                r.total[2],
+                r.total[3],
+                r.miss_pct,
+                if r.is_knee { "  <- knee" } else { "" },
             ));
         }
     }
@@ -321,6 +519,53 @@ fn render_op_levels(
         for level in &op.levels {
             if let Some(comp) = level.compilation_ms_median {
                 out.push_str(&format!("    C={:<4} {:.3}\n", level.concurrency, comp));
+            }
+        }
+    }
+}
+
+/// Render one operation's sweep as GitHub-flavoured Markdown tables (one per cache mode) plus a
+/// compilation-cost table, sharing [`op_mode_tables`] with the console renderer.
+fn render_op_levels_markdown(
+    out: &mut String,
+    op: &OperationReport,
+) {
+    for (mode, rows) in op_mode_tables(op) {
+        // Surface "unknown cache stats" so a 0.0 miss% isn't mistaken for "definitely cached".
+        let any_unknown = rows.iter().any(|r| r.cached_unknown > 0);
+        out.push_str(&format!("\n_{}_\n\n", mode.markdown_label()));
+        out.push_str(
+            "| C | throughput (ops/s) | server p50/p90/p95/p99 (ms) | total p50/p90/p95/p99 (ms) | miss% | |\n",
+        );
+        out.push_str("|---:|---:|---|---|---:|---|\n");
+        for r in rows {
+            out.push_str(&format!(
+                "| {} | {:.0} | {:.3} / {:.3} / {:.3} / {:.3} | {:.3} / {:.3} / {:.3} / {:.3} | {}{:.1} | {} |\n",
+                r.concurrency,
+                r.throughput,
+                r.server[0],
+                r.server[1],
+                r.server[2],
+                r.server[3],
+                r.total[0],
+                r.total[1],
+                r.total[2],
+                r.total[3],
+                if r.cached_unknown > 0 { "~" } else { "" },
+                r.miss_pct,
+                if r.is_knee { "⬅ knee" } else { "" },
+            ));
+        }
+        if any_unknown {
+            out.push_str("\n> `~` miss% includes samples with no cache stat reported.\n");
+        }
+    }
+    if op.levels.iter().any(|l| l.compilation_ms_median.is_some()) {
+        out.push_str("\ncompilation_ms (median uncached − cached server time):\n\n");
+        out.push_str("| C | compilation_ms |\n|---:|---:|\n");
+        for level in &op.levels {
+            if let Some(comp) = level.compilation_ms_median {
+                out.push_str(&format!("| {} | {:.3} |\n", level.concurrency, comp));
             }
         }
     }
@@ -392,6 +637,16 @@ mod tests {
                     cache_size: Some(25),
                     redis_version: Some("8.6.3".to_string()),
                     ..Default::default()
+                },
+                host: HostInfo {
+                    hostname: Some("bench-host".to_string()),
+                    os: Some("Linux 6.8 Ubuntu 24.04".to_string()),
+                    kernel: Some("6.8.0-40-generic".to_string()),
+                    arch: Some("aarch64".to_string()),
+                    cpu: Some("Test CPU @ 3.2GHz".to_string()),
+                    physical_cores: Some(8),
+                    logical_cores: 16,
+                    total_memory_bytes: 34_359_738_368,
                 },
                 dataset: None,
             },
@@ -469,6 +724,121 @@ mod tests {
         assert!(out.contains("CACHE_SIZE 25"));
         // The operator-supplied image identity is echoed when present.
         assert!(out.contains("server image: falkordb/falkordb:v4.2.1@sha256:deadbeef"));
+    }
+
+    #[test]
+    fn markdown_contains_metadata_and_tables() {
+        let mut r = sample_report();
+        r.meta.server.server_image = Some("falkordb/falkordb:v4.2.1@sha256:deadbeef".to_string());
+        let md = r.to_markdown();
+        assert!(md.contains("# Synthetic per-operation benchmark"));
+        assert!(md.contains("| FalkorDB module | 4.20.1 |"));
+        assert!(md.contains("| server image | `falkordb/falkordb:v4.2.1@sha256:deadbeef` |"));
+        assert!(md.contains("| concurrency | 1, 8 |"));
+        // The client-host summary is present, but the hostname is NOT (kept out of pasteable md).
+        assert!(md.contains("Test CPU @ 3.2GHz (8c/16t)"));
+        assert!(
+            !md.contains("bench-host"),
+            "hostname must stay out of the markdown"
+        );
+        // Per-op section, markdown table header, both cache modes, knee, and compilation table.
+        assert!(md.contains("## `return_const`"));
+        assert!(md.contains("| C | throughput (ops/s) |"));
+        assert!(md.contains("cached — plan reused"));
+        assert!(md.contains("uncached — plan-cache miss"));
+        assert!(md.contains("⬅ knee"));
+        assert!(md.contains("compilation_ms"));
+    }
+
+    #[test]
+    fn markdown_and_console_agree_on_numbers() {
+        // The shared row model means a level's throughput renders identically in both surfaces.
+        let r = sample_report();
+        let (console, md) = (r.to_console(), r.to_markdown());
+        for needle in ["2950", "return_const"] {
+            assert!(
+                console.contains(needle) && md.contains(needle),
+                "both surfaces must render {needle}"
+            );
+        }
+    }
+
+    #[test]
+    fn host_summary_hides_hostname_unless_requested() {
+        let h = HostInfo {
+            hostname: Some("secret-box".to_string()),
+            os: Some("Linux 6.8".to_string()),
+            kernel: None,
+            arch: Some("x86_64".to_string()),
+            cpu: Some("CPU X".to_string()),
+            physical_cores: Some(4),
+            logical_cores: 8,
+            total_memory_bytes: 16 * 1024 * 1024 * 1024,
+        };
+        let with = host_summary(&h, true);
+        let without = host_summary(&h, false);
+        assert!(with.contains("secret-box"));
+        assert!(!without.contains("secret-box"), "hostname omitted when not requested");
+        assert!(without.contains("CPU X (4c/8t)"));
+        assert!(without.contains("16.0 GiB"));
+        assert!(without.contains("x86_64"));
+    }
+
+    #[test]
+    fn host_summary_without_cpu_reports_thread_count() {
+        let h = HostInfo {
+            cpu: None,
+            logical_cores: 4,
+            total_memory_bytes: 8 * 1024 * 1024 * 1024,
+            ..Default::default()
+        };
+        let s = host_summary(&h, false);
+        assert!(s.contains("4 threads"), "falls back to a thread count: {s}");
+        assert!(s.contains("8.0 GiB"));
+    }
+
+    #[test]
+    fn host_summary_cpu_without_physical_cores_shows_threads_only() {
+        let h = HostInfo {
+            cpu: Some("CPU Y".to_string()),
+            physical_cores: None,
+            logical_cores: 6,
+            total_memory_bytes: 4 * 1024 * 1024 * 1024,
+            ..Default::default()
+        };
+        assert!(host_summary(&h, false).contains("CPU Y (6t)"));
+    }
+
+    #[test]
+    fn markdown_flags_placeholder_version_and_default_concurrency() {
+        let mut r = sample_report();
+        r.meta.server.module_graph_ver = Some(ServerInfo::PLACEHOLDER_VER);
+        r.meta.concurrency.clear(); // no sweep configured ⇒ header shows the implicit single level
+        let md = r.to_markdown();
+        assert!(md.contains("dev placeholder"));
+        assert!(md.contains("| concurrency | 1 |"));
+    }
+
+    #[test]
+    fn markdown_renders_dataset_and_unknown_cache_marker() {
+        let mut r = sample_report();
+        r.meta.dataset = Some(DatasetInfo {
+            seed: 7,
+            nodes: 100,
+            edges: 200,
+            corpus_hash: "sha256:abc123".to_string(),
+        });
+        // Force an "unknown cache stat" sample so the `~` marker + note render.
+        if let Some(op) = r.operations.get_mut("return_const") {
+            if let Some(lm) = op.levels[0].cached.as_mut() {
+                lm.metrics.cached_unknown = 3;
+            }
+        }
+        let md = r.to_markdown();
+        assert!(md.contains("| dataset | seed 7 · 100 nodes · 200 edges |"));
+        assert!(md.contains("| corpus_hash | `sha256:abc123` |"));
+        assert!(md.contains('~'), "unknown-cache miss% is marked with ~");
+        assert!(md.contains("no cache stat reported"));
     }
 
     #[test]

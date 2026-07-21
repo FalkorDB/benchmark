@@ -293,12 +293,19 @@ match_by_index
 expand_1_hop
   ...
 report written to synthetic-report.json
+markdown written to synthetic-report.md
 ```
+
+Alongside the JSON, the tool writes a **PR-pasteable Markdown report** (`<out>.md`, e.g.
+`synthetic-report.md`) — a metadata table plus the same per-op latency-vs-throughput tables, ready
+to drop into a pull request.
 
 The report's `meta.server` block records the FalkorDB module version, `redis_version`/`build_id`,
 `CACHE_SIZE`, and the operator-supplied `--server-image` (FalkorDB does not expose a graph-module
 git SHA to clients, so the image digest is the reproducible build identity). A `:edge` image reports
 a `999999` placeholder version and the tool warns you to use a tagged image for comparisons.
+`meta.host` records the **client** machine that ran the probe (OS, CPU, cores, memory, arch, via
+`sysinfo`); the hostname is kept in the JSON/console but omitted from the Markdown.
 
 #### Write operations (steady-state isolation)
 
