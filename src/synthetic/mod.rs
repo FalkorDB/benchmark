@@ -882,7 +882,7 @@ async fn measure_level(
     // For a write op, capture the cleanup handle up-front — *before* any worker's setup mutates the
     // graph — so a mid-loop connection/setup failure still drops whatever scratch earlier workers
     // created. The run label is shared, so worker 0's scratch cleans the whole run.
-    let mut write_cleanup: Option<(WritePlan, WriteScratch)> = match &op_spec.write {
+    let write_cleanup: Option<(WritePlan, WriteScratch)> = match &op_spec.write {
         Some(plan) => Some((*plan, WriteScratch::new(run_token, 0, config.reset_every)?)),
         None => None,
     };
@@ -933,27 +933,13 @@ async fn measure_level(
     }
     .await;
 
-    let workers = match build_workers {
-        Ok(w) => w,
-        Err(e) => {
-            // Setup failed partway; best-effort drop whatever scratch was already created (the run
-            // error is what matters) before propagating it.
-            if let Some((plan, scratch)) = write_cleanup.take() {
-                let _ = run_scratch_cleanup(
-                    &config.endpoint,
-                    &config.graph,
-                    plan,
-                    &scratch,
-                    hook_server_timeout_ms,
-                    hook_deadline,
-                )
-                .await;
-            }
-            return Err(e);
-        }
+    // Run the closed loop only if every worker built; otherwise carry the build/setup error forward
+    // so the single cleanup path below runs for both outcomes (a partially set-up populated band
+    // must never leak). The build/setup error is what we ultimately propagate.
+    let run = match build_workers {
+        Ok(workers) => run_closed_loop(workers, effective_warmup, config.samples).await,
+        Err(e) => Err(e),
     };
-
-    let run = run_closed_loop(workers, effective_warmup, config.samples).await;
 
     // Drop the run's scratch on a fresh connection, whether or not the level succeeded, so a write
     // level can't leave scratch behind for the next level/op. On the **success** path a cleanup
