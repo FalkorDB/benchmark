@@ -796,13 +796,32 @@ async fn run_write_stmts(
     Ok(())
 }
 
+/// Open a fresh connection and drop a write run's scratch (its `cleanup` statements). Kept off the
+/// measurement connections so a level that errored still gets cleaned up, and so — unlike the
+/// per-op work — a cleanup failure is a **surfaced** error the caller can propagate on the success
+/// path rather than silent scratch pollution.
+async fn run_scratch_cleanup(
+    endpoint: &str,
+    graph: &str,
+    plan: WritePlan,
+    scratch: &WriteScratch,
+    server_timeout_ms: i64,
+    deadline: Duration,
+) -> BenchmarkResult<()> {
+    let mut g = open_graph(endpoint, graph).await?;
+    let stmts = (plan.cleanup)(scratch)?;
+    run_write_stmts(&mut g, stmts, server_timeout_ms, deadline).await
+}
+
 /// Measure one operation at one concurrency level `C` in one cache mode via the closed-loop engine:
 /// open `C` single-socket connections (one per worker), drive them to completion, and summarize the
 /// pooled samples plus the achieved throughput.
 ///
-/// For write ops each worker gets an isolated [`WriteScratch`], its untimed setup runs before the
-/// window, and the run's scratch is dropped afterward on a fresh connection (even if the level
-/// errored), so a failed write level never leaks scratch into the next one.
+/// For write ops each worker gets an isolated [`WriteScratch`] and its untimed setup runs before the
+/// window. The run's scratch is dropped afterward on a fresh connection whether or not the level
+/// errored, so a failed write level never leaks scratch into the next one. A cleanup failure on the
+/// **success** path is surfaced (leftover scratch must never silently pollute the graph); on the
+/// **failure** path cleanup stays best-effort so it can't mask the level's original error.
 #[allow(clippy::too_many_arguments)]
 async fn measure_level(
     config: &Config,
@@ -881,17 +900,27 @@ async fn measure_level(
 
     let run = run_closed_loop(workers, effective_warmup, config.samples).await;
 
-    // Drop the run's scratch on a fresh connection, whether or not the level succeeded, so a failed
-    // write level can't leave scratch behind for the next level/op.
-    if let Some((plan, scratch)) = write_cleanup {
-        if let Ok(mut g) = open_graph(&config.endpoint, &config.graph).await {
-            if let Ok(stmts) = (plan.cleanup)(&scratch) {
-                let _ = run_write_stmts(&mut g, stmts, hook_server_timeout_ms, hook_deadline).await;
-            }
+    // Drop the run's scratch on a fresh connection, whether or not the level succeeded, so a write
+    // level can't leave scratch behind for the next level/op. On the **success** path a cleanup
+    // failure is surfaced (leftover scratch must never silently pollute the graph); on the
+    // **failure** path cleanup stays best-effort so it can't mask the level's original error.
+    let cleanup = match write_cleanup {
+        Some((plan, scratch)) => {
+            run_scratch_cleanup(
+                &config.endpoint,
+                &config.graph,
+                plan,
+                &scratch,
+                hook_server_timeout_ms,
+                hook_deadline,
+            )
+            .await
         }
-    }
+        None => Ok(()),
+    };
 
-    let run = run?;
+    let run = run?; // a level error wins (cleanup already ran best-effort above)
+    cleanup?; // otherwise surface any cleanup failure so scratch can't leak silently
     let metrics = summarize_samples(&run.samples)?;
     Ok(LevelMetrics {
         throughput_ops_per_sec: run.throughput_ops_per_sec(),

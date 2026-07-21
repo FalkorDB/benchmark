@@ -633,7 +633,7 @@ async fn write_ops_run_isolated_sweep_and_clean_up() {
         let op = report
             .operations
             .get(name)
-            .unwrap_or_else(|| panic!("{name} present in report"));
+            .unwrap_or_else(|| panic!("{name} missing from report"));
         let lvl = only_level(op);
         assert_eq!(lvl.concurrency, 8);
         let m = lvl
