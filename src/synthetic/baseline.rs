@@ -74,7 +74,10 @@ pub fn guard(
     }
 
     let mut warnings = Vec::new();
-    if baseline.module_graph_ver == candidate.module_graph_ver {
+    // Only warn "same version" when both versions are actually *known* and equal — two unknown
+    // (`None`) versions are not a known match, so don't claim there's no delta to measure.
+    if baseline.module_graph_ver.is_some() && baseline.module_graph_ver == candidate.module_graph_ver
+    {
         warnings.push(format!(
             "baseline and candidate ran the same FalkorDB module version ({}) — there is no \
              version delta to measure",
@@ -160,6 +163,21 @@ mod tests {
                 assert!(warnings.iter().any(|w| w.contains("same FalkorDB module version")));
             }
             other => panic!("expected Proceed with a warning, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unknown_versions_do_not_claim_a_same_version_match() {
+        // Both versions unknown (None) is not a *known* match, so we must not warn "no delta".
+        let base = key(Some("sha256:abc"), None);
+        let cand = key(Some("sha256:abc"), None);
+        match guard(&base, &cand) {
+            GuardOutcome::Proceed { warnings } => {
+                assert!(!warnings
+                    .iter()
+                    .any(|w| w.contains("same FalkorDB module version")));
+            }
+            other => panic!("expected Proceed, got {other:?}"),
         }
     }
 

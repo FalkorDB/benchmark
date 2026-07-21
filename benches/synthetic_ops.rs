@@ -42,15 +42,14 @@ fn resolve_endpoint(cfg: &FileConfig) -> String {
 /// The graph key to measure against — the config's `graph`, else the default (matching
 /// `benchmark synthetic run`, so it's the same graph the recipe generated into).
 fn resolve_graph(cfg: &FileConfig) -> String {
-    cfg.graph.clone().unwrap_or_else(|| "falkor".to_string())
+    cfg.graph
+        .clone()
+        .unwrap_or_else(|| benchmark::synthetic::DEFAULT_GRAPH.to_string())
 }
 
 /// The read ops to baseline: the config's `operations` (or every read op), keeping reads only.
 fn read_ops(cfg: &FileConfig) -> Vec<OpName> {
-    let ops = cfg
-        .operations
-        .clone()
-        .unwrap_or_else(|| OpName::all_reads().to_vec());
+    let ops = cfg.operations.clone().unwrap_or_else(OpName::all_reads);
     ops.into_iter()
         .filter(|op| op.kind() == QueryType::Read)
         .collect()
