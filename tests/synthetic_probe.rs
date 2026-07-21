@@ -29,6 +29,7 @@ fn base_config(graph: &str) -> Config {
         samples: 300,
         warmup: 50,
         concurrency: vec![1],
+        reset_every: 1000,
         seed: 1,
         server_timeout_ms: 5_000,
         client_deadline_ms: 6_000,
@@ -600,6 +601,142 @@ async fn concurrency_sweep_produces_per_level_throughput_and_percentiles() {
         throughputs[1..].iter().any(|&t| t > throughputs[0]),
         "throughput should rise above the C=1 baseline as concurrency grows: {throughputs:?}"
     );
+    drop_graph(graph).await;
+}
+
+#[tokio::test]
+#[ignore = "requires a running FalkorDB server"]
+async fn write_ops_run_isolated_sweep_and_clean_up() {
+    // create_node + merge_miss at C=8 over several sawtooth windows. A green run is itself the
+    // isolation proof: every sample verifies `nodes_created == 1`, so if two of the 8 workers ever
+    // shared a key, a key repeated within a window, or a reset failed to clear its band, a MERGE
+    // would hit instead of miss (nodes_created == 0) and the run would error. We also assert the
+    // seeded real data is untouched and the run's scratch is fully cleaned up afterward.
+    let graph = "syn_it_writes";
+    let seeded_users: i64 = 50;
+    seed_user_graph(graph, seeded_users).await;
+
+    let report = run(&Config {
+        graph: graph.to_string(),
+        ops: vec![OpName::CreateNode, OpName::MergeMiss],
+        samples: 200, // > reset_every ⇒ multiple resets per worker
+        warmup: 20,
+        concurrency: vec![8],
+        reset_every: 50,
+        cache: CacheSelection::Cached,
+        ..base_config(graph)
+    })
+    .await
+    .expect("write sweep should succeed (isolation keeps every MERGE a miss)");
+
+    for name in ["create_node", "merge_miss"] {
+        let op = report
+            .operations
+            .get(name)
+            .unwrap_or_else(|| panic!("{name} present in report"));
+        let lvl = only_level(op);
+        assert_eq!(lvl.concurrency, 8);
+        let m = lvl
+            .cached
+            .as_ref()
+            .unwrap_or_else(|| panic!("{name} missing cached metrics"));
+        assert!(
+            m.throughput_ops_per_sec > 0.0,
+            "{name} must report positive throughput"
+        );
+        let s = &m.metrics.server_ms;
+        assert!(s.n > 0, "{name} must have samples");
+        assert!(
+            s.median <= s.p90 && s.p90 <= s.p95 && s.p95 <= s.p99 && s.p99.is_finite(),
+            "{name} percentiles must be ordered p50<=p90<=p95<=p99 (got {:?})",
+            (s.median, s.p90, s.p95, s.p99)
+        );
+    }
+
+    // Isolation from real data + cleanup: the seeded :User nodes are untouched, and no scratch node
+    // of any label leaks past the run's post-level cleanup (total node count == seeded users).
+    let mut g = open_graph(&endpoint(), graph).await.expect("reopen graph");
+    assert_eq!(
+        scalar_i64(&mut g, "MATCH (u:User) RETURN count(u)").await,
+        seeded_users,
+        "seeded :User data must be untouched by the write sweep"
+    );
+    assert_eq!(
+        scalar_i64(&mut g, "MATCH (n) RETURN count(n)").await,
+        seeded_users,
+        "no scratch nodes may remain after the run's post-level cleanup"
+    );
+    drop_graph(graph).await;
+}
+
+#[tokio::test]
+#[ignore = "requires a running FalkorDB server"]
+async fn write_scratch_reset_reuses_its_band_without_duplicates() {
+    // Pin the isolation model against the server directly: within a window every MERGE misses
+    // (unique keys), a band-scoped reset clears exactly this worker's rows, and the next window
+    // reuses the very same keys — still all misses, with no duplicate accumulation.
+    use benchmark::synthetic::writes::{verify_mutation, ExpectedMutation, WriteScratch};
+
+    let graph = "syn_it_write_reset";
+    drop_graph(graph).await;
+    let mut g = open_graph(&endpoint(), graph).await.expect("open graph");
+
+    let reset_every = 5usize;
+    let scratch = WriteScratch::new(0xBEEF, 0, reset_every).expect("scratch");
+    let label = scratch.label();
+    let count_cypher = format!("MATCH (n:{label}) RETURN count(n)");
+
+    // Window 1: `reset_every` distinct MERGEs, each a miss (creates exactly one node).
+    for seq in 0..reset_every as u64 {
+        let cypher = format!(
+            "MERGE (n:{label} {{id: {}}}) RETURN n.id",
+            scratch.window_key(seq)
+        );
+        let s = run_and_drain(&mut g, QueryType::Write, &cypher, 5_000, Duration::from_secs(5))
+            .await
+            .expect("window-1 merge");
+        verify_mutation(ExpectedMutation::NodeCreated, &s.mutations).expect("window-1 must miss");
+    }
+    assert_eq!(
+        scalar_i64(&mut g, &count_cypher).await,
+        reset_every as i64,
+        "one node per key after the first window"
+    );
+
+    // Reset: delete exactly this worker's key band (scoped by label + id range).
+    let (lo, hi) = scratch.key_band();
+    run_and_drain(
+        &mut g,
+        QueryType::Write,
+        &format!("MATCH (n:{label}) WHERE n.id >= {lo} AND n.id <= {hi} DELETE n"),
+        5_000,
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("reset delete");
+    assert_eq!(
+        scalar_i64(&mut g, &count_cypher).await,
+        0,
+        "the reset clears the whole band"
+    );
+
+    // Window 2: `window_key` cycles back over the same keys, and every MERGE misses again.
+    for seq in reset_every as u64..2 * reset_every as u64 {
+        let cypher = format!(
+            "MERGE (n:{label} {{id: {}}}) RETURN n.id",
+            scratch.window_key(seq)
+        );
+        let s = run_and_drain(&mut g, QueryType::Write, &cypher, 5_000, Duration::from_secs(5))
+            .await
+            .expect("window-2 merge");
+        verify_mutation(ExpectedMutation::NodeCreated, &s.mutations).expect("window-2 must miss");
+    }
+    assert_eq!(
+        scalar_i64(&mut g, &count_cypher).await,
+        reset_every as i64,
+        "the reused band holds exactly one node per key — no duplicate accumulation"
+    );
+
     drop_graph(graph).await;
 }
 

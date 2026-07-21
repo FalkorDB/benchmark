@@ -21,6 +21,7 @@
 
 use crate::error::BenchmarkError::OtherError;
 use crate::error::BenchmarkResult;
+use crate::query::Query;
 
 /// Fires a reset every `reset_every` operations, counted over the **global** invocation sequence
 /// (warm-up + measured), so scratch that warm-up mutated is bounded too.
@@ -166,6 +167,15 @@ impl WriteScratch {
         self.schedule
     }
 
+    /// This worker's inclusive key band `[lo, hi]` (`lo = worker_id · reset_every`,
+    /// `hi = lo + reset_every - 1`) — the id range a reset scopes its delete to, so it only ever
+    /// clears this worker's rows. Both ends fit `i32` (validated in [`WriteScratch::new`]).
+    pub fn key_band(&self) -> (i32, i32) {
+        let lo = self.worker_id * self.schedule.reset_every();
+        let hi = lo + self.schedule.reset_every() - 1;
+        (lo as i32, hi as i32)
+    }
+
     /// This worker's index in the level (`0..concurrency`).
     pub fn worker_id(&self) -> usize {
         self.worker_id
@@ -175,6 +185,34 @@ impl WriteScratch {
     pub fn run_token(&self) -> u64 {
         self.run_token
     }
+}
+
+/// The lifecycle of a write operation: what it mutates (for per-sample verification), a stable tag
+/// for the workload hash, a default reset cadence, and the untimed setup/reset/cleanup hooks plus
+/// the timed per-invocation query builder. Fn pointers keep [`crate::synthetic::catalog::
+/// OperationSpec`] `Copy`; every hook returns already-built [`Query`]s scoped to a worker's
+/// [`WriteScratch`].
+#[derive(Clone, Copy)]
+pub struct WritePlan {
+    /// What each invocation must mutate, checked against the response counters via
+    /// [`verify_mutation`].
+    pub expected: ExpectedMutation,
+    /// A stable identifier for this operation's query shape, folded into the workload hash so a
+    /// change to the write bodies makes old and new runs incomparable. Bump the suffix when the
+    /// cypher changes (e.g. `"create_node.v1"`).
+    pub plan_tag: &'static str,
+    /// Reset cadence (ops per sawtooth window) when the config doesn't override `reset_every`.
+    pub default_reset_every: usize,
+    /// Untimed statements run once per worker before the measurement window (e.g. clear this
+    /// worker's key band, or pre-create a pool).
+    pub setup: fn(&WriteScratch) -> BenchmarkResult<Vec<Query>>,
+    /// Untimed statements run every `reset_every` ops to undo drift (scoped to this worker's band).
+    pub reset: fn(&WriteScratch) -> BenchmarkResult<Vec<Query>>,
+    /// Untimed statements run once after the level to drop the run's scratch (scoped to the run
+    /// label, so it clears every worker at once).
+    pub cleanup: fn(&WriteScratch) -> BenchmarkResult<Vec<Query>>,
+    /// The timed query for measured invocation `seq` (identity from `scratch.window_key(seq)`).
+    pub render: fn(&WriteScratch, u64) -> BenchmarkResult<Query>,
 }
 
 /// The mutation counters FalkorDB reports for a query, used to verify a write actually did what the

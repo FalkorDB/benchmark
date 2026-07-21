@@ -253,7 +253,7 @@ pub enum Commands {
 #[allow(clippy::large_enum_variant)]
 #[derive(Subcommand, Debug)]
 pub enum SyntheticCommands {
-    #[command(about = "run the per-operation latency probe over one or more read operations")]
+    #[command(about = "run the per-operation latency/throughput probe over one or more read or write operations")]
     Run {
         #[arg(
             long = "config",
@@ -289,6 +289,11 @@ pub enum SyntheticCommands {
             help = "concurrency levels to sweep (closed-loop workers C), repeatable/comma-separated (e.g. --concurrency 1,4,16,32). Default 1,2,4,8,16,32."
         )]
         concurrency: Vec<usize>,
+        #[arg(
+            long = "reset-every",
+            help = "write-op reset cadence: every N ops each worker's scratch is reset (untimed) to bound write drift to one sawtooth window. Ignored by read ops. Default 50000."
+        )]
+        reset_every: Option<usize>,
         #[arg(
             long,
             help = "seed for the dataset and the per-operation corpora (same seed ⇒ identical workload; default 0)"

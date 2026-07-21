@@ -8,6 +8,7 @@
 use crate::error::BenchmarkError::OtherError;
 use crate::error::BenchmarkResult;
 use crate::queries_repository::QueryType;
+use crate::synthetic::writes::MutationStats;
 use falkordb::AsyncGraph;
 use futures::StreamExt;
 use std::hint::black_box;
@@ -25,6 +26,9 @@ pub struct OpSample {
     pub rows: usize,
     /// Whether the server reported a cached execution plan (`None` if the stat was absent).
     pub cached: Option<bool>,
+    /// The mutation counters FalkorDB reported (all zero for reads), so a write worker can verify
+    /// each sample actually effected its intended change (see [`crate::synthetic::writes`]).
+    pub mutations: MutationStats,
 }
 
 /// Execute one query against `graph`, timing the full round-trip and reading the server time.
@@ -63,6 +67,14 @@ pub async fn run_and_drain(
         .map_err(|e| OtherError(format!("query '{}' failed: {:?}", cypher, e)))?;
 
         let cached = query_result.get_cached_execution();
+        // Read the mutation counters (absent ⇒ 0, e.g. for reads) before draining the stream, so a
+        // write worker can verify the sample actually did what the operation intends.
+        let mutations = MutationStats {
+            nodes_created: query_result.get_nodes_created().unwrap_or(0),
+            nodes_deleted: query_result.get_nodes_deleted().unwrap_or(0),
+            relationships_created: query_result.get_relationship_created().unwrap_or(0),
+            properties_set: query_result.get_properties_set().unwrap_or(0),
+        };
         // A missing server-time stat is a hard error — never fold it into the numbers as NaN/0.
         let server_ms = validate_server_ms(query_result.get_internal_execution_time(), cypher)?;
 
@@ -76,10 +88,12 @@ pub async fn run_and_drain(
             let _ = black_box(row);
             rows += 1;
         }
-        Ok::<(f64, usize, Option<bool>), crate::error::BenchmarkError>((server_ms, rows, cached))
+        Ok::<(f64, usize, Option<bool>, MutationStats), crate::error::BenchmarkError>((
+            server_ms, rows, cached, mutations,
+        ))
     };
 
-    let (server_ms, rows, cached) = tokio::time::timeout(client_deadline, measured)
+    let (server_ms, rows, cached, mutations) = tokio::time::timeout(client_deadline, measured)
         .await
         .map_err(|e: Elapsed| {
             OtherError(format!(
@@ -96,6 +110,7 @@ pub async fn run_and_drain(
         total_ms,
         rows,
         cached,
+        mutations,
     })
 }
 

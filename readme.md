@@ -158,15 +158,16 @@ workflow. Please cover new code with tests and keep coverage high — **patch co
 
 ### Synthetic per-operation benchmark (experimental)
 
-Measures a curated suite of **read operations in isolation** — one at a time, selectable — capturing
-on every invocation both the **server time** (FalkorDB's reported internal execution time) and the
-**total time** (end-to-end client round-trip), then summarizing them with severe-outlier removal
-(Tukey fences, like Criterion.rs) and writing a JSON report with one block per operation. For each
-operation it sweeps a list of **concurrency levels**, so the report traces how latency (including the
-p99 tail) changes as achieved throughput rises — the latency-vs-throughput curve and its saturation
-"knee". This is Part 4 of a larger tool (see the design epic
+Measures a curated suite of **read and write operations in isolation** — one at a time, selectable —
+capturing on every invocation both the **server time** (FalkorDB's reported internal execution time)
+and the **total time** (end-to-end client round-trip), then summarizing them with severe-outlier
+removal (Tukey fences, like Criterion.rs) and writing a JSON report with one block per operation. For
+each operation it sweeps a list of **concurrency levels**, so the report traces how latency
+(including the p99 tail) changes as achieved throughput rises — the latency-vs-throughput curve and
+its saturation "knee". This is Part 5 of a larger tool (see the design epic
 [#200](https://github.com/FalkorDB/benchmark/issues/200)); it can **generate its own reproducible
-dataset** and sweep concurrency, with write operations still to come.
+dataset**, sweep concurrency, and measure **write operations** with steady-state isolation (see
+[Write operations](#write-operations-steady-state-isolation) below).
 
 Each operation is measured under two plan-cache conditions so you can see the cost of expression
 **compilation** separately from execution:
@@ -206,15 +207,19 @@ See [`synthetic-benchmark.md`](synthetic-benchmark.md) for the concurrency model
 
 #### Operation catalog
 
-Select operations with `--op <name>` (repeatable and comma-separated) or `--all-reads`. All read
-ops except `return_const` target the benchmark's `:User {id, age}` / `(:User)-[:Friend]->(:User)`
-schema (with an index on `:User(id)`). Most draw their parameters from `:User` ids sampled out of
+Select operations with `--op <name>` (repeatable and comma-separated) or `--all-reads`. `--all-reads`
+selects every **read** op; **write** ops (`create_node`, `merge_miss`) are opt-in via `--op` so a
+sweep never mutates a graph unless you ask. All read ops except `return_const` target the benchmark's
+`:User {id, age}` / `(:User)-[:Friend]->(:User)` schema (with an index on `:User(id)`). Most draw
+their parameters from `:User` ids sampled out of
 `--graph` (`shortest_path` needs two, `match_by_index`/`expand_*`/`aggregate_*`/`property_projection`
 one); `return_const` and `match_by_label_scan` need no seed ids (they vary a constant / a scan
-modulus). Either point `--graph` at a graph that already holds that schema, or let the tool
-**generate a reproducible one** (see [Generating a dataset](#generating-a-reproducible-dataset)
-below). Every query projects **scalars** (never whole nodes) and is parameterized; the corpus is
-seeded (`--seed`) so the same seed yields an identical corpus.
+modulus). Write ops need no seed ids either — they target their own scratch namespace (see
+[Write operations](#write-operations-steady-state-isolation)). Either point `--graph` at a graph that
+already holds that schema, or let the tool **generate a reproducible one** (see
+[Generating a dataset](#generating-a-reproducible-dataset) below). Every query projects **scalars**
+(never whole nodes) and is parameterized; the corpus is seeded (`--seed`) so the same seed yields an
+identical corpus.
 
 | Operation | What it measures | Cypher (body) |
 |---|---|---|
@@ -227,6 +232,8 @@ seeded (`--seed`) so the same seed yields an identical corpus.
 | `aggregate_group` | group neighbours by age with counts | `MATCH (s:User {id: $id})-[:Friend]->(n:User) RETURN n.age AS age, count(*) AS c ORDER BY c DESC LIMIT 10` |
 | `shortest_path` | bounded shortest `:Friend` path between two nodes | `MATCH (s:User {id: $from}), (t:User {id: $to}) WITH shortestPath((s)-[:Friend*1..6]->(t)) AS p RETURN coalesce(length(p), -1) AS len` |
 | `property_projection` | project scalar properties of an indexed node | `MATCH (n:User {id: $id}) RETURN n.id, n.age` |
+| `create_node` *(write)* | create a fresh scratch node each invocation | `CREATE (n:BenchScratch_<run> {id: $id}) RETURN n.id` |
+| `merge_miss` *(write)* | `MERGE` a fresh scratch node (always misses → creates) | `MERGE (n:BenchScratch_<run> {id: $id}) RETURN n.id` |
 
 Because `OpName` is a clap `ValueEnum`, `--op <TAB>` completes the operation names once you've
 installed completion (`benchmark generate-auto-complete <shell>`), and `just synthetic-ops` (or
@@ -288,6 +295,44 @@ The report's `meta.server` block records the FalkorDB module version, `redis_ver
 git SHA to clients, so the image digest is the reproducible build identity). A `:edge` image reports
 a `999999` placeholder version and the tool warns you to use a tagged image for comparisons.
 
+#### Write operations (steady-state isolation)
+
+Write ops (`create_node`, `merge_miss`, with more to come) measure mutation latency/throughput
+without the graph drifting between samples, so write numbers stay comparable across a long sweep.
+Only the operation itself is inside the timer; setup/reset/cleanup run in **untimed** hooks that
+abort the sample on failure. The isolation model:
+
+- **Scratch namespace.** A run writes only to a **run-unique label** `BenchScratch_<run_token>` (a
+  random per-run hex nonce), so a sweep never touches your real data or another run's scratch. The
+  label is shared by all workers of a run (keeping the plan cache warm), and the run's scratch is
+  dropped on a fresh connection after each level — even if the level errored — so nothing leaks into
+  the next op/level.
+- **Disjoint per-worker keys.** At concurrency `C`, worker `w` owns the key band
+  `[w·reset_every, (w+1)·reset_every − 1]` and uses `window_key = w·reset_every + (seq mod
+  reset_every)` for invocation `seq`. Bands never overlap, so concurrent writers never collide, and
+  within a window every key is unique — so `merge_miss` always misses (creates) and identities never
+  repeat. Keys are **run-independent** (only the label carries the nonce), so the workload stays
+  comparable across runs; `(w+1)·reset_every` must fit `i32` (FalkorDB params), which bounds
+  `reset_every × C`.
+- **Run-level reset (sawtooth).** Every `reset_every` operations — counted over the **global**
+  warm-up + measured sequence — each worker runs an untimed reset that deletes its key band before
+  it is reused, bounding write drift to one sawtooth window. Tune the cadence with `--reset-every N`
+  (config `reset_every`, default 50000); a smaller `N` keeps the graph tighter but spends more time
+  resetting. `merge_miss` staying a miss across resets is the isolation guarantee: a shared key or a
+  missed reset would turn a `MERGE` into a hit, and the run would error.
+- **Per-sample verification.** Each write checks FalkorDB's mutation counters against the operation's
+  intent (`create_node`/`merge_miss` ⇒ exactly one node created), so a silent no-op fails loudly
+  rather than producing a fast, misleading sample.
+
+**Limitation:** this is closed-loop steady state, not a fixed arrival rate — the reset produces a
+sawtooth in graph size within each window; it bounds drift, it does not eliminate it.
+
+```bash
+# measure the write ops over a concurrency sweep, resetting each worker's scratch every 50k ops
+just synthetic-bench --graph bench --op create_node,merge_miss \
+    --concurrency 1,8,32 --reset-every 50000 --samples 500
+```
+
 #### Generating a reproducible dataset
 
 Instead of measuring whatever graph the endpoint already holds, the tool can **generate its own**
@@ -327,6 +372,7 @@ operations = ["match_by_index", "expand_hops_5", "aggregate_count"]
 samples = 500
 concurrency = [1, 4, 16, 32]   # closed-loop worker counts to sweep (default 1,2,4,8,16,32)
 cache = "both"           # cached | uncached | both
+reset_every = 50000      # write-op scratch reset cadence (ops per sawtooth window); read ops ignore it
 # endpoint / graph / warmup / server_timeout_ms / client_deadline_ms / out are all optional
 ```
 

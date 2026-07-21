@@ -27,6 +27,8 @@ pub struct FileConfig {
     pub warmup: Option<usize>,
     /// Concurrency sweep (closed-loop worker counts). Defaults to the built-in sweep when omitted.
     pub concurrency: Option<Vec<usize>>,
+    /// Reset cadence for write ops (untimed scratch reset every N ops). Ignored by read ops.
+    pub reset_every: Option<usize>,
     pub seed: Option<u64>,
     pub cache: Option<CacheSelection>,
     pub server_timeout_ms: Option<i64>,
@@ -79,6 +81,8 @@ pub struct CliOverrides {
     pub warmup: Option<usize>,
     /// Explicit `--concurrency` sweep (empty = not passed).
     pub concurrency: Vec<usize>,
+    /// `--reset-every` write reset cadence (`None` = not passed).
+    pub reset_every: Option<usize>,
     pub seed: Option<u64>,
     pub cache: Option<CacheSelection>,
     pub server_timeout_ms: Option<i64>,
@@ -150,6 +154,7 @@ pub fn resolve(
         endpoint: default_endpoint,
         samples: default_samples,
         warmup: default_warmup,
+        reset_every: default_reset_every,
         server_timeout_ms: default_server_timeout_ms,
         client_deadline_ms: default_client_deadline_ms,
         cache: default_cache,
@@ -167,6 +172,10 @@ pub fn resolve(
         samples: cli.samples.or(file.samples).unwrap_or(default_samples),
         warmup: cli.warmup.or(file.warmup).unwrap_or(default_warmup),
         concurrency,
+        reset_every: cli
+            .reset_every
+            .or(file.reset_every)
+            .unwrap_or(default_reset_every),
         seed,
         server_timeout_ms: cli
             .server_timeout_ms
@@ -251,6 +260,48 @@ mod tests {
         };
         let cfg2 = resolve(CliOverrides::default(), Some(file2)).unwrap();
         assert_eq!(cfg2.concurrency, Config::default().concurrency);
+    }
+
+    #[test]
+    fn reset_every_precedence_cli_over_file_over_default() {
+        // CLI wins over the file.
+        let file = FileConfig {
+            operations: Some(vec![OpName::CreateNode]),
+            reset_every: Some(3),
+            ..Default::default()
+        };
+        let cli = CliOverrides {
+            reset_every: Some(7),
+            ..Default::default()
+        };
+        assert_eq!(resolve(cli, Some(file.clone())).unwrap().reset_every, 7);
+
+        // No CLI ⇒ the file's value.
+        assert_eq!(
+            resolve(CliOverrides::default(), Some(file))
+                .unwrap()
+                .reset_every,
+            3
+        );
+
+        // Neither CLI nor file ⇒ the built-in default.
+        let bare = FileConfig {
+            operations: Some(vec![OpName::CreateNode]),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve(CliOverrides::default(), Some(bare))
+                .unwrap()
+                .reset_every,
+            Config::default().reset_every
+        );
+    }
+
+    #[test]
+    fn reset_every_parses_from_toml() {
+        let cfg =
+            FileConfig::from_toml("operations = [\"create_node\"]\nreset_every = 12345\n").unwrap();
+        assert_eq!(cfg.reset_every, Some(12345));
     }
 
     #[test]
