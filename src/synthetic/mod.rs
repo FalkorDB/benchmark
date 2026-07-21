@@ -39,6 +39,7 @@ use crate::synthetic::op_runner::{run_and_drain, OpSample};
 use crate::synthetic::report::{
     DatasetInfo, LevelMetrics, LevelReport, Meta, OperationReport, Report,
 };
+use crate::synthetic::writes::{verify_mutation, WritePlan, WriteScratch};
 use clap::ValueEnum;
 use falkordb::{AsyncGraph, ConnectionStrategy, FalkorClientBuilder};
 use futures::StreamExt;
@@ -47,7 +48,6 @@ use rand::SeedableRng;
 use serde::de::{self, Deserializer};
 use serde::Deserialize;
 use std::collections::BTreeMap;
-use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -94,6 +94,10 @@ pub enum OpName {
     ShortestPath,
     /// Project scalar properties of an indexed node.
     PropertyProjection,
+    /// (write) `CREATE` a fresh scratch node each invocation.
+    CreateNode,
+    /// (write) `MERGE` a fresh scratch node each invocation — always misses, so always creates.
+    MergeMiss,
 }
 
 impl OpName {
@@ -102,8 +106,7 @@ impl OpName {
         OpName::value_variants()
     }
 
-    /// Every read operation (all of them, for now — writes arrive in Part 5). Used by
-    /// `--all-reads`.
+    /// Every read operation. Used by `--all-reads` (write ops are opt-in via explicit `--op`).
     pub fn all_reads() -> Vec<OpName> {
         OpName::all()
             .iter()
@@ -124,6 +127,8 @@ impl OpName {
             OpName::AggregateGroup => "aggregate_group",
             OpName::ShortestPath => "shortest_path",
             OpName::PropertyProjection => "property_projection",
+            OpName::CreateNode => "create_node",
+            OpName::MergeMiss => "merge_miss",
         }
     }
 
@@ -151,6 +156,8 @@ impl OpName {
             OpName::AggregateGroup => 0x4147_475f_4752_5000,
             OpName::ShortestPath => 0x5348_5254_5f50_5448,
             OpName::PropertyProjection => 0x5052_4f50_5f50_524a,
+            OpName::CreateNode => 0x4352_4541_5445_4e44,
+            OpName::MergeMiss => 0x4d45_5247_455f_4d53,
         }
     }
 
@@ -248,6 +255,9 @@ pub struct Config {
     /// Concurrency levels to sweep (closed-loop worker counts `C`); each op is measured once per
     /// level, tracing its latency-vs-throughput curve. Non-empty, each ≥ 1, deduped + sorted.
     pub concurrency: Vec<usize>,
+    /// Reset cadence for write operations: every `reset_every` ops, each worker's scratch is reset
+    /// (untimed) to bound drift to one sawtooth window. Ignored by read ops.
+    pub reset_every: usize,
     /// Seed for the per-operation parameter corpora (same seed ⇒ identical corpora).
     pub seed: u64,
     pub server_timeout_ms: i64,
@@ -269,6 +279,7 @@ impl Default for Config {
             samples: 1000,
             warmup: 200,
             concurrency: DEFAULT_CONCURRENCY.to_vec(),
+            reset_every: crate::synthetic::catalog::DEFAULT_RESET_EVERY,
             seed: 0,
             server_timeout_ms: 5_000,
             client_deadline_ms: 6_000,
@@ -345,6 +356,22 @@ pub async fn run(config: &Config) -> BenchmarkResult<Report> {
             "no operations selected — pass --op <name> (repeatable/comma-separated) or --all-reads"
                 .to_string(),
         ));
+    }
+    // Write ops need a positive reset cadence AND a per-worker key band that fits `i32` (FalkorDB
+    // params) at the widest concurrency level. Validate both up-front — before opening any
+    // connection or collecting provenance — so an invalid write config fails fast instead of after
+    // connection/provenance setup.
+    if ops.iter().any(|op| spec(*op).write.is_some()) {
+        if config.reset_every == 0 {
+            return Err(OtherError(
+                "reset_every must be >= 1 for write operations".to_string(),
+            ));
+        }
+        // The band bound grows with the worker id, so the largest level bounds every smaller one;
+        // reuse `WriteScratch::new`'s checked i32 arithmetic (its run_token doesn't affect the
+        // bound). `normalize_concurrency` guarantees a non-empty, ≥1 sweep, so `max_worker ≥ 0`.
+        let max_worker = concurrency.last().copied().unwrap_or(1).saturating_sub(1);
+        WriteScratch::new(0, max_worker, config.reset_every)?;
     }
 
     let started_at_epoch_secs = SystemTime::now()
@@ -433,7 +460,13 @@ pub async fn run(config: &Config) -> BenchmarkResult<Report> {
         // Seed each op's corpus deterministically (same --seed ⇒ byte-identical corpus).
         let mut rng = StdRng::seed_from_u64(config.seed ^ op.salt());
         let corpus = Arc::new(op_spec.build_corpus(&mut rng, &dataset, 0, 1)?);
-        op_fingerprints.push((op, dataset::corpus_fingerprint(&corpus)));
+        // Fingerprint reads by their rendered corpus; writes by their stable plan tag + reset
+        // cadence (their queries are rendered per-invocation from scratch, not from the corpus).
+        let fingerprint = match &op_spec.write {
+            Some(plan) => format!("write:{}:reset_every={}", plan.plan_tag, config.reset_every),
+            None => dataset::corpus_fingerprint(&corpus),
+        };
+        op_fingerprints.push((op, fingerprint));
         let op_report = measure_op(
             config,
             &concurrency,
@@ -613,39 +646,97 @@ pub(crate) fn is_empty_graph_key(msg: &str) -> bool {
     m.contains("empty key") || m.contains("invalid graph operation")
 }
 
+/// Where a [`GraphWorker`] gets each invocation's query: a read cycles a shared corpus; a write
+/// renders a fresh query from its own [`WriteScratch`] and runs the untimed reset/verification.
+enum WorkerSource {
+    /// A read op: cycle the shared corpus from a decorrelating offset.
+    Read {
+        corpus: Arc<Vec<Query>>,
+        corpus_offset: usize,
+    },
+    /// A write op (Part 5): the plan's per-invocation render + the worker's isolated scratch.
+    Write {
+        plan: WritePlan,
+        scratch: WriteScratch,
+    },
+}
+
 /// A closed-loop worker for one operation, cache mode and connection: owns a single-socket
-/// `AsyncGraph` and drives one query at a time via [`run_and_drain`]. The worker cycles its corpus
-/// from a decorrelating `corpus_offset` (so concurrent workers don't march in lock-step) and claims
-/// a disjoint `uid_base` so its uncached query text is globally unique across the whole sweep.
+/// `AsyncGraph` and drives one query at a time via [`run_and_drain`]. Reads cycle a shared corpus
+/// from a decorrelating `corpus_offset`; writes render from a per-worker [`WriteScratch`], run an
+/// untimed reset at each window boundary, and verify each sample's mutation. It claims a disjoint
+/// `uid_base` so its uncached query text is globally unique across the whole sweep.
 struct GraphWorker {
     graph: AsyncGraph,
     kind: QueryType,
-    corpus: Arc<Vec<Query>>,
     mode: CacheMode,
     run_token: u64,
-    corpus_offset: usize,
     uid_base: u64,
     server_timeout_ms: i64,
     client_deadline: Duration,
+    /// Generous server-timeout/deadline for the untimed write hooks (a reset can delete a whole
+    /// window of nodes, which mustn't trip the tight measurement deadline).
+    hook_server_timeout_ms: i64,
+    hook_deadline: Duration,
+    source: WorkerSource,
 }
 
 impl OpInvoker for GraphWorker {
-    fn invoke(
+    async fn invoke(
         &mut self,
         seq: u64,
-    ) -> impl Future<Output = BenchmarkResult<OpSample>> + Send {
-        let idx = (self.corpus_offset + seq as usize) % self.corpus.len();
-        let cypher = render_cypher(
-            &self.corpus[idx],
-            self.mode,
-            self.run_token,
-            self.uid_base + seq,
-        );
+    ) -> BenchmarkResult<OpSample> {
+        let uid = self.uid_base + seq;
+        let mode = self.mode;
+        let run_token = self.run_token;
         let kind = self.kind;
         let server_timeout_ms = self.server_timeout_ms;
         let client_deadline = self.client_deadline;
-        let graph = &mut self.graph;
-        async move { run_and_drain(graph, kind, &cypher, server_timeout_ms, client_deadline).await }
+        // `&self.source` and `&mut self.graph` borrow disjoint fields, so both are live together.
+        match &self.source {
+            WorkerSource::Read {
+                corpus,
+                corpus_offset,
+            } => {
+                let idx = (corpus_offset + seq as usize) % corpus.len();
+                let cypher = render_cypher(&corpus[idx], mode, run_token, uid);
+                run_and_drain(&mut self.graph, kind, &cypher, server_timeout_ms, client_deadline)
+                    .await
+            }
+            WorkerSource::Write { plan, scratch } => {
+                let plan = *plan;
+                let scratch = scratch.clone();
+                // Undo the previous window's drift *before* reusing its key band — untimed, so it
+                // never lands in a sample. `seq` is the global (warm-up + measured) counter, so the
+                // cadence bounds warm-up accumulation too.
+                if scratch.schedule().should_reset(seq) {
+                    for q in (plan.reset)(&scratch)? {
+                        let c = q.to_cypher();
+                        run_and_drain(
+                            &mut self.graph,
+                            kind,
+                            &c,
+                            self.hook_server_timeout_ms,
+                            self.hook_deadline,
+                        )
+                        .await?;
+                    }
+                }
+                let base = (plan.render)(&scratch, seq)?;
+                let cypher = render_cypher(&base, mode, run_token, uid);
+                let sample = run_and_drain(
+                    &mut self.graph,
+                    kind,
+                    &cypher,
+                    server_timeout_ms,
+                    client_deadline,
+                )
+                .await?;
+                // The op must actually effect its intended mutation — a silent no-op is an error.
+                verify_mutation(plan.expected, &sample.mutations)?;
+                Ok(sample)
+            }
+        }
     }
 }
 
@@ -701,9 +792,46 @@ async fn measure_op(
     Ok(OperationReport { levels })
 }
 
+/// Run a list of untimed write statements (setup/reset/cleanup) to completion on `graph`.
+async fn run_write_stmts(
+    graph: &mut AsyncGraph,
+    stmts: Vec<Query>,
+    server_timeout_ms: i64,
+    deadline: Duration,
+) -> BenchmarkResult<()> {
+    for q in stmts {
+        let cypher = q.to_cypher();
+        run_and_drain(graph, QueryType::Write, &cypher, server_timeout_ms, deadline).await?;
+    }
+    Ok(())
+}
+
+/// Open a fresh connection and drop a write run's scratch (its `cleanup` statements). Kept off the
+/// measurement connections so a level that errored still gets cleaned up, and so — unlike the
+/// per-op work — a cleanup failure is a **surfaced** error the caller can propagate on the success
+/// path rather than silent scratch pollution.
+async fn run_scratch_cleanup(
+    endpoint: &str,
+    graph: &str,
+    plan: WritePlan,
+    scratch: &WriteScratch,
+    server_timeout_ms: i64,
+    deadline: Duration,
+) -> BenchmarkResult<()> {
+    let mut g = open_graph(endpoint, graph).await?;
+    let stmts = (plan.cleanup)(scratch)?;
+    run_write_stmts(&mut g, stmts, server_timeout_ms, deadline).await
+}
+
 /// Measure one operation at one concurrency level `C` in one cache mode via the closed-loop engine:
 /// open `C` single-socket connections (one per worker), drive them to completion, and summarize the
 /// pooled samples plus the achieved throughput.
+///
+/// For write ops each worker gets an isolated [`WriteScratch`] and its untimed setup runs before the
+/// window. The run's scratch is dropped afterward on a fresh connection whether or not the level
+/// errored, so a failed write level never leaks scratch into the next one. A cleanup failure on the
+/// **success** path is surfaced (leftover scratch must never silently pollute the graph); on the
+/// **failure** path cleanup stays best-effort so it can't mask the level's original error.
 #[allow(clippy::too_many_arguments)]
 async fn measure_level(
     config: &Config,
@@ -727,23 +855,82 @@ async fn measure_level(
     // Each worker claims a disjoint id block wide enough for its warm-up + measured invocations, so
     // no two workers (here or at any other level) ever render the same uncached query text.
     let block = (effective_warmup + config.samples) as u64;
+
+    // The untimed write hooks (setup/reset/cleanup) can touch a whole window of nodes, so give them
+    // a generous deadline independent of the tight per-op measurement deadline.
+    let hook_deadline = client_deadline.max(Duration::from_millis(60_000));
+    let hook_server_timeout_ms = config
+        .server_timeout_ms
+        .max(i64::try_from(hook_deadline.as_millis()).unwrap_or(i64::MAX));
+
     let mut workers = Vec::with_capacity(concurrency);
+    // One representative (plan, scratch) drives the post-level cleanup (the run label is shared, so
+    // any worker's scratch cleans the whole run).
+    let mut write_cleanup: Option<(WritePlan, WriteScratch)> = None;
     for w in 0..concurrency {
-        let graph = open_graph(&config.endpoint, &config.graph).await?;
+        let mut graph = open_graph(&config.endpoint, &config.graph).await?;
+        let uid_base = uid_alloc.fetch_add(block, Ordering::Relaxed);
+        let source = match &op_spec.write {
+            Some(plan) => {
+                let scratch = WriteScratch::new(run_token, w, config.reset_every)?;
+                // Untimed setup on this worker's own connection before the measurement window.
+                run_write_stmts(
+                    &mut graph,
+                    (plan.setup)(&scratch)?,
+                    hook_server_timeout_ms,
+                    hook_deadline,
+                )
+                .await?;
+                if write_cleanup.is_none() {
+                    write_cleanup = Some((*plan, scratch.clone()));
+                }
+                WorkerSource::Write {
+                    plan: *plan,
+                    scratch,
+                }
+            }
+            None => WorkerSource::Read {
+                corpus: Arc::clone(corpus),
+                corpus_offset: w % corpus.len(),
+            },
+        };
         workers.push(GraphWorker {
             graph,
             kind: op_spec.kind,
-            corpus: Arc::clone(corpus),
             mode,
             run_token,
-            corpus_offset: w % corpus.len(),
-            uid_base: uid_alloc.fetch_add(block, Ordering::Relaxed),
+            uid_base,
             server_timeout_ms: config.server_timeout_ms,
             client_deadline,
+            hook_server_timeout_ms,
+            hook_deadline,
+            source,
         });
     }
 
-    let run = run_closed_loop(workers, effective_warmup, config.samples).await?;
+    let run = run_closed_loop(workers, effective_warmup, config.samples).await;
+
+    // Drop the run's scratch on a fresh connection, whether or not the level succeeded, so a write
+    // level can't leave scratch behind for the next level/op. On the **success** path a cleanup
+    // failure is surfaced (leftover scratch must never silently pollute the graph); on the
+    // **failure** path cleanup stays best-effort so it can't mask the level's original error.
+    let cleanup = match write_cleanup {
+        Some((plan, scratch)) => {
+            run_scratch_cleanup(
+                &config.endpoint,
+                &config.graph,
+                plan,
+                &scratch,
+                hook_server_timeout_ms,
+                hook_deadline,
+            )
+            .await
+        }
+        None => Ok(()),
+    };
+
+    let run = run?; // a level error wins (cleanup already ran best-effort above)
+    cleanup?; // otherwise surface any cleanup failure so scratch can't leak silently
     let metrics = summarize_samples(&run.samples)?;
     Ok(LevelMetrics {
         throughput_ops_per_sec: run.throughput_ops_per_sec(),
@@ -832,6 +1019,7 @@ pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkRes
             samples,
             warmup,
             concurrency,
+            reset_every,
             seed,
             cache,
             server_timeout_ms,
@@ -850,6 +1038,7 @@ pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkRes
                 samples,
                 warmup,
                 concurrency,
+                reset_every,
                 seed,
                 cache,
                 server_timeout_ms,
@@ -907,6 +1096,11 @@ mod tests {
         };
         for op in OpName::all() {
             let s = spec(*op);
+            // Write ops render their measured query per-invocation from a WriteScratch, not from a
+            // corpus (the corpus is a stub), so the read-corpus invariants below don't apply.
+            if s.write.is_some() {
+                continue;
+            }
             let mut rng = StdRng::seed_from_u64(7 ^ op.salt());
             let corpus = s
                 .build_corpus(&mut rng, &dataset, 0, 1)
@@ -968,10 +1162,22 @@ mod tests {
     #[test]
     fn all_reads_covers_the_catalog_and_dedups() {
         let reads = OpName::all_reads();
+        // `--all-reads` selects exactly the read-kind ops; write ops are opt-in via `--op`.
+        assert!(
+            reads.iter().all(|op| op.kind() == QueryType::Read),
+            "all_reads must contain only reads"
+        );
+        assert!(
+            !reads.contains(&OpName::CreateNode) && !reads.contains(&OpName::MergeMiss),
+            "write ops must be excluded from --all-reads"
+        );
         assert_eq!(
             reads.len(),
-            OpName::all().len(),
-            "all catalog ops are reads"
+            OpName::all()
+                .iter()
+                .filter(|op| op.kind() == QueryType::Read)
+                .count(),
+            "all_reads covers every read op"
         );
         // dedup_ops keeps first occurrence and drops duplicates / overlaps.
         let deduped = dedup_ops(&[
@@ -1092,6 +1298,7 @@ mod tests {
             samples: Some(0),
             warmup: Some(0),
             concurrency: vec![],
+            reset_every: None,
             seed: Some(0),
             cache: Some(CacheSelection::Both),
             server_timeout_ms: Some(5_000),
@@ -1130,6 +1337,7 @@ mod tests {
             samples: Some(100),
             warmup: Some(0),
             concurrency: vec![],
+            reset_every: None,
             seed: Some(0),
             cache: Some(CacheSelection::Both),
             server_timeout_ms: Some(5_000),
@@ -1156,6 +1364,42 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn run_rejects_zero_reset_every_for_write_ops_before_connecting() {
+        // A write op with reset_every == 0 fails the fast pre-connection validation, so no
+        // connection is opened — this stays hermetic (the endpoint is never touched).
+        let cfg = Config {
+            ops: vec![OpName::CreateNode],
+            reset_every: 0,
+            ..Config::default()
+        };
+        let err = run(&cfg).await.expect_err("zero cadence must be rejected");
+        assert!(
+            format!("{err:?}").contains("reset_every must be >= 1"),
+            "expected a reset_every validation error, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_rejects_write_key_band_overflow_before_connecting() {
+        // A write op whose widest concurrency level × reset_every would overflow the i32 key range
+        // is rejected up-front, before any connection is opened (hermetic). Here worker 1's highest
+        // key is 2·(i32::MAX) − 1, well past i32::MAX.
+        let cfg = Config {
+            ops: vec![OpName::CreateNode],
+            reset_every: i32::MAX as usize,
+            concurrency: vec![2],
+            ..Config::default()
+        };
+        let err = run(&cfg)
+            .await
+            .expect_err("an overflowing key band must be rejected");
+        assert!(
+            format!("{err:?}").contains("overflows i32"),
+            "expected an i32 key-band overflow error, got: {err:?}"
+        );
+    }
+
     #[test]
     fn summarize_samples_computes_paired_residual_and_cache() {
         let samples = vec![
@@ -1164,24 +1408,28 @@ mod tests {
                 total_ms: 0.40,
                 rows: 1,
                 cached: Some(true),
+                mutations: crate::synthetic::writes::MutationStats::default(),
             },
             OpSample {
                 server_ms: 0.12,
                 total_ms: 0.45,
                 rows: 1,
                 cached: Some(false),
+                mutations: crate::synthetic::writes::MutationStats::default(),
             },
             OpSample {
                 server_ms: 0.11,
                 total_ms: 0.42,
                 rows: 1,
                 cached: None,
+                mutations: crate::synthetic::writes::MutationStats::default(),
             },
             OpSample {
                 server_ms: 0.13,
                 total_ms: 0.44,
                 rows: 1,
                 cached: Some(true),
+                mutations: crate::synthetic::writes::MutationStats::default(),
             },
         ];
         let r = summarize_samples(&samples).unwrap();
@@ -1206,6 +1454,7 @@ mod tests {
                     total_ms: s + 0.3,
                     rows: 1,
                     cached: Some(true),
+                    mutations: crate::synthetic::writes::MutationStats::default(),
                 }
             })
             .collect();
@@ -1214,6 +1463,7 @@ mod tests {
             total_ms: 500.0,
             rows: 1,
             cached: Some(true),
+            mutations: crate::synthetic::writes::MutationStats::default(),
         });
         let r = summarize_samples(&samples).unwrap();
         assert_eq!(r.server_ms.n, r.total_ms.n);
@@ -1232,18 +1482,21 @@ mod tests {
                 total_ms: 0.40,
                 rows: 1,
                 cached: None,
+                mutations: crate::synthetic::writes::MutationStats::default(),
             },
             OpSample {
                 server_ms: 0.12,
                 total_ms: 0.45,
                 rows: 1,
                 cached: None,
+                mutations: crate::synthetic::writes::MutationStats::default(),
             },
             OpSample {
                 server_ms: 0.11,
                 total_ms: 0.42,
                 rows: 1,
                 cached: None,
+                mutations: crate::synthetic::writes::MutationStats::default(),
             },
         ];
         let r = summarize_samples(&samples).unwrap();

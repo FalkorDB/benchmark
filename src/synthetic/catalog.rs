@@ -12,6 +12,7 @@ use crate::error::BenchmarkError::OtherError;
 use crate::error::BenchmarkResult;
 use crate::queries_repository::QueryType;
 use crate::query::{Query, QueryBuilder};
+use crate::synthetic::writes::{ExpectedMutation, WritePlan, WriteScratch};
 use crate::synthetic::OpName;
 use rand::{Rng, RngExt};
 
@@ -97,6 +98,9 @@ pub struct OperationSpec {
     pub description: &'static str,
     pub requirement: DatasetRequirement,
     pub corpus: CorpusFn,
+    /// Present for write operations (Part 5): the lifecycle hooks, mutation to verify, and timed
+    /// query builder. `None` for reads, which use `corpus` instead.
+    pub write: Option<WritePlan>,
 }
 
 impl OperationSpec {
@@ -137,6 +141,7 @@ pub fn spec(op: OpName) -> OperationSpec {
             description: "RETURN $i — pure round-trip baseline (no dataset required)",
             requirement: DatasetRequirement::None,
             corpus: corpus_return_const,
+            write: None,
         },
         OpName::MatchByIndex => OperationSpec {
             name: op,
@@ -144,6 +149,7 @@ pub fn spec(op: OpName) -> OperationSpec {
             description: "point lookup on the :User(id) index",
             requirement: DatasetRequirement::OneId,
             corpus: corpus_match_by_index,
+            write: None,
         },
         OpName::MatchByLabelScan => OperationSpec {
             name: op,
@@ -151,6 +157,7 @@ pub fn spec(op: OpName) -> OperationSpec {
             description: "full :User label scan with a non-indexable predicate",
             requirement: DatasetRequirement::None,
             corpus: corpus_match_by_label_scan,
+            write: None,
         },
         OpName::Expand1Hop => OperationSpec {
             name: op,
@@ -158,6 +165,7 @@ pub fn spec(op: OpName) -> OperationSpec {
             description: "1-hop :Friend expansion from a seed node",
             requirement: DatasetRequirement::OneId,
             corpus: corpus_expand_1_hop,
+            write: None,
         },
         OpName::ExpandHops5 => OperationSpec {
             name: op,
@@ -165,6 +173,7 @@ pub fn spec(op: OpName) -> OperationSpec {
             description: "fixed 5-hop :Friend expansion from a seed node",
             requirement: DatasetRequirement::OneId,
             corpus: corpus_expand_hops_5,
+            write: None,
         },
         OpName::AggregateCount => OperationSpec {
             name: op,
@@ -172,6 +181,7 @@ pub fn spec(op: OpName) -> OperationSpec {
             description: "count a seed node's 1-hop :Friend neighbours",
             requirement: DatasetRequirement::OneId,
             corpus: corpus_aggregate_count,
+            write: None,
         },
         OpName::AggregateGroup => OperationSpec {
             name: op,
@@ -179,6 +189,7 @@ pub fn spec(op: OpName) -> OperationSpec {
             description: "group a seed node's neighbours by age with counts",
             requirement: DatasetRequirement::OneId,
             corpus: corpus_aggregate_group,
+            write: None,
         },
         OpName::ShortestPath => OperationSpec {
             name: op,
@@ -186,6 +197,7 @@ pub fn spec(op: OpName) -> OperationSpec {
             description: "bounded shortest :Friend path between two seed nodes",
             requirement: DatasetRequirement::TwoIds,
             corpus: corpus_shortest_path,
+            write: None,
         },
         OpName::PropertyProjection => OperationSpec {
             name: op,
@@ -193,8 +205,105 @@ pub fn spec(op: OpName) -> OperationSpec {
             description: "project scalar properties of an indexed node",
             requirement: DatasetRequirement::OneId,
             corpus: corpus_property_projection,
+            write: None,
+        },
+        OpName::CreateNode => OperationSpec {
+            name: op,
+            kind: QueryType::Write,
+            description: "create a fresh scratch node each invocation",
+            requirement: DatasetRequirement::None,
+            corpus: write_corpus_stub,
+            write: Some(WritePlan {
+                expected: ExpectedMutation::NodeCreated,
+                plan_tag: "create_node.v1",
+                default_reset_every: DEFAULT_RESET_EVERY,
+                setup: write_clear_band,
+                reset: write_clear_band,
+                cleanup: write_cleanup_run,
+                render: write_create_node_render,
+            }),
+        },
+        OpName::MergeMiss => OperationSpec {
+            name: op,
+            kind: QueryType::Write,
+            description: "MERGE a fresh scratch node each invocation (always misses → creates)",
+            requirement: DatasetRequirement::None,
+            corpus: write_corpus_stub,
+            write: Some(WritePlan {
+                expected: ExpectedMutation::NodeCreated,
+                plan_tag: "merge_miss.v1",
+                default_reset_every: DEFAULT_RESET_EVERY,
+                setup: write_clear_band,
+                reset: write_clear_band,
+                cleanup: write_cleanup_run,
+                render: write_merge_miss_render,
+            }),
         },
     }
+}
+
+/// Default reset cadence (measured ops per sawtooth window) for write operations.
+pub const DEFAULT_RESET_EVERY: usize = 50_000;
+
+/// Delete only this worker's scratch rows (its key band) — used as both **setup** (a clean start,
+/// self-healing over any stale rows in this run's namespace) and **reset** (undo a window's
+/// accumulation). Scoped by the run-unique label *and* the worker's id band, so it can never touch
+/// another worker's or another run's data.
+fn write_clear_band(scratch: &WriteScratch) -> BenchmarkResult<Vec<Query>> {
+    let (lo, hi) = scratch.key_band();
+    let text = format!(
+        "MATCH (n:{}) WHERE n.id >= $lo AND n.id <= $hi DELETE n",
+        scratch.label()
+    );
+    Ok(vec![QueryBuilder::new()
+        .text(text)
+        .param("lo", lo)
+        .param("hi", hi)
+        .build()])
+}
+
+/// Drop the whole run's scratch (every worker's rows for the run-unique label) — the coordinator
+/// runs this once after a level, on a fresh connection.
+fn write_cleanup_run(scratch: &WriteScratch) -> BenchmarkResult<Vec<Query>> {
+    let text = format!("MATCH (n:{}) DELETE n", scratch.label());
+    Ok(vec![QueryBuilder::new().text(text).build()])
+}
+
+/// `create_node`: create a fresh scratch node with this invocation's within-window-unique id.
+fn write_create_node_render(
+    scratch: &WriteScratch,
+    seq: u64,
+) -> BenchmarkResult<Query> {
+    let text = format!("CREATE (n:{} {{id: $id}}) RETURN n.id", scratch.label());
+    Ok(QueryBuilder::new()
+        .text(text)
+        .param("id", scratch.window_key(seq))
+        .build())
+}
+
+/// `merge_miss`: `MERGE` a scratch node whose id is unique within the window, so it always misses
+/// and creates (never hits).
+fn write_merge_miss_render(
+    scratch: &WriteScratch,
+    seq: u64,
+) -> BenchmarkResult<Query> {
+    let text = format!("MERGE (n:{} {{id: $id}}) RETURN n.id", scratch.label());
+    Ok(QueryBuilder::new()
+        .text(text)
+        .param("id", scratch.window_key(seq))
+        .build())
+}
+
+/// Placeholder corpus for write ops: the runner builds their queries per-invocation via the
+/// [`WritePlan`] render, so this is never measured — it exists only to satisfy [`OperationSpec`]'s
+/// `corpus` field and the non-empty-corpus invariant.
+fn write_corpus_stub(
+    _rng: &mut dyn Rng,
+    _dataset: &DatasetHandle,
+    _worker: usize,
+    _workers: usize,
+) -> BenchmarkResult<Vec<Query>> {
+    Ok(vec![QueryBuilder::new().text("RETURN 1").build()])
 }
 
 /// Pick a uniformly-random id from the sample.
@@ -401,7 +510,13 @@ mod tests {
         assert_eq!(all.len(), OpName::all().len());
         for (entry, op) in all.iter().zip(OpName::all()) {
             assert_eq!(entry.name, *op);
-            assert_eq!(entry.kind, QueryType::Read, "all catalog ops are reads");
+            // A write op carries a WritePlan and QueryType::Write; a read carries neither.
+            assert_eq!(
+                entry.kind == QueryType::Write,
+                entry.write.is_some(),
+                "op {} kind must match presence of a write plan",
+                op.as_str()
+            );
             assert!(!entry.description.is_empty());
         }
     }
@@ -465,5 +580,83 @@ mod tests {
                 "pair ({from},{to}) not from the connected-pair pool"
             );
         }
+    }
+
+    // ---- Part 5 write operations ----------------------------------------------------------------
+
+    #[test]
+    fn write_ops_carry_a_write_plan_and_write_kind() {
+        for op in [OpName::CreateNode, OpName::MergeMiss] {
+            let s = spec(op);
+            assert_eq!(s.kind, QueryType::Write, "{} is a write op", op.as_str());
+            let plan = s.write.expect("write op carries a WritePlan");
+            assert_eq!(plan.expected, ExpectedMutation::NodeCreated);
+            assert_eq!(plan.default_reset_every, DEFAULT_RESET_EVERY);
+        }
+        // A read op carries no write plan and stays QueryType::Read.
+        let read = spec(OpName::MatchByIndex);
+        assert!(read.write.is_none());
+        assert_eq!(read.kind, QueryType::Read);
+    }
+
+    #[test]
+    fn create_node_render_targets_the_run_label_and_window_key() {
+        use crate::query::QueryParam;
+        // worker 2, reset_every 10 ⇒ window_key(3) = 2*10 + 3%10 = 23.
+        let scratch = WriteScratch::new(0xABCD, 2, 10).unwrap();
+        let q = write_create_node_render(&scratch, 3).unwrap();
+        assert_eq!(q.text, "CREATE (n:BenchScratch_abcd {id: $id}) RETURN n.id");
+        assert!(
+            matches!(q.params.get("id"), Some(QueryParam::Integer(23))),
+            "id must be the worker's window key, got {:?}",
+            q.params.get("id")
+        );
+    }
+
+    #[test]
+    fn merge_miss_render_uses_merge_with_the_window_key() {
+        use crate::query::QueryParam;
+        let scratch = WriteScratch::new(0x1, 0, 100).unwrap();
+        let q = write_merge_miss_render(&scratch, 7).unwrap();
+        assert_eq!(q.text, "MERGE (n:BenchScratch_1 {id: $id}) RETURN n.id");
+        assert!(matches!(q.params.get("id"), Some(QueryParam::Integer(7))));
+    }
+
+    #[test]
+    fn clear_band_deletes_only_this_workers_key_band() {
+        use crate::query::QueryParam;
+        // worker 3, reset_every 10 ⇒ band [30, 39].
+        let scratch = WriteScratch::new(0xF, 3, 10).unwrap();
+        let stmts = write_clear_band(&scratch).unwrap();
+        assert_eq!(stmts.len(), 1);
+        let q = &stmts[0];
+        assert_eq!(
+            q.text,
+            "MATCH (n:BenchScratch_f) WHERE n.id >= $lo AND n.id <= $hi DELETE n"
+        );
+        assert!(matches!(q.params.get("lo"), Some(QueryParam::Integer(30))));
+        assert!(matches!(q.params.get("hi"), Some(QueryParam::Integer(39))));
+    }
+
+    #[test]
+    fn cleanup_run_drops_the_whole_run_label_unparameterized() {
+        // Cleanup is scoped by the run-unique label (not a key band), so it wipes every worker's
+        // rows at once and carries no params.
+        let scratch = WriteScratch::new(0x2a, 5, 10).unwrap();
+        let stmts = write_cleanup_run(&scratch).unwrap();
+        assert_eq!(stmts.len(), 1);
+        assert_eq!(stmts[0].text, "MATCH (n:BenchScratch_2a) DELETE n");
+        assert!(stmts[0].params.is_empty());
+    }
+
+    #[test]
+    fn write_corpus_stub_is_a_single_placeholder_query() {
+        // Writes render their measured query per-invocation from the WritePlan, so the corpus is a
+        // never-measured stub that only satisfies the non-empty-corpus invariant.
+        let mut rng = StdRng::seed_from_u64(1);
+        let corpus = spec(OpName::CreateNode)
+            .build_corpus(&mut rng, &DatasetHandle::default(), 0, 4)
+            .expect("stub corpus builds without a dataset");
+        assert_eq!(corpus.len(), 1);
     }
 }

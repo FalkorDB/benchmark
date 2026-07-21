@@ -222,6 +222,7 @@ mod tests {
                 total_ms: 1.0,
                 rows: 0,
                 cached: Some(false),
+                mutations: crate::synthetic::writes::MutationStats::default(),
             })
         }
     }
@@ -274,6 +275,7 @@ mod tests {
                 total_ms: latency.as_secs_f64() * 1_000.0,
                 rows: 0,
                 cached: Some(false),
+                mutations: crate::synthetic::writes::MutationStats::default(),
             })
         }
     }
@@ -309,6 +311,7 @@ mod tests {
                 total_ms: seq as f64,
                 rows: 0,
                 cached: Some(false),
+                mutations: crate::synthetic::writes::MutationStats::default(),
             })
         }
     }
@@ -350,6 +353,7 @@ mod tests {
                 total_ms: 1.0,
                 rows: 0,
                 cached: Some(false),
+                mutations: crate::synthetic::writes::MutationStats::default(),
             })
         }
     }

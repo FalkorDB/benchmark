@@ -16,6 +16,7 @@ nodes = 100000
 edges = 1000000
 
 # Operations to measure, using the same names as `--op` (see `benchmark synthetic list-ops`).
+# Read ops and write ops (e.g. `create_node`, `merge_miss`) can be mixed here.
 operations = ["match_by_index", "expand_hops_5", "aggregate_count"]
 
 # Measurement knobs (all optional; shown with their defaults).
@@ -26,6 +27,10 @@ cache = "both"              # cached | uncached | both
 # Concurrency sweep: the closed-loop worker counts to measure each op at, tracing the
 # latency-vs-throughput curve. Each level opens that many dedicated connections.
 concurrency = [1, 2, 4, 8, 16, 32]
+
+# Write-op reset cadence: every `reset_every` operations each worker's scratch is reset (untimed)
+# so write drift is bounded to one sawtooth window. Ignored by read ops.
+reset_every = 50000
 
 # Connection / output (all optional).
 # endpoint = "falkor://127.0.0.1:6379"
