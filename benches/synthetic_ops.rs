@@ -28,7 +28,10 @@ use std::time::{Duration, Instant};
 use tokio::runtime::Runtime;
 
 const SERVER_TIMEOUT_MS: i64 = 5_000;
-const CLIENT_DEADLINE: Duration = Duration::from_secs(5);
+/// Larger than the server-side timeout (matching the runner's 5000/6000 defaults): the client
+/// deadline wraps the whole execute+drain round-trip plus client overhead, so keeping it above
+/// `SERVER_TIMEOUT_MS` avoids spurious client-side timeouts.
+const CLIENT_DEADLINE: Duration = Duration::from_secs(6);
 
 /// The FalkorDB endpoint — resolved like `benchmark synthetic run`: the config's `endpoint`, else
 /// the local default. (Deliberately does NOT read `FALKORDB_HOST`/`PORT`, so the bench and the

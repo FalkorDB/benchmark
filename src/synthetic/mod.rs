@@ -1483,7 +1483,7 @@ mod tests {
         })
         .await
         .expect_err("corpus_hash mismatch must abort");
-        assert!(format!("{err:?}").contains("corpus_hash mismatch"));
+        assert!(format!("{err}").contains("corpus_hash mismatch"));
         for p in [base, ok, bad] {
             let _ = std::fs::remove_file(p);
         }
