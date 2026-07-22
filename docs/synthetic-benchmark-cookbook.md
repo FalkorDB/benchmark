@@ -97,9 +97,9 @@ _cached (plan reused — execution only)_
 > **The `workload_hash` matching is the whole point** — identical here, it proves A (v4.2.0) and B
 > (v4.2.1) ran byte-identical graphs and commands, so the deltas reflect the *version change* and
 > nothing else. And `report --diff` is **fail-closed**: if a version returns *different results*, it
-> **aborts** instead of reporting a misleading speedup — e.g. diffing v4.2.0 against 4.20.1 aborts
-> with `cannot diff — result mismatch for op 'expand_hops_5'` (their 5-hop traversals disagree), so
-> you can't accidentally "win" by returning wrong results faster. See
+> **aborts** instead of reporting a misleading speedup — e.g. diffing v4.2.0 against `latest`
+> (module 4.20.1) aborts with `cannot diff — result mismatch for op 'expand_hops_5'` (their 5-hop
+> traversals disagree), so you can't accidentally "win" by returning wrong results faster. See
 > [`docs/synthetic/sample-diff.md`](synthetic/sample-diff.md) for a full example.
 
 `just synthetic-compare-versions A=falkor://…:6381 B=falkor://…:6382` wraps the two runs + the diff
