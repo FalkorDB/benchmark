@@ -22,7 +22,7 @@ use std::time::Duration;
 
 /// Bumped whenever the generator algorithm or the operation catalog's query bodies change, so a
 /// [`corpus_hash`] from an older build never compares equal to a newer, differently-generated one.
-pub const GENERATOR_VERSION: &str = "synthbench/v2";
+pub const GENERATOR_VERSION: &str = "synthbench/v3";
 
 /// Max distinct `:User` ids sampled into the [`DatasetHandle`] id pool.
 const POOL_IDS: usize = 4096;
@@ -724,7 +724,7 @@ mod tests {
         )];
         assert_eq!(
             corpus_hash(&s, 0, 256, &bodies, &s.handle()),
-            "sha256:daa1d6d9810babea1faf1871e1884b8803e8b83259430ddecfc0a926bddbbb28"
+            "sha256:ad6dec1c5dc2f7700383cddecbdb23b0a7b02bead9a12ff64239b3c9aa836ab0"
         );
     }
 }

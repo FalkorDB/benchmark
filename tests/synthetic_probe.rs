@@ -1117,7 +1117,13 @@ async fn replay_concurrency_sweep_verifies_results_and_reports_levels() {
         nodes: 600,
         edges: 1800,
     };
-    let ops = vec![OpName::MatchByIndex, OpName::Expand1Hop, OpName::AggregateCount];
+    let ops = vec![
+        OpName::MatchByIndex,
+        OpName::Expand1Hop,
+        OpName::AggregateCount,
+        OpName::ExpandHops5,
+        OpName::AggregateGroup,
+    ];
     recording::record(&spec, graph, &ops, spec.seed, 256, &dir).expect("record");
 
     let cfg = ReplayConfig {
@@ -1135,10 +1141,18 @@ async fn replay_concurrency_sweep_verifies_results_and_reports_levels() {
         server_image: None,
     };
     // If any op returned different results at C=4 vs the single-flight reference, run() errors here.
+    // The two LIMIT ops (expand_hops_5, aggregate_group) are totally ordered, so their value digests
+    // are deterministic too.
     let report = replay::run(&cfg).await.expect("replay concurrency sweep");
 
     assert_eq!(report.meta.concurrency, vec![1, 4]);
-    for op in ["match_by_index", "expand_1_hop", "aggregate_count"] {
+    for op in [
+        "match_by_index",
+        "expand_1_hop",
+        "aggregate_count",
+        "expand_hops_5",
+        "aggregate_group",
+    ] {
         let opr = &report.operations[op];
         assert_eq!(opr.levels.len(), 2, "op {op} should have two concurrency levels");
         assert!(opr.result_digest.is_some(), "op {op} needs a result digest");

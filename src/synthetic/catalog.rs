@@ -573,7 +573,7 @@ fn corpus_expand_hops_5(
     Ok(one_id_corpus(
         rng,
         ids,
-        "MATCH (s:User {id: $id})-[:Friend*5..5]->(n:User) RETURN DISTINCT n.id LIMIT 100",
+        "MATCH (s:User {id: $id})-[:Friend*5..5]->(n:User) RETURN DISTINCT n.id ORDER BY n.id LIMIT 100",
     ))
 }
 
@@ -601,7 +601,7 @@ fn corpus_aggregate_group(
     Ok(one_id_corpus(
         rng,
         ids,
-        "MATCH (s:User {id: $id})-[:Friend]->(n:User) RETURN n.age AS age, count(*) AS c ORDER BY c DESC LIMIT 10",
+        "MATCH (s:User {id: $id})-[:Friend]->(n:User) RETURN n.age AS age, count(*) AS c ORDER BY c DESC, age ASC LIMIT 10",
     ))
 }
 

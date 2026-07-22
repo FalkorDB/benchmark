@@ -1054,7 +1054,7 @@ pub async fn run_and_report(config: &Config) -> BenchmarkResult<()> {
 }
 
 /// Print nothing extra, but write the JSON report to `out` **and** the pasteable Markdown alongside
-/// it (`<out>.md`). Shared by [`run_and_report`] and `synthetic replay`.
+/// it (`<out>.md`). Shared by [`run_and_report`] and the `run --recording` path.
 pub(crate) async fn write_report(
     report: &crate::synthetic::report::Report,
     out: &str,

@@ -23,7 +23,7 @@ pub struct BaselineKey {
     pub module_graph_ver: Option<u64>,
     /// Operator-supplied server image identity, when provided.
     pub server_image: Option<String>,
-    /// Per-op result-cardinality digests (present for `synthetic replay` runs). Compared op-by-op:
+    /// Per-op result-cardinality digests (present for `synthetic run --recording` runs). Compared op-by-op:
     /// two versions must agree, or a wrong/empty-but-faster result could look like a win.
     #[serde(default)]
     pub result_digests: BTreeMap<String, String>,
@@ -87,7 +87,7 @@ pub fn guard(
     // candidate must record the *same* digest — otherwise a version returning wrong or empty
     // results faster could masquerade as an improvement. A candidate that is missing a digest the
     // baseline has is also a mismatch (fail closed, matching the docs' "every op" guarantee).
-    // Digests are present for `synthetic replay` runs; a `synthetic run` baseline has none, so the
+    // Digests are present for `synthetic run --recording` runs; a `synthetic run` baseline has none, so the
     // loop is a no-op there (and such runs already differ on `corpus_hash` above).
     for (op, base_dig) in &baseline.result_digests {
         match candidate.result_digests.get(op) {
@@ -106,7 +106,7 @@ pub fn guard(
                     reason: format!(
                         "candidate is missing a result digest for op '{op}' that the baseline \
                          recorded — the runs aren't comparable (re-run the candidate with \
-                         `synthetic replay`)"
+                         `synthetic run --recording`)"
                     ),
                 };
             }

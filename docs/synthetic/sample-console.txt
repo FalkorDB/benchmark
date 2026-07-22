@@ -1,7 +1,7 @@
 $ benchmark synthetic record --graph tutorial_demo \
     --op match_by_index,expand_1_hop,aggregate_count --seed 42 --nodes 1000 --edges 5000 \
     --out-dir recordings/demo
-recorded 3 op(s) into recordings/demo (workload_hash sha256:57638f31c17b7be582ca3c15f7e3c4ad050189e4200f5af478f6711658dd5eb5)
+recorded 3 op(s) into recordings/demo (workload_hash sha256:57ec47dffa81b5be2d39fba9b634ea93e79020e2a0ba9f578692d72b351c7606)
 
 $ benchmark synthetic run --recording recordings/demo --endpoint falkor://127.0.0.1:6379 \
     --concurrency 1,4 --samples 500 --warmup 100 --out recordings/demo/version-a.json
@@ -9,17 +9,17 @@ $ benchmark synthetic run --recording recordings/demo --endpoint falkor://127.0.
 synthetic benchmark — endpoint falkor://127.0.0.1:6379  graph tutorial_demo  samples 500  warmup 100  concurrency [1,4]  seed 42  connection pool(size=1) per worker
 server — falkordb module ver 4.20.1  redis 8.6.3  CACHE_SIZE 25
 client host — bench-host · macOS 26.5.2 Tahoe · Apple M1 Pro (10c/10t) · 16.0 GiB · arm64
-dataset — seed 42  nodes 1000  edges 5000  corpus_hash sha256:57638f31c17b7be582ca3c15f7e3c4ad050189e4200f5af478f6711658dd5eb5
+dataset — seed 42  nodes 1000  edges 5000  corpus_hash sha256:57ec47dffa81b5be2d39fba9b634ea93e79020e2a0ba9f578692d72b351c7606
 
 aggregate_count
   [cached — plan reused, execution only]
     C    throughput(ops/s)   server p50/p90/p95/p99             total p50/p90/p95/p99              miss%
-    1              2793     0.077 / 0.084 / 0.087 / 0.092     0.353 / 0.378 / 0.388 / 0.408     0.0
-    4              8308     0.093 / 0.139 / 0.155 / 0.186     0.466 / 0.564 / 0.591 / 0.646     0.0  <- knee
+    1              2593     0.078 / 0.093 / 0.097 / 0.107     0.361 / 0.400 / 0.422 / 0.472     0.0
+    4              7924     0.093 / 0.139 / 0.165 / 0.196     0.476 / 0.589 / 0.642 / 0.769     0.0  <- knee
   [uncached — plan-cache miss each run, execution + compilation]
     C    throughput(ops/s)   server p50/p90/p95/p99             total p50/p90/p95/p99              miss%
-    1              2389     0.128 / 0.142 / 0.148 / 0.157     0.407 / 0.438 / 0.449 / 0.476   100.0
-    4              7196     0.168 / 0.224 / 0.250 / 0.293     0.538 / 0.644 / 0.688 / 0.791   100.0  <- knee
+    1              2314     0.130 / 0.155 / 0.165 / 0.179     0.417 / 0.469 / 0.503 / 0.526   100.0
+    4              7160     0.172 / 0.232 / 0.256 / 0.304     0.540 / 0.643 / 0.683 / 0.768   100.0  <- knee
   compilation_ms (median uncached-cached server time) by level:
     …(remaining ops omitted for brevity)…
 

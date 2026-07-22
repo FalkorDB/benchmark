@@ -172,7 +172,7 @@ pub struct LevelReport {
 pub struct OperationReport {
     pub levels: Vec<LevelReport>,
     /// A `sha256:…` digest of this operation's **result cardinality** across its recorded commands
-    /// (present only for a `synthetic replay` run). Two versions that return a different number of
+    /// (present only for a `synthetic run --recording` run). Two versions that return a different number of
     /// rows for the same recorded command produce different digests, so a version returning wrong
     /// or empty results faster can't masquerade as an improvement. `None` for a `synthetic run`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
