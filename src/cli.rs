@@ -4,6 +4,38 @@ use crate::synthetic::{CacheSelection, OpName};
 use clap::{Parser, Subcommand};
 use clap_complete::Shell;
 
+/// A `--op` value: either a single operation, or the magic `all` / `*` meaning **every** read op.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OpSelector {
+    /// The magic `all` / `*` — every read operation.
+    All,
+    /// One named operation.
+    One(OpName),
+}
+
+/// Parse one `--op` value: `all` or `*` → [`OpSelector::All`]; otherwise a valid operation name.
+fn parse_op_selector(s: &str) -> Result<OpSelector, String> {
+    match s {
+        "all" | "*" => Ok(OpSelector::All),
+        name => OpName::from_tag(name).map(OpSelector::One).ok_or_else(|| {
+            format!("unknown operation '{name}' — use an operation name, or 'all' / '*' for every read op")
+        }),
+    }
+}
+
+/// Expand `--op` selectors to concrete operations: if any selector is [`OpSelector::All`], every
+/// read op; otherwise the named ops (in order). Empty input stays empty (no `--op` given).
+pub fn expand_op_selectors(selectors: &[OpSelector]) -> Vec<OpName> {
+    let mut ops = Vec::with_capacity(selectors.len());
+    for selector in selectors {
+        match selector {
+            OpSelector::All => return OpName::all_reads(),
+            OpSelector::One(op) => ops.push(*op),
+        }
+    }
+    ops
+}
+
 #[derive(Parser, Debug)]
 #[command(name = "benchmark", version, about="falkor benchmark tool", long_about = None, arg_required_else_help(true), propagate_version(true))]
 pub struct Cli {
@@ -267,16 +299,16 @@ pub enum SyntheticCommands {
         graph: Option<String>,
         #[arg(
             long = "op",
-            value_enum,
+            value_parser = parse_op_selector,
             value_delimiter = ',',
             num_args = 1..,
-            help = "operation(s) to measure; repeatable and comma-separated (e.g. --op match_by_index --op expand_1_hop or --op match_by_index,expand_1_hop). Overrides the config's operations."
+            help = "operation(s) to measure; repeatable and comma-separated (e.g. --op match_by_index,expand_1_hop). Use --op all (or --op '*') for every read op. Overrides the config's operations."
         )]
-        ops: Vec<OpName>,
+        ops: Vec<OpSelector>,
         #[arg(
             long,
             conflicts_with = "ops",
-            help = "measure every read operation (mutually exclusive with --op)"
+            help = "measure every read operation (same as --op all; mutually exclusive with --op)"
         )]
         all_reads: bool,
         #[arg(long, help = "number of measured invocations (default 1000)")]
@@ -360,16 +392,16 @@ pub enum SyntheticCommands {
         graph: Option<String>,
         #[arg(
             long = "op",
-            value_enum,
+            value_parser = parse_op_selector,
             value_delimiter = ',',
             num_args = 1..,
-            help = "read operation(s) to record; repeatable and comma-separated. Overrides the config's operations."
+            help = "read operation(s) to record; repeatable and comma-separated. Use --op all (or --op '*') for every read op. Overrides the config's operations."
         )]
-        ops: Vec<OpName>,
+        ops: Vec<OpSelector>,
         #[arg(
             long,
             conflicts_with = "ops",
-            help = "record every read operation (mutually exclusive with --op)"
+            help = "record every read operation (same as --op all; mutually exclusive with --op)"
         )]
         all_reads: bool,
         #[arg(
@@ -414,5 +446,38 @@ fn parse_write_ratio(val: &str) -> Result<f32, String> {
         Ok(value) if (0.0..=1.0).contains(&value) => Ok(value),
         Ok(_) => Err(String::from("Value must be between 0.0 and 1.0")),
         Err(_) => Err(String::from("Invalid float value")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_op_selector_accepts_magic_and_names() {
+        assert_eq!(parse_op_selector("all").unwrap(), OpSelector::All);
+        assert_eq!(parse_op_selector("*").unwrap(), OpSelector::All);
+        assert_eq!(
+            parse_op_selector("match_by_index").unwrap(),
+            OpSelector::One(OpName::MatchByIndex)
+        );
+        assert!(parse_op_selector("nope").is_err());
+    }
+
+    #[test]
+    fn expand_op_selectors_all_wins_names_preserved_empty_stays_empty() {
+        // `all` anywhere expands to every read op.
+        let all = expand_op_selectors(&[OpSelector::One(OpName::MatchByIndex), OpSelector::All]);
+        assert_eq!(all, OpName::all_reads());
+        // Named ops preserved in order.
+        assert_eq!(
+            expand_op_selectors(&[
+                OpSelector::One(OpName::Expand1Hop),
+                OpSelector::One(OpName::MatchByIndex)
+            ]),
+            vec![OpName::Expand1Hop, OpName::MatchByIndex]
+        );
+        // Empty stays empty (no --op given).
+        assert!(expand_op_selectors(&[]).is_empty());
     }
 }
