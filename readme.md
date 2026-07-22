@@ -429,7 +429,8 @@ load-script *and* the measured commands — then **run that identical bundle** a
 the commands each run), `run --recording` loads the recorded graph and measures the recorded commands
 through the closed-loop engine (the full concurrency sweep + cached/uncached modes), so the only
 variable is the FalkorDB version. See the full walkthrough in the
-[synthetic benchmark tutorial](docs/synthetic-benchmark-tutorial.md).
+[synthetic benchmark tutorial](docs/synthetic-benchmark-tutorial.md), and task-oriented recipes in
+the [synthetic benchmark cookbook](docs/synthetic-benchmark-cookbook.md).
 
 ```bash
 # 1. record a bundle OFFLINE (no server) into recordings/demo/

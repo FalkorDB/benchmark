@@ -8,6 +8,10 @@ run-to-run latency noise you will see and why it is *not* a workload difference.
 All commands are driven through [`just`](../Justfile) recipes (the same ones CI uses). Every step
 links its **expected output** under [`docs/synthetic/`](synthetic/).
 
+> Looking for a quick "how do I do X" reference instead of the full explainer? See the
+> [synthetic benchmark cookbook](synthetic-benchmark-cookbook.md) — task-oriented recipes by user
+> story (compare two versions, profile one version, record offline, re-render/diff, self-check).
+
 ## Why record / replay
 
 To compare two FalkorDB versions, the **graph** and the **measured commands** must be *identical* —
