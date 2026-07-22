@@ -483,7 +483,7 @@ async fn generated_dataset_has_exact_counts_index_and_hash() {
     // The report records the generated dataset + a corpus_hash.
     let ds = report.meta.dataset.as_ref().expect("dataset info present");
     assert_eq!((ds.seed, ds.nodes, ds.edges), (123, 400, 2000));
-    assert!(ds.corpus_hash.starts_with("sha256:"));
+    assert!(ds.workload_hash.starts_with("sha256:"));
 
     // Exact counts in the graph.
     let mut g = open_graph(&endpoint(), graph).await.expect("open graph");
@@ -536,8 +536,8 @@ async fn generation_is_reproducible_across_runs() {
     let a = run(&cfg).await.expect("run a");
     let b = run(&cfg).await.expect("run b");
     assert_eq!(
-        a.meta.dataset.unwrap().corpus_hash,
-        b.meta.dataset.unwrap().corpus_hash
+        a.meta.dataset.unwrap().workload_hash,
+        b.meta.dataset.unwrap().workload_hash
     );
     drop_graph(graph).await;
 }
@@ -952,6 +952,8 @@ fn replay_config(dir: &std::path::Path, graph: &str, out: &str, load: bool) -> R
         load,
         samples: 200,
         warmup: 30,
+        concurrency: vec![1],
+        cache: benchmark::synthetic::CacheSelection::Cached,
         server_timeout_ms: 5_000,
         client_deadline_ms: 6_000,
         out: out.to_string(),
@@ -986,8 +988,8 @@ async fn record_then_replay_roundtrips_and_guard_proceeds() {
         .expect("replay --no-load");
 
     // Same workload identity: the workload_hash (stamped as corpus_hash) matches.
-    let ha = a.meta.dataset.as_ref().expect("dataset a").corpus_hash.clone();
-    let hb = b.meta.dataset.as_ref().expect("dataset b").corpus_hash.clone();
+    let ha = a.meta.dataset.as_ref().expect("dataset a").workload_hash.clone();
+    let hb = b.meta.dataset.as_ref().expect("dataset b").workload_hash.clone();
     assert_eq!(ha, hb, "workload_hash must match across replays");
 
     // Every op has a result digest, and they match across the two replays.
@@ -1067,26 +1069,99 @@ async fn record_and_replay_via_run_command() {
     assert!(dir.join("manifest.json").exists());
 
     let report_out = dir.join("cli.json").to_string_lossy().into_owned();
-    run_command(SyntheticCommands::Replay {
-        recording: out_dir,
+    run_command(SyntheticCommands::Run {
+        config: None,
         endpoint: Some(endpoint()),
         graph: None,
-        no_load: false,
+        ops: vec![],
+        all_reads: false,
         samples: Some(150),
         warmup: Some(20),
+        concurrency: vec![1, 4],
+        reset_every: None,
+        seed: None,
+        cache: Some(benchmark::synthetic::CacheSelection::Both),
         server_timeout_ms: None,
         client_deadline_ms: None,
         out: Some(report_out.clone()),
         server_image: None,
+        generate: false,
+        nodes: None,
+        edges: None,
+        recording: Some(out_dir),
+        no_load: false,
     })
     .await
-    .expect("replay via run_command");
+    .expect("run --recording via run_command");
 
     let written = std::fs::read_to_string(&report_out).expect("report exists");
     assert!(written.contains("match_by_index"));
     assert!(written.contains("result_digest"));
     // The Markdown sibling is written too.
     assert!(std::path::Path::new(&report_out.replace(".json", ".md")).exists());
+
+    std::fs::remove_dir_all(&dir).ok();
+    drop_graph(graph).await;
+}
+
+/// A recorded workload replayed at concurrency > 1 (both cache modes) must return identical results
+/// (the untimed concurrent verify passes) and produce a per-level, per-mode report.
+#[tokio::test]
+#[ignore = "requires a running FalkorDB server"]
+async fn replay_concurrency_sweep_verifies_results_and_reports_levels() {
+    let graph = "syn_it_replay_conc";
+    drop_graph(graph).await;
+    let dir = temp_bundle_dir("syn-it-conc");
+    let spec = DatasetSpec {
+        seed: 5,
+        nodes: 600,
+        edges: 1800,
+    };
+    let ops = vec![
+        OpName::MatchByIndex,
+        OpName::Expand1Hop,
+        OpName::AggregateCount,
+        OpName::ExpandHops5,
+        OpName::AggregateGroup,
+    ];
+    recording::record(&spec, graph, &ops, spec.seed, 256, &dir).expect("record");
+
+    let cfg = ReplayConfig {
+        recording_dir: dir.clone(),
+        endpoint: endpoint(),
+        graph: Some(graph.to_string()),
+        load: true,
+        samples: 150,
+        warmup: 30,
+        concurrency: vec![1, 4],
+        cache: benchmark::synthetic::CacheSelection::Both,
+        server_timeout_ms: 5_000,
+        client_deadline_ms: 6_000,
+        out: dir.join("conc.json").to_string_lossy().into_owned(),
+        server_image: None,
+    };
+    // If any op returned different results at C=4 vs the single-flight reference, run() errors here.
+    // The two LIMIT ops (expand_hops_5, aggregate_group) are totally ordered, so their value digests
+    // are deterministic too.
+    let report = replay::run(&cfg).await.expect("replay concurrency sweep");
+
+    assert_eq!(report.meta.concurrency, vec![1, 4]);
+    for op in [
+        "match_by_index",
+        "expand_1_hop",
+        "aggregate_count",
+        "expand_hops_5",
+        "aggregate_group",
+    ] {
+        let opr = &report.operations[op];
+        assert_eq!(opr.levels.len(), 2, "op {op} should have two concurrency levels");
+        assert!(opr.result_digest.is_some(), "op {op} needs a result digest");
+        // Both cache modes were measured at each level.
+        for lvl in &opr.levels {
+            assert!(lvl.cached.is_some(), "op {op} C={} missing cached", lvl.concurrency);
+            assert!(lvl.uncached.is_some(), "op {op} C={} missing uncached", lvl.concurrency);
+        }
+    }
 
     std::fs::remove_dir_all(&dir).ok();
     drop_graph(graph).await;

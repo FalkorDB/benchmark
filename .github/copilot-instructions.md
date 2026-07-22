@@ -42,11 +42,11 @@ Key recipes:
 | `just synthetic-ops` | List the synthetic operations. |
 | `just synthetic-it` | Run the synthetic integration test against a live FalkorDB. |
 | `just synthetic-record <name>` | Record a workload bundle **offline** (dataset load-script + measured commands + `workload_hash`) into `recordings/<name>/` for cross-version replay. |
-| `just synthetic-replay <name> <endpoint>` | Load the recorded graph + measure the recorded commands (fixed-length, deterministic); writes a report + per-op `result_digest`. |
-| `just synthetic-compare-versions <name> <A> <B>` | Replay one recorded bundle against two FalkorDB versions and guard (aborts unless `workload_hash` **and** result digests match). |
-| `just synthetic-sanity` | Self-contained tool sanity: record twice (asserts identical `workload_hash`) + replay + guard against a throwaway Docker FalkorDB. |
-| `just synthetic-baseline <name>` | Save a Criterion C=1 latency baseline (per-op read latencies) for the current build/version (needs a live FalkorDB + `synthetic-bench.toml`). Single-version tracker; prefer record/replay for cross-version. |
-| `just synthetic-compare <name>` | Compare the current build against a saved baseline — guards on `corpus_hash` (aborts on workload mismatch), then runs Criterion (needs a live FalkorDB). |
+| `just synthetic-replay <name> <endpoint>` | Measure a recorded bundle via `synthetic run --recording` (loads the recorded graph, measures across the concurrency sweep + cache modes); writes a report + per-op `result_digest`. |
+| `just synthetic-compare-versions <name> <A> <B>` | `run --recording` one bundle against two FalkorDB versions, then `report --diff` (guards `workload_hash` + result digests, writes a Markdown diff across every op/cache-mode/concurrency). |
+| `just synthetic-sanity` | Self-contained tool sanity: record twice (asserts identical `workload_hash`) + `run --recording` at C=1,4 + `report --diff` (incl. the C>1 result verification) against a throwaway Docker FalkorDB. |
+| `just synthetic-baseline <name>` | Save a Criterion C=1 latency baseline (per-op read latencies) for the current build/version (needs a live FalkorDB + `synthetic-bench.toml`). Single-version tracker; prefer record/run/report for cross-version. |
+| `just synthetic-compare <name>` | Compare the current build against a saved baseline — guards via `report --diff` (aborts on workload mismatch), then runs Criterion (needs a live FalkorDB). |
 | `just fmt` / `just fmt-check` | Format Rust in place / check formatting. |
 | `just run -- <args>` | Run the benchmark binary (e.g. `just run -- --help`). |
 | `just ui-install` | `npm ci` in `ui/`. |

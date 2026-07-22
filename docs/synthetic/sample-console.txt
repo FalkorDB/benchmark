@@ -1,38 +1,35 @@
 $ benchmark synthetic record --graph tutorial_demo \
     --op match_by_index,expand_1_hop,aggregate_count --seed 42 --nodes 1000 --edges 5000 \
     --out-dir recordings/demo
-recorded 3 op(s) into recordings/demo (workload_hash sha256:57638f31c17b7be582ca3c15f7e3c4ad050189e4200f5af478f6711658dd5eb5)
+recorded 3 op(s) into recordings/demo (workload_hash sha256:57ec47dffa81b5be2d39fba9b634ea93e79020e2a0ba9f578692d72b351c7606)
 
-$ benchmark synthetic replay --recording recordings/demo \
-    --endpoint falkor://127.0.0.1:6379 --samples 500 --warmup 100 --out recordings/demo/version-a.json
+$ benchmark synthetic run --recording recordings/demo --endpoint falkor://127.0.0.1:6379 \
+    --concurrency 1,4 --samples 500 --warmup 100 --out recordings/demo/version-a.json
 
-synthetic benchmark — endpoint falkor://127.0.0.1:6379  graph tutorial_demo  samples 500  warmup 100  concurrency [1]  seed 42  connection pool(size=1)
+synthetic benchmark — endpoint falkor://127.0.0.1:6379  graph tutorial_demo  samples 500  warmup 100  concurrency [1,4]  seed 42  connection pool(size=1) per worker
 server — falkordb module ver 4.20.1  redis 8.6.3  CACHE_SIZE 25
 client host — bench-host · macOS 26.5.2 Tahoe · Apple M1 Pro (10c/10t) · 16.0 GiB · arm64
-dataset — seed 42  nodes 1000  edges 5000  corpus_hash sha256:57638f31c17b7be582ca3c15f7e3c4ad050189e4200f5af478f6711658dd5eb5
+dataset — seed 42  nodes 1000  edges 5000  workload_hash sha256:57ec47dffa81b5be2d39fba9b634ea93e79020e2a0ba9f578692d72b351c7606
 
 aggregate_count
   [cached — plan reused, execution only]
     C    throughput(ops/s)   server p50/p90/p95/p99             total p50/p90/p95/p99              miss%
-    1              1969     0.089 / 0.113 / 0.126 / 0.145     0.472 / 0.600 / 0.646 / 0.726     0.0  <- knee
-
-expand_1_hop
-  [cached — plan reused, execution only]
+    1              2561     0.080 / 0.096 / 0.102 / 0.115     0.365 / 0.421 / 0.443 / 0.488     0.0
+    4              7792     0.093 / 0.140 / 0.158 / 0.187     0.494 / 0.607 / 0.639 / 0.742     0.0  <- knee
+  [uncached — plan-cache miss each run, execution + compilation]
     C    throughput(ops/s)   server p50/p90/p95/p99             total p50/p90/p95/p99              miss%
-    1              1726     0.089 / 0.133 / 0.146 / 0.175     0.531 / 0.745 / 0.824 / 0.957     0.0  <- knee
+    1              2251     0.141 / 0.169 / 0.179 / 0.198     0.430 / 0.494 / 0.523 / 0.565   100.0
+    4              6506     0.172 / 0.245 / 0.271 / 0.323     0.569 / 0.703 / 0.764 / 0.907   100.0  <- knee
+  compilation_ms (median uncached-cached server time) by level:
+    …(remaining ops omitted for brevity)…
 
-match_by_index
-  [cached — plan reused, execution only]
-    C    throughput(ops/s)   server p50/p90/p95/p99             total p50/p90/p95/p99              miss%
-    1              2615     0.039 / 0.052 / 0.060 / 0.069     0.362 / 0.451 / 0.479 / 0.532     0.0  <- knee
-
-# replay a second version the same way (here shown against the same server), then guard:
-$ benchmark synthetic replay --recording recordings/demo --no-load \
-    --endpoint falkor://127.0.0.1:6379 --samples 500 --warmup 100 --out recordings/demo/version-b.json
-(prints the same per-op summary table as the first replay — omitted here for brevity)
+# run the second version the same way (here: same server, --no-load), then diff:
+$ benchmark synthetic run --recording recordings/demo --no-load --endpoint falkor://127.0.0.1:6379 \
+    --concurrency 1,4 --samples 500 --warmup 100 --out recordings/demo/version-b.json
 report written to recordings/demo/version-b.json
 markdown written to recordings/demo/version-b.md
 
-$ benchmark synthetic baseline-guard \
-    --baseline recordings/demo/version-a.json --current recordings/demo/version-b.json
-baseline guard: OK — same workload, safe to compare
+$ benchmark synthetic report --diff recordings/demo/version-a.json recordings/demo/version-b.json \
+    --out recordings/demo/diff.md
+⚠ baseline and candidate ran the same FalkorDB module version (4.20.1) — there is no version delta to measure
+diff written to recordings/demo/diff.md   # see sample-diff.md

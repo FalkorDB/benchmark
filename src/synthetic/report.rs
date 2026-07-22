@@ -108,16 +108,18 @@ pub struct Meta {
     pub dataset: Option<DatasetInfo>,
 }
 
-/// Provenance for a generated synthetic dataset: its knobs and the `corpus_hash` that identifies
-/// the whole workload (dataset + selected operations + query bodies), so runs are only compared
-/// when they match.
+/// Provenance for a synthetic dataset: its knobs and the `workload_hash` that identifies the whole
+/// workload (dataset + selected operations + query bodies for a generated run; the recorded bundle's
+/// hash for a `--recording` run), so runs are only compared when they match.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DatasetInfo {
     pub seed: u64,
     pub nodes: usize,
     pub edges: usize,
-    /// Algorithm-tagged hash (`sha256:…`) of the full workload; equal iff comparable.
-    pub corpus_hash: String,
+    /// Algorithm-tagged hash (`sha256:…`) of the full workload; equal iff comparable. Read also
+    /// accepts the pre-rename `corpus_hash` key so older reports still deserialize.
+    #[serde(alias = "corpus_hash")]
+    pub workload_hash: String,
 }
 
 /// Latency and cache-health stats for one (operation, cache-mode) measurement.
@@ -171,10 +173,11 @@ pub struct LevelReport {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OperationReport {
     pub levels: Vec<LevelReport>,
-    /// A `sha256:…` digest of this operation's **result cardinality** across its recorded commands
-    /// (present only for a `synthetic replay` run). Two versions that return a different number of
-    /// rows for the same recorded command produce different digests, so a version returning wrong
-    /// or empty results faster can't masquerade as an improvement. `None` for a `synthetic run`.
+    /// A `sha256:…` digest of this operation's **result values** across its recorded commands
+    /// (order-independent within a row set; present only for a `synthetic run --recording` run). Two
+    /// versions that return different values (or a different number of rows) for the same recorded
+    /// command produce different digests, so a version returning wrong or empty results faster can't
+    /// masquerade as an improvement. `None` for a plain `synthetic run`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result_digest: Option<String>,
 }
@@ -293,8 +296,8 @@ impl Report {
         }
         if let Some(d) = &self.meta.dataset {
             out.push_str(&format!(
-                "dataset — seed {}  nodes {}  edges {}  corpus_hash {}\n",
-                d.seed, d.nodes, d.edges, d.corpus_hash
+                "dataset — seed {}  nodes {}  edges {}  workload_hash {}\n",
+                d.seed, d.nodes, d.edges, d.workload_hash
             ));
         }
         for (name, op) in &self.operations {
@@ -366,7 +369,7 @@ impl Report {
                 "| dataset | seed {} · {} nodes · {} edges |\n",
                 d.seed, d.nodes, d.edges
             ));
-            out.push_str(&format!("| corpus_hash | `{}` |\n", md_cell(&d.corpus_hash)));
+            out.push_str(&format!("| workload_hash | `{}` |\n", md_cell(&d.workload_hash)));
         }
 
         for (name, op) in &self.operations {
@@ -380,7 +383,7 @@ impl Report {
 /// Escape a value for a GitHub-flavoured Markdown **table cell**: an unescaped `|` ends the cell
 /// (even inside a code span) and a newline breaks the row, so escape the former and fold the latter
 /// to `<br>`. `\r` is dropped so a CRLF doesn't yield a doubled break.
-fn md_cell(s: &str) -> String {
+pub(crate) fn md_cell(s: &str) -> String {
     s.replace('|', "\\|").replace('\r', "").replace('\n', "<br>")
 }
 
@@ -856,7 +859,7 @@ mod tests {
             seed: 7,
             nodes: 100,
             edges: 200,
-            corpus_hash: "sha256:abc123".to_string(),
+            workload_hash: "sha256:abc123".to_string(),
         });
         // Force an "unknown cache stat" sample so the `~` marker + note render.
         if let Some(op) = r.operations.get_mut("return_const") {
@@ -866,7 +869,7 @@ mod tests {
         }
         let md = r.to_markdown();
         assert!(md.contains("| dataset | seed 7 · 100 nodes · 200 edges |"));
-        assert!(md.contains("| corpus_hash | `sha256:abc123` |"));
+        assert!(md.contains("| workload_hash | `sha256:abc123` |"));
         assert!(md.contains('~'), "unknown-cache miss% is marked with ~");
         assert!(md.contains("known cache stat only"));
     }
@@ -952,11 +955,11 @@ mod tests {
             seed: 42,
             nodes: 1000,
             edges: 5000,
-            corpus_hash: "sha256:abc123".to_string(),
+            workload_hash: "sha256:abc123".to_string(),
         });
         let out = r.to_console();
         assert!(
-            out.contains("dataset — seed 42  nodes 1000  edges 5000  corpus_hash sha256:abc123")
+            out.contains("dataset — seed 42  nodes 1000  edges 5000  workload_hash sha256:abc123")
         );
         // Absent by default (externally-supplied graph).
         assert!(!sample_report().to_console().contains("dataset —"));

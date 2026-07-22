@@ -184,8 +184,9 @@ synthetic-compare name:
     test -f "baselines/{{name}}.json" || { echo "no saved baseline 'baselines/{{name}}.json' — run 'just synthetic-baseline {{name}}' first"; exit 1; }
     cargo run --quiet --bin benchmark -- synthetic run --generate --samples 1 --warmup 0 \
         --concurrency 1 --out "baselines/{{name}}.current.json"
-    cargo run --quiet --bin benchmark -- synthetic baseline-guard \
-        --baseline "baselines/{{name}}.json" --current "baselines/{{name}}.current.json"
+    cargo run --quiet --bin benchmark -- synthetic report \
+        --diff "baselines/{{name}}.json" "baselines/{{name}}.current.json" \
+        --out "baselines/{{name}}.diff.md"
     cargo bench --bench synthetic_ops -- --baseline "{{name}}"
 
 # --- Record / replay: the SAME workload (graph + commands) across FalkorDB versions -----------
@@ -203,9 +204,10 @@ synthetic-record name *args:
     if [ "${1:-}" = "--" ]; then shift; fi
     cargo run --quiet --bin benchmark -- synthetic record --out-dir "recordings/{{name}}" "$@"
 
-# Replay a recorded bundle against an endpoint: load the recorded graph + measure the recorded
-# commands with a fixed-length deterministic runner, writing recordings/<name>/report.json. Extra
-# flags forward to `synthetic replay` (e.g. --graph, --no-load, --samples, --out).
+# Measure a recorded bundle against an endpoint via `run --recording`: load the recorded graph +
+# measure the recorded commands across the concurrency sweep + cache modes, writing
+# recordings/<name>/report.json. Extra flags forward to `synthetic run`
+# (e.g. --concurrency, --cache, --no-load, --samples, --out).
 synthetic-replay name endpoint *args:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -217,27 +219,28 @@ synthetic-replay name endpoint *args:
     for arg in "$@"; do
         case "$arg" in --out|--out=*) has_out=1 ;; esac
     done
-    cmd=(cargo run --quiet --bin benchmark -- synthetic replay \
+    cmd=(cargo run --quiet --bin benchmark -- synthetic run \
         --recording "recordings/{{name}}" --endpoint "{{endpoint}}")
     if [ "$has_out" -eq 0 ]; then
         cmd+=(--out "recordings/{{name}}/report.json")
     fi
     "${cmd[@]}" "$@"
 
-# Compare two FalkorDB versions on the SAME recorded bundle: replay it (load + count-verify) against
-# each endpoint, then GUARD that the workload_hash + per-op result digests match (a version delta is
-# expected and allowed). Record the bundle first with `just synthetic-record <name> …`. Reports land
-# in recordings/<name>/{version-a,version-b}.json for a side-by-side latency read.
+# Compare two FalkorDB versions on the SAME recorded bundle: measure it (load + count-verify) against
+# each endpoint via `run --recording`, then `report --diff` (GUARDS the workload_hash + per-op result
+# digests, then writes a Markdown diff across every op/cache-mode/concurrency). Record the bundle
+# first with `just synthetic-record <name> …`. Outputs land in recordings/<name>/.
 synthetic-compare-versions name endpoint_a endpoint_b:
     #!/usr/bin/env bash
     set -euo pipefail
     test -d "recordings/{{name}}" || { echo "no recording 'recordings/{{name}}' — run 'just synthetic-record {{name}} …' first"; exit 1; }
-    cargo run --quiet --bin benchmark -- synthetic replay --recording "recordings/{{name}}" \
+    cargo run --quiet --bin benchmark -- synthetic run --recording "recordings/{{name}}" \
         --endpoint "{{endpoint_a}}" --out "recordings/{{name}}/version-a.json"
-    cargo run --quiet --bin benchmark -- synthetic replay --recording "recordings/{{name}}" \
+    cargo run --quiet --bin benchmark -- synthetic run --recording "recordings/{{name}}" \
         --endpoint "{{endpoint_b}}" --out "recordings/{{name}}/version-b.json"
-    cargo run --quiet --bin benchmark -- synthetic baseline-guard \
-        --baseline "recordings/{{name}}/version-a.json" --current "recordings/{{name}}/version-b.json"
+    cargo run --quiet --bin benchmark -- synthetic report \
+        --diff "recordings/{{name}}/version-a.json" "recordings/{{name}}/version-b.json" \
+        --out "recordings/{{name}}/diff.md"
 
 # Self-contained sanity check for the synthetic tool itself: spin up a throwaway Docker FalkorDB,
 # RECORD a small workload TWICE (asserting the two workload_hashes are identical — deterministic
@@ -268,13 +271,14 @@ synthetic-sanity:
     hb=$(grep '"workload_hash"' recordings/_sanity_b/manifest.json | sed -E 's/.*"(sha256:[a-f0-9]+)".*/\1/')
     if [ "$ha" != "$hb" ]; then echo "SANITY FAIL: recording is not deterministic ($ha != $hb)"; exit 1; fi
     echo "deterministic recording OK: $ha"
-    # Replay (load) then re-replay (no-load) against the same server, and guard the two.
-    cargo run --quiet --bin benchmark -- synthetic replay --recording recordings/_sanity_a \
-        --endpoint "$endpoint" --samples 300 --warmup 50 --out recordings/_sanity_a/ref.json
-    cargo run --quiet --bin benchmark -- synthetic replay --recording recordings/_sanity_a \
-        --endpoint "$endpoint" --no-load --samples 300 --warmup 50 --out recordings/_sanity_a/cand.json
-    cargo run --quiet --bin benchmark -- synthetic baseline-guard \
-        --baseline recordings/_sanity_a/ref.json --current recordings/_sanity_a/cand.json
+    # Measure (load) then re-measure (no-load) at a small concurrency sweep against the same server,
+    # then report --diff (guards workload_hash + result digests, incl. the C>1 value verification).
+    cargo run --quiet --bin benchmark -- synthetic run --recording recordings/_sanity_a \
+        --endpoint "$endpoint" --concurrency 1,4 --samples 300 --warmup 50 --out recordings/_sanity_a/ref.json
+    cargo run --quiet --bin benchmark -- synthetic run --recording recordings/_sanity_a \
+        --endpoint "$endpoint" --no-load --concurrency 1,4 --samples 300 --warmup 50 --out recordings/_sanity_a/cand.json
+    cargo run --quiet --bin benchmark -- synthetic report \
+        --diff recordings/_sanity_a/ref.json recordings/_sanity_a/cand.json --out recordings/_sanity_a/diff.md
     echo "synthetic-sanity OK"
 
 # === UI (Next.js dashboard in ui/) ===========================================

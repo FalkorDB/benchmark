@@ -3,7 +3,7 @@
 //!
 //! FalkorDB's **version** is the *subject* of a version comparison (a baseline captured on v4.2.1
 //! vs a candidate on v4.3.0), so a version change is *recorded and displayed*, never rejected.
-//! The **workload** — identified by [`corpus_hash`](crate::synthetic::report::DatasetInfo) — is the
+//! The **workload** — identified by [`workload_hash`](crate::synthetic::report::DatasetInfo) — is the
 //! hard gate: a different (or absent) hash means the two runs measured different things and the
 //! latency comparison would be meaningless. Keeping this logic in the library (rather than the
 //! Criterion bench harness) makes it unit-testable.
@@ -18,12 +18,12 @@ use std::collections::BTreeMap;
 pub struct BaselineKey {
     /// Workload fingerprint (dataset knobs + ops in order + query bodies + sampled pools). `None`
     /// for an external graph that couldn't be fingerprinted — such a run can't be safely compared.
-    pub corpus_hash: Option<String>,
+    pub workload_hash: Option<String>,
     /// FalkorDB graph-module version (recorded for display; expected to differ across versions).
     pub module_graph_ver: Option<u64>,
     /// Operator-supplied server image identity, when provided.
     pub server_image: Option<String>,
-    /// Per-op result-cardinality digests (present for `synthetic replay` runs). Compared op-by-op:
+    /// Per-op result-value digests (present for `synthetic run --recording` runs). Compared op-by-op:
     /// two versions must agree, or a wrong/empty-but-faster result could look like a win.
     #[serde(default)]
     pub result_digests: BTreeMap<String, String>,
@@ -33,7 +33,7 @@ impl BaselineKey {
     /// Extract the comparison key from a run's report.
     pub fn from_report(report: &Report) -> Self {
         BaselineKey {
-            corpus_hash: report.meta.dataset.as_ref().map(|d| d.corpus_hash.clone()),
+            workload_hash: report.meta.dataset.as_ref().map(|d| d.workload_hash.clone()),
             module_graph_ver: report.meta.server.module_graph_ver,
             server_image: report.meta.server.server_image.clone(),
             result_digests: report
@@ -56,7 +56,7 @@ pub enum GuardOutcome {
 
 /// Guard a `candidate` run against a saved `baseline` before comparing their latencies.
 ///
-/// The **workload** (`corpus_hash`) is a hard gate — a different or absent hash means the runs
+/// The **workload** (`workload_hash`) is a hard gate — a different or absent hash means the runs
 /// measured different things, so we abort. The FalkorDB **version** is only advisory: comparing
 /// across versions is the whole point, so a version change is recorded (as a `Proceed` with no
 /// warning); identical or placeholder versions produce advisory warnings.
@@ -64,19 +64,19 @@ pub fn guard(
     baseline: &BaselineKey,
     candidate: &BaselineKey,
 ) -> GuardOutcome {
-    match (&baseline.corpus_hash, &candidate.corpus_hash) {
+    match (&baseline.workload_hash, &candidate.workload_hash) {
         (Some(a), Some(b)) if a == b => {}
         (Some(a), Some(b)) => {
             return GuardOutcome::Abort {
                 reason: format!(
-                    "corpus_hash mismatch — the workload changed since the baseline was saved \
+                    "workload_hash mismatch — the workload changed since the baseline was saved \
                      (baseline {a}, candidate {b}); re-save the baseline for the current workload"
                 ),
             };
         }
         _ => {
             return GuardOutcome::Abort {
-                reason: "missing corpus_hash — a comparable baseline needs a generated dataset \
+                reason: "missing workload_hash — a comparable baseline needs a generated dataset \
                          (`--generate`) so the workload can be fingerprinted"
                     .to_string(),
             };
@@ -87,8 +87,8 @@ pub fn guard(
     // candidate must record the *same* digest — otherwise a version returning wrong or empty
     // results faster could masquerade as an improvement. A candidate that is missing a digest the
     // baseline has is also a mismatch (fail closed, matching the docs' "every op" guarantee).
-    // Digests are present for `synthetic replay` runs; a `synthetic run` baseline has none, so the
-    // loop is a no-op there (and such runs already differ on `corpus_hash` above).
+    // Digests are present for `synthetic run --recording` runs; a `synthetic run` baseline has none, so the
+    // loop is a no-op there (and such runs already differ on `workload_hash` above).
     for (op, base_dig) in &baseline.result_digests {
         match candidate.result_digests.get(op) {
             Some(cand_dig) if cand_dig == base_dig => {}
@@ -106,7 +106,7 @@ pub fn guard(
                     reason: format!(
                         "candidate is missing a result digest for op '{op}' that the baseline \
                          recorded — the runs aren't comparable (re-run the candidate with \
-                         `synthetic replay`)"
+                         `synthetic run --recording`)"
                     ),
                 };
             }
@@ -153,7 +153,7 @@ mod tests {
 
     fn key(corpus: Option<&str>, ver: Option<u64>) -> BaselineKey {
         BaselineKey {
-            corpus_hash: corpus.map(|s| s.to_string()),
+            workload_hash: corpus.map(|s| s.to_string()),
             module_graph_ver: ver,
             server_image: None,
             result_digests: BTreeMap::new(),
@@ -165,7 +165,7 @@ mod tests {
         digests: &[(&str, &str)],
     ) -> BaselineKey {
         BaselineKey {
-            corpus_hash: corpus.map(|s| s.to_string()),
+            workload_hash: corpus.map(|s| s.to_string()),
             module_graph_ver: Some(42001),
             server_image: None,
             result_digests: digests
@@ -222,18 +222,18 @@ mod tests {
     }
 
     #[test]
-    fn aborts_on_corpus_hash_mismatch() {
+    fn aborts_on_workload_hash_mismatch() {
         let base = key(Some("sha256:abc"), Some(42001));
         let cand = key(Some("sha256:def"), Some(42001));
         match guard(&base, &cand) {
-            GuardOutcome::Abort { reason } => assert!(reason.contains("corpus_hash mismatch")),
+            GuardOutcome::Abort { reason } => assert!(reason.contains("workload_hash mismatch")),
             other => panic!("expected Abort, got {other:?}"),
         }
     }
 
     #[test]
-    fn aborts_when_a_corpus_hash_is_absent() {
-        // An external graph (no generated dataset) has no corpus_hash ⇒ unsafe to compare.
+    fn aborts_when_a_workload_hash_is_absent() {
+        // An external graph (no generated dataset) has no workload_hash ⇒ unsafe to compare.
         assert!(matches!(
             guard(&key(None, Some(42001)), &key(Some("sha256:abc"), Some(42001))),
             GuardOutcome::Abort { .. }
@@ -285,13 +285,13 @@ mod tests {
     #[test]
     fn warns_on_server_image_change() {
         let base = BaselineKey {
-            corpus_hash: Some("sha256:abc".to_string()),
+            workload_hash: Some("sha256:abc".to_string()),
             module_graph_ver: Some(42001),
             server_image: Some("falkordb@sha256:aaa".to_string()),
             result_digests: BTreeMap::new(),
         };
         let cand = BaselineKey {
-            corpus_hash: Some("sha256:abc".to_string()),
+            workload_hash: Some("sha256:abc".to_string()),
             module_graph_ver: Some(42002),
             server_image: Some("falkordb@sha256:bbb".to_string()),
             result_digests: BTreeMap::new(),

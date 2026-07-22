@@ -19,6 +19,7 @@ pub mod catalog;
 pub mod config;
 pub mod baseline;
 pub mod dataset;
+pub mod diff;
 pub mod engine;
 pub mod host;
 pub mod op_runner;
@@ -51,6 +52,7 @@ use rand::rngs::StdRng;
 use rand::SeedableRng;
 use serde::de::{self, Deserializer};
 use serde::Deserialize;
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -256,15 +258,16 @@ pub enum CacheMode {
 /// invocation id (disjoint per worker and per concurrency level), so no two invocations anywhere in
 /// the sweep ever collide.
 fn render_cypher(
-    query: &Query,
+    base: &str,
     mode: CacheMode,
     run_token: u64,
     uid: u64,
-) -> String {
-    let base = query.to_cypher();
+) -> Cow<'_, str> {
     match mode {
-        CacheMode::Cached => base,
-        CacheMode::Uncached => format!("{} /* co{:x}-{} */", base, run_token, uid),
+        // Cached mode sends the base verbatim — borrow it (no per-invocation allocation on the
+        // timed path); only uncached allocates to append its unique cache-buster comment.
+        CacheMode::Cached => Cow::Borrowed(base),
+        CacheMode::Uncached => Cow::Owned(format!("{} /* co{:x}-{} */", base, run_token, uid)),
     }
 }
 
@@ -493,11 +496,15 @@ pub async fn run(config: &Config) -> BenchmarkResult<Report> {
             None => dataset::corpus_fingerprint(&corpus),
         };
         op_fingerprints.push((op, fingerprint));
+        // Pre-render reads to their cached-mode base strings so the engine measures strings (writes
+        // render per-invocation, so this is unused for them). This is the same string a recorded
+        // bundle stores, so a generated run and a `--recording` run measure identically.
+        let rendered: Arc<Vec<String>> = Arc::new(corpus.iter().map(|q| q.to_cypher()).collect());
         let op_report = measure_op(
             config,
             &concurrency,
             &op_spec,
-            Arc::clone(&corpus),
+            rendered,
             run_token,
             &uid_alloc,
             client_deadline,
@@ -512,7 +519,7 @@ pub async fn run(config: &Config) -> BenchmarkResult<Report> {
         seed: spec.seed,
         nodes: spec.nodes,
         edges: spec.edges,
-        corpus_hash: dataset::corpus_hash(
+        workload_hash: dataset::corpus_hash(
             spec,
             config.seed,
             CORPUS_SIZE,
@@ -546,7 +553,7 @@ pub async fn run(config: &Config) -> BenchmarkResult<Report> {
 
 /// Validate and canonicalize the configured concurrency sweep: non-empty, every level ≥ 1,
 /// deduplicated and sorted ascending (so the curve reads low → high and each `C` runs once).
-fn normalize_concurrency(concurrency: &[usize]) -> BenchmarkResult<Vec<usize>> {
+pub(crate) fn normalize_concurrency(concurrency: &[usize]) -> BenchmarkResult<Vec<usize>> {
     if concurrency.is_empty() {
         return Err(OtherError(
             "concurrency must list at least one level (e.g. --concurrency 1,4,16)".to_string(),
@@ -676,9 +683,10 @@ pub(crate) fn is_empty_graph_key(msg: &str) -> bool {
 /// Where a [`GraphWorker`] gets each invocation's query: a read cycles a shared corpus; a write
 /// renders a fresh query from its own [`WriteScratch`] and runs the untimed reset/verification.
 enum WorkerSource {
-    /// A read op: cycle the shared corpus from a decorrelating offset.
+    /// A read op: cycle the shared **pre-rendered** corpus (cached-mode base strings) from a
+    /// decorrelating offset. Uncached mode decorates each base with a unique comment.
     Read {
-        corpus: Arc<Vec<Query>>,
+        corpus: Arc<Vec<String>>,
         corpus_offset: usize,
     },
     /// A write op (Part 5): the plan's per-invocation render + the worker's isolated scratch.
@@ -750,7 +758,9 @@ impl OpInvoker for GraphWorker {
                     }
                 }
                 let base = (plan.render)(&scratch, seq)?;
-                let cypher = render_cypher(&base, mode, run_token, uid);
+                // Bind the owned rendered string so cached mode can borrow it (no second copy).
+                let rendered = base.to_cypher();
+                let cypher = render_cypher(&rendered, mode, run_token, uid);
                 let sample = run_and_drain(
                     &mut self.graph,
                     kind,
@@ -770,11 +780,11 @@ impl OpInvoker for GraphWorker {
 /// Measure one operation across the concurrency sweep, under every requested cache mode, and derive
 /// its per-level compilation cost.
 #[allow(clippy::too_many_arguments)]
-async fn measure_op(
+pub(crate) async fn measure_op(
     config: &Config,
     concurrency: &[usize],
     op_spec: &OperationSpec,
-    corpus: Arc<Vec<Query>>,
+    corpus: Arc<Vec<String>>,
     run_token: u64,
     uid_alloc: &AtomicU64,
     client_deadline: Duration,
@@ -867,7 +877,7 @@ async fn measure_level(
     config: &Config,
     concurrency: usize,
     op_spec: &OperationSpec,
-    corpus: &Arc<Vec<Query>>,
+    corpus: &Arc<Vec<String>>,
     mode: CacheMode,
     run_token: u64,
     uid_alloc: &AtomicU64,
@@ -1049,7 +1059,7 @@ pub async fn run_and_report(config: &Config) -> BenchmarkResult<()> {
 }
 
 /// Print nothing extra, but write the JSON report to `out` **and** the pasteable Markdown alongside
-/// it (`<out>.md`). Shared by [`run_and_report`] and `synthetic replay`.
+/// it (`<out>.md`). Shared by [`run_and_report`] and the `run --recording` path.
 pub(crate) async fn write_report(
     report: &crate::synthetic::report::Report,
     out: &str,
@@ -1099,7 +1109,40 @@ pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkRes
             generate,
             nodes,
             edges,
+            recording,
+            no_load,
         } => {
+            // A recorded workload takes a different, exclusive path: measure the recorded commands
+            // across the concurrency sweep + cache modes (no generation/probing).
+            if let Some(recording) = recording {
+                if config_path.is_some() || generate || all_reads || !ops.is_empty() || nodes.is_some() || edges.is_some() || seed.is_some() {
+                    return Err(OtherError(
+                        "--recording measures a recorded bundle and can't be combined with \
+                         --config/--generate/--op/--all-reads/--nodes/--edges/--seed (the bundle \
+                         defines the workload; pass --endpoint/--graph/--concurrency/--cache directly)"
+                            .to_string(),
+                    ));
+                }
+                let replay_config = replay::ReplayConfig {
+                    recording_dir: std::path::PathBuf::from(recording),
+                    endpoint: endpoint.unwrap_or_else(|| "falkor://127.0.0.1:6379".to_string()),
+                    graph,
+                    load: !no_load,
+                    samples: samples.unwrap_or(1000),
+                    warmup: warmup.unwrap_or(200),
+                    concurrency: if concurrency.is_empty() {
+                        DEFAULT_CONCURRENCY.to_vec()
+                    } else {
+                        concurrency
+                    },
+                    cache: cache.unwrap_or(CacheSelection::Both),
+                    server_timeout_ms: server_timeout_ms.unwrap_or(5_000),
+                    client_deadline_ms: client_deadline_ms.unwrap_or(6_000),
+                    out: out.unwrap_or_else(|| "synthetic-report.json".to_string()),
+                    server_image,
+                };
+                return replay::run_and_report(&replay_config).await;
+            }
             let overrides = config::CliOverrides {
                 endpoint,
                 graph,
@@ -1179,45 +1222,20 @@ pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkRes
             );
             Ok(())
         }
-        crate::cli::SyntheticCommands::Replay {
-            recording,
-            endpoint,
-            graph,
-            no_load,
-            samples,
-            warmup,
-            server_timeout_ms,
-            client_deadline_ms,
-            out,
-            server_image,
-        } => {
-            let replay_config = replay::ReplayConfig {
-                recording_dir: std::path::PathBuf::from(recording),
-                endpoint: endpoint.unwrap_or_else(|| "falkor://127.0.0.1:6379".to_string()),
-                graph,
-                load: !no_load,
-                samples: samples.unwrap_or(1000),
-                warmup: warmup.unwrap_or(200),
-                server_timeout_ms: server_timeout_ms.unwrap_or(5_000),
-                client_deadline_ms: client_deadline_ms.unwrap_or(6_000),
-                out: out.unwrap_or_else(|| "synthetic-report.json".to_string()),
-                server_image,
-            };
-            replay::run_and_report(&replay_config).await
-        }
-        crate::cli::SyntheticCommands::BaselineGuard { baseline, current } => {
-            baseline_guard(&baseline, &current)
+        crate::cli::SyntheticCommands::Report { input, diff, out } => {
+            report_command(input, diff, out).await
         }
     }
 }
 
-/// Guard a version comparison: load the saved baseline and current run reports, compare their
-/// workload identity, and **abort** (return an error ⇒ non-zero exit) when the workloads differ, so
-/// `synthetic-compare` never compares latencies across mismatched benchmarks. Advisory notes (a
-/// version/image change, an identical or placeholder version) are printed but do not abort.
-fn baseline_guard(
-    baseline_path: &str,
-    current_path: &str,
+/// `synthetic report`: re-render a saved report (`input`) to console + Markdown, or **diff** two
+/// reports (`diff = [A, B]`). The diff first runs the [`baseline`] guard (workload_hash + result
+/// digests) and **aborts** on a mismatch, then writes a Markdown diff to `out` (default
+/// `synthetic-diff.md`). Advisory guard notes (version/image change) are printed but don't abort.
+async fn report_command(
+    input: Option<String>,
+    diff: Vec<String>,
+    out: Option<String>,
 ) -> BenchmarkResult<()> {
     let load = |path: &str| -> BenchmarkResult<crate::synthetic::report::Report> {
         let text = std::fs::read_to_string(path)
@@ -1225,20 +1243,43 @@ fn baseline_guard(
         serde_json::from_str(&text)
             .map_err(|e| OtherError(format!("invalid synthetic report '{}': {}", path, e)))
     };
-    let baseline = baseline::BaselineKey::from_report(&load(baseline_path)?);
-    let current = baseline::BaselineKey::from_report(&load(current_path)?);
 
-    match baseline::guard(&baseline, &current) {
-        baseline::GuardOutcome::Proceed { warnings } => {
-            for w in &warnings {
-                eprintln!("⚠ {}", w);
+    if diff.len() == 2 {
+        let a = load(&diff[0])?;
+        let b = load(&diff[1])?;
+        let warnings = match baseline::guard(
+            &baseline::BaselineKey::from_report(&a),
+            &baseline::BaselineKey::from_report(&b),
+        ) {
+            baseline::GuardOutcome::Proceed { warnings } => warnings,
+            baseline::GuardOutcome::Abort { reason } => {
+                return Err(OtherError(format!("cannot diff — {}", reason)))
             }
-            println!("baseline guard: OK — same workload, safe to compare");
+        };
+        for w in &warnings {
+            eprintln!("⚠ {}", w);
+        }
+        let md = diff::diff_markdown(&a, &b, &warnings);
+        let out_path = out.unwrap_or_else(|| "synthetic-diff.md".to_string());
+        tokio::fs::write(&out_path, &md).await?;
+        println!("{}", md);
+        println!("diff written to {}", out_path);
+        return Ok(());
+    }
+
+    match input {
+        Some(path) => {
+            let report = load(&path)?;
+            println!("{}", report.to_console());
+            if let Some(out_path) = out {
+                tokio::fs::write(&out_path, report.to_markdown()).await?;
+                println!("markdown written to {}", out_path);
+            }
             Ok(())
         }
-        baseline::GuardOutcome::Abort { reason } => {
-            Err(OtherError(format!("baseline guard: ABORT — {}", reason)))
-        }
+        None => Err(OtherError(
+            "report needs a report path to re-render, or `--diff <A.json> <B.json>`".to_string(),
+        )),
     }
 }
 
@@ -1376,16 +1417,17 @@ mod tests {
             .text("MATCH (n:User {id: $id}) RETURN n.id")
             .param("id", 7)
             .build();
+        let base = q.to_cypher();
         // Cached: body verbatim (plan reused), no uniqueness token.
-        let c0 = render_cypher(&q, CacheMode::Cached, 0xABCD, 0);
-        let c1 = render_cypher(&q, CacheMode::Cached, 0xABCD, 1);
+        let c0 = render_cypher(&base, CacheMode::Cached, 0xABCD, 0);
+        let c1 = render_cypher(&base, CacheMode::Cached, 0xABCD, 1);
         assert_eq!(c0, c1);
         assert!(!c0.contains("/* co"));
         assert!(c0.contains("RETURN n.id"));
         // Uncached: a unique per-invocation comment ⇒ distinct cache key; the run_token keeps it apart
         // from other runs.
-        let u0 = render_cypher(&q, CacheMode::Uncached, 0xABCD, 0);
-        let u1 = render_cypher(&q, CacheMode::Uncached, 0xABCD, 1);
+        let u0 = render_cypher(&base, CacheMode::Uncached, 0xABCD, 0);
+        let u1 = render_cypher(&base, CacheMode::Uncached, 0xABCD, 1);
         assert_ne!(u0, u1);
         assert!(u0.contains("/* coabcd-0 */"));
         assert!(u1.contains("/* coabcd-1 */"));
@@ -1490,6 +1532,8 @@ mod tests {
             generate: false,
             nodes: None,
             edges: None,
+            recording: None,
+            no_load: false,
         };
         assert!(run_command(command).await.is_err());
         let _ = std::fs::remove_file(&cfg_path);
@@ -1529,6 +1573,8 @@ mod tests {
             generate: false,
             nodes: None,
             edges: None,
+            recording: None,
+            no_load: false,
         };
         let err = run_command(command).await.expect_err("no ops ⇒ error");
         assert!(
@@ -1536,6 +1582,47 @@ mod tests {
             "expected a no-operations error, got: {err:?}"
         );
         let _ = std::fs::remove_file(&cfg_path);
+    }
+
+    #[tokio::test]
+    async fn run_recording_rejects_conflicting_flags() {
+        // --recording is exclusive with generate/probe knobs; the conflict is caught before any I/O.
+        let command = crate::cli::SyntheticCommands::Run {
+            config: None,
+            endpoint: None,
+            graph: None,
+            ops: vec![],
+            all_reads: false,
+            samples: None,
+            warmup: None,
+            concurrency: vec![],
+            reset_every: None,
+            seed: None,
+            cache: None,
+            server_timeout_ms: None,
+            client_deadline_ms: None,
+            out: None,
+            server_image: None,
+            generate: true,
+            nodes: None,
+            edges: None,
+            recording: Some("/nonexistent/rec".to_string()),
+            no_load: false,
+        };
+        let err = run_command(command).await.expect_err("recording + generate ⇒ error");
+        assert!(format!("{err}").contains("--recording"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn report_requires_input_or_diff() {
+        let err = run_command(crate::cli::SyntheticCommands::Report {
+            input: None,
+            diff: vec![],
+            out: None,
+        })
+        .await
+        .expect_err("report with no args ⇒ error");
+        assert!(format!("{err}").contains("report needs"), "got: {err}");
     }
 
     #[test]
@@ -1566,27 +1653,33 @@ mod tests {
             p.to_string_lossy().into_owned()
         };
         let base = write_report("sha256:same", 42001);
-        // Same workload + same version ⇒ guard proceeds with an advisory warning (exercises the
-        // warning-print path).
+        // Same workload + same version ⇒ guard proceeds (report --diff succeeds + writes a diff).
         let ok = write_report("sha256:same", 42001);
-        assert!(run_command(crate::cli::SyntheticCommands::BaselineGuard {
-            baseline: base.clone(),
-            current: ok.clone(),
+        let diff_out = dir
+            .join(format!("bg-diff-{}.md", std::process::id()))
+            .to_string_lossy()
+            .into_owned();
+        assert!(run_command(crate::cli::SyntheticCommands::Report {
+            input: None,
+            diff: vec![base.clone(), ok.clone()],
+            out: Some(diff_out.clone()),
         })
         .await
         .is_ok());
-        // Different workload ⇒ guard aborts.
+        // Different workload ⇒ guard aborts the diff.
         let bad = write_report("sha256:different", 42002);
-        let err = run_command(crate::cli::SyntheticCommands::BaselineGuard {
-            baseline: base.clone(),
-            current: bad.clone(),
+        let err = run_command(crate::cli::SyntheticCommands::Report {
+            input: None,
+            diff: vec![base.clone(), bad.clone()],
+            out: Some(diff_out.clone()),
         })
         .await
-        .expect_err("corpus_hash mismatch must abort");
-        assert!(format!("{err}").contains("corpus_hash mismatch"));
+        .expect_err("workload_hash mismatch must abort");
+        assert!(format!("{err}").contains("workload_hash mismatch"));
         for p in [base, ok, bad] {
             let _ = std::fs::remove_file(p);
         }
+        let _ = std::fs::remove_file(&diff_out);
     }
 
     #[test]
