@@ -65,6 +65,11 @@ jobs:
     runs-on: ubuntu-latest
     # Bound the job so a stalled Docker pull or a benchmark deadlock can't run for hours.
     timeout-minutes: 20
+    # The default token is read-only (top-level `permissions`); this job also upserts a sticky PR
+    # comment with the A/B diff, which needs pull-requests: write.
+    permissions:
+      contents: read
+      pull-requests: write
 
     steps:
       - name: Checkout code
@@ -88,6 +93,41 @@ jobs:
 
       # Runs the recorded workload (all read ops) twice against the same FalkorDB across the full
       # concurrency sweep + both cache modes and fails if the two runs diverge (workload_hash or any
-      # per-op result digest differs). The recipe manages its own throwaway FalkorDB container.
+      # per-op result digest differs). The recipe manages its own throwaway FalkorDB container and
+      # writes the PR-ready A/B report to recordings/verify-report.md.
       - name: Verify no run-to-run divergence
         run: just synthetic-verify
+
+      - name: Publish the A/B diff to the job summary
+        if: ${{ always() }}
+        run: |
+          if [ -s recordings/verify-report.md ]; then
+            cat recordings/verify-report.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upsert the A/B diff as a sticky PR comment
+        if: ${{ always() && github.event_name == 'pull_request' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          file=recordings/verify-report.md
+          if [ ! -s "$file" ]; then
+            echo "no verify report (the divergence gate failed earlier); skipping comment"
+            exit 0
+          fi
+          # Posting is best-effort: fork PRs get a read-only GITHUB_TOKEN, so a 403 here must not
+          # fail the job (the report is still in the job summary above).
+          warn() { echo "::warning::could not post the synthetic-verify comment (read-only token on a fork PR?); see the job summary"; exit 0; }
+          marker='<!-- synthetic-verify -->'
+          id="$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" --paginate \
+            --jq "map(select(.body | contains(\"${marker}\"))) | .[0].id // empty")" || warn
+          body="$(cat "$file")"
+          if [ -n "$id" ]; then
+            gh api -X PATCH "repos/${GITHUB_REPOSITORY}/issues/comments/${id}" -f body="$body" >/dev/null || warn
+            echo "updated sticky comment ${id}"
+          else
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" -f body="$body" >/dev/null || warn
+            echo "created sticky comment"
+          fi

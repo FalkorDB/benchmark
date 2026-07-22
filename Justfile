@@ -326,19 +326,26 @@ synthetic-verify:
     cargo run --quiet --bin benchmark -- synthetic report --diff \
         recordings/_verify/run-a.json recordings/_verify/run-b.json --out recordings/_verify/diff.md
     echo "synthetic-verify OK — no divergence across all ops × concurrency $sweep × cached/uncached"
-    # In CI, surface the per-op diff (A vs B, same server) on the job Summary page so the
-    # latency/throughput values are viewable straight from the PR checks, not just the raw log.
-    if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
-        {
-            echo "## Synthetic non-divergence — \`report --diff\` (run A vs run B, same FalkorDB)"
-            echo
-            echo "Identical workload run twice on one server; deltas are pure run-to-run noise (the gate only fails if a result digest or the workload_hash differs)."
-            echo
-            cat recordings/_verify/diff.md
-        } >> "$GITHUB_STEP_SUMMARY"
-    fi
-    # Clean up the bundle + reports only on success; on failure the trap leaves them (and only
-    # tears down the container) so the run JSONs and diff.md can be inspected or uploaded.
+    # Assemble a PR-ready report: a sticky-comment marker + a short note + the diff. The metadata
+    # header (module, workload_hash, samples) stays visible; the per-op tables are collapsed so the
+    # sticky comment is compact. The workflow publishes recordings/verify-report.md to the job
+    # summary AND upserts it as a sticky PR comment; the raw bundle is then dropped (on failure the
+    # trap leaves it to inspect).
+    awk '/^## `/{p=1} {print > ("recordings/_verify/" (p ? "detail" : "hdr") ".md")}' recordings/_verify/diff.md
+    {
+        echo '<!-- synthetic-verify -->'
+        echo "> 🔁 **Synthetic non-divergence — same-machine A/B.** The recorded workload (every read op) ran **twice** against the same FalkorDB, back-to-back on one machine, across concurrency \`$sweep\` × cached/uncached. The gate fails only if a per-op result digest or the \`workload_hash\` differs — so the latency deltas below are same-machine noise, not a regression."
+        echo
+        cat recordings/_verify/hdr.md
+        echo '<details>'
+        echo '<summary>Per-op A/B — latency (p50/p90/p95/p99) &amp; throughput, every read op × concurrency × cached/uncached</summary>'
+        echo
+        cat recordings/_verify/detail.md
+        echo
+        echo '</details>'
+    } > recordings/verify-report.md
+    # Clean up the bundle + run JSONs only on success (keep verify-report.md); on failure the trap
+    # leaves everything (and only tears down the container) for inspection.
     rm -rf recordings/_verify
 
 # === UI (Next.js dashboard in ui/) ===========================================

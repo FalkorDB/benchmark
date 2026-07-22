@@ -466,7 +466,8 @@ just synthetic-compare-versions demo falkor://127.0.0.1:6379 falkor://127.0.0.1:
   (`--op all`, medium dataset) and runs `run --recording` **twice** against the same throwaway
   FalkorDB across the full concurrency sweep + both cache modes, failing if `report --diff` finds a
   different `workload_hash` or any per-op result digest — i.e. the two runs on one machine must not
-  diverge. Latency is not asserted.
+  diverge. Latency is not asserted. The CI job publishes the A/B report to the job summary and
+  upserts it as a **sticky PR comment** so the diff is viewable inline in the PR.
 - `recordings/` is git-ignored (regenerable bundles).
 
 #### Version-comparison baselines (Criterion, C=1)
