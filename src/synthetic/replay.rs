@@ -203,13 +203,9 @@ async fn measure_op(
     }
     let st = config.server_timeout_ms;
 
-    // Prime the plan cache so the first measured iteration isn't a compile.
-    run_and_drain(graph, QueryType::Read, &cyphers[0], st, client_deadline)
-        .await
-        .map_err(|e| OtherError(format!("priming '{}': {}", op.as_str(), e)))?;
-
     // Untimed cardinality pass over every recorded command (in order) → the result digest that the
-    // guard uses as a correctness gate.
+    // guard uses as a correctness gate. This also primes the plan cache for *every* command (so the
+    // measured cycle below never pays a first-time compile), which is why there's no separate prime.
     let mut cardinalities = Vec::with_capacity(cyphers.len());
     for cypher in cyphers {
         let sample = run_and_drain(graph, QueryType::Read, cypher, st, client_deadline)
