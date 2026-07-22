@@ -23,14 +23,25 @@ fn parse_op_selector(s: &str) -> Result<OpSelector, String> {
     }
 }
 
-/// Expand `--op` selectors to concrete operations: if any selector is [`OpSelector::All`], every
-/// read op; otherwise the named ops (in order). Empty input stays empty (no `--op` given).
+/// Expand `--op` selectors to concrete operations. [`OpSelector::All`] contributes every read op
+/// (in canonical order); explicitly named ops are kept too, so a write op listed alongside `all`
+/// (e.g. `--op all,create_node` on `run`) is **not** silently dropped. Duplicates are removed,
+/// preserving first-occurrence order. Empty input stays empty (no `--op` given).
 pub fn expand_op_selectors(selectors: &[OpSelector]) -> Vec<OpName> {
-    let mut ops = Vec::with_capacity(selectors.len());
+    let mut ops: Vec<OpName> = Vec::new();
+    let push_unique = |op: OpName, ops: &mut Vec<OpName>| {
+        if !ops.contains(&op) {
+            ops.push(op);
+        }
+    };
     for selector in selectors {
         match selector {
-            OpSelector::All => return OpName::all_reads(),
-            OpSelector::One(op) => ops.push(*op),
+            OpSelector::All => {
+                for op in OpName::all_reads() {
+                    push_unique(op, &mut ops);
+                }
+            }
+            OpSelector::One(op) => push_unique(*op, &mut ops),
         }
     }
     ops
@@ -564,15 +575,27 @@ mod tests {
     }
 
     #[test]
-    fn expand_op_selectors_all_wins_names_preserved_empty_stays_empty() {
-        // `all` anywhere expands to every read op.
-        let all = expand_op_selectors(&[OpSelector::One(OpName::MatchByIndex), OpSelector::All]);
-        assert_eq!(all, OpName::all_reads());
-        // Named ops preserved in order.
+    fn expand_op_selectors_merges_dedups_and_keeps_explicit_ops() {
+        // `all` alone expands to every read op in canonical order.
+        assert_eq!(expand_op_selectors(&[OpSelector::All]), OpName::all_reads());
+        // A read op already covered by `all` is not duplicated.
+        assert_eq!(
+            expand_op_selectors(&[OpSelector::All, OpSelector::One(OpName::MatchByIndex)]),
+            OpName::all_reads()
+        );
+        // A write op listed alongside `all` is kept (not silently dropped) — appended after reads.
+        let mut expected = OpName::all_reads();
+        expected.push(OpName::CreateNode);
+        assert_eq!(
+            expand_op_selectors(&[OpSelector::All, OpSelector::One(OpName::CreateNode)]),
+            expected
+        );
+        // Named ops preserved in first-occurrence order, with duplicates removed.
         assert_eq!(
             expand_op_selectors(&[
                 OpSelector::One(OpName::Expand1Hop),
-                OpSelector::One(OpName::MatchByIndex)
+                OpSelector::One(OpName::MatchByIndex),
+                OpSelector::One(OpName::Expand1Hop),
             ]),
             vec![OpName::Expand1Hop, OpName::MatchByIndex]
         );
