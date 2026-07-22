@@ -11,6 +11,7 @@ pub struct Cli {
     pub command: Commands,
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand, Debug)]
 pub enum Commands {
     #[command(arg_required_else_help = true)]
@@ -332,6 +333,16 @@ pub enum SyntheticCommands {
         nodes: Option<usize>,
         #[arg(long, help = "dataset edge count, must be >= nodes (with --generate)")]
         edges: Option<usize>,
+        #[arg(
+            long = "recording",
+            help = "measure a RECORDED workload bundle (from `synthetic record`) instead of generating/probing: loads the recorded graph, then measures the recorded commands across --concurrency + --cache. Conflicts with --generate/--op/--all-reads/--nodes/--edges/--seed."
+        )]
+        recording: Option<String>,
+        #[arg(
+            long = "no-load",
+            help = "with --recording: skip loading the recorded graph, only count-verify the already-loaded graph (load-once / run-many)."
+        )]
+        no_load: bool,
     },
     #[command(about = "list the available operations")]
     ListOps,
@@ -376,57 +387,24 @@ pub enum SyntheticCommands {
         out_dir: String,
     },
     #[command(
-        about = "replay a recorded bundle against an endpoint: load the recorded graph + measure the recorded commands with a fixed-length deterministic runner"
+        about = "render a saved synthetic report, or DIFF two of them: `report <run.json>` re-renders console+markdown; `report --diff <A.json> <B.json>` guards (workload_hash + result digests) then writes a Markdown diff across every op/cache-mode/concurrency"
     )]
-    Replay {
+    Report {
+        #[arg(help = "a saved synthetic report JSON to re-render (console + Markdown)")]
+        input: Option<String>,
         #[arg(
-            long = "recording",
-            help = "path to a recording bundle directory (produced by `synthetic record`)"
+            long = "diff",
+            num_args = 2,
+            value_names = ["A_JSON", "B_JSON"],
+            conflicts_with = "input",
+            help = "diff two saved reports A and B (guards that they measured the same workload, then writes the diff)"
         )]
-        recording: String,
-        #[arg(long, help = "FalkorDB endpoint (default falkor://127.0.0.1:6379)")]
-        endpoint: Option<String>,
+        diff: Vec<String>,
         #[arg(
             long,
-            help = "graph key to load into / measure against (default: the recording's graph)"
-        )]
-        graph: Option<String>,
-        #[arg(
-            long = "no-load",
-            help = "skip loading the recorded graph; only count-verify the already-loaded graph (for load-once / run-many). DESTRUCTIVE without it: replay drops+reloads the graph."
-        )]
-        no_load: bool,
-        #[arg(long, help = "measured invocations per operation (default 1000)")]
-        samples: Option<usize>,
-        #[arg(long, help = "warm-up invocations per operation, discarded (default 200)")]
-        warmup: Option<usize>,
-        #[arg(
-            long,
-            help = "FalkorDB server-side per-query timeout in ms (default 5000)"
-        )]
-        server_timeout_ms: Option<i64>,
-        #[arg(long, help = "client-side deadline per query in ms (default 6000)")]
-        client_deadline_ms: Option<u64>,
-        #[arg(
-            long,
-            help = "path to write the JSON report (default synthetic-report.json)"
+            help = "with --diff: path to write the Markdown diff (default synthetic-diff.md)"
         )]
         out: Option<String>,
-        #[arg(
-            long,
-            env = "FALKOR_SERVER_IMAGE",
-            help = "operator-supplied server image identity (e.g. falkordb/falkordb:v4.2.1@sha256:...), recorded verbatim"
-        )]
-        server_image: Option<String>,
-    },
-    #[command(
-        about = "guard a version comparison: abort if the saved baseline and the current run measured different workloads (corpus_hash mismatch)"
-    )]
-    BaselineGuard {
-        #[arg(long, help = "path to the saved baseline's synthetic report JSON")]
-        baseline: String,
-        #[arg(long, help = "path to the current run's synthetic report JSON")]
-        current: String,
     },
 }
 

@@ -19,6 +19,7 @@ pub mod catalog;
 pub mod config;
 pub mod baseline;
 pub mod dataset;
+pub mod diff;
 pub mod engine;
 pub mod host;
 pub mod op_runner;
@@ -1103,7 +1104,40 @@ pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkRes
             generate,
             nodes,
             edges,
+            recording,
+            no_load,
         } => {
+            // A recorded workload takes a different, exclusive path: measure the recorded commands
+            // across the concurrency sweep + cache modes (no generation/probing).
+            if let Some(recording) = recording {
+                if generate || all_reads || !ops.is_empty() || nodes.is_some() || edges.is_some() || seed.is_some() {
+                    return Err(OtherError(
+                        "--recording measures a recorded bundle and can't be combined with \
+                         --generate/--op/--all-reads/--nodes/--edges/--seed (the bundle defines the \
+                         workload)"
+                            .to_string(),
+                    ));
+                }
+                let replay_config = replay::ReplayConfig {
+                    recording_dir: std::path::PathBuf::from(recording),
+                    endpoint: endpoint.unwrap_or_else(|| "falkor://127.0.0.1:6379".to_string()),
+                    graph,
+                    load: !no_load,
+                    samples: samples.unwrap_or(1000),
+                    warmup: warmup.unwrap_or(200),
+                    concurrency: if concurrency.is_empty() {
+                        DEFAULT_CONCURRENCY.to_vec()
+                    } else {
+                        concurrency
+                    },
+                    cache: cache.unwrap_or(CacheSelection::Both),
+                    server_timeout_ms: server_timeout_ms.unwrap_or(5_000),
+                    client_deadline_ms: client_deadline_ms.unwrap_or(6_000),
+                    out: out.unwrap_or_else(|| "synthetic-report.json".to_string()),
+                    server_image,
+                };
+                return replay::run_and_report(&replay_config).await;
+            }
             let overrides = config::CliOverrides {
                 endpoint,
                 graph,
@@ -1183,47 +1217,20 @@ pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkRes
             );
             Ok(())
         }
-        crate::cli::SyntheticCommands::Replay {
-            recording,
-            endpoint,
-            graph,
-            no_load,
-            samples,
-            warmup,
-            server_timeout_ms,
-            client_deadline_ms,
-            out,
-            server_image,
-        } => {
-            let replay_config = replay::ReplayConfig {
-                recording_dir: std::path::PathBuf::from(recording),
-                endpoint: endpoint.unwrap_or_else(|| "falkor://127.0.0.1:6379".to_string()),
-                graph,
-                load: !no_load,
-                samples: samples.unwrap_or(1000),
-                warmup: warmup.unwrap_or(200),
-                concurrency: vec![1],
-                cache: CacheSelection::Both,
-                server_timeout_ms: server_timeout_ms.unwrap_or(5_000),
-                client_deadline_ms: client_deadline_ms.unwrap_or(6_000),
-                out: out.unwrap_or_else(|| "synthetic-report.json".to_string()),
-                server_image,
-            };
-            replay::run_and_report(&replay_config).await
-        }
-        crate::cli::SyntheticCommands::BaselineGuard { baseline, current } => {
-            baseline_guard(&baseline, &current)
+        crate::cli::SyntheticCommands::Report { input, diff, out } => {
+            report_command(input, diff, out).await
         }
     }
 }
 
-/// Guard a version comparison: load the saved baseline and current run reports, compare their
-/// workload identity, and **abort** (return an error ⇒ non-zero exit) when the workloads differ, so
-/// `synthetic-compare` never compares latencies across mismatched benchmarks. Advisory notes (a
-/// version/image change, an identical or placeholder version) are printed but do not abort.
-fn baseline_guard(
-    baseline_path: &str,
-    current_path: &str,
+/// `synthetic report`: re-render a saved report (`input`) to console + Markdown, or **diff** two
+/// reports (`diff = [A, B]`). The diff first runs the [`baseline`] guard (workload_hash + result
+/// digests) and **aborts** on a mismatch, then writes a Markdown diff to `out` (default
+/// `synthetic-diff.md`). Advisory guard notes (version/image change) are printed but don't abort.
+async fn report_command(
+    input: Option<String>,
+    diff: Vec<String>,
+    out: Option<String>,
 ) -> BenchmarkResult<()> {
     let load = |path: &str| -> BenchmarkResult<crate::synthetic::report::Report> {
         let text = std::fs::read_to_string(path)
@@ -1231,20 +1238,43 @@ fn baseline_guard(
         serde_json::from_str(&text)
             .map_err(|e| OtherError(format!("invalid synthetic report '{}': {}", path, e)))
     };
-    let baseline = baseline::BaselineKey::from_report(&load(baseline_path)?);
-    let current = baseline::BaselineKey::from_report(&load(current_path)?);
 
-    match baseline::guard(&baseline, &current) {
-        baseline::GuardOutcome::Proceed { warnings } => {
-            for w in &warnings {
-                eprintln!("⚠ {}", w);
+    if diff.len() == 2 {
+        let a = load(&diff[0])?;
+        let b = load(&diff[1])?;
+        let warnings = match baseline::guard(
+            &baseline::BaselineKey::from_report(&a),
+            &baseline::BaselineKey::from_report(&b),
+        ) {
+            baseline::GuardOutcome::Proceed { warnings } => warnings,
+            baseline::GuardOutcome::Abort { reason } => {
+                return Err(OtherError(format!("cannot diff — {}", reason)))
             }
-            println!("baseline guard: OK — same workload, safe to compare");
+        };
+        for w in &warnings {
+            eprintln!("⚠ {}", w);
+        }
+        let md = diff::diff_markdown(&a, &b, &warnings);
+        let out_path = out.unwrap_or_else(|| "synthetic-diff.md".to_string());
+        tokio::fs::write(&out_path, &md).await?;
+        println!("{}", md);
+        println!("diff written to {}", out_path);
+        return Ok(());
+    }
+
+    match input {
+        Some(path) => {
+            let report = load(&path)?;
+            println!("{}", report.to_console());
+            if let Some(out_path) = out {
+                tokio::fs::write(&out_path, report.to_markdown()).await?;
+                println!("markdown written to {}", out_path);
+            }
             Ok(())
         }
-        baseline::GuardOutcome::Abort { reason } => {
-            Err(OtherError(format!("baseline guard: ABORT — {}", reason)))
-        }
+        None => Err(OtherError(
+            "report needs a report path to re-render, or `--diff <A.json> <B.json>`".to_string(),
+        )),
     }
 }
 
@@ -1497,6 +1527,8 @@ mod tests {
             generate: false,
             nodes: None,
             edges: None,
+            recording: None,
+            no_load: false,
         };
         assert!(run_command(command).await.is_err());
         let _ = std::fs::remove_file(&cfg_path);
@@ -1536,6 +1568,8 @@ mod tests {
             generate: false,
             nodes: None,
             edges: None,
+            recording: None,
+            no_load: false,
         };
         let err = run_command(command).await.expect_err("no ops ⇒ error");
         assert!(
@@ -1573,20 +1607,25 @@ mod tests {
             p.to_string_lossy().into_owned()
         };
         let base = write_report("sha256:same", 42001);
-        // Same workload + same version ⇒ guard proceeds with an advisory warning (exercises the
-        // warning-print path).
+        // Same workload + same version ⇒ guard proceeds (report --diff succeeds + writes a diff).
         let ok = write_report("sha256:same", 42001);
-        assert!(run_command(crate::cli::SyntheticCommands::BaselineGuard {
-            baseline: base.clone(),
-            current: ok.clone(),
+        let diff_out = dir
+            .join(format!("bg-diff-{}.md", std::process::id()))
+            .to_string_lossy()
+            .into_owned();
+        assert!(run_command(crate::cli::SyntheticCommands::Report {
+            input: None,
+            diff: vec![base.clone(), ok.clone()],
+            out: Some(diff_out.clone()),
         })
         .await
         .is_ok());
-        // Different workload ⇒ guard aborts.
+        // Different workload ⇒ guard aborts the diff.
         let bad = write_report("sha256:different", 42002);
-        let err = run_command(crate::cli::SyntheticCommands::BaselineGuard {
-            baseline: base.clone(),
-            current: bad.clone(),
+        let err = run_command(crate::cli::SyntheticCommands::Report {
+            input: None,
+            diff: vec![base.clone(), bad.clone()],
+            out: Some(diff_out.clone()),
         })
         .await
         .expect_err("corpus_hash mismatch must abort");
@@ -1594,6 +1633,7 @@ mod tests {
         for p in [base, ok, bad] {
             let _ = std::fs::remove_file(p);
         }
+        let _ = std::fs::remove_file(&diff_out);
     }
 
     #[test]

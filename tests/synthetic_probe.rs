@@ -1069,20 +1069,30 @@ async fn record_and_replay_via_run_command() {
     assert!(dir.join("manifest.json").exists());
 
     let report_out = dir.join("cli.json").to_string_lossy().into_owned();
-    run_command(SyntheticCommands::Replay {
-        recording: out_dir,
+    run_command(SyntheticCommands::Run {
+        config: None,
         endpoint: Some(endpoint()),
         graph: None,
-        no_load: false,
+        ops: vec![],
+        all_reads: false,
         samples: Some(150),
         warmup: Some(20),
+        concurrency: vec![1, 4],
+        reset_every: None,
+        seed: None,
+        cache: Some(benchmark::synthetic::CacheSelection::Both),
         server_timeout_ms: None,
         client_deadline_ms: None,
         out: Some(report_out.clone()),
         server_image: None,
+        generate: false,
+        nodes: None,
+        edges: None,
+        recording: Some(out_dir),
+        no_load: false,
     })
     .await
-    .expect("replay via run_command");
+    .expect("run --recording via run_command");
 
     let written = std::fs::read_to_string(&report_out).expect("report exists");
     assert!(written.contains("match_by_index"));
