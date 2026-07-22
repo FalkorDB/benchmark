@@ -429,7 +429,8 @@ load-script *and* the measured commands — then **run that identical bundle** a
 the commands each run), `run --recording` loads the recorded graph and measures the recorded commands
 through the closed-loop engine (the full concurrency sweep + cached/uncached modes), so the only
 variable is the FalkorDB version. See the full walkthrough in the
-[synthetic benchmark tutorial](docs/synthetic-benchmark-tutorial.md).
+[synthetic benchmark tutorial](docs/synthetic-benchmark-tutorial.md), and task-oriented recipes in
+the [synthetic benchmark cookbook](docs/synthetic-benchmark-cookbook.md).
 
 ```bash
 # 1. record a bundle OFFLINE (no server) into recordings/demo/
@@ -442,7 +443,8 @@ just synthetic-compare-versions demo falkor://127.0.0.1:6379 falkor://127.0.0.1:
 - **`just synthetic-record <name> [flags]`** writes `recordings/<name>/` = `manifest.json` +
   `graph.jsonl` (load statements) + `commands/<op>.jsonl`, plus a length-framed **`workload_hash`**
   over the graph *and* the commands (so any later edit is detected on load). It is **offline** — a
-  pure function of the seed + knobs — and reads `synthetic-bench.toml` for defaults.
+  pure function of the seed + knobs — and reads `synthetic-bench.toml` for defaults. Select ops with
+  `--op <names>`, or **`--op all`** (or `--op '*'`) for every read operation.
 - **`benchmark synthetic run --recording <dir> [--concurrency … --cache …]`** drops + loads +
   **count-verifies** the recorded graph, then measures the recorded commands across the concurrency
   sweep + cache modes, writing a report plus a per-op **`result_digest`** (a hash of the result
@@ -460,6 +462,12 @@ just synthetic-compare-versions demo falkor://127.0.0.1:6379 falkor://127.0.0.1:
   identical `workload_hash` — deterministic recording), then `run --recording` at C=1,4 + `report
   --diff` (incl. the C>1 result verification) against a throwaway Docker FalkorDB. Latency is not
   asserted (it is environment-dependent noise — see the tutorial).
+- **`just synthetic-verify`** is the CI **non-divergence gate**: it records **all** read ops
+  (`--op all`, medium dataset) and runs `run --recording` **twice** against the same throwaway
+  FalkorDB across the full concurrency sweep + both cache modes, failing if `report --diff` finds a
+  different `workload_hash` or any per-op result digest — i.e. the two runs on one machine must not
+  diverge. Latency is not asserted. The CI job publishes the A/B report to the job summary and
+  upserts it as a **sticky PR comment** so the diff is viewable inline in the PR.
 - `recordings/` is git-ignored (regenerable bundles).
 
 #### Version-comparison baselines (Criterion, C=1)

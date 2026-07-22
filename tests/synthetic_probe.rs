@@ -1057,7 +1057,10 @@ async fn record_and_replay_via_run_command() {
     run_command(SyntheticCommands::Record {
         config: None,
         graph: Some(graph.to_string()),
-        ops: vec![OpName::MatchByIndex, OpName::AggregateCount],
+        ops: vec![
+            benchmark::cli::OpSelector::One(OpName::MatchByIndex),
+            benchmark::cli::OpSelector::One(OpName::AggregateCount),
+        ],
         all_reads: false,
         seed: Some(11),
         nodes: Some(400),

@@ -1,8 +1,150 @@
-use crate::queries_repository::QueryCoverageProfile;
+use crate::queries_repository::{QueryCoverageProfile, QueryType};
 use crate::scenario::Vendor;
 use crate::synthetic::{CacheSelection, OpName};
 use clap::{Parser, Subcommand};
 use clap_complete::Shell;
+
+/// A `--op` value: either a single operation, or the magic `all` / `*` meaning **every** read op.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OpSelector {
+    /// The magic `all` / `*` — every read operation.
+    All,
+    /// One named operation.
+    One(OpName),
+}
+
+/// Parse one `--op` value: `all` or `*` → [`OpSelector::All`]; otherwise a valid operation name.
+fn parse_op_selector(s: &str) -> Result<OpSelector, String> {
+    match s {
+        "all" | "*" => Ok(OpSelector::All),
+        name => OpName::from_tag(name).map(OpSelector::One).ok_or_else(|| {
+            format!("unknown operation '{name}' — use an operation name, or 'all' / '*' for every read op")
+        }),
+    }
+}
+
+/// Expand `--op` selectors to concrete operations. [`OpSelector::All`] contributes every read op
+/// (in canonical order); explicitly named ops are kept too, so a write op listed alongside `all`
+/// (e.g. `--op all,create_node` on `run`) is **not** silently dropped. Duplicates are removed,
+/// preserving first-occurrence order. Empty input stays empty (no `--op` given).
+pub fn expand_op_selectors(selectors: &[OpSelector]) -> Vec<OpName> {
+    let mut ops: Vec<OpName> = Vec::new();
+    let push_unique = |op: OpName, ops: &mut Vec<OpName>| {
+        if !ops.contains(&op) {
+            ops.push(op);
+        }
+    };
+    for selector in selectors {
+        match selector {
+            OpSelector::All => {
+                for op in OpName::all_reads() {
+                    push_unique(op, &mut ops);
+                }
+            }
+            OpSelector::One(op) => push_unique(*op, &mut ops),
+        }
+    }
+    ops
+}
+
+/// A clap value parser for `--op` that parses [`OpSelector`] via [`parse_op_selector`] while still
+/// advertising its **possible values** (operation tags plus `all` / `*`) to `--help` and to
+/// shell-completion (`GenerateAutoComplete`) — which a bare function `value_parser` cannot do.
+/// When `reads_only`, it advertises and accepts read ops only (used by `record`, which cannot
+/// record write ops), so an unrecordable write op is rejected at parse time instead of mid-run.
+#[derive(Clone, Copy)]
+struct OpSelectorValueParser {
+    reads_only: bool,
+}
+
+impl OpSelectorValueParser {
+    /// Accept every operation (reads + writes) — used by `run`.
+    const fn all_ops() -> Self {
+        Self { reads_only: false }
+    }
+
+    /// Accept read operations only — used by `record` (write ops aren't recordable).
+    const fn reads_only() -> Self {
+        Self { reads_only: true }
+    }
+
+    /// Build an `InvalidValue` clap error that keeps `parse_op_selector`'s actionable message
+    /// (surfaced as a suggestion) alongside the standard invalid-arg/-value context.
+    fn invalid_value(
+        &self,
+        cmd: &clap::Command,
+        arg: Option<&clap::Arg>,
+        raw: String,
+        message: String,
+    ) -> clap::Error {
+        let mut err = clap::Error::new(clap::error::ErrorKind::InvalidValue).with_cmd(cmd);
+        if let Some(arg) = arg {
+            err.insert(
+                clap::error::ContextKind::InvalidArg,
+                clap::error::ContextValue::String(arg.to_string()),
+            );
+        }
+        err.insert(
+            clap::error::ContextKind::InvalidValue,
+            clap::error::ContextValue::String(raw),
+        );
+        err.insert(
+            clap::error::ContextKind::Suggested,
+            clap::error::ContextValue::StyledStrs(vec![message.into()]),
+        );
+        err
+    }
+}
+
+impl clap::builder::TypedValueParser for OpSelectorValueParser {
+    type Value = OpSelector;
+
+    fn parse_ref(
+        &self,
+        cmd: &clap::Command,
+        arg: Option<&clap::Arg>,
+        value: &std::ffi::OsStr,
+    ) -> Result<Self::Value, clap::Error> {
+        let raw = clap::builder::StringValueParser::new().parse_ref(cmd, arg, value)?;
+        let selector =
+            parse_op_selector(&raw).map_err(|msg| self.invalid_value(cmd, arg, raw.clone(), msg))?;
+        if self.reads_only {
+            if let OpSelector::One(op) = &selector {
+                if op.kind() == QueryType::Write {
+                    return Err(self.invalid_value(
+                        cmd,
+                        arg,
+                        raw,
+                        format!(
+                            "'{}' is a write op — recording supports read ops only (use 'all' for every read op)",
+                            op.as_str()
+                        ),
+                    ));
+                }
+            }
+        }
+        Ok(selector)
+    }
+
+    fn possible_values(
+        &self,
+    ) -> Option<Box<dyn Iterator<Item = clap::builder::PossibleValue> + '_>> {
+        let ops = if self.reads_only {
+            OpName::all_reads()
+        } else {
+            OpName::all().to_vec()
+        };
+        let values: Vec<clap::builder::PossibleValue> = ops
+            .iter()
+            .map(|op| clap::builder::PossibleValue::new(op.as_str()))
+            .chain([
+                clap::builder::PossibleValue::new("all"),
+                clap::builder::PossibleValue::new("*"),
+            ])
+            .collect();
+        Some(Box::new(values.into_iter()))
+    }
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "benchmark", version, about="falkor benchmark tool", long_about = None, arg_required_else_help(true), propagate_version(true))]
@@ -267,16 +409,16 @@ pub enum SyntheticCommands {
         graph: Option<String>,
         #[arg(
             long = "op",
-            value_enum,
+            value_parser = OpSelectorValueParser::all_ops(),
             value_delimiter = ',',
             num_args = 1..,
-            help = "operation(s) to measure; repeatable and comma-separated (e.g. --op match_by_index --op expand_1_hop or --op match_by_index,expand_1_hop). Overrides the config's operations."
+            help = "operation(s) to measure; repeatable and comma-separated (e.g. --op match_by_index,expand_1_hop). Use --op all (or --op '*') for every read op. Overrides the config's operations."
         )]
-        ops: Vec<OpName>,
+        ops: Vec<OpSelector>,
         #[arg(
             long,
             conflicts_with = "ops",
-            help = "measure every read operation (mutually exclusive with --op)"
+            help = "measure every read operation (same as --op all; mutually exclusive with --op)"
         )]
         all_reads: bool,
         #[arg(long, help = "number of measured invocations (default 1000)")]
@@ -360,16 +502,16 @@ pub enum SyntheticCommands {
         graph: Option<String>,
         #[arg(
             long = "op",
-            value_enum,
+            value_parser = OpSelectorValueParser::reads_only(),
             value_delimiter = ',',
             num_args = 1..,
-            help = "read operation(s) to record; repeatable and comma-separated. Overrides the config's operations."
+            help = "read operation(s) to record; repeatable and comma-separated. Use --op all (or --op '*') for every read op. Overrides the config's operations."
         )]
-        ops: Vec<OpName>,
+        ops: Vec<OpSelector>,
         #[arg(
             long,
             conflicts_with = "ops",
-            help = "record every read operation (mutually exclusive with --op)"
+            help = "record every read operation (same as --op all; mutually exclusive with --op)"
         )]
         all_reads: bool,
         #[arg(
@@ -414,5 +556,140 @@ fn parse_write_ratio(val: &str) -> Result<f32, String> {
         Ok(value) if (0.0..=1.0).contains(&value) => Ok(value),
         Ok(_) => Err(String::from("Value must be between 0.0 and 1.0")),
         Err(_) => Err(String::from("Invalid float value")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_op_selector_accepts_magic_and_names() {
+        assert_eq!(parse_op_selector("all").unwrap(), OpSelector::All);
+        assert_eq!(parse_op_selector("*").unwrap(), OpSelector::All);
+        assert_eq!(
+            parse_op_selector("match_by_index").unwrap(),
+            OpSelector::One(OpName::MatchByIndex)
+        );
+        assert!(parse_op_selector("nope").is_err());
+    }
+
+    #[test]
+    fn expand_op_selectors_merges_dedups_and_keeps_explicit_ops() {
+        // `all` alone expands to every read op in canonical order.
+        assert_eq!(expand_op_selectors(&[OpSelector::All]), OpName::all_reads());
+        // A read op already covered by `all` is not duplicated.
+        assert_eq!(
+            expand_op_selectors(&[OpSelector::All, OpSelector::One(OpName::MatchByIndex)]),
+            OpName::all_reads()
+        );
+        // A write op listed alongside `all` is kept (not silently dropped) — appended after reads.
+        let mut expected = OpName::all_reads();
+        expected.push(OpName::CreateNode);
+        assert_eq!(
+            expand_op_selectors(&[OpSelector::All, OpSelector::One(OpName::CreateNode)]),
+            expected
+        );
+        // Named ops preserved in first-occurrence order, with duplicates removed.
+        assert_eq!(
+            expand_op_selectors(&[
+                OpSelector::One(OpName::Expand1Hop),
+                OpSelector::One(OpName::MatchByIndex),
+                OpSelector::One(OpName::Expand1Hop),
+            ]),
+            vec![OpName::Expand1Hop, OpName::MatchByIndex]
+        );
+        // Empty stays empty (no --op given).
+        assert!(expand_op_selectors(&[]).is_empty());
+    }
+
+    #[test]
+    fn op_selector_value_parser_parses_and_advertises_possible_values() {
+        use clap::builder::TypedValueParser;
+        let cmd = clap::Command::new("test");
+        let parser = OpSelectorValueParser::all_ops();
+        // Magic + named values parse via the TypedValueParser (the path clap actually uses).
+        assert_eq!(
+            parser.parse_ref(&cmd, None, std::ffi::OsStr::new("all")).unwrap(),
+            OpSelector::All
+        );
+        assert_eq!(
+            parser.parse_ref(&cmd, None, std::ffi::OsStr::new("*")).unwrap(),
+            OpSelector::All
+        );
+        assert_eq!(
+            parser
+                .parse_ref(&cmd, None, std::ffi::OsStr::new("match_by_index"))
+                .unwrap(),
+            OpSelector::One(OpName::MatchByIndex)
+        );
+        // all_ops advertises every op tag (reads + writes) plus the two magic tokens.
+        let possible: Vec<String> = parser
+            .possible_values()
+            .unwrap()
+            .map(|v| v.get_name().to_string())
+            .collect();
+        assert_eq!(possible.len(), OpName::all().len() + 2);
+        assert!(possible.contains(&"match_by_index".to_string()));
+        assert!(possible.contains(&"create_node".to_string()));
+        assert!(possible.contains(&"all".to_string()));
+        assert!(possible.contains(&"*".to_string()));
+    }
+
+    #[test]
+    fn reads_only_op_parser_excludes_and_rejects_write_ops() {
+        use clap::builder::TypedValueParser;
+        let cmd = clap::Command::new("test");
+        let parser = OpSelectorValueParser::reads_only();
+        // A read op and the magic tokens still parse.
+        assert_eq!(
+            parser
+                .parse_ref(&cmd, None, std::ffi::OsStr::new("match_by_index"))
+                .unwrap(),
+            OpSelector::One(OpName::MatchByIndex)
+        );
+        assert_eq!(parser.parse_ref(&cmd, None, std::ffi::OsStr::new("all")).unwrap(), OpSelector::All);
+        // A write op is rejected at parse time (recording can't record writes).
+        assert!(parser
+            .parse_ref(&cmd, None, std::ffi::OsStr::new("create_node"))
+            .is_err());
+        // Possible values are exactly the read ops + all / * (no write tags).
+        let possible: Vec<String> = parser
+            .possible_values()
+            .unwrap()
+            .map(|v| v.get_name().to_string())
+            .collect();
+        assert_eq!(possible.len(), OpName::all_reads().len() + 2);
+        assert!(possible.contains(&"match_by_index".to_string()));
+        assert!(!possible.contains(&"create_node".to_string()));
+    }
+
+    #[test]
+    fn cli_op_flag_accepts_magic_and_rejects_unknown() {
+        use clap::Parser;
+        // `--op all` + comma lists parse end-to-end through the real command tree.
+        assert!(Cli::try_parse_from(["benchmark", "synthetic", "run", "--op", "all"]).is_ok());
+        assert!(Cli::try_parse_from([
+            "benchmark",
+            "synthetic",
+            "run",
+            "--op",
+            "match_by_index,expand_1_hop",
+        ])
+        .is_ok());
+        // An unknown op is rejected with a clap error (exercises the arg-context error path).
+        assert!(Cli::try_parse_from(["benchmark", "synthetic", "run", "--op", "bogus"]).is_err());
+        // `run` accepts write ops, but `record` rejects them (reads-only bundle).
+        assert!(Cli::try_parse_from(["benchmark", "synthetic", "run", "--op", "create_node"]).is_ok());
+        assert!(Cli::try_parse_from([
+            "benchmark",
+            "synthetic",
+            "record",
+            "--op",
+            "create_node",
+            "--out-dir",
+            "/tmp/does-not-matter",
+        ])
+        .is_err());
     }
 }

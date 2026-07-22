@@ -1112,6 +1112,8 @@ pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkRes
             recording,
             no_load,
         } => {
+            // Expand `--op all` / `--op '*'` to the concrete read ops before anything else.
+            let ops = crate::cli::expand_op_selectors(&ops);
             // A recorded workload takes a different, exclusive path: measure the recorded commands
             // across the concurrency sweep + cache modes (no generation/probing).
             if let Some(recording) = recording {
@@ -1180,6 +1182,8 @@ pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkRes
             edges,
             out_dir,
         } => {
+            // Expand `--op all` / `--op '*'` to the concrete read ops.
+            let ops = crate::cli::expand_op_selectors(&ops);
             // Reuse the run-config resolution (with generate=true) to validate + resolve the
             // dataset knobs, graph and read-op selection, then record OFFLINE (no server).
             let overrides = config::CliOverrides {
@@ -1517,7 +1521,7 @@ mod tests {
             config: Some(cfg_path.to_string_lossy().into_owned()),
             endpoint: Some("falkor://127.0.0.1:6379".to_string()),
             graph: Some("falkor".to_string()),
-            ops: vec![OpName::ReturnConst],
+            ops: vec![crate::cli::OpSelector::One(OpName::ReturnConst)],
             all_reads: false,
             samples: Some(0),
             warmup: Some(0),
