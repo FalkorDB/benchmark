@@ -109,7 +109,7 @@ impl clap::builder::TypedValueParser for OpSelectorValueParser {
         let selector =
             parse_op_selector(&raw).map_err(|msg| self.invalid_value(cmd, arg, raw.clone(), msg))?;
         if self.reads_only {
-            if let OpSelector::One(op) = selector {
+            if let OpSelector::One(op) = &selector {
                 if op.kind() == QueryType::Write {
                     return Err(self.invalid_value(
                         cmd,
