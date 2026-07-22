@@ -292,7 +292,7 @@ synthetic-verify:
     set -euo pipefail
     docker rm -f falkordb-verify >/dev/null 2>&1 || true
     docker run -d --name falkordb-verify -p 6381:6379 falkordb/falkordb:latest >/dev/null
-    trap 'docker rm -f falkordb-verify >/dev/null 2>&1 || true; rm -rf recordings/_verify' EXIT
+    trap 'docker rm -f falkordb-verify >/dev/null 2>&1 || true' EXIT
     for i in $(seq 1 30); do
         if docker exec falkordb-verify redis-cli ping >/dev/null 2>&1; then break; fi
         sleep 1
@@ -319,6 +319,9 @@ synthetic-verify:
     cargo run --quiet --bin benchmark -- synthetic report --diff \
         recordings/_verify/run-a.json recordings/_verify/run-b.json --out recordings/_verify/diff.md
     echo "synthetic-verify OK — no divergence across all ops × concurrency $sweep × cached/uncached"
+    # Clean up the bundle + reports only on success; on failure the trap leaves them (and only
+    # tears down the container) so the run JSONs and diff.md can be inspected or uploaded.
+    rm -rf recordings/_verify
 
 # === UI (Next.js dashboard in ui/) ===========================================
 

@@ -60,6 +60,8 @@ jobs:
   synthetic_verify:
     name: Synthetic non-divergence
     runs-on: ubuntu-latest
+    # Bound the job so a stalled Docker pull or a benchmark deadlock can't run for hours.
+    timeout-minutes: 20
 
     steps:
       - name: Checkout code
