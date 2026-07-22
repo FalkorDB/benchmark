@@ -52,3 +52,29 @@ jobs:
 
       - name: Test
         run: just test
+
+  synthetic_verify:
+    name: Synthetic non-divergence
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Set up Rust
+        run: rustup update stable && rustup default stable
+
+      - name: Install protobuf compiler
+        # The prometheus crate's build script needs protoc.
+        run: sudo apt-get install -y protobuf-compiler
+
+      - name: Install just
+        uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2.83.4
+        with:
+          tool: just
+
+      # Runs the recorded workload (all read ops) twice against the same FalkorDB across the full
+      # concurrency sweep + both cache modes and fails if the two runs diverge (workload_hash or any
+      # per-op result digest differs). The recipe manages its own throwaway FalkorDB container.
+      - name: Verify no run-to-run divergence
+        run: just synthetic-verify

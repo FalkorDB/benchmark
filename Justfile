@@ -281,6 +281,45 @@ synthetic-sanity:
         --diff recordings/_sanity_a/ref.json recordings/_sanity_a/cand.json --out recordings/_sanity_a/diff.md
     echo "synthetic-sanity OK"
 
+# CI NON-DIVERGENCE CHECK: run the recorded workload (ALL read ops via `--op all`) TWICE against the
+# SAME FalkorDB across the full concurrency sweep + BOTH cache modes, and FAIL if the two runs
+# DIVERGE — i.e. if `report --diff` finds a different workload_hash or any different per-op result
+# digest. Latency is NOT asserted (environment noise). Spins up a throwaway Docker FalkorDB with a
+# raised queued-query limit (so the uncached high-concurrency sweep doesn't trip "pending queries
+# exceeded"), and tears it down after. This is the `synthetic-verify` CI gate.
+synthetic-verify:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    docker rm -f falkordb-verify >/dev/null 2>&1 || true
+    docker run -d --name falkordb-verify -p 6381:6379 falkordb/falkordb:latest >/dev/null
+    trap 'docker rm -f falkordb-verify >/dev/null 2>&1 || true; rm -rf recordings/_verify' EXIT
+    for i in $(seq 1 30); do
+        if docker exec falkordb-verify redis-cli ping >/dev/null 2>&1; then break; fi
+        sleep 1
+    done
+    if ! docker exec falkordb-verify redis-cli ping >/dev/null 2>&1; then
+        echo "VERIFY FAIL: FalkorDB did not become ready within 30s"; exit 1
+    fi
+    # Raise the queued-query limit so the uncached sweep at C=32 doesn't trip "pending queries exceeded".
+    docker exec falkordb-verify redis-cli GRAPH.CONFIG SET MAX_QUEUED_QUERIES 1000 >/dev/null
+    endpoint="falkor://127.0.0.1:6381"
+    sweep="1,2,4,8,16,32"
+    # Record ALL read ops over a medium dataset (offline).
+    cargo run --quiet --bin benchmark -- synthetic record --graph verify --op all \
+        --seed 7 --nodes 10000 --edges 50000 --out-dir recordings/_verify
+    # Run twice against the SAME server (load, then reuse it): full concurrency sweep + both cache modes.
+    cargo run --quiet --bin benchmark -- synthetic run --recording recordings/_verify \
+        --endpoint "$endpoint" --concurrency "$sweep" --cache both --samples 200 --warmup 50 \
+        --out recordings/_verify/run-a.json
+    cargo run --quiet --bin benchmark -- synthetic run --recording recordings/_verify \
+        --endpoint "$endpoint" --no-load --concurrency "$sweep" --cache both --samples 200 --warmup 50 \
+        --out recordings/_verify/run-b.json
+    # FAIL on divergence: report --diff aborts (non-zero) if the workload_hash or any per-op result
+    # digest differs between the two runs.
+    cargo run --quiet --bin benchmark -- synthetic report --diff \
+        recordings/_verify/run-a.json recordings/_verify/run-b.json --out recordings/_verify/diff.md
+    echo "synthetic-verify OK — no divergence across all ops × concurrency $sweep × cached/uncached"
+
 # === UI (Next.js dashboard in ui/) ===========================================
 
 # Install UI dependencies from the lockfile.
