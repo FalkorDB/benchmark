@@ -115,8 +115,9 @@ transcript (hostname redacted to `bench-host`) is at
 
 `just synthetic-sanity` is a self-contained check of the tool itself. It spins up a throwaway Docker
 FalkorDB, **records the same workload twice** and asserts the two `workload_hash`es are identical
-(proving recording is deterministic), then `run --recording` at C=1,4 (load, then no-load) and
-`report --diff` (which runs the C>1 result verification) the two reports:
+(proving recording is deterministic), then `run --recording` at C=1,4 (load, then no-load) — each run
+**verifies results are unchanged under concurrency** — and finally `report --diff` guards the two
+reports (workload_hash + result digests):
 
 ```bash
 just synthetic-sanity

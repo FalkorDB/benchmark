@@ -387,10 +387,10 @@ pub enum SyntheticCommands {
         out_dir: String,
     },
     #[command(
-        about = "render a saved synthetic report, or DIFF two of them: `report <run.json>` re-renders console+markdown; `report --diff <A.json> <B.json>` guards (workload_hash + result digests) then writes a Markdown diff across every op/cache-mode/concurrency"
+        about = "render a saved synthetic report, or DIFF two of them: `report <run.json>` prints the console summary (and writes Markdown only when --out is given); `report --diff <A.json> <B.json>` guards (workload_hash + result digests) then writes a Markdown diff across every op/cache-mode/concurrency"
     )]
     Report {
-        #[arg(help = "a saved synthetic report JSON to re-render (console + Markdown)")]
+        #[arg(help = "a saved synthetic report JSON to re-render (prints the console summary; writes Markdown only if --out is set)")]
         input: Option<String>,
         #[arg(
             long = "diff",
@@ -402,7 +402,7 @@ pub enum SyntheticCommands {
         diff: Vec<String>,
         #[arg(
             long,
-            help = "with --diff: path to write the Markdown diff (default synthetic-diff.md)"
+            help = "Markdown output path: the diff (default synthetic-diff.md) with --diff, or the re-rendered report's Markdown when re-rendering a single report"
         )]
         out: Option<String>,
     },

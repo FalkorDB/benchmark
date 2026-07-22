@@ -9,17 +9,17 @@ $ benchmark synthetic run --recording recordings/demo --endpoint falkor://127.0.
 synthetic benchmark — endpoint falkor://127.0.0.1:6379  graph tutorial_demo  samples 500  warmup 100  concurrency [1,4]  seed 42  connection pool(size=1) per worker
 server — falkordb module ver 4.20.1  redis 8.6.3  CACHE_SIZE 25
 client host — bench-host · macOS 26.5.2 Tahoe · Apple M1 Pro (10c/10t) · 16.0 GiB · arm64
-dataset — seed 42  nodes 1000  edges 5000  corpus_hash sha256:57ec47dffa81b5be2d39fba9b634ea93e79020e2a0ba9f578692d72b351c7606
+dataset — seed 42  nodes 1000  edges 5000  workload_hash sha256:57ec47dffa81b5be2d39fba9b634ea93e79020e2a0ba9f578692d72b351c7606
 
 aggregate_count
   [cached — plan reused, execution only]
     C    throughput(ops/s)   server p50/p90/p95/p99             total p50/p90/p95/p99              miss%
-    1              2593     0.078 / 0.093 / 0.097 / 0.107     0.361 / 0.400 / 0.422 / 0.472     0.0
-    4              7924     0.093 / 0.139 / 0.165 / 0.196     0.476 / 0.589 / 0.642 / 0.769     0.0  <- knee
+    1              2758     0.077 / 0.087 / 0.091 / 0.094     0.351 / 0.378 / 0.389 / 0.406     0.0
+    4              8363     0.091 / 0.135 / 0.151 / 0.180     0.463 / 0.556 / 0.588 / 0.647     0.0  <- knee
   [uncached — plan-cache miss each run, execution + compilation]
     C    throughput(ops/s)   server p50/p90/p95/p99             total p50/p90/p95/p99              miss%
-    1              2314     0.130 / 0.155 / 0.165 / 0.179     0.417 / 0.469 / 0.503 / 0.526   100.0
-    4              7160     0.172 / 0.232 / 0.256 / 0.304     0.540 / 0.643 / 0.683 / 0.768   100.0  <- knee
+    1              2451     0.126 / 0.135 / 0.139 / 0.143     0.403 / 0.427 / 0.434 / 0.454   100.0
+    4              7181     0.167 / 0.226 / 0.250 / 0.296     0.534 / 0.638 / 0.675 / 0.764   100.0  <- knee
   compilation_ms (median uncached-cached server time) by level:
     …(remaining ops omitted for brevity)…
 

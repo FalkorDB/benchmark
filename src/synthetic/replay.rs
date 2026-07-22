@@ -1,19 +1,23 @@
-//! Replay a recorded workload (see [`crate::synthetic::recording`]) against a FalkorDB endpoint.
+//! Backs `synthetic run --recording`: measure a recorded workload (see
+//! [`crate::synthetic::recording`]) against a FalkorDB endpoint.
 //!
 //! Unlike `synthetic run --generate` (which regenerates the graph and re-derives the commands every
-//! run) and the Criterion baseline (whose iteration count adapts to observed latency), a replay
-//! **loads the recorded graph** and measures the **recorded command stream** with a **fixed-length,
-//! deterministic** runner — the same graph and the same measured sequence on every version, so two
-//! versions' reports are genuinely comparable.
+//! run) and the Criterion baseline (whose iteration count adapts to observed latency), this **loads
+//! the recorded graph** and measures the **recorded command stream** — the same graph and the same
+//! commands on every version, so two versions' reports are genuinely comparable. It runs an untimed
+//! single-flight **reference pass** (capturing each command's result shape), then measures each op
+//! through the shared closed-loop engine across the configured **concurrency sweep + cache modes**,
+//! and — at the highest concurrency — **verifies results are unchanged under concurrency**.
 //!
-//! The measured latency itself is still subject to environment noise; the *hard* guarantees a replay
-//! provides are integrity (the bundle's `workload_hash` is verified on load), graph fidelity (drop +
-//! load + count-verify), and result correctness (a per-op result-cardinality digest), leaving
-//! latency to be compared advisorily by the [`crate::synthetic::baseline`] guard.
+//! The measured latency itself is still subject to environment noise; the *hard* guarantees are
+//! integrity (the bundle's `workload_hash` is verified on load), graph fidelity (drop + load +
+//! count-verify), and result correctness (a per-op result-**value** digest + the concurrency check),
+//! leaving latency to be compared advisorily by the [`crate::synthetic::baseline`] guard.
 
 use crate::error::BenchmarkError::OtherError;
 use crate::error::BenchmarkResult;
 use crate::falkor::falkor_endpoint_to_redis_url;
+use crate::queries_repository::QueryType;
 use crate::synthetic::catalog::{spec, DEFAULT_RESET_EVERY};
 use crate::synthetic::dataset::{self, DatasetSpec};
 use crate::synthetic::op_runner::{capture_result, ResultShape};
@@ -70,6 +74,19 @@ pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
     }
     let concurrency = normalize_concurrency(&config.concurrency)?;
     let bundle = recording::load(&config.recording_dir)?;
+    // Fail closed on a write op: v1 recording is read-only, and the measurement path uses RO_QUERY.
+    // A hand-crafted bundle naming a write op would otherwise be run as a read.
+    if let Some((op, _)) = bundle
+        .commands
+        .iter()
+        .find(|(op, _)| spec(*op).kind == QueryType::Write)
+    {
+        return Err(OtherError(format!(
+            "recorded op '{}' is a write op — replaying writes is not supported (v1 records reads \
+             only)",
+            op.as_str()
+        )));
+    }
     let dataset_spec = bundle.spec();
     let graph_name = config
         .graph

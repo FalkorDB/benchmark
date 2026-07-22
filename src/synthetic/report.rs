@@ -294,7 +294,7 @@ impl Report {
         }
         if let Some(d) = &self.meta.dataset {
             out.push_str(&format!(
-                "dataset — seed {}  nodes {}  edges {}  corpus_hash {}\n",
+                "dataset — seed {}  nodes {}  edges {}  workload_hash {}\n",
                 d.seed, d.nodes, d.edges, d.corpus_hash
             ));
         }
@@ -367,7 +367,7 @@ impl Report {
                 "| dataset | seed {} · {} nodes · {} edges |\n",
                 d.seed, d.nodes, d.edges
             ));
-            out.push_str(&format!("| corpus_hash | `{}` |\n", md_cell(&d.corpus_hash)));
+            out.push_str(&format!("| workload_hash | `{}` |\n", md_cell(&d.corpus_hash)));
         }
 
         for (name, op) in &self.operations {
@@ -867,7 +867,7 @@ mod tests {
         }
         let md = r.to_markdown();
         assert!(md.contains("| dataset | seed 7 · 100 nodes · 200 edges |"));
-        assert!(md.contains("| corpus_hash | `sha256:abc123` |"));
+        assert!(md.contains("| workload_hash | `sha256:abc123` |"));
         assert!(md.contains('~'), "unknown-cache miss% is marked with ~");
         assert!(md.contains("known cache stat only"));
     }
@@ -957,7 +957,7 @@ mod tests {
         });
         let out = r.to_console();
         assert!(
-            out.contains("dataset — seed 42  nodes 1000  edges 5000  corpus_hash sha256:abc123")
+            out.contains("dataset — seed 42  nodes 1000  edges 5000  workload_hash sha256:abc123")
         );
         // Absent by default (externally-supplied graph).
         assert!(!sample_report().to_console().contains("dataset —"));
