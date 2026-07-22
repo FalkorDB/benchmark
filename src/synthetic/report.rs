@@ -383,7 +383,7 @@ impl Report {
 /// Escape a value for a GitHub-flavoured Markdown **table cell**: an unescaped `|` ends the cell
 /// (even inside a code span) and a newline breaks the row, so escape the former and fold the latter
 /// to `<br>`. `\r` is dropped so a CRLF doesn't yield a doubled break.
-fn md_cell(s: &str) -> String {
+pub(crate) fn md_cell(s: &str) -> String {
     s.replace('|', "\\|").replace('\r', "").replace('\n', "<br>")
 }
 

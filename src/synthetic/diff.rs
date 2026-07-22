@@ -4,7 +4,7 @@
 //! guard confirms the two runs measured the same workload.
 
 use crate::synthetic::provenance::decode_module_version;
-use crate::synthetic::report::{LevelMetrics, LevelReport, Report};
+use crate::synthetic::report::{md_cell, LevelMetrics, LevelReport, Report};
 use std::collections::BTreeSet;
 
 /// Which cache mode of a [`LevelReport`] to read.
@@ -194,7 +194,13 @@ fn row2(
     a: &str,
     b: &str,
 ) {
-    out.push_str(&format!("| {field} | {a} | {b} |\n"));
+    // Escape table-breaking characters — endpoint/graph/server_image are operator-supplied.
+    out.push_str(&format!(
+        "| {} | {} | {} |\n",
+        md_cell(field),
+        md_cell(a),
+        md_cell(b)
+    ));
 }
 
 #[cfg(test)]
@@ -307,5 +313,17 @@ mod tests {
         assert_eq!(pct(0.0, 5.0), "n/a");
         assert_eq!(pct(2.0, 3.0), "+50.0%");
         assert_eq!(pct(2.0, 1.0), "-50.0%");
+    }
+
+    #[test]
+    fn diff_escapes_table_breaking_cells() {
+        let mut a = report(42001, 1.0, 1000.0);
+        let mut b = report(42002, 1.0, 1000.0);
+        // A pipe in an operator-supplied field must not break the Markdown table.
+        a.meta.graph = "left|right".to_string();
+        b.meta.graph = "left|right".to_string();
+        let md = diff_markdown(&a, &b, &[]);
+        assert!(md.contains("left\\|right"), "pipe not escaped: {md}");
+        assert!(!md.contains("`left|right`"), "raw pipe leaked into a cell");
     }
 }
