@@ -340,6 +340,7 @@ pub enum SyntheticCommands {
         recording: Option<String>,
         #[arg(
             long = "no-load",
+            requires = "recording",
             help = "with --recording: skip loading the recorded graph, only count-verify the already-loaded graph (load-once / run-many)."
         )]
         no_load: bool,
