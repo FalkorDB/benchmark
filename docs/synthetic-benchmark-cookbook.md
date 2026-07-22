@@ -76,10 +76,12 @@ benchmark synthetic report --diff runA.json runB.json --out diff.md
 
 | field | A (baseline) | B (candidate) |
 |---|---|---|
-| FalkorDB module | 4.20.1 | 4.20.1 |
+| FalkorDB module | 4.2.0 | 4.2.1 |
 | server image | falkordb/falkordb:v4.2.0 | falkordb/falkordb:v4.2.1 |
-| workload_hash | `sha256:7be5c44c…3058e2` | `sha256:7be5c44c…3058e2` |
+| workload_hash | `sha256:6f62d81a…60f7` | `sha256:6f62d81a…60f7` |
 | samples / warmup | 100 / 50 | 100 / 50 |
+
+> ⚠ server image changed: falkordb/falkordb:v4.2.0 → falkordb/falkordb:v4.2.1
 
 ## `aggregate_count`
 
@@ -87,16 +89,17 @@ _cached (plan reused — execution only)_
 
 | C | A total p50/p90/p95/p99 (ms) | B total p50/p90/p95/p99 (ms) | Δp50 | A tput (ops/s) | B tput (ops/s) | Δtput |
 |---:|---|---|---:|---:|---:|---:|
-| 1  | 0.496 / 0.708 / 0.793 / 0.968 | 0.426 / 0.536 / 0.565 / 0.602 | -14.2% | 1860 | 2179 | +17.1% |
-| 8  | 0.734 / 0.976 / 1.078 / 1.272 | 0.719 / 0.907 / 0.977 / 1.177 | -2.0%  | 10065 | 10609 | +5.4% |
-| 32 | 1.768 / 2.467 / 2.694 / 3.194 | 1.632 / 2.442 / 2.886 / 3.640 | -7.7%  | 16830 | 17250 | +2.5% |
+| 1  | 0.500 / 0.612 / 0.633 / 0.712 | 0.448 / 0.514 / 0.545 / 0.569 | -10.3% | 1924 | 2182 | +13.4% |
+| 8  | 0.708 / 0.916 / 0.979 / 1.095 | 0.705 / 0.890 / 0.949 / 1.021 | -0.4%  | 10798 | 10878 | +0.7% |
+| 32 | 1.873 / 2.455 / 2.638 / 3.291 | 1.882 / 2.519 / 2.756 / 3.207 | +0.5%  | 16411 | 15910 | -3.1% |
 ```
 
-> **The `workload_hash` matching is the whole point** — it proves A and B ran byte-identical
-> graphs and commands. When both endpoints are the *same* build (as above), the diff even prints
-> `⚠ baseline and candidate ran the same FalkorDB module version … there is no version delta to
-> measure`, and the small ±deltas you see are pure environment noise. Point the two `--endpoint`s
-> at genuinely different versions to read a real delta. See
+> **The `workload_hash` matching is the whole point** — identical here, it proves A (v4.2.0) and B
+> (v4.2.1) ran byte-identical graphs and commands, so the deltas reflect the *version change* and
+> nothing else. And `report --diff` is **fail-closed**: if a version returns *different results*, it
+> **aborts** instead of reporting a misleading speedup — e.g. diffing v4.2.0 against 4.20.1 aborts
+> with `cannot diff — result mismatch for op 'expand_hops_5'` (their 5-hop traversals disagree), so
+> you can't accidentally "win" by returning wrong results faster. See
 > [`docs/synthetic/sample-diff.md`](synthetic/sample-diff.md) for a full example.
 
 `just synthetic-compare-versions A=falkor://…:6381 B=falkor://…:6382` wraps the two runs + the diff
