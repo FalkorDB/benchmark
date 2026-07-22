@@ -326,6 +326,17 @@ synthetic-verify:
     cargo run --quiet --bin benchmark -- synthetic report --diff \
         recordings/_verify/run-a.json recordings/_verify/run-b.json --out recordings/_verify/diff.md
     echo "synthetic-verify OK — no divergence across all ops × concurrency $sweep × cached/uncached"
+    # In CI, surface the per-op diff (A vs B, same server) on the job Summary page so the
+    # latency/throughput values are viewable straight from the PR checks, not just the raw log.
+    if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+        {
+            echo "## Synthetic non-divergence — \`report --diff\` (run A vs run B, same FalkorDB)"
+            echo
+            echo "Identical workload run twice on one server; deltas are pure run-to-run noise (the gate only fails if a result digest or the workload_hash differs)."
+            echo
+            cat recordings/_verify/diff.md
+        } >> "$GITHUB_STEP_SUMMARY"
+    fi
     # Clean up the bundle + reports only on success; on failure the trap leaves them (and only
     # tears down the container) so the run JSONs and diff.md can be inspected or uploaded.
     rm -rf recordings/_verify

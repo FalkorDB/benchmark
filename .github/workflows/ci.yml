@@ -32,6 +32,9 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
+        with:
+          # Don't persist the GITHUB_TOKEN in .git/config (zizmor `artipacked`); the job only builds.
+          persist-credentials: false
 
       - name: Set up Rust
         run: rustup update ${{ matrix.toolchain }} && rustup default ${{ matrix.toolchain }}
@@ -66,6 +69,10 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
+        with:
+          # Don't persist the GITHUB_TOKEN in .git/config (zizmor `artipacked`); this job runs
+          # third-party Docker images and cargo build scripts and needs no repo credentials.
+          persist-credentials: false
 
       - name: Set up Rust
         run: rustup update stable && rustup default stable
