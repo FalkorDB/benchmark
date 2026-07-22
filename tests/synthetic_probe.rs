@@ -483,7 +483,7 @@ async fn generated_dataset_has_exact_counts_index_and_hash() {
     // The report records the generated dataset + a corpus_hash.
     let ds = report.meta.dataset.as_ref().expect("dataset info present");
     assert_eq!((ds.seed, ds.nodes, ds.edges), (123, 400, 2000));
-    assert!(ds.corpus_hash.starts_with("sha256:"));
+    assert!(ds.workload_hash.starts_with("sha256:"));
 
     // Exact counts in the graph.
     let mut g = open_graph(&endpoint(), graph).await.expect("open graph");
@@ -536,8 +536,8 @@ async fn generation_is_reproducible_across_runs() {
     let a = run(&cfg).await.expect("run a");
     let b = run(&cfg).await.expect("run b");
     assert_eq!(
-        a.meta.dataset.unwrap().corpus_hash,
-        b.meta.dataset.unwrap().corpus_hash
+        a.meta.dataset.unwrap().workload_hash,
+        b.meta.dataset.unwrap().workload_hash
     );
     drop_graph(graph).await;
 }
@@ -988,8 +988,8 @@ async fn record_then_replay_roundtrips_and_guard_proceeds() {
         .expect("replay --no-load");
 
     // Same workload identity: the workload_hash (stamped as corpus_hash) matches.
-    let ha = a.meta.dataset.as_ref().expect("dataset a").corpus_hash.clone();
-    let hb = b.meta.dataset.as_ref().expect("dataset b").corpus_hash.clone();
+    let ha = a.meta.dataset.as_ref().expect("dataset a").workload_hash.clone();
+    let hb = b.meta.dataset.as_ref().expect("dataset b").workload_hash.clone();
     assert_eq!(ha, hb, "workload_hash must match across replays");
 
     // Every op has a result digest, and they match across the two replays.

@@ -240,7 +240,7 @@ pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
                 seed: dataset_spec.seed,
                 nodes: dataset_spec.nodes,
                 edges: dataset_spec.edges,
-                corpus_hash: bundle.manifest.workload_hash.clone(),
+                workload_hash: bundle.manifest.workload_hash.clone(),
             }),
         },
         operations,

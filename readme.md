@@ -382,11 +382,12 @@ just synthetic-bench --graph bench --generate --nodes 100000 --edges 1000000 \
   guarantees connectivity for expansions/shortest paths); `edges` counts relationships. The same
   seed + knobs reproduce the exact same graph and the same operation corpora everywhere.
 - When a dataset is generated, the report's `meta.dataset` records `{seed, nodes, edges,
-  corpus_hash}`. **`corpus_hash`** (`sha256:…`) is a stable fingerprint of the whole workload — the
-  dataset knobs, the selected operations (in order) and their query bodies, and the sampled input
-  pools. **Only compare runs whose `corpus_hash` matches**; a different hash means a different
+  workload_hash}`. **`workload_hash`** (`sha256:…`) is a stable fingerprint of the whole workload —
+  the dataset knobs, the selected operations (in order) and their query bodies, and the sampled input
+  pools. **Only compare runs whose `workload_hash` matches**; a different hash means a different
   workload. (For an externally-supplied graph the tool can't fingerprint the data, so no
-  `corpus_hash` is emitted.)
+  `workload_hash` is emitted. Older reports used the field name `corpus_hash`, still accepted on
+  read.)
 
 #### Config file (`synthetic-bench.toml`)
 
@@ -467,7 +468,7 @@ To track a **read** operation's latency **between FalkorDB versions**, save a
 [Criterion](https://github.com/bheisler/criterion.rs) C=1 single-flight baseline on one version and
 compare against it on another. The workload (dataset + operations) comes from `synthetic-bench.toml`,
 so both runs measure exactly the same thing — and `synthetic-compare` **guards** that with the
-`corpus_hash` before it will compare, refusing to put mismatched workloads side by side. (This path
+`workload_hash` before it will compare, refusing to put mismatched workloads side by side. (This path
 regenerates per run; for a rigorous cross-version comparison prefer **record / replay** above.)
 
 ```bash
@@ -488,11 +489,11 @@ synthetic/match_by_index/total_ms
 How it works:
 
 - **`just synthetic-baseline <name>`** (re)generates the dataset from `synthetic-bench.toml`, captures
-  that run's `corpus_hash` + FalkorDB module version into `baselines/<name>.json`, then saves the
+  that run's `workload_hash` + FalkorDB module version into `baselines/<name>.json`, then saves the
   Criterion baseline `<name>` (single-flight C=1 read latencies + browsable HTML plots under
   `target/criterion/`).
 - **`just synthetic-compare <name>`** captures the current run's identity, runs the **guard**
-  (`benchmark synthetic report --diff`) — which **aborts** if the `corpus_hash` differs (or is
+  (`benchmark synthetic report --diff`) — which **aborts** if the `workload_hash` differs (or is
   absent, i.e. an external, unfingerprintable graph) — then runs Criterion against the saved baseline.
 - The **FalkorDB version is the subject** of the comparison, so a version change is *recorded and
   displayed*, never a reason to abort; the guard only warns when the two versions are identical (no

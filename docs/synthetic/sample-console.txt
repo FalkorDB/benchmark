@@ -14,12 +14,12 @@ dataset — seed 42  nodes 1000  edges 5000  workload_hash sha256:57ec47dffa81b5
 aggregate_count
   [cached — plan reused, execution only]
     C    throughput(ops/s)   server p50/p90/p95/p99             total p50/p90/p95/p99              miss%
-    1              2758     0.077 / 0.087 / 0.091 / 0.094     0.351 / 0.378 / 0.389 / 0.406     0.0
-    4              8363     0.091 / 0.135 / 0.151 / 0.180     0.463 / 0.556 / 0.588 / 0.647     0.0  <- knee
+    1              2561     0.080 / 0.096 / 0.102 / 0.115     0.365 / 0.421 / 0.443 / 0.488     0.0
+    4              7792     0.093 / 0.140 / 0.158 / 0.187     0.494 / 0.607 / 0.639 / 0.742     0.0  <- knee
   [uncached — plan-cache miss each run, execution + compilation]
     C    throughput(ops/s)   server p50/p90/p95/p99             total p50/p90/p95/p99              miss%
-    1              2451     0.126 / 0.135 / 0.139 / 0.143     0.403 / 0.427 / 0.434 / 0.454   100.0
-    4              7181     0.167 / 0.226 / 0.250 / 0.296     0.534 / 0.638 / 0.675 / 0.764   100.0  <- knee
+    1              2251     0.141 / 0.169 / 0.179 / 0.198     0.430 / 0.494 / 0.523 / 0.565   100.0
+    4              6506     0.172 / 0.245 / 0.271 / 0.323     0.569 / 0.703 / 0.764 / 0.907   100.0  <- knee
   compilation_ms (median uncached-cached server time) by level:
     …(remaining ops omitted for brevity)…
 
@@ -27,6 +27,7 @@ aggregate_count
 $ benchmark synthetic run --recording recordings/demo --no-load --endpoint falkor://127.0.0.1:6379 \
     --concurrency 1,4 --samples 500 --warmup 100 --out recordings/demo/version-b.json
 report written to recordings/demo/version-b.json
+markdown written to recordings/demo/version-b.md
 
 $ benchmark synthetic report --diff recordings/demo/version-a.json recordings/demo/version-b.json \
     --out recordings/demo/diff.md

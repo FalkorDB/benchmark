@@ -184,7 +184,7 @@ fn opt_hash(report: &Report) -> String {
         .meta
         .dataset
         .as_ref()
-        .map(|d| format!("`{}`", d.corpus_hash))
+        .map(|d| format!("`{}`", d.workload_hash))
         .unwrap_or_else(|| "—".to_string())
 }
 
@@ -268,7 +268,7 @@ mod tests {
                     seed: 0,
                     nodes: 10,
                     edges: 20,
-                    corpus_hash: "sha256:abc".to_string(),
+                    workload_hash: "sha256:abc".to_string(),
                 }),
             },
             operations,

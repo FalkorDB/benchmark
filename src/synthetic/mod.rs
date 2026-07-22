@@ -519,7 +519,7 @@ pub async fn run(config: &Config) -> BenchmarkResult<Report> {
         seed: spec.seed,
         nodes: spec.nodes,
         edges: spec.edges,
-        corpus_hash: dataset::corpus_hash(
+        workload_hash: dataset::corpus_hash(
             spec,
             config.seed,
             CORPUS_SIZE,
@@ -1674,8 +1674,8 @@ mod tests {
             out: Some(diff_out.clone()),
         })
         .await
-        .expect_err("corpus_hash mismatch must abort");
-        assert!(format!("{err}").contains("corpus_hash mismatch"));
+        .expect_err("workload_hash mismatch must abort");
+        assert!(format!("{err}").contains("workload_hash mismatch"));
         for p in [base, ok, bad] {
             let _ = std::fs::remove_file(p);
         }
