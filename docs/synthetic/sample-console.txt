@@ -29,6 +29,7 @@ match_by_index
 # replay a second version the same way (here shown against the same server), then guard:
 $ benchmark synthetic replay --recording recordings/demo --no-load \
     --endpoint falkor://127.0.0.1:6379 --samples 500 --warmup 100 --out recordings/demo/version-b.json
+(prints the same per-op summary table as the first replay — omitted here for brevity)
 report written to recordings/demo/version-b.json
 markdown written to recordings/demo/version-b.md
 

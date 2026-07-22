@@ -362,7 +362,7 @@ pub enum SyntheticCommands {
         all_reads: bool,
         #[arg(
             long,
-            help = "seed for the dataset and the per-operation corpora (same seed ⇒ identical bundle; default 0)"
+            help = "seed for the dataset and the per-operation corpora (same seed + same tool build ⇒ identical bundle; default 0)"
         )]
         seed: Option<u64>,
         #[arg(long, help = "dataset node count")]
