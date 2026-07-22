@@ -1115,11 +1115,11 @@ pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkRes
             // A recorded workload takes a different, exclusive path: measure the recorded commands
             // across the concurrency sweep + cache modes (no generation/probing).
             if let Some(recording) = recording {
-                if generate || all_reads || !ops.is_empty() || nodes.is_some() || edges.is_some() || seed.is_some() {
+                if config_path.is_some() || generate || all_reads || !ops.is_empty() || nodes.is_some() || edges.is_some() || seed.is_some() {
                     return Err(OtherError(
                         "--recording measures a recorded bundle and can't be combined with \
-                         --generate/--op/--all-reads/--nodes/--edges/--seed (the bundle defines the \
-                         workload)"
+                         --config/--generate/--op/--all-reads/--nodes/--edges/--seed (the bundle \
+                         defines the workload; pass --endpoint/--graph/--concurrency/--cache directly)"
                             .to_string(),
                     ));
                 }

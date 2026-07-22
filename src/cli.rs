@@ -335,7 +335,7 @@ pub enum SyntheticCommands {
         edges: Option<usize>,
         #[arg(
             long = "recording",
-            help = "measure a RECORDED workload bundle (from `synthetic record`) instead of generating/probing: loads the recorded graph, then measures the recorded commands across --concurrency + --cache. Conflicts with --generate/--op/--all-reads/--nodes/--edges/--seed."
+            help = "measure a RECORDED workload bundle (from `synthetic record`) instead of generating/probing: loads the recorded graph, then measures the recorded commands across --concurrency + --cache. Conflicts with --config/--generate/--op/--all-reads/--nodes/--edges/--seed."
         )]
         recording: Option<String>,
         #[arg(
