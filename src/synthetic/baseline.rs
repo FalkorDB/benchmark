@@ -23,7 +23,7 @@ pub struct BaselineKey {
     pub module_graph_ver: Option<u64>,
     /// Operator-supplied server image identity, when provided.
     pub server_image: Option<String>,
-    /// Per-op result-cardinality digests (present for `synthetic run --recording` runs). Compared op-by-op:
+    /// Per-op result-value digests (present for `synthetic run --recording` runs). Compared op-by-op:
     /// two versions must agree, or a wrong/empty-but-faster result could look like a win.
     #[serde(default)]
     pub result_digests: BTreeMap<String, String>,

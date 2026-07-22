@@ -99,8 +99,7 @@ fn render_mode(
 ) {
     // Union of concurrency levels that have this mode in either run.
     let mut levels: BTreeSet<usize> = BTreeSet::new();
-    for (rep, has) in [(a, false), (b, false)] {
-        let _ = has;
+    for rep in [a, b] {
         if let Some(opr) = rep.operations.get(op) {
             for lvl in &opr.levels {
                 if mode.pick(lvl).is_some() {

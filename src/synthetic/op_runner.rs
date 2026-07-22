@@ -175,14 +175,16 @@ pub async fn capture_result(
     })
 }
 
-/// Canonicalize one row (its column values, in column order) to a stable string.
+/// Canonicalize one row (its column values, in column order) to a stable string. Each column is
+/// **length-prefixed** (`<byte-len>:<value>`) so no column value — even one containing a delimiter
+/// byte — can shift the boundary and alias a different row.
 fn canonical_row(values: &[FalkorValue]) -> String {
     let mut s = String::new();
-    for (i, v) in values.iter().enumerate() {
-        if i > 0 {
-            s.push('\u{1f}'); // unit separator — can't appear in our scalar renderings
-        }
-        s.push_str(&canonical_value(v));
+    for v in values {
+        let cv = canonical_value(v);
+        s.push_str(&cv.len().to_string());
+        s.push(':');
+        s.push_str(&cv);
     }
     s
 }
