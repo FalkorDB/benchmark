@@ -36,6 +36,53 @@ pub fn expand_op_selectors(selectors: &[OpSelector]) -> Vec<OpName> {
     ops
 }
 
+/// A clap value parser for `--op` that parses [`OpSelector`] via [`parse_op_selector`] while still
+/// advertising its **possible values** (every operation tag plus `all` / `*`) to `--help` and to
+/// shell-completion (`GenerateAutoComplete`) — which a bare function `value_parser` cannot do.
+#[derive(Clone)]
+struct OpSelectorValueParser;
+
+impl clap::builder::TypedValueParser for OpSelectorValueParser {
+    type Value = OpSelector;
+
+    fn parse_ref(
+        &self,
+        cmd: &clap::Command,
+        arg: Option<&clap::Arg>,
+        value: &std::ffi::OsStr,
+    ) -> Result<Self::Value, clap::Error> {
+        let raw = clap::builder::StringValueParser::new().parse_ref(cmd, arg, value)?;
+        parse_op_selector(&raw).map_err(|_| {
+            let mut err = clap::Error::new(clap::error::ErrorKind::InvalidValue).with_cmd(cmd);
+            if let Some(arg) = arg {
+                err.insert(
+                    clap::error::ContextKind::InvalidArg,
+                    clap::error::ContextValue::String(arg.to_string()),
+                );
+            }
+            err.insert(
+                clap::error::ContextKind::InvalidValue,
+                clap::error::ContextValue::String(raw),
+            );
+            err
+        })
+    }
+
+    fn possible_values(
+        &self,
+    ) -> Option<Box<dyn Iterator<Item = clap::builder::PossibleValue> + '_>> {
+        let values: Vec<clap::builder::PossibleValue> = OpName::all()
+            .iter()
+            .map(|op| clap::builder::PossibleValue::new(op.as_str()))
+            .chain([
+                clap::builder::PossibleValue::new("all"),
+                clap::builder::PossibleValue::new("*"),
+            ])
+            .collect();
+        Some(Box::new(values.into_iter()))
+    }
+}
+
 #[derive(Parser, Debug)]
 #[command(name = "benchmark", version, about="falkor benchmark tool", long_about = None, arg_required_else_help(true), propagate_version(true))]
 pub struct Cli {
@@ -299,7 +346,7 @@ pub enum SyntheticCommands {
         graph: Option<String>,
         #[arg(
             long = "op",
-            value_parser = parse_op_selector,
+            value_parser = OpSelectorValueParser,
             value_delimiter = ',',
             num_args = 1..,
             help = "operation(s) to measure; repeatable and comma-separated (e.g. --op match_by_index,expand_1_hop). Use --op all (or --op '*') for every read op. Overrides the config's operations."
@@ -392,7 +439,7 @@ pub enum SyntheticCommands {
         graph: Option<String>,
         #[arg(
             long = "op",
-            value_parser = parse_op_selector,
+            value_parser = OpSelectorValueParser,
             value_delimiter = ',',
             num_args = 1..,
             help = "read operation(s) to record; repeatable and comma-separated. Use --op all (or --op '*') for every read op. Overrides the config's operations."
@@ -479,5 +526,54 @@ mod tests {
         );
         // Empty stays empty (no --op given).
         assert!(expand_op_selectors(&[]).is_empty());
+    }
+
+    #[test]
+    fn op_selector_value_parser_parses_and_advertises_possible_values() {
+        use clap::builder::TypedValueParser;
+        let cmd = clap::Command::new("test");
+        let parser = OpSelectorValueParser;
+        // Magic + named values parse via the TypedValueParser (the path clap actually uses).
+        assert_eq!(
+            parser.parse_ref(&cmd, None, std::ffi::OsStr::new("all")).unwrap(),
+            OpSelector::All
+        );
+        assert_eq!(
+            parser.parse_ref(&cmd, None, std::ffi::OsStr::new("*")).unwrap(),
+            OpSelector::All
+        );
+        assert_eq!(
+            parser
+                .parse_ref(&cmd, None, std::ffi::OsStr::new("match_by_index"))
+                .unwrap(),
+            OpSelector::One(OpName::MatchByIndex)
+        );
+        // Every op tag plus the two magic tokens are advertised (drives --help + completion).
+        let possible: Vec<String> = parser
+            .possible_values()
+            .unwrap()
+            .map(|v| v.get_name().to_string())
+            .collect();
+        assert_eq!(possible.len(), OpName::all().len() + 2);
+        assert!(possible.contains(&"match_by_index".to_string()));
+        assert!(possible.contains(&"all".to_string()));
+        assert!(possible.contains(&"*".to_string()));
+    }
+
+    #[test]
+    fn cli_op_flag_accepts_magic_and_rejects_unknown() {
+        use clap::Parser;
+        // `--op all` + comma lists parse end-to-end through the real command tree.
+        assert!(Cli::try_parse_from(["benchmark", "synthetic", "run", "--op", "all"]).is_ok());
+        assert!(Cli::try_parse_from([
+            "benchmark",
+            "synthetic",
+            "run",
+            "--op",
+            "match_by_index,expand_1_hop",
+        ])
+        .is_ok());
+        // An unknown op is rejected with a clap error (exercises the arg-context error path).
+        assert!(Cli::try_parse_from(["benchmark", "synthetic", "run", "--op", "bogus"]).is_err());
     }
 }

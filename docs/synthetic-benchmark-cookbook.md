@@ -16,10 +16,10 @@ All commands are driven through [`just`](../Justfile) recipes (the same ones CI 
   --generate` builds a fresh dataset and probes it live.
 - **`report`** — re-render a saved report, or **`report --diff A B`** guard-and-diff two reports.
 
-> Prerequisites: a FalkorDB to measure against, e.g. `docker run -d -p 6379:6379
-> falkordb/falkordb:latest`, and the Rust toolchain (see the repo [readme](../readme.md)). Outputs
-> below were captured on a 1000-node / 5000-edge dataset for brevity; host names are shown as
-> `bench-host` and tracing lines are omitted.
+> Prerequisites: a FalkorDB to measure against (e.g. `docker run -d -p 6379:6379 falkordb/falkordb:latest`),
+> and the Rust toolchain (see the repo [readme](../readme.md)). Outputs below were captured on a
+> 1000-node / 5000-edge dataset for brevity; host names are shown as `bench-host` and tracing lines
+> are omitted.
 
 | # | User story | Verbs |
 |---|---|---|
