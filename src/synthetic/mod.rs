@@ -52,6 +52,7 @@ use rand::rngs::StdRng;
 use rand::SeedableRng;
 use serde::de::{self, Deserializer};
 use serde::Deserialize;
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -261,10 +262,12 @@ fn render_cypher(
     mode: CacheMode,
     run_token: u64,
     uid: u64,
-) -> String {
+) -> Cow<'_, str> {
     match mode {
-        CacheMode::Cached => base.to_string(),
-        CacheMode::Uncached => format!("{} /* co{:x}-{} */", base, run_token, uid),
+        // Cached mode sends the base verbatim — borrow it (no per-invocation allocation on the
+        // timed path); only uncached allocates to append its unique cache-buster comment.
+        CacheMode::Cached => Cow::Borrowed(base),
+        CacheMode::Uncached => Cow::Owned(format!("{} /* co{:x}-{} */", base, run_token, uid)),
     }
 }
 
@@ -755,7 +758,9 @@ impl OpInvoker for GraphWorker {
                     }
                 }
                 let base = (plan.render)(&scratch, seq)?;
-                let cypher = render_cypher(&base.to_cypher(), mode, run_token, uid);
+                // Bind the owned rendered string so cached mode can borrow it (no second copy).
+                let rendered = base.to_cypher();
+                let cypher = render_cypher(&rendered, mode, run_token, uid);
                 let sample = run_and_drain(
                     &mut self.graph,
                     kind,
