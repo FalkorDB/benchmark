@@ -83,18 +83,30 @@ pub fn guard(
         }
     }
 
-    // Result-correctness gate: for every op measured (with a result digest) in BOTH runs, the two
-    // versions must return the same result cardinality — otherwise a version returning wrong or
-    // empty results faster could masquerade as an improvement. (Digests are present for `synthetic
-    // replay` runs; a `synthetic run` report has none, so this is a no-op there.)
+    // Result-correctness gate: for every op the baseline recorded a result digest for, the
+    // candidate must record the *same* digest — otherwise a version returning wrong or empty
+    // results faster could masquerade as an improvement. A candidate that is missing a digest the
+    // baseline has is also a mismatch (fail closed, matching the docs' "every op" guarantee).
+    // Digests are present for `synthetic replay` runs; a `synthetic run` baseline has none, so the
+    // loop is a no-op there (and such runs already differ on `corpus_hash` above).
     for (op, base_dig) in &baseline.result_digests {
-        if let Some(cand_dig) = candidate.result_digests.get(op) {
-            if base_dig != cand_dig {
+        match candidate.result_digests.get(op) {
+            Some(cand_dig) if cand_dig == base_dig => {}
+            Some(cand_dig) => {
                 return GuardOutcome::Abort {
                     reason: format!(
                         "result mismatch for op '{op}' — baseline and candidate returned different \
                          result cardinalities (baseline {base_dig}, candidate {cand_dig}), so their \
                          latencies are not comparable"
+                    ),
+                };
+            }
+            None => {
+                return GuardOutcome::Abort {
+                    reason: format!(
+                        "candidate is missing a result digest for op '{op}' that the baseline \
+                         recorded — the runs aren't comparable (re-run the candidate with \
+                         `synthetic replay`)"
                     ),
                 };
             }
@@ -181,6 +193,19 @@ mod tests {
         let base = key_with_digests(Some("sha256:abc"), &[("expand_1_hop", "sha256:aaa")]);
         let cand = key_with_digests(Some("sha256:abc"), &[("expand_1_hop", "sha256:aaa")]);
         assert!(matches!(guard(&base, &cand), GuardOutcome::Proceed { .. }));
+    }
+
+    #[test]
+    fn aborts_when_candidate_missing_a_baseline_digest() {
+        // The baseline recorded a digest for an op the candidate has none for → fail closed.
+        let base = key_with_digests(Some("sha256:abc"), &[("expand_1_hop", "sha256:aaa")]);
+        let cand = key_with_digests(Some("sha256:abc"), &[]);
+        match guard(&base, &cand) {
+            GuardOutcome::Abort { reason } => {
+                assert!(reason.contains("missing a result digest for op 'expand_1_hop'"), "got: {reason}");
+            }
+            other => panic!("expected Abort, got {other:?}"),
+        }
     }
 
     #[test]

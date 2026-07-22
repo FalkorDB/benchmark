@@ -200,7 +200,8 @@ async fn measure_op(
         .await
         .map_err(|e| OtherError(format!("priming '{}': {}", op.as_str(), e)))?;
 
-    // Untimed cardinality pass over every distinct command → the result digest (correctness gate).
+    // Untimed cardinality pass over every recorded command (in order) → the result digest that the
+    // guard uses as a correctness gate.
     let mut cardinalities = Vec::with_capacity(cyphers.len());
     for cypher in cyphers {
         let sample = run_and_drain(graph, QueryType::Read, cypher, st, client_deadline)
