@@ -123,7 +123,9 @@ fn bench_synthetic_ops(c: &mut Criterion) {
 
                     let start = Instant::now();
                     for i in 0..iters {
-                        let cypher = &cyphers[(i as usize) % cyphers.len()];
+                        // Reduce in u64 before the cast so the index is correct even on 32-bit
+                        // targets (where `i as usize` would truncate a large `iters`).
+                        let cypher = &cyphers[(i % cyphers.len() as u64) as usize];
                         // Propagate (panic) on any error so a timeout/failure can't masquerade as a
                         // dramatic speed-up in the measurement.
                         run_and_drain(
