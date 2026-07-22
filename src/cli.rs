@@ -336,6 +336,90 @@ pub enum SyntheticCommands {
     #[command(about = "list the available operations")]
     ListOps,
     #[command(
+        about = "record a workload bundle OFFLINE (no server): the dataset load-script + measured commands, so the exact same graph and commands can be replayed across FalkorDB versions"
+    )]
+    Record {
+        #[arg(
+            long = "config",
+            help = "path to a synthetic-bench.toml config (auto-detected in the CWD if present); CLI flags override it"
+        )]
+        config: Option<String>,
+        #[arg(long, help = "graph key the recorded commands target (default falkor)")]
+        graph: Option<String>,
+        #[arg(
+            long = "op",
+            value_enum,
+            value_delimiter = ',',
+            num_args = 1..,
+            help = "read operation(s) to record; repeatable and comma-separated. Overrides the config's operations."
+        )]
+        ops: Vec<OpName>,
+        #[arg(
+            long,
+            conflicts_with = "ops",
+            help = "record every read operation (mutually exclusive with --op)"
+        )]
+        all_reads: bool,
+        #[arg(
+            long,
+            help = "seed for the dataset and the per-operation corpora (same seed + same tool build ⇒ identical bundle; default 0)"
+        )]
+        seed: Option<u64>,
+        #[arg(long, help = "dataset node count")]
+        nodes: Option<usize>,
+        #[arg(long, help = "dataset edge count, must be >= nodes")]
+        edges: Option<usize>,
+        #[arg(
+            long = "out-dir",
+            help = "directory to write the recording bundle into (manifest.json + graph.jsonl + commands/)"
+        )]
+        out_dir: String,
+    },
+    #[command(
+        about = "replay a recorded bundle against an endpoint: load the recorded graph + measure the recorded commands with a fixed-length deterministic runner"
+    )]
+    Replay {
+        #[arg(
+            long = "recording",
+            help = "path to a recording bundle directory (produced by `synthetic record`)"
+        )]
+        recording: String,
+        #[arg(long, help = "FalkorDB endpoint (default falkor://127.0.0.1:6379)")]
+        endpoint: Option<String>,
+        #[arg(
+            long,
+            help = "graph key to load into / measure against (default: the recording's graph)"
+        )]
+        graph: Option<String>,
+        #[arg(
+            long = "no-load",
+            help = "skip loading the recorded graph; only count-verify the already-loaded graph (for load-once / run-many). DESTRUCTIVE without it: replay drops+reloads the graph."
+        )]
+        no_load: bool,
+        #[arg(long, help = "measured invocations per operation (default 1000)")]
+        samples: Option<usize>,
+        #[arg(long, help = "warm-up invocations per operation, discarded (default 200)")]
+        warmup: Option<usize>,
+        #[arg(
+            long,
+            help = "FalkorDB server-side per-query timeout in ms (default 5000)"
+        )]
+        server_timeout_ms: Option<i64>,
+        #[arg(long, help = "client-side deadline per query in ms (default 6000)")]
+        client_deadline_ms: Option<u64>,
+        #[arg(
+            long,
+            help = "path to write the JSON report (default synthetic-report.json)"
+        )]
+        out: Option<String>,
+        #[arg(
+            long,
+            env = "FALKOR_SERVER_IMAGE",
+            help = "operator-supplied server image identity (e.g. falkordb/falkordb:v4.2.1@sha256:...), recorded verbatim"
+        )]
+        server_image: Option<String>,
+    },
+    #[command(
         about = "guard a version comparison: abort if the saved baseline and the current run measured different workloads (corpus_hash mismatch)"
     )]
     BaselineGuard {

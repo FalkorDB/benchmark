@@ -23,6 +23,8 @@ pub mod engine;
 pub mod host;
 pub mod op_runner;
 pub mod provenance;
+pub mod recording;
+pub mod replay;
 pub mod report;
 pub mod stats;
 pub mod writes;
@@ -149,6 +151,12 @@ impl OpName {
     /// Whether this operation reads or writes (selects `RO_QUERY` vs `QUERY`).
     pub fn kind(self) -> QueryType {
         spec(self).kind
+    }
+
+    /// Parse an [`OpName`] from its stable [`as_str`](Self::as_str) tag (e.g. reading a recorded
+    /// bundle's manifest/command files). `None` for an unknown tag.
+    pub fn from_tag(tag: &str) -> Option<OpName> {
+        OpName::all().iter().copied().find(|op| op.as_str() == tag)
     }
 
     /// A one-line description for `list-ops` and the report.
@@ -322,7 +330,7 @@ pub fn list_ops() -> String {
 /// credentials passed in a `falkor://user:pass@host` URL never leak into `synthetic-report.json`.
 /// If the endpoint can't be parsed as a URL it's replaced with a placeholder (rather than echoed
 /// verbatim, which could still contain credentials).
-fn redact_endpoint(endpoint: &str) -> String {
+pub(crate) fn redact_endpoint(endpoint: &str) -> String {
     match url::Url::parse(endpoint) {
         Ok(mut url) => {
             if url.password().is_some() {
@@ -808,7 +816,10 @@ async fn measure_op(
         });
     }
 
-    Ok(OperationReport { levels })
+    Ok(OperationReport {
+        levels,
+        result_digest: None,
+    })
 }
 
 /// Run a list of untimed write statements (setup/reset/cleanup) to completion on `graph`.
@@ -979,7 +990,9 @@ async fn measure_level(
 /// computed over that single shared retained cohort. This keeps their sample counts identical and
 /// preserves the invariant that, since every raw pair has `total >= server`, the retained
 /// aggregates do too. Cache-health stats are computed over the same retained cohort.
-fn summarize_samples(samples: &[OpSample]) -> BenchmarkResult<crate::synthetic::report::MetricSet> {
+pub(crate) fn summarize_samples(
+    samples: &[OpSample]
+) -> BenchmarkResult<crate::synthetic::report::MetricSet> {
     let server: Vec<f64> = samples.iter().map(|s| s.server_ms).collect();
     let total: Vec<f64> = samples.iter().map(|s| s.total_ms).collect();
 
@@ -1032,12 +1045,21 @@ pub async fn run_and_report(config: &Config) -> BenchmarkResult<()> {
     }
     let report = run(config).await?;
     println!("{}", report.to_console());
+    write_report(&report, &config.out).await
+}
+
+/// Print nothing extra, but write the JSON report to `out` **and** the pasteable Markdown alongside
+/// it (`<out>.md`). Shared by [`run_and_report`] and `synthetic replay`.
+pub(crate) async fn write_report(
+    report: &crate::synthetic::report::Report,
+    out: &str,
+) -> BenchmarkResult<()> {
     let json = report.to_json()?;
-    tokio::fs::write(&config.out, json).await?;
-    info!("wrote {}", config.out);
-    println!("report written to {}", config.out);
+    tokio::fs::write(out, json).await?;
+    info!("wrote {}", out);
+    println!("report written to {}", out);
     // A PR-pasteable Markdown report alongside the JSON: `<out>.md` (replacing a `.json` suffix).
-    let md_path = markdown_path(&config.out);
+    let md_path = markdown_path(out);
     tokio::fs::write(&md_path, report.to_markdown()).await?;
     info!("wrote {}", md_path);
     println!("markdown written to {}", md_path);
@@ -1104,6 +1126,84 @@ pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkRes
         crate::cli::SyntheticCommands::ListOps => {
             print!("{}", list_ops());
             Ok(())
+        }
+        crate::cli::SyntheticCommands::Record {
+            config: config_path,
+            graph,
+            ops,
+            all_reads,
+            seed,
+            nodes,
+            edges,
+            out_dir,
+        } => {
+            // Reuse the run-config resolution (with generate=true) to validate + resolve the
+            // dataset knobs, graph and read-op selection, then record OFFLINE (no server).
+            let overrides = config::CliOverrides {
+                endpoint: None,
+                graph,
+                ops,
+                all_reads,
+                samples: None,
+                warmup: None,
+                concurrency: Vec::new(),
+                reset_every: None,
+                seed,
+                cache: None,
+                server_timeout_ms: None,
+                client_deadline_ms: None,
+                out: None,
+                server_image: None,
+                generate: true,
+                nodes,
+                edges,
+            };
+            let file = config::FileConfig::load(config_path.as_deref())?;
+            let resolved = config::resolve(overrides, file)?;
+            let spec = resolved.dataset.ok_or_else(|| {
+                OtherError("record requires --nodes/--edges (or a config) to generate a dataset".to_string())
+            })?;
+            let manifest = recording::record(
+                &spec,
+                &resolved.graph,
+                &resolved.ops,
+                resolved.seed,
+                DATASET_LOAD_BATCH,
+                std::path::Path::new(&out_dir),
+            )?;
+            println!(
+                "recorded {} op(s) into {} (workload_hash {})",
+                manifest.ops.len(),
+                out_dir,
+                manifest.workload_hash
+            );
+            Ok(())
+        }
+        crate::cli::SyntheticCommands::Replay {
+            recording,
+            endpoint,
+            graph,
+            no_load,
+            samples,
+            warmup,
+            server_timeout_ms,
+            client_deadline_ms,
+            out,
+            server_image,
+        } => {
+            let replay_config = replay::ReplayConfig {
+                recording_dir: std::path::PathBuf::from(recording),
+                endpoint: endpoint.unwrap_or_else(|| "falkor://127.0.0.1:6379".to_string()),
+                graph,
+                load: !no_load,
+                samples: samples.unwrap_or(1000),
+                warmup: warmup.unwrap_or(200),
+                server_timeout_ms: server_timeout_ms.unwrap_or(5_000),
+                client_deadline_ms: client_deadline_ms.unwrap_or(6_000),
+                out: out.unwrap_or_else(|| "synthetic-report.json".to_string()),
+                server_image,
+            };
+            replay::run_and_report(&replay_config).await
         }
         crate::cli::SyntheticCommands::BaselineGuard { baseline, current } => {
             baseline_guard(&baseline, &current)

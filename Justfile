@@ -188,6 +188,95 @@ synthetic-compare name:
         --baseline "baselines/{{name}}.json" --current "baselines/{{name}}.current.json"
     cargo bench --bench synthetic_ops -- --baseline "{{name}}"
 
+# --- Record / replay: the SAME workload (graph + commands) across FalkorDB versions -----------
+# The baseline/compare recipes above re-generate the graph + re-derive the commands each run; for a
+# rigorous cross-version comparison, record the workload ONCE and replay that identical bundle.
+
+# Record a workload bundle OFFLINE (no server) into `recordings/<name>/`: the dataset load-script
+# (graph.jsonl), the measured commands (commands/<op>.jsonl) and a length-framed workload_hash.
+# Reads `synthetic-bench.toml` (nodes/edges/operations/seed/graph) unless overridden, e.g.
+# `just synthetic-record demo --op match_by_index,expand_1_hop --nodes 1000 --edges 5000`.
+synthetic-record name *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    shift || true                          # drop `name` (just also passes it in $@)
+    if [ "${1:-}" = "--" ]; then shift; fi
+    cargo run --quiet --bin benchmark -- synthetic record --out-dir "recordings/{{name}}" "$@"
+
+# Replay a recorded bundle against an endpoint: load the recorded graph + measure the recorded
+# commands with a fixed-length deterministic runner, writing recordings/<name>/report.json. Extra
+# flags forward to `synthetic replay` (e.g. --graph, --no-load, --samples, --out).
+synthetic-replay name endpoint *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    shift || true                          # drop `name`
+    shift || true                          # drop `endpoint`
+    if [ "${1:-}" = "--" ]; then shift; fi
+    # Default the report path, but let a forwarded --out override it (avoid a duplicate Clap arg).
+    has_out=0
+    for arg in "$@"; do
+        case "$arg" in --out|--out=*) has_out=1 ;; esac
+    done
+    cmd=(cargo run --quiet --bin benchmark -- synthetic replay \
+        --recording "recordings/{{name}}" --endpoint "{{endpoint}}")
+    if [ "$has_out" -eq 0 ]; then
+        cmd+=(--out "recordings/{{name}}/report.json")
+    fi
+    "${cmd[@]}" "$@"
+
+# Compare two FalkorDB versions on the SAME recorded bundle: replay it (load + count-verify) against
+# each endpoint, then GUARD that the workload_hash + per-op result digests match (a version delta is
+# expected and allowed). Record the bundle first with `just synthetic-record <name> …`. Reports land
+# in recordings/<name>/{version-a,version-b}.json for a side-by-side latency read.
+synthetic-compare-versions name endpoint_a endpoint_b:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    test -d "recordings/{{name}}" || { echo "no recording 'recordings/{{name}}' — run 'just synthetic-record {{name}} …' first"; exit 1; }
+    cargo run --quiet --bin benchmark -- synthetic replay --recording "recordings/{{name}}" \
+        --endpoint "{{endpoint_a}}" --out "recordings/{{name}}/version-a.json"
+    cargo run --quiet --bin benchmark -- synthetic replay --recording "recordings/{{name}}" \
+        --endpoint "{{endpoint_b}}" --out "recordings/{{name}}/version-b.json"
+    cargo run --quiet --bin benchmark -- synthetic baseline-guard \
+        --baseline "recordings/{{name}}/version-a.json" --current "recordings/{{name}}/version-b.json"
+
+# Self-contained sanity check for the synthetic tool itself: spin up a throwaway Docker FalkorDB,
+# RECORD a small workload TWICE (asserting the two workload_hashes are identical — deterministic
+# recording), then REPLAY it (load) and re-replay (no-load) and GUARD (workload_hash + result
+# digests must match). Passes iff recording is deterministic and the replay pipeline completes +
+# guards clean; latency is NOT asserted (environment noise). Tears the server down afterwards.
+synthetic-sanity:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    docker rm -f falkordb-sanity >/dev/null 2>&1 || true
+    docker run -d --name falkordb-sanity -p 6380:6379 falkordb/falkordb:latest >/dev/null
+    trap 'docker rm -f falkordb-sanity >/dev/null 2>&1 || true; rm -rf recordings/_sanity_a recordings/_sanity_b' EXIT
+    for i in $(seq 1 30); do
+        if docker exec falkordb-sanity redis-cli ping >/dev/null 2>&1; then break; fi
+        sleep 1
+    done
+    if ! docker exec falkordb-sanity redis-cli ping >/dev/null 2>&1; then
+        echo "SANITY FAIL: FalkorDB did not become ready within 30s"; exit 1
+    fi
+    endpoint="falkor://127.0.0.1:6380"
+    ops="match_by_index,expand_1_hop,aggregate_count"
+    # Record the identical workload twice, independently.
+    cargo run --quiet --bin benchmark -- synthetic record --graph sanity --op "$ops" \
+        --seed 7 --nodes 1000 --edges 5000 --out-dir recordings/_sanity_a
+    cargo run --quiet --bin benchmark -- synthetic record --graph sanity --op "$ops" \
+        --seed 7 --nodes 1000 --edges 5000 --out-dir recordings/_sanity_b
+    ha=$(grep '"workload_hash"' recordings/_sanity_a/manifest.json | sed -E 's/.*"(sha256:[a-f0-9]+)".*/\1/')
+    hb=$(grep '"workload_hash"' recordings/_sanity_b/manifest.json | sed -E 's/.*"(sha256:[a-f0-9]+)".*/\1/')
+    if [ "$ha" != "$hb" ]; then echo "SANITY FAIL: recording is not deterministic ($ha != $hb)"; exit 1; fi
+    echo "deterministic recording OK: $ha"
+    # Replay (load) then re-replay (no-load) against the same server, and guard the two.
+    cargo run --quiet --bin benchmark -- synthetic replay --recording recordings/_sanity_a \
+        --endpoint "$endpoint" --samples 300 --warmup 50 --out recordings/_sanity_a/ref.json
+    cargo run --quiet --bin benchmark -- synthetic replay --recording recordings/_sanity_a \
+        --endpoint "$endpoint" --no-load --samples 300 --warmup 50 --out recordings/_sanity_a/cand.json
+    cargo run --quiet --bin benchmark -- synthetic baseline-guard \
+        --baseline recordings/_sanity_a/ref.json --current recordings/_sanity_a/cand.json
+    echo "synthetic-sanity OK"
+
 # === UI (Next.js dashboard in ui/) ===========================================
 
 # Install UI dependencies from the lockfile.

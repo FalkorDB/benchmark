@@ -1,0 +1,29 @@
+{
+  "format_version": 1,
+  "generator_version": "synthbench/v2",
+  "tool_version": "0.1.0",
+  "dataset": {
+    "seed": 42,
+    "nodes": 1000,
+    "edges": 5000
+  },
+  "graph": "tutorial_demo",
+  "corpus_seed": 42,
+  "batch_size": 1000,
+  "ops": [
+    {
+      "name": "match_by_index",
+      "count": 256
+    },
+    {
+      "name": "expand_1_hop",
+      "count": 256
+    },
+    {
+      "name": "aggregate_count",
+      "count": 256
+    }
+  ],
+  "workload_hash": "sha256:57638f31c17b7be582ca3c15f7e3c4ad050189e4200f5af478f6711658dd5eb5",
+  "created_at_epoch_secs": 1784704984
+}

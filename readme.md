@@ -420,13 +420,48 @@ To run the integration test against a live server:
 just synthetic-it     # uses FALKORDB_HOST/FALKORDB_PORT, default 127.0.0.1:6379
 ```
 
+#### Record / replay: the same workload across versions (recommended)
+
+For a rigorous comparison of two FalkorDB versions, **record the workload once** — the dataset
+load-script *and* the measured commands — then **replay that identical bundle** against each version.
+Unlike the Criterion baselines below (which regenerate the graph and re-derive the commands each
+run), replay loads the recorded graph and replays the recorded commands with a fixed-length,
+deterministic runner, so the only variable is the FalkorDB version. See the full walkthrough in the
+[synthetic benchmark tutorial](docs/synthetic-benchmark-tutorial.md).
+
+```bash
+# 1. record a bundle OFFLINE (no server) into recordings/demo/
+just synthetic-record demo --graph tutorial_demo \
+  --op match_by_index,expand_1_hop,aggregate_count --seed 42 --nodes 1000 --edges 5000
+# 2. compare version A (:6379) vs version B (:6380) on that identical bundle
+just synthetic-compare-versions demo falkor://127.0.0.1:6379 falkor://127.0.0.1:6380
+```
+
+- **`just synthetic-record <name> [flags]`** writes `recordings/<name>/` = `manifest.json` +
+  `graph.jsonl` (load statements) + `commands/<op>.jsonl`, plus a length-framed **`workload_hash`**
+  over the graph *and* the commands (so any later edit is detected on load). It is **offline** — a
+  pure function of the seed + knobs — and reads `synthetic-bench.toml` for defaults.
+- **`just synthetic-replay <name> <endpoint> [-- flags]`** drops + loads + **count-verifies** the
+  recorded graph, then measures the recorded commands (`C=1` cached), writing a report plus a per-op
+  **`result_digest`** (a hash of the result cardinality). `--no-load` skips the reload for a
+  load-once / run-many flow (still count-verifying first).
+- **`just synthetic-compare-versions <name> <A> <B>`** replays the same bundle against both endpoints
+  and **guards** the pair: it aborts unless the `workload_hash` **and** every op's `result_digest`
+  match, so a version returning wrong/empty results faster can't masquerade as an improvement. The
+  version difference itself is expected and recorded.
+- **`just synthetic-sanity`** self-checks the tool: it records the same workload twice (asserting an
+  identical `workload_hash` — deterministic recording), then replays + guards against a throwaway
+  Docker FalkorDB. Latency is not asserted (it is environment-dependent noise — see the tutorial).
+- `recordings/` is git-ignored (regenerable bundles).
+
 #### Version-comparison baselines (Criterion, C=1)
 
 To track a **read** operation's latency **between FalkorDB versions**, save a
 [Criterion](https://github.com/bheisler/criterion.rs) C=1 single-flight baseline on one version and
 compare against it on another. The workload (dataset + operations) comes from `synthetic-bench.toml`,
 so both runs measure exactly the same thing — and `synthetic-compare` **guards** that with the
-`corpus_hash` before it will compare, refusing to put mismatched workloads side by side.
+`corpus_hash` before it will compare, refusing to put mismatched workloads side by side. (This path
+regenerates per run; for a rigorous cross-version comparison prefer **record / replay** above.)
 
 ```bash
 # on FalkorDB version A (needs a synthetic-bench.toml with nodes/edges/operations)
