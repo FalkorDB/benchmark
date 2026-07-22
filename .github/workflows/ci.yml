@@ -13,6 +13,10 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+# Read-only token: both jobs only check out and build/test the repo (CodeQL hardening).
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
