@@ -15,7 +15,6 @@ use crate::error::BenchmarkError::OtherError;
 use crate::error::BenchmarkResult;
 use crate::falkor::falkor_endpoint_to_redis_url;
 use crate::queries_repository::QueryType;
-use crate::synthetic::catalog::CORPUS_SIZE;
 use crate::synthetic::dataset::{self, DatasetSpec};
 use crate::synthetic::op_runner::{run_and_drain, OpSample};
 use crate::synthetic::recording::{self, Bundle};
@@ -110,6 +109,15 @@ pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
         operations.insert(op.as_str().to_string(), op_report);
     }
 
+    // The corpus size is what the bundle actually recorded per op (not the compile-time constant),
+    // so a report reflects the replayed commands even if the recorder used a different count.
+    let corpus_size = bundle
+        .commands
+        .iter()
+        .map(|(_, cyphers)| cyphers.len())
+        .max()
+        .unwrap_or(0);
+
     Ok(Report {
         schema_version: SCHEMA_VERSION,
         meta: Meta {
@@ -120,7 +128,7 @@ pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
             warmup: config.warmup,
             concurrency: vec![1],
             seed: bundle.manifest.corpus_seed,
-            corpus_size: CORPUS_SIZE,
+            corpus_size,
             server_timeout_ms: config.server_timeout_ms,
             client_deadline_ms: config.client_deadline_ms,
             connection: "pool(size=1)".to_string(),
