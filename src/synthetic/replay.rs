@@ -66,7 +66,7 @@ pub struct ReplayConfig {
 /// concurrency. Builds the [`Report`].
 pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
     if config.samples == 0 {
-        return Err(OtherError("replay --samples must be greater than 0".to_string()));
+        return Err(OtherError("run --recording --samples must be greater than 0".to_string()));
     }
     let concurrency = normalize_concurrency(&config.concurrency)?;
     let bundle = recording::load(&config.recording_dir)?;
