@@ -14,21 +14,22 @@
 use crate::error::BenchmarkError::OtherError;
 use crate::error::BenchmarkResult;
 use crate::falkor::falkor_endpoint_to_redis_url;
-use crate::queries_repository::QueryType;
+use crate::synthetic::catalog::{spec, DEFAULT_RESET_EVERY};
 use crate::synthetic::dataset::{self, DatasetSpec};
-use crate::synthetic::op_runner::{run_and_drain, OpSample};
+use crate::synthetic::op_runner::{capture_result, ResultShape};
 use crate::synthetic::recording::{self, Bundle};
-use crate::synthetic::report::{
-    DatasetInfo, LevelMetrics, LevelReport, Meta, OperationReport, Report, ServerInfo, SCHEMA_VERSION,
-};
+use crate::synthetic::report::{DatasetInfo, Meta, Report, ServerInfo, SCHEMA_VERSION};
 use crate::synthetic::{
-    open_graph, provenance, redact_endpoint, summarize_samples, write_report, OpName,
+    measure_op, normalize_concurrency, open_graph, provenance, redact_endpoint, write_report,
+    CacheSelection, Config, OpName,
 };
 use falkordb::AsyncGraph;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::sync::atomic::AtomicU64;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{info, warn};
 
 /// How to replay a recorded bundle.
@@ -44,10 +45,14 @@ pub struct ReplayConfig {
     /// `false`, skip loading but still **count-verify** the already-loaded graph (so a load-once /
     /// run-many flow can't drift onto the wrong graph).
     pub load: bool,
-    /// Measured invocations per operation (deterministic cycle over the recorded commands).
+    /// Measured invocations per operation, per worker.
     pub samples: usize,
     /// Warm-up invocations per operation, discarded.
     pub warmup: usize,
+    /// Concurrency levels to sweep (closed-loop worker counts `C`).
+    pub concurrency: Vec<usize>,
+    /// Plan-cache condition(s) to measure: cached, uncached, or both.
+    pub cache: CacheSelection,
     pub server_timeout_ms: i64,
     pub client_deadline_ms: u64,
     /// Where to write the JSON report (Markdown alongside as `<out>.md`).
@@ -56,13 +61,16 @@ pub struct ReplayConfig {
     pub server_image: Option<String>,
 }
 
-/// Replay `config`'s bundle and build a [`Report`] (a single C=1 cached level per op).
+/// Replay `config`'s bundle: load the recorded graph, then measure the recorded commands through the
+/// closed-loop engine across the concurrency sweep + cache modes, verifying results are unchanged by
+/// concurrency. Builds the [`Report`].
 pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
     if config.samples == 0 {
         return Err(OtherError("replay --samples must be greater than 0".to_string()));
     }
+    let concurrency = normalize_concurrency(&config.concurrency)?;
     let bundle = recording::load(&config.recording_dir)?;
-    let spec = bundle.spec();
+    let dataset_spec = bundle.spec();
     let graph_name = config
         .graph
         .clone()
@@ -90,10 +98,10 @@ pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
     };
 
     if config.load {
-        load_recorded_graph(&mut graph, &bundle, &graph_name, &spec, config).await?;
+        load_recorded_graph(&mut graph, &bundle, &graph_name, &dataset_spec, config).await?;
     } else {
         // Load-once / run-many: don't reload, but confirm the right graph is present.
-        dataset::verify_counts(&mut graph, &spec, config.server_timeout_ms, client_deadline)
+        dataset::verify_counts(&mut graph, &dataset_spec, config.server_timeout_ms, client_deadline)
             .await
             .map_err(|e| {
                 OtherError(format!(
@@ -103,18 +111,92 @@ pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
             })?;
     }
 
-    let mut operations = BTreeMap::new();
+    // Reference pass (untimed, single-flight) over every recorded command: capture each result's
+    // shape (cardinality + order-independent value digest). This is the correctness oracle and also
+    // primes the plan cache. Reads return scalars, so a single connection is safe.
+    let st = config.server_timeout_ms;
+    let mut reference: Vec<(OpName, Arc<Vec<String>>, Vec<ResultShape>)> =
+        Vec::with_capacity(bundle.commands.len());
     for (op, cyphers) in &bundle.commands {
-        let op_report = measure_op(&mut graph, *op, cyphers, config, client_deadline).await?;
+        if cyphers.is_empty() {
+            return Err(OtherError(format!("op '{}' has no recorded commands", op.as_str())));
+        }
+        let mut shapes = Vec::with_capacity(cyphers.len());
+        for c in cyphers {
+            shapes.push(
+                capture_result(&mut graph, c, st, client_deadline)
+                    .await
+                    .map_err(|e| OtherError(format!("capturing '{}': {}", op.as_str(), e)))?,
+            );
+        }
+        reference.push((*op, Arc::new(cyphers.clone()), shapes));
+    }
+    // Setup connection done; drop it so it isn't an idle extra connection during the sweep.
+    drop(graph);
+
+    // Engine config for the recorded workload (writes/reset are irrelevant — recorded ops are reads).
+    let engine_config = Config {
+        endpoint: config.endpoint.clone(),
+        graph: graph_name.clone(),
+        ops: reference.iter().map(|(op, _, _)| *op).collect(),
+        samples: config.samples,
+        warmup: config.warmup,
+        concurrency: concurrency.clone(),
+        reset_every: DEFAULT_RESET_EVERY,
+        seed: bundle.manifest.corpus_seed,
+        server_timeout_ms: config.server_timeout_ms,
+        client_deadline_ms: config.client_deadline_ms,
+        cache: config.cache,
+        out: config.out.clone(),
+        server_image: config.server_image.clone(),
+        dataset: None,
+    };
+    let run_token = rand::random_range(0..=u64::MAX);
+    let uid_alloc = AtomicU64::new(0);
+    let max_c = concurrency.iter().copied().max().unwrap_or(1);
+
+    let mut operations = BTreeMap::new();
+    for (op, corpus, shapes) in &reference {
+        // Verify results are IDENTICAL at the highest concurrency (untimed) before trusting the
+        // measured latencies — a concurrent path that returns different/wrong results is a hard fail.
+        if max_c > 1 {
+            verify_concurrent(
+                &config.endpoint,
+                &graph_name,
+                corpus,
+                shapes,
+                max_c,
+                st,
+                client_deadline,
+            )
+            .await
+            .map_err(|e| {
+                OtherError(format!(
+                    "op '{}' returned different results at concurrency {}: {}",
+                    op.as_str(),
+                    max_c,
+                    e
+                ))
+            })?;
+        }
+        let mut op_report = measure_op(
+            &engine_config,
+            &concurrency,
+            &spec(*op),
+            Arc::clone(corpus),
+            run_token,
+            &uid_alloc,
+            client_deadline,
+        )
+        .await?;
+        op_report.result_digest = Some(op_result_digest(*op, shapes));
         operations.insert(op.as_str().to_string(), op_report);
     }
 
-    // The corpus size is what the bundle actually recorded per op (not the compile-time constant),
-    // so a report reflects the replayed commands even if the recorder used a different count.
-    let corpus_size = bundle
-        .commands
+    // The corpus size is what the bundle actually recorded per op (not the compile-time constant).
+    let corpus_size = reference
         .iter()
-        .map(|(_, cyphers)| cyphers.len())
+        .map(|(_, corpus, _)| corpus.len())
         .max()
         .unwrap_or(0);
 
@@ -126,21 +208,21 @@ pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
             graph: graph_name,
             samples: config.samples,
             warmup: config.warmup,
-            concurrency: vec![1],
+            concurrency: concurrency.clone(),
             seed: bundle.manifest.corpus_seed,
             corpus_size,
             server_timeout_ms: config.server_timeout_ms,
             client_deadline_ms: config.client_deadline_ms,
-            connection: "pool(size=1)".to_string(),
+            connection: "pool(size=1) per worker".to_string(),
             started_at_epoch_secs,
             server,
             host: crate::synthetic::host::collect(),
-            // The bundle's workload_hash is the comparison key: it attests the graph *and* the
-            // commands, so the existing guard compares replays of the same bundle safely.
+            // The bundle's workload_hash attests the graph *and* the commands, so the guard compares
+            // replays of the same bundle safely.
             dataset: Some(DatasetInfo {
-                seed: spec.seed,
-                nodes: spec.nodes,
-                edges: spec.edges,
+                seed: dataset_spec.seed,
+                nodes: dataset_spec.nodes,
+                edges: dataset_spec.edges,
                 corpus_hash: bundle.manifest.workload_hash.clone(),
             }),
         },
@@ -189,85 +271,65 @@ async fn load_recorded_graph(
     .await
 }
 
-/// Measure one operation: prime the plan cache, capture a result-cardinality digest, run a fixed
-/// warm-up then a fixed measured cycle over the recorded commands, and summarize.
-async fn measure_op(
-    graph: &mut AsyncGraph,
-    op: OpName,
-    cyphers: &[String],
-    config: &ReplayConfig,
+/// Verify the recorded commands return the **same results** when run concurrently: spin up `workers`
+/// connections, run every command on each, and assert each command's [`ResultShape`] equals the
+/// single-flight reference. Untimed — a pure correctness check that concurrency didn't change
+/// results. Any mismatch (or error) fails the whole run.
+async fn verify_concurrent(
+    endpoint: &str,
+    graph_name: &str,
+    cyphers: &Arc<Vec<String>>,
+    expected: &[ResultShape],
+    workers: usize,
+    server_timeout_ms: i64,
     client_deadline: Duration,
-) -> BenchmarkResult<OperationReport> {
-    if cyphers.is_empty() {
-        return Err(OtherError(format!("op '{}' has no recorded commands", op.as_str())));
+) -> BenchmarkResult<()> {
+    let expected: Arc<Vec<ResultShape>> = Arc::new(expected.to_vec());
+    let mut handles = Vec::with_capacity(workers);
+    for _ in 0..workers {
+        let endpoint = endpoint.to_string();
+        let graph_name = graph_name.to_string();
+        let cyphers = Arc::clone(cyphers);
+        let expected = Arc::clone(&expected);
+        handles.push(tokio::spawn(async move {
+            let mut graph = open_graph(&endpoint, &graph_name).await?;
+            for (i, cypher) in cyphers.iter().enumerate() {
+                let shape = capture_result(&mut graph, cypher, server_timeout_ms, client_deadline).await?;
+                if shape != expected[i] {
+                    return Err(OtherError(format!(
+                        "command #{i} returned {:?}, expected {:?}",
+                        shape, expected[i]
+                    )));
+                }
+            }
+            Ok::<(), crate::error::BenchmarkError>(())
+        }));
     }
-    let st = config.server_timeout_ms;
-
-    // Untimed cardinality pass over every recorded command (in order) → the result digest that the
-    // guard uses as a correctness gate. This also primes the plan cache for *every* command (so the
-    // measured cycle below never pays a first-time compile), which is why there's no separate prime.
-    let mut cardinalities = Vec::with_capacity(cyphers.len());
-    for cypher in cyphers {
-        let sample = run_and_drain(graph, QueryType::Read, cypher, st, client_deadline)
-            .await
-            .map_err(|e| OtherError(format!("verifying '{}': {}", op.as_str(), e)))?;
-        cardinalities.push(sample.rows);
+    for h in handles {
+        h.await
+            .map_err(|e| OtherError(format!("concurrent verify task panicked: {e}")))??;
     }
-    let result_digest = cardinality_digest(op, &cardinalities);
-
-    // Warm-up (discarded), then the fixed-length measured cycle.
-    for i in 0..config.warmup {
-        let cypher = &cyphers[i % cyphers.len()];
-        run_and_drain(graph, QueryType::Read, cypher, st, client_deadline)
-            .await
-            .map_err(|e| OtherError(format!("warm-up '{}': {}", op.as_str(), e)))?;
-    }
-
-    let mut samples: Vec<OpSample> = Vec::with_capacity(config.samples);
-    let start = Instant::now();
-    for i in 0..config.samples {
-        let cypher = &cyphers[i % cyphers.len()];
-        let sample = run_and_drain(graph, QueryType::Read, cypher, st, client_deadline)
-            .await
-            .map_err(|e| OtherError(format!("measuring '{}': {}", op.as_str(), e)))?;
-        samples.push(sample);
-    }
-    let elapsed = start.elapsed().as_secs_f64();
-    let throughput_ops_per_sec = if elapsed > 0.0 {
-        samples.len() as f64 / elapsed
-    } else {
-        0.0
-    };
-
-    let metrics = summarize_samples(&samples)?;
-    Ok(OperationReport {
-        levels: vec![LevelReport {
-            concurrency: 1,
-            cached: Some(LevelMetrics {
-                throughput_ops_per_sec,
-                metrics,
-            }),
-            uncached: None,
-            compilation_ms_median: None,
-        }],
-        result_digest: Some(result_digest),
-    })
+    Ok(())
 }
 
-/// A `sha256:…` digest over an operation's per-command result cardinality (row counts), in command
-/// order. Deterministic given the same graph + recorded commands, and length-framed so it can't
-/// alias a different op's digest.
-fn cardinality_digest(
+/// A `sha256:…` digest over an operation's per-command result **values** (order-independent within a
+/// row set), in command order. Deterministic given the same graph + recorded commands, and
+/// length-framed so it can't alias a different op's digest. Two versions returning different results
+/// for the same recorded command produce different digests.
+fn op_result_digest(
     op: OpName,
-    rows: &[usize],
+    shapes: &[ResultShape],
 ) -> String {
     let mut h = Sha256::new();
     let name = op.as_str().as_bytes();
     h.update((name.len() as u64).to_le_bytes());
     h.update(name);
-    h.update((rows.len() as u64).to_le_bytes());
-    for &r in rows {
-        h.update((r as u64).to_le_bytes());
+    h.update((shapes.len() as u64).to_le_bytes());
+    for s in shapes {
+        h.update((s.rows as u64).to_le_bytes());
+        let d = s.value_digest.as_bytes();
+        h.update((d.len() as u64).to_le_bytes());
+        h.update(d);
     }
     format!("sha256:{:x}", h.finalize())
 }
@@ -276,15 +338,24 @@ fn cardinality_digest(
 mod tests {
     use super::*;
 
+    fn shape(rows: usize, digest: &str) -> ResultShape {
+        ResultShape {
+            rows,
+            value_digest: format!("sha256:{digest}"),
+        }
+    }
+
     #[test]
-    fn cardinality_digest_is_deterministic_and_sensitive() {
-        let a = cardinality_digest(OpName::MatchByIndex, &[1, 1, 1]);
-        let b = cardinality_digest(OpName::MatchByIndex, &[1, 1, 1]);
-        assert_eq!(a, b);
-        // A different cardinality vector changes the digest.
-        assert_ne!(a, cardinality_digest(OpName::MatchByIndex, &[1, 0, 1]));
-        // The op name is part of the digest (same rows, different op).
-        assert_ne!(a, cardinality_digest(OpName::Expand1Hop, &[1, 1, 1]));
+    fn op_result_digest_is_deterministic_and_sensitive() {
+        let base = vec![shape(1, "aa"), shape(3, "bb")];
+        let a = op_result_digest(OpName::MatchByIndex, &base);
+        assert_eq!(a, op_result_digest(OpName::MatchByIndex, &base));
+        // A different value digest changes it (even at the same cardinality).
+        assert_ne!(a, op_result_digest(OpName::MatchByIndex, &[shape(1, "aa"), shape(3, "cc")]));
+        // A different cardinality changes it.
+        assert_ne!(a, op_result_digest(OpName::MatchByIndex, &[shape(2, "aa"), shape(3, "bb")]));
+        // The op name is part of the digest.
+        assert_ne!(a, op_result_digest(OpName::Expand1Hop, &base));
         assert!(a.starts_with("sha256:"));
     }
 
@@ -298,6 +369,8 @@ mod tests {
             load: true,
             samples: 0,
             warmup: 0,
+            concurrency: vec![1],
+            cache: CacheSelection::Cached,
             server_timeout_ms: 5_000,
             client_deadline_ms: 6_000,
             out: "unused.json".to_string(),

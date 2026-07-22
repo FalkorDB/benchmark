@@ -256,14 +256,13 @@ pub enum CacheMode {
 /// invocation id (disjoint per worker and per concurrency level), so no two invocations anywhere in
 /// the sweep ever collide.
 fn render_cypher(
-    query: &Query,
+    base: &str,
     mode: CacheMode,
     run_token: u64,
     uid: u64,
 ) -> String {
-    let base = query.to_cypher();
     match mode {
-        CacheMode::Cached => base,
+        CacheMode::Cached => base.to_string(),
         CacheMode::Uncached => format!("{} /* co{:x}-{} */", base, run_token, uid),
     }
 }
@@ -493,11 +492,15 @@ pub async fn run(config: &Config) -> BenchmarkResult<Report> {
             None => dataset::corpus_fingerprint(&corpus),
         };
         op_fingerprints.push((op, fingerprint));
+        // Pre-render reads to their cached-mode base strings so the engine measures strings (writes
+        // render per-invocation, so this is unused for them). This is the same string a recorded
+        // bundle stores, so a generated run and a `--recording` run measure identically.
+        let rendered: Arc<Vec<String>> = Arc::new(corpus.iter().map(|q| q.to_cypher()).collect());
         let op_report = measure_op(
             config,
             &concurrency,
             &op_spec,
-            Arc::clone(&corpus),
+            rendered,
             run_token,
             &uid_alloc,
             client_deadline,
@@ -546,7 +549,7 @@ pub async fn run(config: &Config) -> BenchmarkResult<Report> {
 
 /// Validate and canonicalize the configured concurrency sweep: non-empty, every level ≥ 1,
 /// deduplicated and sorted ascending (so the curve reads low → high and each `C` runs once).
-fn normalize_concurrency(concurrency: &[usize]) -> BenchmarkResult<Vec<usize>> {
+pub(crate) fn normalize_concurrency(concurrency: &[usize]) -> BenchmarkResult<Vec<usize>> {
     if concurrency.is_empty() {
         return Err(OtherError(
             "concurrency must list at least one level (e.g. --concurrency 1,4,16)".to_string(),
@@ -676,9 +679,10 @@ pub(crate) fn is_empty_graph_key(msg: &str) -> bool {
 /// Where a [`GraphWorker`] gets each invocation's query: a read cycles a shared corpus; a write
 /// renders a fresh query from its own [`WriteScratch`] and runs the untimed reset/verification.
 enum WorkerSource {
-    /// A read op: cycle the shared corpus from a decorrelating offset.
+    /// A read op: cycle the shared **pre-rendered** corpus (cached-mode base strings) from a
+    /// decorrelating offset. Uncached mode decorates each base with a unique comment.
     Read {
-        corpus: Arc<Vec<Query>>,
+        corpus: Arc<Vec<String>>,
         corpus_offset: usize,
     },
     /// A write op (Part 5): the plan's per-invocation render + the worker's isolated scratch.
@@ -750,7 +754,7 @@ impl OpInvoker for GraphWorker {
                     }
                 }
                 let base = (plan.render)(&scratch, seq)?;
-                let cypher = render_cypher(&base, mode, run_token, uid);
+                let cypher = render_cypher(&base.to_cypher(), mode, run_token, uid);
                 let sample = run_and_drain(
                     &mut self.graph,
                     kind,
@@ -770,11 +774,11 @@ impl OpInvoker for GraphWorker {
 /// Measure one operation across the concurrency sweep, under every requested cache mode, and derive
 /// its per-level compilation cost.
 #[allow(clippy::too_many_arguments)]
-async fn measure_op(
+pub(crate) async fn measure_op(
     config: &Config,
     concurrency: &[usize],
     op_spec: &OperationSpec,
-    corpus: Arc<Vec<Query>>,
+    corpus: Arc<Vec<String>>,
     run_token: u64,
     uid_alloc: &AtomicU64,
     client_deadline: Duration,
@@ -867,7 +871,7 @@ async fn measure_level(
     config: &Config,
     concurrency: usize,
     op_spec: &OperationSpec,
-    corpus: &Arc<Vec<Query>>,
+    corpus: &Arc<Vec<String>>,
     mode: CacheMode,
     run_token: u64,
     uid_alloc: &AtomicU64,
@@ -1198,6 +1202,8 @@ pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkRes
                 load: !no_load,
                 samples: samples.unwrap_or(1000),
                 warmup: warmup.unwrap_or(200),
+                concurrency: vec![1],
+                cache: CacheSelection::Both,
                 server_timeout_ms: server_timeout_ms.unwrap_or(5_000),
                 client_deadline_ms: client_deadline_ms.unwrap_or(6_000),
                 out: out.unwrap_or_else(|| "synthetic-report.json".to_string()),
@@ -1376,16 +1382,17 @@ mod tests {
             .text("MATCH (n:User {id: $id}) RETURN n.id")
             .param("id", 7)
             .build();
+        let base = q.to_cypher();
         // Cached: body verbatim (plan reused), no uniqueness token.
-        let c0 = render_cypher(&q, CacheMode::Cached, 0xABCD, 0);
-        let c1 = render_cypher(&q, CacheMode::Cached, 0xABCD, 1);
+        let c0 = render_cypher(&base, CacheMode::Cached, 0xABCD, 0);
+        let c1 = render_cypher(&base, CacheMode::Cached, 0xABCD, 1);
         assert_eq!(c0, c1);
         assert!(!c0.contains("/* co"));
         assert!(c0.contains("RETURN n.id"));
         // Uncached: a unique per-invocation comment ⇒ distinct cache key; the run_token keeps it apart
         // from other runs.
-        let u0 = render_cypher(&q, CacheMode::Uncached, 0xABCD, 0);
-        let u1 = render_cypher(&q, CacheMode::Uncached, 0xABCD, 1);
+        let u0 = render_cypher(&base, CacheMode::Uncached, 0xABCD, 0);
+        let u1 = render_cypher(&base, CacheMode::Uncached, 0xABCD, 1);
         assert_ne!(u0, u1);
         assert!(u0.contains("/* coabcd-0 */"));
         assert!(u1.contains("/* coabcd-1 */"));

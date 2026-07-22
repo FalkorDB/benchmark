@@ -952,6 +952,8 @@ fn replay_config(dir: &std::path::Path, graph: &str, out: &str, load: bool) -> R
         load,
         samples: 200,
         warmup: 30,
+        concurrency: vec![1],
+        cache: benchmark::synthetic::CacheSelection::Cached,
         server_timeout_ms: 5_000,
         client_deadline_ms: 6_000,
         out: out.to_string(),
@@ -1087,6 +1089,55 @@ async fn record_and_replay_via_run_command() {
     assert!(written.contains("result_digest"));
     // The Markdown sibling is written too.
     assert!(std::path::Path::new(&report_out.replace(".json", ".md")).exists());
+
+    std::fs::remove_dir_all(&dir).ok();
+    drop_graph(graph).await;
+}
+
+/// A recorded workload replayed at concurrency > 1 (both cache modes) must return identical results
+/// (the untimed concurrent verify passes) and produce a per-level, per-mode report.
+#[tokio::test]
+#[ignore = "requires a running FalkorDB server"]
+async fn replay_concurrency_sweep_verifies_results_and_reports_levels() {
+    let graph = "syn_it_replay_conc";
+    drop_graph(graph).await;
+    let dir = temp_bundle_dir("syn-it-conc");
+    let spec = DatasetSpec {
+        seed: 5,
+        nodes: 600,
+        edges: 1800,
+    };
+    let ops = vec![OpName::MatchByIndex, OpName::Expand1Hop, OpName::AggregateCount];
+    recording::record(&spec, graph, &ops, spec.seed, 256, &dir).expect("record");
+
+    let cfg = ReplayConfig {
+        recording_dir: dir.clone(),
+        endpoint: endpoint(),
+        graph: Some(graph.to_string()),
+        load: true,
+        samples: 150,
+        warmup: 30,
+        concurrency: vec![1, 4],
+        cache: benchmark::synthetic::CacheSelection::Both,
+        server_timeout_ms: 5_000,
+        client_deadline_ms: 6_000,
+        out: dir.join("conc.json").to_string_lossy().into_owned(),
+        server_image: None,
+    };
+    // If any op returned different results at C=4 vs the single-flight reference, run() errors here.
+    let report = replay::run(&cfg).await.expect("replay concurrency sweep");
+
+    assert_eq!(report.meta.concurrency, vec![1, 4]);
+    for op in ["match_by_index", "expand_1_hop", "aggregate_count"] {
+        let opr = &report.operations[op];
+        assert_eq!(opr.levels.len(), 2, "op {op} should have two concurrency levels");
+        assert!(opr.result_digest.is_some(), "op {op} needs a result digest");
+        // Both cache modes were measured at each level.
+        for lvl in &opr.levels {
+            assert!(lvl.cached.is_some(), "op {op} C={} missing cached", lvl.concurrency);
+            assert!(lvl.uncached.is_some(), "op {op} C={} missing uncached", lvl.concurrency);
+        }
+    }
 
     std::fs::remove_dir_all(&dir).ok();
     drop_graph(graph).await;

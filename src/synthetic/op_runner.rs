@@ -9,8 +9,9 @@ use crate::error::BenchmarkError::OtherError;
 use crate::error::BenchmarkResult;
 use crate::queries_repository::QueryType;
 use crate::synthetic::writes::MutationStats;
-use falkordb::AsyncGraph;
+use falkordb::{AsyncGraph, FalkorValue};
 use futures::StreamExt;
+use sha2::{Digest, Sha256};
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 use tokio::time::error::Elapsed;
@@ -112,6 +113,91 @@ pub async fn run_and_drain(
         cached,
         mutations,
     })
+}
+
+/// A canonical, order-independent fingerprint of a read query's result set: the row count plus a
+/// SHA-256 over the **sorted** canonical rendering of every row. Used by the untimed correctness
+/// passes (reference + concurrency-invariance check) — never on the timed measurement path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResultShape {
+    /// Number of rows returned.
+    pub rows: usize,
+    /// `sha256:…` over the sorted per-row canonical strings (order-independent).
+    pub value_digest: String,
+}
+
+/// Execute a **read** query and capture its [`ResultShape`] (row count + order-independent value
+/// digest), bounded by `client_deadline`. Rows are rendered to canonical strings, sorted, then
+/// hashed, so a differing row *order* doesn't matter but differing *values* or *cardinality* do.
+pub async fn capture_result(
+    graph: &mut AsyncGraph,
+    cypher: &str,
+    server_timeout_ms: i64,
+    client_deadline: Duration,
+) -> BenchmarkResult<ResultShape> {
+    let fut = async {
+        let query_result = graph
+            .ro_query(cypher)
+            .with_timeout(server_timeout_ms)
+            .execute()
+            .await
+            .map_err(|e| OtherError(format!("capture query '{}' failed: {:?}", cypher, e)))?;
+        let mut rows: Vec<String> = Vec::new();
+        let mut data = query_result.data;
+        while let Some(row) = data.next().await {
+            let row =
+                row.map_err(|e| OtherError(format!("row decode error for '{}': {:?}", cypher, e)))?;
+            rows.push(canonical_row(&row.into_values()));
+        }
+        Ok::<Vec<String>, crate::error::BenchmarkError>(rows)
+    };
+    let mut rows = tokio::time::timeout(client_deadline, fut)
+        .await
+        .map_err(|e: Elapsed| {
+            OtherError(format!(
+                "client deadline ({} ms) exceeded capturing '{}': {}",
+                client_deadline.as_millis(),
+                cypher,
+                e
+            ))
+        })??;
+    let count = rows.len();
+    rows.sort_unstable();
+    let mut h = Sha256::new();
+    h.update((count as u64).to_le_bytes());
+    for r in &rows {
+        h.update((r.len() as u64).to_le_bytes());
+        h.update(r.as_bytes());
+    }
+    Ok(ResultShape {
+        rows: count,
+        value_digest: format!("sha256:{:x}", h.finalize()),
+    })
+}
+
+/// Canonicalize one row (its column values, in column order) to a stable string.
+fn canonical_row(values: &[FalkorValue]) -> String {
+    let mut s = String::new();
+    for (i, v) in values.iter().enumerate() {
+        if i > 0 {
+            s.push('\u{1f}'); // unit separator — can't appear in our scalar renderings
+        }
+        s.push_str(&canonical_value(v));
+    }
+    s
+}
+
+/// A stable string for one scalar [`FalkorValue`] (the shapes our read ops return). Floats use their
+/// bit pattern so equal values always render identically; other shapes fall back to `Debug`.
+fn canonical_value(v: &FalkorValue) -> String {
+    match v {
+        FalkorValue::I64(i) => format!("i:{i}"),
+        FalkorValue::F64(f) => format!("f:{:016x}", f.to_bits()),
+        FalkorValue::Bool(b) => format!("b:{b}"),
+        FalkorValue::String(s) => format!("s:{s}"),
+        FalkorValue::None => "null".to_string(),
+        other => format!("o:{other:?}"),
+    }
 }
 
 /// Validate FalkorDB's reported internal execution time: it must be present, finite and
