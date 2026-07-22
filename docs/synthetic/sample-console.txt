@@ -14,17 +14,23 @@ dataset — seed 42  nodes 1000  edges 5000  corpus_hash sha256:57638f31c17b7be5
 aggregate_count
   [cached — plan reused, execution only]
     C    throughput(ops/s)   server p50/p90/p95/p99             total p50/p90/p95/p99              miss%
-    1              1772     0.094 / 0.130 / 0.146 / 0.167     0.523 / 0.694 / 0.752 / 0.841     0.0  <- knee
+    1              1969     0.089 / 0.113 / 0.126 / 0.145     0.472 / 0.600 / 0.646 / 0.726     0.0  <- knee
 
 expand_1_hop
   [cached — plan reused, execution only]
     C    throughput(ops/s)   server p50/p90/p95/p99             total p50/p90/p95/p99              miss%
-    1              1706     0.088 / 0.130 / 0.146 / 0.165     0.548 / 0.709 / 0.764 / 0.937     0.0  <- knee
+    1              1726     0.089 / 0.133 / 0.146 / 0.175     0.531 / 0.745 / 0.824 / 0.957     0.0  <- knee
 
 match_by_index
   [cached — plan reused, execution only]
     C    throughput(ops/s)   server p50/p90/p95/p99             total p50/p90/p95/p99              miss%
-    1              2039     0.043 / 0.060 / 0.068 / 0.081     0.457 / 0.577 / 0.645 / 0.755     0.0  <- knee
+    1              2615     0.039 / 0.052 / 0.060 / 0.069     0.362 / 0.451 / 0.479 / 0.532     0.0  <- knee
+
+# replay a second version the same way (here shown against the same server), then guard:
+$ benchmark synthetic replay --recording recordings/demo --no-load \
+    --endpoint falkor://127.0.0.1:6379 --samples 500 --warmup 100 --out recordings/demo/version-b.json
+report written to recordings/demo/version-b.json
+markdown written to recordings/demo/version-b.md
 
 $ benchmark synthetic baseline-guard \
     --baseline recordings/demo/version-a.json --current recordings/demo/version-b.json

@@ -212,8 +212,17 @@ synthetic-replay name endpoint *args:
     shift || true                          # drop `name`
     shift || true                          # drop `endpoint`
     if [ "${1:-}" = "--" ]; then shift; fi
-    cargo run --quiet --bin benchmark -- synthetic replay --recording "recordings/{{name}}" \
-        --endpoint "{{endpoint}}" --out "recordings/{{name}}/report.json" "$@"
+    # Default the report path, but let a forwarded --out override it (avoid a duplicate Clap arg).
+    has_out=0
+    for arg in "$@"; do
+        case "$arg" in --out|--out=*) has_out=1 ;; esac
+    done
+    cmd=(cargo run --quiet --bin benchmark -- synthetic replay \
+        --recording "recordings/{{name}}" --endpoint "{{endpoint}}")
+    if [ "$has_out" -eq 0 ]; then
+        cmd+=(--out "recordings/{{name}}/report.json")
+    fi
+    "${cmd[@]}" "$@"
 
 # Compare two FalkorDB versions on the SAME recorded bundle: replay it (load + count-verify) against
 # each endpoint, then GUARD that the workload_hash + per-op result digests match (a version delta is
@@ -245,6 +254,9 @@ synthetic-sanity:
         if docker exec falkordb-sanity redis-cli ping >/dev/null 2>&1; then break; fi
         sleep 1
     done
+    if ! docker exec falkordb-sanity redis-cli ping >/dev/null 2>&1; then
+        echo "SANITY FAIL: FalkorDB did not become ready within 30s"; exit 1
+    fi
     endpoint="falkor://127.0.0.1:6380"
     ops="match_by_index,expand_1_hop,aggregate_count"
     # Record the identical workload twice, independently.

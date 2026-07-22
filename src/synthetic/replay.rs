@@ -91,7 +91,7 @@ pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
     };
 
     if config.load {
-        load_recorded_graph(&mut graph, &bundle, &spec, config).await?;
+        load_recorded_graph(&mut graph, &bundle, &graph_name, &spec, config).await?;
     } else {
         // Load-once / run-many: don't reload, but confirm the right graph is present.
         dataset::verify_counts(&mut graph, &spec, config.server_timeout_ms, client_deadline)
@@ -151,6 +151,7 @@ pub async fn run_and_report(config: &ReplayConfig) -> BenchmarkResult<()> {
 async fn load_recorded_graph(
     graph: &mut AsyncGraph,
     bundle: &Bundle,
+    graph_name: &str,
     spec: &DatasetSpec,
     config: &ReplayConfig,
 ) -> BenchmarkResult<()> {
@@ -161,10 +162,12 @@ async fn load_recorded_graph(
         .server_timeout_ms
         .max(i64::try_from(load_deadline.as_millis()).unwrap_or(i64::MAX));
 
+    // Log the graph actually being loaded (the resolved target, which `--graph` can override — not
+    // necessarily the bundle's recorded graph name).
     info!(
         "loading recorded graph ({} statements) into '{}'",
         bundle.graph_statements.len(),
-        bundle.manifest.graph
+        graph_name
     );
 
     // Drop + load the recorded statements + verify counts — the exact path `--generate` uses.
