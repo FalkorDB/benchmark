@@ -171,6 +171,12 @@ pub struct LevelReport {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OperationReport {
     pub levels: Vec<LevelReport>,
+    /// A `sha256:…` digest of this operation's **result cardinality** across its recorded commands
+    /// (present only for a `synthetic replay` run). Two versions that return a different number of
+    /// rows for the same recorded command produce different digests, so a version returning wrong
+    /// or empty results faster can't masquerade as an improvement. `None` for a `synthetic run`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_digest: Option<String>,
 }
 
 impl OperationReport {
@@ -625,6 +631,7 @@ mod tests {
                         compilation_ms_median: Some(0.06),
                     },
                 ],
+                result_digest: None,
             },
         );
         Report {
@@ -889,6 +896,7 @@ mod tests {
                         compilation_ms_median: None,
                     },
                 ],
+                result_digest: None,
             },
         );
         ops.insert(
@@ -900,6 +908,7 @@ mod tests {
                     uncached: Some(sample_level_metrics(50.0)),
                     compilation_ms_median: None,
                 }],
+                result_digest: None,
             },
         );
         ops.insert(
@@ -920,6 +929,7 @@ mod tests {
                         compilation_ms_median: None,
                     },
                 ],
+                result_digest: None,
             },
         );
         r.operations = ops;

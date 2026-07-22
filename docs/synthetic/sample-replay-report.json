@@ -1,0 +1,201 @@
+{
+  "schema_version": 2,
+  "meta": {
+    "tool_version": "0.1.0",
+    "endpoint": "falkor://127.0.0.1:6379",
+    "graph": "tutorial_demo",
+    "samples": 500,
+    "warmup": 100,
+    "concurrency": [
+      1
+    ],
+    "seed": 42,
+    "corpus_size": 256,
+    "server_timeout_ms": 5000,
+    "client_deadline_ms": 6000,
+    "connection": "pool(size=1)",
+    "started_at_epoch_secs": 1784704984,
+    "server": {
+      "module_graph_ver": 42001,
+      "cache_size": 25,
+      "redis_version": "8.6.3",
+      "redis_build_id": "313de0794c1dcd59",
+      "redis_git_sha1": "00000000",
+      "run_id": "6f355549c5aa2543b9abe5822767ec8c0b1a8c2a",
+      "os": "Linux 6.12.76-linuxkit aarch64",
+      "arch_bits": "64",
+      "server_image": null
+    },
+    "host": {
+      "hostname": "bench-host",
+      "os": "macOS 26.5.2 Tahoe",
+      "kernel": "25.5.0",
+      "arch": "arm64",
+      "cpu": "Apple M1 Pro",
+      "physical_cores": 10,
+      "logical_cores": 10,
+      "total_memory_bytes": 17179869184
+    },
+    "dataset": {
+      "seed": 42,
+      "nodes": 1000,
+      "edges": 5000,
+      "corpus_hash": "sha256:57638f31c17b7be582ca3c15f7e3c4ad050189e4200f5af478f6711658dd5eb5"
+    }
+  },
+  "operations": {
+    "aggregate_count": {
+      "levels": [
+        {
+          "concurrency": 1,
+          "cached": {
+            "throughput_ops_per_sec": 1777.9099973884634,
+            "metrics": {
+              "server_ms": {
+                "n": 480,
+                "removed": 20,
+                "min": 0.065625,
+                "mean": 0.09802106666666652,
+                "median": 0.09364549999999999,
+                "p90": 0.12329550000000002,
+                "p95": 0.13281904999999986,
+                "p99": 0.15774481999999992,
+                "max": 0.170167,
+                "stddev": 0.01822080641189413
+              },
+              "total_ms": {
+                "n": 480,
+                "removed": 20,
+                "min": 0.394959,
+                "mean": 0.5433213083333334,
+                "median": 0.5228545,
+                "p90": 0.6680208000000001,
+                "p95": 0.7341440999999999,
+                "p99": 0.8234375399999997,
+                "max": 0.934667,
+                "stddev": 0.09331834456570741
+              },
+              "non_internal_ms": {
+                "n": 480,
+                "removed": 20,
+                "min": 0.312625,
+                "mean": 0.44530024166666665,
+                "median": 0.4269585,
+                "p90": 0.5513452000000001,
+                "p95": 0.6175920499999998,
+                "p99": 0.7074113199999996,
+                "max": 0.833041,
+                "stddev": 0.08312607390231073
+              },
+              "cached_false_rate": 0.0,
+              "cached_unknown": 0
+            }
+          }
+        }
+      ],
+      "result_digest": "sha256:b5c83860437f5b1c699ae3843dc9ca78a9e6ddf0438174b9325921f1138b55a4"
+    },
+    "expand_1_hop": {
+      "levels": [
+        {
+          "concurrency": 1,
+          "cached": {
+            "throughput_ops_per_sec": 1779.548360378061,
+            "metrics": {
+              "server_ms": {
+                "n": 485,
+                "removed": 15,
+                "min": 0.060667,
+                "mean": 0.09268782886597943,
+                "median": 0.088375,
+                "p90": 0.1186668,
+                "p95": 0.13210859999999994,
+                "p99": 0.15009499999999995,
+                "max": 0.158583,
+                "stddev": 0.017949651588658157
+              },
+              "total_ms": {
+                "n": 485,
+                "removed": 15,
+                "min": 0.422708,
+                "mean": 0.5512735298969071,
+                "median": 0.5264580000000001,
+                "p90": 0.6700668,
+                "p95": 0.7527918,
+                "p99": 0.8246517199999999,
+                "max": 0.9128339999999999,
+                "stddev": 0.0907228566400642
+              },
+              "non_internal_ms": {
+                "n": 485,
+                "removed": 15,
+                "min": 0.342041,
+                "mean": 0.458585701030928,
+                "median": 0.437708,
+                "p90": 0.5587831999999999,
+                "p95": 0.6358923999999995,
+                "p99": 0.6942431599999999,
+                "max": 0.809083,
+                "stddev": 0.0793617465274545
+              },
+              "cached_false_rate": 0.0,
+              "cached_unknown": 0
+            }
+          }
+        }
+      ],
+      "result_digest": "sha256:b1a89fe0081c3f086b06d0ae211de0d2e45c96d6dce70cb35b1ecf136340036a"
+    },
+    "match_by_index": {
+      "levels": [
+        {
+          "concurrency": 1,
+          "cached": {
+            "throughput_ops_per_sec": 2067.7925797263274,
+            "metrics": {
+              "server_ms": {
+                "n": 481,
+                "removed": 19,
+                "min": 0.025667,
+                "mean": 0.04565903950103954,
+                "median": 0.043417,
+                "p90": 0.060125,
+                "p95": 0.067667,
+                "p99": 0.07849179999999999,
+                "max": 0.083708,
+                "stddev": 0.010343709657601965
+              },
+              "total_ms": {
+                "n": 481,
+                "removed": 19,
+                "min": 0.355292,
+                "mean": 0.47356442203742183,
+                "median": 0.452625,
+                "p90": 0.58025,
+                "p95": 0.622,
+                "p99": 0.7101493999999998,
+                "max": 0.771666,
+                "stddev": 0.07520148271309599
+              },
+              "non_internal_ms": {
+                "n": 481,
+                "removed": 19,
+                "min": 0.319292,
+                "mean": 0.42790538253638233,
+                "median": 0.407167,
+                "p90": 0.5258340000000001,
+                "p95": 0.566166,
+                "p99": 0.6613658,
+                "max": 0.7005,
+                "stddev": 0.06967016314721602
+              },
+              "cached_false_rate": 0.0,
+              "cached_unknown": 0
+            }
+          }
+        }
+      ],
+      "result_digest": "sha256:28e92e5f668d2c1e90a0bd15c209ef370424135588dbf650595afc3a2991754a"
+    }
+  }
+}

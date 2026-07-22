@@ -935,3 +935,159 @@ async fn explain(
     let plan = graph.explain(cypher).execute().await.expect("explain");
     plan.plan().to_vec()
 }
+
+// ---------------------------------------------------------------------------
+// Record / replay (record-once, replay-identically across versions).
+// ---------------------------------------------------------------------------
+
+use benchmark::synthetic::baseline::{guard, BaselineKey, GuardOutcome};
+use benchmark::synthetic::recording::{self, temp_bundle_dir};
+use benchmark::synthetic::replay::{self, ReplayConfig};
+
+fn replay_config(dir: &std::path::Path, graph: &str, out: &str, load: bool) -> ReplayConfig {
+    ReplayConfig {
+        recording_dir: dir.to_path_buf(),
+        endpoint: endpoint(),
+        graph: Some(graph.to_string()),
+        load,
+        samples: 200,
+        warmup: 30,
+        server_timeout_ms: 5_000,
+        client_deadline_ms: 6_000,
+        out: out.to_string(),
+        server_image: None,
+    }
+}
+
+/// record (offline) → replay --load → replay --no-load produces byte-identical workload identity
+/// (workload_hash + per-op result digests), and the guard proceeds — the whole cross-version basis.
+#[tokio::test]
+#[ignore = "requires a running FalkorDB server"]
+async fn record_then_replay_roundtrips_and_guard_proceeds() {
+    let graph = "syn_it_replay";
+    drop_graph(graph).await;
+    let dir = temp_bundle_dir("syn-it-rec");
+    let spec = DatasetSpec {
+        seed: 9,
+        nodes: 500,
+        edges: 1500,
+    };
+    let ops = vec![OpName::MatchByIndex, OpName::Expand1Hop, OpName::AggregateCount];
+    recording::record(&spec, graph, &ops, spec.seed, 256, &dir).expect("record");
+
+    // Replay #1 loads the recorded graph; #2 reuses it (no-load), count-verifying first.
+    let ref_out = dir.join("ref.json").to_string_lossy().into_owned();
+    let cand_out = dir.join("cand.json").to_string_lossy().into_owned();
+    let a = replay::run(&replay_config(&dir, graph, &ref_out, true))
+        .await
+        .expect("replay --load");
+    let b = replay::run(&replay_config(&dir, graph, &cand_out, false))
+        .await
+        .expect("replay --no-load");
+
+    // Same workload identity: the workload_hash (stamped as corpus_hash) matches.
+    let ha = a.meta.dataset.as_ref().expect("dataset a").corpus_hash.clone();
+    let hb = b.meta.dataset.as_ref().expect("dataset b").corpus_hash.clone();
+    assert_eq!(ha, hb, "workload_hash must match across replays");
+
+    // Every op has a result digest, and they match across the two replays.
+    for op in ["match_by_index", "expand_1_hop", "aggregate_count"] {
+        let da = a.operations[op].result_digest.as_ref().expect("digest a");
+        let db = b.operations[op].result_digest.as_ref().expect("digest b");
+        assert_eq!(da, db, "result digest for {op} must match");
+        // A single C=1 cached level was measured.
+        let lvl = only_level(&a.operations[op]);
+        assert_eq!(lvl.concurrency, 1);
+        assert!(lvl.cached.is_some());
+    }
+
+    // The guard proceeds (same workload + matching result digests).
+    match guard(&BaselineKey::from_report(&a), &BaselineKey::from_report(&b)) {
+        GuardOutcome::Proceed { .. } => {}
+        GuardOutcome::Abort { reason } => panic!("guard aborted unexpectedly: {reason}"),
+    }
+
+    std::fs::remove_dir_all(&dir).ok();
+    drop_graph(graph).await;
+}
+
+/// replay --no-load against a graph that doesn't hold the recorded dataset fails closed (the
+/// count-verify rejects it) rather than silently measuring the wrong graph.
+#[tokio::test]
+#[ignore = "requires a running FalkorDB server"]
+async fn replay_no_load_fails_closed_on_wrong_graph() {
+    let graph = "syn_it_replay_missing";
+    drop_graph(graph).await; // ensure it's empty / absent
+    let dir = temp_bundle_dir("syn-it-rec-missing");
+    let spec = DatasetSpec {
+        seed: 3,
+        nodes: 300,
+        edges: 900,
+    };
+    recording::record(&spec, graph, &[OpName::MatchByIndex], spec.seed, 256, &dir).expect("record");
+
+    let out = dir.join("r.json").to_string_lossy().into_owned();
+    let err = replay::run(&replay_config(&dir, graph, &out, false))
+        .await
+        .expect_err("replay --no-load on an unloaded graph must fail");
+    assert!(
+        format!("{err}").contains("load the recording first"),
+        "expected a count-verify failure, got: {err}"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+    drop_graph(graph).await;
+}
+
+/// Drive the CLI arms end-to-end: `run_command(Record)` (offline) then `run_command(Replay)`
+/// (load + measure + write report), covering config resolution + report writing.
+#[tokio::test]
+#[ignore = "requires a running FalkorDB server"]
+async fn record_and_replay_via_run_command() {
+    use benchmark::cli::SyntheticCommands;
+    use benchmark::synthetic::run_command;
+
+    let graph = "syn_it_cli_replay";
+    drop_graph(graph).await;
+    let dir = temp_bundle_dir("syn-it-cli");
+    let out_dir = dir.to_string_lossy().into_owned();
+
+    run_command(SyntheticCommands::Record {
+        config: None,
+        graph: Some(graph.to_string()),
+        ops: vec![OpName::MatchByIndex, OpName::AggregateCount],
+        all_reads: false,
+        seed: Some(11),
+        nodes: Some(400),
+        edges: Some(1200),
+        out_dir: out_dir.clone(),
+    })
+    .await
+    .expect("record via run_command");
+    assert!(dir.join("manifest.json").exists());
+
+    let report_out = dir.join("cli.json").to_string_lossy().into_owned();
+    run_command(SyntheticCommands::Replay {
+        recording: out_dir,
+        endpoint: Some(endpoint()),
+        graph: None,
+        no_load: false,
+        samples: Some(150),
+        warmup: Some(20),
+        server_timeout_ms: None,
+        client_deadline_ms: None,
+        out: Some(report_out.clone()),
+        server_image: None,
+    })
+    .await
+    .expect("replay via run_command");
+
+    let written = std::fs::read_to_string(&report_out).expect("report exists");
+    assert!(written.contains("match_by_index"));
+    assert!(written.contains("result_digest"));
+    // The Markdown sibling is written too.
+    assert!(std::path::Path::new(&report_out.replace(".json", ".md")).exists());
+
+    std::fs::remove_dir_all(&dir).ok();
+    drop_graph(graph).await;
+}

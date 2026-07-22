@@ -10,6 +10,7 @@
 
 use crate::synthetic::report::{Report, ServerInfo};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// The workload + environment identity of a run (extracted from its [`Report`]) that a
 /// version-comparison must agree on — or knowingly differ on.
@@ -22,6 +23,10 @@ pub struct BaselineKey {
     pub module_graph_ver: Option<u64>,
     /// Operator-supplied server image identity, when provided.
     pub server_image: Option<String>,
+    /// Per-op result-cardinality digests (present for `synthetic replay` runs). Compared op-by-op:
+    /// two versions must agree, or a wrong/empty-but-faster result could look like a win.
+    #[serde(default)]
+    pub result_digests: BTreeMap<String, String>,
 }
 
 impl BaselineKey {
@@ -31,6 +36,11 @@ impl BaselineKey {
             corpus_hash: report.meta.dataset.as_ref().map(|d| d.corpus_hash.clone()),
             module_graph_ver: report.meta.server.module_graph_ver,
             server_image: report.meta.server.server_image.clone(),
+            result_digests: report
+                .operations
+                .iter()
+                .filter_map(|(name, op)| op.result_digest.clone().map(|d| (name.clone(), d)))
+                .collect(),
         }
     }
 }
@@ -70,6 +80,24 @@ pub fn guard(
                          (`--generate`) so the workload can be fingerprinted"
                     .to_string(),
             };
+        }
+    }
+
+    // Result-correctness gate: for every op measured (with a result digest) in BOTH runs, the two
+    // versions must return the same result cardinality — otherwise a version returning wrong or
+    // empty results faster could masquerade as an improvement. (Digests are present for `synthetic
+    // replay` runs; a `synthetic run` report has none, so this is a no-op there.)
+    for (op, base_dig) in &baseline.result_digests {
+        if let Some(cand_dig) = candidate.result_digests.get(op) {
+            if base_dig != cand_dig {
+                return GuardOutcome::Abort {
+                    reason: format!(
+                        "result mismatch for op '{op}' — baseline and candidate returned different \
+                         result cardinalities (baseline {base_dig}, candidate {cand_dig}), so their \
+                         latencies are not comparable"
+                    ),
+                };
+            }
         }
     }
 
@@ -116,7 +144,43 @@ mod tests {
             corpus_hash: corpus.map(|s| s.to_string()),
             module_graph_ver: ver,
             server_image: None,
+            result_digests: BTreeMap::new(),
         }
+    }
+
+    fn key_with_digests(
+        corpus: Option<&str>,
+        digests: &[(&str, &str)],
+    ) -> BaselineKey {
+        BaselineKey {
+            corpus_hash: corpus.map(|s| s.to_string()),
+            module_graph_ver: Some(42001),
+            server_image: None,
+            result_digests: digests
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn aborts_on_result_digest_mismatch() {
+        // Same workload, but an op returned a different result cardinality across versions.
+        let base = key_with_digests(Some("sha256:abc"), &[("expand_1_hop", "sha256:aaa")]);
+        let cand = key_with_digests(Some("sha256:abc"), &[("expand_1_hop", "sha256:bbb")]);
+        match guard(&base, &cand) {
+            GuardOutcome::Abort { reason } => {
+                assert!(reason.contains("result mismatch for op 'expand_1_hop'"), "got: {reason}");
+            }
+            other => panic!("expected Abort, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn proceeds_when_result_digests_match() {
+        let base = key_with_digests(Some("sha256:abc"), &[("expand_1_hop", "sha256:aaa")]);
+        let cand = key_with_digests(Some("sha256:abc"), &[("expand_1_hop", "sha256:aaa")]);
+        assert!(matches!(guard(&base, &cand), GuardOutcome::Proceed { .. }));
     }
 
     #[test]
@@ -199,11 +263,13 @@ mod tests {
             corpus_hash: Some("sha256:abc".to_string()),
             module_graph_ver: Some(42001),
             server_image: Some("falkordb@sha256:aaa".to_string()),
+            result_digests: BTreeMap::new(),
         };
         let cand = BaselineKey {
             corpus_hash: Some("sha256:abc".to_string()),
             module_graph_ver: Some(42002),
             server_image: Some("falkordb@sha256:bbb".to_string()),
+            result_digests: BTreeMap::new(),
         };
         match guard(&base, &cand) {
             GuardOutcome::Proceed { warnings } => {

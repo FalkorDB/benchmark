@@ -1,0 +1,31 @@
+$ benchmark synthetic record --graph tutorial_demo \
+    --op match_by_index,expand_1_hop,aggregate_count --seed 42 --nodes 1000 --edges 5000 \
+    --out-dir recordings/demo
+recorded 3 op(s) into recordings/demo (workload_hash sha256:57638f31c17b7be582ca3c15f7e3c4ad050189e4200f5af478f6711658dd5eb5)
+
+$ benchmark synthetic replay --recording recordings/demo \
+    --endpoint falkor://127.0.0.1:6379 --samples 500 --warmup 100 --out recordings/demo/version-a.json
+
+synthetic benchmark — endpoint falkor://127.0.0.1:6379  graph tutorial_demo  samples 500  warmup 100  concurrency [1]  seed 42  connection pool(size=1)
+server — falkordb module ver 4.20.1  redis 8.6.3  CACHE_SIZE 25
+client host — bench-host · macOS 26.5.2 Tahoe · Apple M1 Pro (10c/10t) · 16.0 GiB · arm64
+dataset — seed 42  nodes 1000  edges 5000  corpus_hash sha256:57638f31c17b7be582ca3c15f7e3c4ad050189e4200f5af478f6711658dd5eb5
+
+aggregate_count
+  [cached — plan reused, execution only]
+    C    throughput(ops/s)   server p50/p90/p95/p99             total p50/p90/p95/p99              miss%
+    1              1772     0.094 / 0.130 / 0.146 / 0.167     0.523 / 0.694 / 0.752 / 0.841     0.0  <- knee
+
+expand_1_hop
+  [cached — plan reused, execution only]
+    C    throughput(ops/s)   server p50/p90/p95/p99             total p50/p90/p95/p99              miss%
+    1              1706     0.088 / 0.130 / 0.146 / 0.165     0.548 / 0.709 / 0.764 / 0.937     0.0  <- knee
+
+match_by_index
+  [cached — plan reused, execution only]
+    C    throughput(ops/s)   server p50/p90/p95/p99             total p50/p90/p95/p99              miss%
+    1              2039     0.043 / 0.060 / 0.068 / 0.081     0.457 / 0.577 / 0.645 / 0.755     0.0  <- knee
+
+$ benchmark synthetic baseline-guard \
+    --baseline recordings/demo/version-a.json --current recordings/demo/version-b.json
+baseline guard: OK — same workload, safe to compare

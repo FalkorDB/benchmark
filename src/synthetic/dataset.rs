@@ -224,6 +224,102 @@ pub fn corpus_hash(
     format!("sha256:{:x}", h.finalize())
 }
 
+/// The phase a load statement belongs to, so a recorded bundle can label statements and a loader
+/// can report which phase failed. All three run identically (execute + drain), but the ordering
+/// (index first, then nodes, then edges) matters and is preserved by [`load_statements`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoadPhase {
+    Index,
+    Nodes,
+    Edges,
+}
+
+impl LoadPhase {
+    /// A stable lowercase tag used in the recorded `graph.jsonl` and its hash.
+    pub fn tag(self) -> &'static str {
+        match self {
+            LoadPhase::Index => "index",
+            LoadPhase::Nodes => "nodes",
+            LoadPhase::Edges => "edges",
+        }
+    }
+
+    /// Parse a [`LoadPhase`] from its [`tag`](Self::tag) (reading a recorded `graph.jsonl`).
+    pub fn from_tag(tag: &str) -> Option<LoadPhase> {
+        match tag {
+            "index" => Some(LoadPhase::Index),
+            "nodes" => Some(LoadPhase::Nodes),
+            "edges" => Some(LoadPhase::Edges),
+            _ => None,
+        }
+    }
+}
+
+/// The `:User(id)` index DDL — created before any data so every insert maintains it.
+const INDEX_STMT: &str = "CREATE INDEX FOR (u:User) ON (u.id)";
+
+/// One node `UNWIND` batch covering ids `lo..=hi` (inclusive, 1-based).
+fn node_batch(
+    spec: &DatasetSpec,
+    lo: i32,
+    hi: i32,
+) -> String {
+    let mut maps = String::new();
+    for id in lo..=hi {
+        if id != lo {
+            maps.push(',');
+        }
+        let _ = write!(maps, "{{id:{},age:{}}}", id, spec.node_age(id));
+    }
+    format!("UNWIND [{}] AS row CREATE (u:User) SET u = row", maps)
+}
+
+/// One edge `UNWIND` batch covering edge indices `lo..hi` (half-open).
+fn edge_batch(
+    spec: &DatasetSpec,
+    lo: usize,
+    hi: usize,
+) -> String {
+    let mut maps = String::new();
+    for e in lo..hi {
+        if e != lo {
+            maps.push(',');
+        }
+        let (src, dst) = spec.edge_at(e);
+        let _ = write!(maps, "{{src:{},dst:{}}}", src, dst);
+    }
+    format!(
+        "UNWIND [{}] AS row MATCH (n:User {{id: row.src}}), (m:User {{id: row.dst}}) CREATE (n)-[:Friend]->(m)",
+        maps
+    )
+}
+
+/// The exact ordered sequence of load statements that builds `spec`'s dataset: the index DDL, then
+/// `batch_size`-sized node `UNWIND` batches, then edge batches. **Lazy** — each batch string is
+/// built on demand as the iterator advances, so only one batch is materialized at a time (no
+/// full-script `Vec`). Shared by the live loader ([`generate_and_load`]) and the offline recorder
+/// so a replay loads a byte-identical graph to what a `--generate` run would. Callers must pass a
+/// validated `spec` (`spec.validate()`) and `batch_size >= 1`.
+pub(crate) fn load_statements(
+    spec: &DatasetSpec,
+    batch_size: usize,
+) -> impl Iterator<Item = (LoadPhase, String)> + '_ {
+    debug_assert!(batch_size >= 1, "batch_size must be >= 1");
+    let nodes = spec.nodes as i32;
+    let edges = spec.edges;
+    let index = std::iter::once((LoadPhase::Index, INDEX_STMT.to_string()));
+    let node_batches = (1..=nodes).step_by(batch_size).map(move |lo| {
+        // Widen to i64 so `lo + batch_size` can't overflow i32 near the id ceiling.
+        let hi = ((lo as i64) + (batch_size as i64) - 1).min(nodes as i64) as i32;
+        (LoadPhase::Nodes, node_batch(spec, lo, hi))
+    });
+    let edge_batches = (0..edges).step_by(batch_size).map(move |lo| {
+        let hi = (lo + batch_size).min(edges);
+        (LoadPhase::Edges, edge_batch(spec, lo, hi))
+    });
+    index.chain(node_batches).chain(edge_batches)
+}
+
 /// Generate the dataset described by `spec` and bulk-load it into `graph`, **replacing** whatever
 /// was there (the graph key is dropped first). Creates the `:User(id)` index, loads nodes then
 /// edges in `batch_size` `UNWIND` batches, verifies the final counts, and returns the seeded
@@ -239,7 +335,32 @@ pub(crate) async fn generate_and_load(
     if batch_size == 0 {
         return Err(OtherError("dataset batch_size must be greater than 0".to_string()));
     }
+    // Same drop → load statements → verify path a replay uses, fed the freshly-generated
+    // statements (so `--generate` and a recorded replay build byte-identical graphs).
+    load_dataset(
+        graph,
+        load_statements(spec, batch_size),
+        spec,
+        load_deadline,
+        server_timeout_ms,
+    )
+    .await?;
+    Ok(spec.handle())
+}
 
+/// Drop `graph`, execute an ordered `statements` stream into it, then verify it holds exactly
+/// `spec`'s node/edge counts. Shared by [`generate_and_load`] (fed the generated statements) and a
+/// recorded replay (fed the recorded `graph.jsonl`), so both build + verify identically.
+pub(crate) async fn load_dataset<I>(
+    graph: &mut AsyncGraph,
+    statements: I,
+    spec: &DatasetSpec,
+    load_deadline: Duration,
+    server_timeout_ms: i64,
+) -> BenchmarkResult<()>
+where
+    I: IntoIterator<Item = (LoadPhase, String)>,
+{
     // Clean slate: drop the graph key so we don't load on top of stale data. A "graph doesn't
     // exist yet" error is expected and ignored; anything else (auth/network/wrong type) must abort
     // rather than silently loading into a graph we couldn't clear. Bounded by the load deadline.
@@ -249,120 +370,76 @@ pub(crate) async fn generate_and_load(
             let msg = format!("{:?}", e);
             if !crate::synthetic::is_empty_graph_key(&msg) {
                 return Err(OtherError(format!(
-                    "failed to drop graph before generating dataset: {}",
+                    "failed to drop graph before loading dataset: {}",
                     msg
                 )));
             }
         }
         Err(e) => {
             return Err(OtherError(format!(
-                "dropping graph before generating dataset timed out: {}",
+                "dropping graph before loading dataset timed out: {}",
                 e
             )))
         }
     }
 
-    // (Re)create the id index before any data so every insert maintains it and it's operational
-    // throughout.
-    exec_drain(
-        graph,
-        "CREATE INDEX FOR (u:User) ON (u.id)",
-        server_timeout_ms,
-        load_deadline,
-    )
-    .await
-    .map_err(|e| OtherError(format!("failed to create :User(id) index: {}", e)))?;
-
-    // Nodes: UNWIND [{id,age},...] AS row CREATE (u:User) SET u = row
-    let mut batch = String::new();
-    let mut in_batch = 0usize;
-    for id in 1..=spec.nodes as i32 {
-        if in_batch > 0 {
-            batch.push(',');
-        }
-        // write! appends directly into the batch buffer (no per-row temporary String).
-        let _ = write!(batch, "{{id:{},age:{}}}", id, spec.node_age(id));
-        in_batch += 1;
-        if in_batch == batch_size {
-            flush_nodes(graph, &batch, server_timeout_ms, load_deadline).await?;
-            batch.clear();
-            in_batch = 0;
-        }
-    }
-    if in_batch > 0 {
-        flush_nodes(graph, &batch, server_timeout_ms, load_deadline).await?;
-        batch.clear();
+    for (phase, stmt) in statements {
+        exec_drain(graph, &stmt, server_timeout_ms, load_deadline)
+            .await
+            .map_err(|e| OtherError(format!("dataset load failed during {} phase: {}", phase.tag(), e)))?;
     }
 
-    // Edges: UNWIND [{src,dst},...] AS row MATCH (n:User{id:row.src}),(m:User{id:row.dst}) CREATE ...
-    in_batch = 0;
-    for e in 0..spec.edges {
-        let (src, dst) = spec.edge_at(e);
-        if in_batch > 0 {
-            batch.push(',');
-        }
-        let _ = write!(batch, "{{src:{},dst:{}}}", src, dst);
-        in_batch += 1;
-        if in_batch == batch_size {
-            flush_edges(graph, &batch, server_timeout_ms, load_deadline).await?;
-            batch.clear();
-            in_batch = 0;
-        }
-    }
-    if in_batch > 0 {
-        flush_edges(graph, &batch, server_timeout_ms, load_deadline).await?;
-    }
+    verify_counts(graph, spec, server_timeout_ms, load_deadline).await
+}
 
-    // Verify the load produced exactly the requested counts before anyone measures against it.
-    let node_count = count(graph, "MATCH (n:User) RETURN count(n)", server_timeout_ms, load_deadline).await?;
+/// Verify `graph` holds exactly `spec`'s `:User` node and `:Friend` edge counts (an absent/empty
+/// graph counts as `0`, so the mismatch message is helpful rather than a raw "empty key" error).
+pub(crate) async fn verify_counts(
+    graph: &mut AsyncGraph,
+    spec: &DatasetSpec,
+    server_timeout_ms: i64,
+    deadline: Duration,
+) -> BenchmarkResult<()> {
+    let node_count = count_or_empty(graph, "MATCH (n:User) RETURN count(n)", server_timeout_ms, deadline).await?;
     if node_count != spec.nodes as i64 {
         return Err(OtherError(format!(
-            "dataset load produced {} nodes, expected {}",
+            "graph has {} :User nodes, expected {}",
             node_count, spec.nodes
         )));
     }
-    let edge_count = count(
+    let edge_count = count_or_empty(
         graph,
         "MATCH (:User)-[e:Friend]->(:User) RETURN count(e)",
         server_timeout_ms,
-        load_deadline,
+        deadline,
     )
     .await?;
     if edge_count != spec.edges as i64 {
         return Err(OtherError(format!(
-            "dataset load produced {} edges, expected {}",
+            "graph has {} :Friend edges, expected {}",
             edge_count, spec.edges
         )));
     }
-
-    Ok(spec.handle())
+    Ok(())
 }
 
-async fn flush_nodes(
+/// Run a scalar `count` query, treating an absent/empty graph key as a count of `0` (so verifying
+/// against an unloaded graph reports a count mismatch rather than a raw redis "empty key" error).
+async fn count_or_empty(
     graph: &mut AsyncGraph,
-    maps: &str,
+    cypher: &str,
     server_timeout_ms: i64,
     deadline: Duration,
-) -> BenchmarkResult<()> {
-    let q = format!("UNWIND [{}] AS row CREATE (u:User) SET u = row", maps);
-    exec_drain(graph, &q, server_timeout_ms, deadline).await
-}
-
-async fn flush_edges(
-    graph: &mut AsyncGraph,
-    maps: &str,
-    server_timeout_ms: i64,
-    deadline: Duration,
-) -> BenchmarkResult<()> {
-    let q = format!(
-        "UNWIND [{}] AS row MATCH (n:User {{id: row.src}}), (m:User {{id: row.dst}}) CREATE (n)-[:Friend]->(m)",
-        maps
-    );
-    exec_drain(graph, &q, server_timeout_ms, deadline).await
+) -> BenchmarkResult<i64> {
+    match count(graph, cypher, server_timeout_ms, deadline).await {
+        Ok(n) => Ok(n),
+        Err(e) if crate::synthetic::is_empty_graph_key(&format!("{}", e)) => Ok(0),
+        Err(e) => Err(e),
+    }
 }
 
 /// Execute a write query and drain its (empty) result set, bounded by `deadline`.
-async fn exec_drain(
+pub(crate) async fn exec_drain(
     graph: &mut AsyncGraph,
     cypher: &str,
     server_timeout_ms: i64,
@@ -386,7 +463,7 @@ async fn exec_drain(
 }
 
 /// Run a `RETURN count(...)` scalar query and read the single i64 result.
-async fn count(
+pub(crate) async fn count(
     graph: &mut AsyncGraph,
     cypher: &str,
     server_timeout_ms: i64,
@@ -431,6 +508,73 @@ mod tests {
         assert!(spec(1, i32::MAX as usize + 1, i32::MAX as usize + 1)
             .validate()
             .is_err());
+    }
+
+    #[test]
+    fn load_statements_are_ordered_and_batched() {
+        // 5 nodes, 6 edges, batch 2 → index + ceil(5/2)=3 node batches + ceil(6/2)=3 edge batches.
+        let s = spec(3, 5, 6);
+        let stmts: Vec<(LoadPhase, String)> = load_statements(&s, 2).collect();
+        let phases: Vec<LoadPhase> = stmts.iter().map(|(p, _)| *p).collect();
+        assert_eq!(
+            phases,
+            vec![
+                LoadPhase::Index,
+                LoadPhase::Nodes,
+                LoadPhase::Nodes,
+                LoadPhase::Nodes,
+                LoadPhase::Edges,
+                LoadPhase::Edges,
+                LoadPhase::Edges,
+            ]
+        );
+        // The index DDL comes first, verbatim.
+        assert_eq!(stmts[0].1, INDEX_STMT);
+        // First node batch has ids 1,2 with their deterministic ages; last has the lone id 5.
+        assert_eq!(
+            stmts[1].1,
+            format!(
+                "UNWIND [{{id:1,age:{}}},{{id:2,age:{}}}] AS row CREATE (u:User) SET u = row",
+                s.node_age(1),
+                s.node_age(2)
+            )
+        );
+        assert_eq!(
+            stmts[3].1,
+            format!(
+                "UNWIND [{{id:5,age:{}}}] AS row CREATE (u:User) SET u = row",
+                s.node_age(5)
+            )
+        );
+        // First edge batch covers edge indices 0,1 (the ring backbone start).
+        let (e0s, e0d) = s.edge_at(0);
+        let (e1s, e1d) = s.edge_at(1);
+        assert_eq!(
+            stmts[4].1,
+            format!(
+                "UNWIND [{{src:{e0s},dst:{e0d}}},{{src:{e1s},dst:{e1d}}}] AS row MATCH (n:User {{id: row.src}}), (m:User {{id: row.dst}}) CREATE (n)-[:Friend]->(m)"
+            )
+        );
+    }
+
+    #[test]
+    fn load_statements_are_deterministic_and_reproduce_generate() {
+        // Same spec ⇒ byte-identical statement stream (the record/replay guarantee).
+        let s = spec(42, 100, 250);
+        let a: Vec<_> = load_statements(&s, 32).collect();
+        let b: Vec<_> = load_statements(&spec(42, 100, 250), 32).collect();
+        assert_eq!(a, b);
+        // A different seed changes the stream (ages/edges differ).
+        let c: Vec<_> = load_statements(&spec(43, 100, 250), 32).collect();
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn load_statements_batch_size_one_yields_one_statement_per_row() {
+        let s = spec(1, 3, 3);
+        let stmts: Vec<_> = load_statements(&s, 1).collect();
+        // index + 3 node batches + 3 edge batches.
+        assert_eq!(stmts.len(), 1 + 3 + 3);
     }
 
     #[test]
