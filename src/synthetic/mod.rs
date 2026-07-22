@@ -17,6 +17,7 @@
 
 pub mod catalog;
 pub mod config;
+pub mod baseline;
 pub mod dataset;
 pub mod engine;
 pub mod host;
@@ -1104,6 +1105,40 @@ pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkRes
             print!("{}", list_ops());
             Ok(())
         }
+        crate::cli::SyntheticCommands::BaselineGuard { baseline, current } => {
+            baseline_guard(&baseline, &current)
+        }
+    }
+}
+
+/// Guard a version comparison: load the saved baseline and current run reports, compare their
+/// workload identity, and **abort** (return an error ⇒ non-zero exit) when the workloads differ, so
+/// `synthetic-compare` never compares latencies across mismatched benchmarks. Advisory notes (a
+/// version/image change, an identical or placeholder version) are printed but do not abort.
+fn baseline_guard(
+    baseline_path: &str,
+    current_path: &str,
+) -> BenchmarkResult<()> {
+    let load = |path: &str| -> BenchmarkResult<crate::synthetic::report::Report> {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| OtherError(format!("could not read report '{}': {}", path, e)))?;
+        serde_json::from_str(&text)
+            .map_err(|e| OtherError(format!("invalid synthetic report '{}': {}", path, e)))
+    };
+    let baseline = baseline::BaselineKey::from_report(&load(baseline_path)?);
+    let current = baseline::BaselineKey::from_report(&load(current_path)?);
+
+    match baseline::guard(&baseline, &current) {
+        baseline::GuardOutcome::Proceed { warnings } => {
+            for w in &warnings {
+                eprintln!("⚠ {}", w);
+            }
+            println!("baseline guard: OK — same workload, safe to compare");
+            Ok(())
+        }
+        baseline::GuardOutcome::Abort { reason } => {
+            Err(OtherError(format!("baseline guard: ABORT — {}", reason)))
+        }
     }
 }
 
@@ -1408,6 +1443,49 @@ mod tests {
         let listing = list_ops();
         for op in OpName::value_variants() {
             assert!(listing.contains(op.as_str()));
+        }
+    }
+
+    #[tokio::test]
+    async fn baseline_guard_command_gates_on_corpus_hash() {
+        // Hermetic: writes minimal report JSONs and drives the `baseline-guard` subcommand (which
+        // only reads files + applies the guard — no server).
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir();
+        let write_report = |hash: &str, ver: u64| -> String {
+            let p = dir.join(format!(
+                "bg-{}-{}.json",
+                std::process::id(),
+                SEQ.fetch_add(1, Ordering::Relaxed)
+            ));
+            let json = format!(
+                r#"{{"meta":{{"tool_version":"0.1.0","endpoint":"x","samples":1,"warmup":0,"server_timeout_ms":5000,"client_deadline_ms":6000,"connection":"c","started_at_epoch_secs":0,"server":{{"module_graph_ver":{ver}}},"dataset":{{"seed":1,"nodes":10,"edges":20,"corpus_hash":"{hash}"}}}},"operations":{{}}}}"#
+            );
+            std::fs::write(&p, json).unwrap();
+            p.to_string_lossy().into_owned()
+        };
+        let base = write_report("sha256:same", 42001);
+        // Same workload + same version ⇒ guard proceeds with an advisory warning (exercises the
+        // warning-print path).
+        let ok = write_report("sha256:same", 42001);
+        assert!(run_command(crate::cli::SyntheticCommands::BaselineGuard {
+            baseline: base.clone(),
+            current: ok.clone(),
+        })
+        .await
+        .is_ok());
+        // Different workload ⇒ guard aborts.
+        let bad = write_report("sha256:different", 42002);
+        let err = run_command(crate::cli::SyntheticCommands::BaselineGuard {
+            baseline: base.clone(),
+            current: bad.clone(),
+        })
+        .await
+        .expect_err("corpus_hash mismatch must abort");
+        assert!(format!("{err}").contains("corpus_hash mismatch"));
+        for p in [base, ok, bad] {
+            let _ = std::fs::remove_file(p);
         }
     }
 

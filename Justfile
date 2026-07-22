@@ -163,6 +163,31 @@ synthetic-ops:
 synthetic-it:
     cargo test --test synthetic_probe -- --ignored --nocapture
 
+# Save a Criterion C=1 single-flight latency baseline named <name>. (Re)generates the dataset from
+# `synthetic-bench.toml`, captures the run's corpus_hash + FalkorDB version into
+# `baselines/<name>.json`, then saves the Criterion baseline. Needs a live FalkorDB + a
+# `synthetic-bench.toml` with `nodes`/`edges`/`operations`. Run this on FalkorDB version A.
+synthetic-baseline name:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p baselines
+    cargo run --quiet --bin benchmark -- synthetic run --generate --samples 1 --warmup 0 \
+        --concurrency 1 --out "baselines/{{name}}.json"
+    cargo bench --bench synthetic_ops -- --save-baseline "{{name}}"
+
+# Compare the current build against a saved baseline <name>: first GUARD that the workload still
+# matches the baseline's corpus_hash (aborting on mismatch), then run Criterion against the saved
+# baseline. Run this on FalkorDB version B (after upgrading) to see the per-op latency change.
+synthetic-compare name:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    test -f "baselines/{{name}}.json" || { echo "no saved baseline 'baselines/{{name}}.json' — run 'just synthetic-baseline {{name}}' first"; exit 1; }
+    cargo run --quiet --bin benchmark -- synthetic run --generate --samples 1 --warmup 0 \
+        --concurrency 1 --out "baselines/{{name}}.current.json"
+    cargo run --quiet --bin benchmark -- synthetic baseline-guard \
+        --baseline "baselines/{{name}}.json" --current "baselines/{{name}}.current.json"
+    cargo bench --bench synthetic_ops -- --baseline "{{name}}"
+
 # === UI (Next.js dashboard in ui/) ===========================================
 
 # Install UI dependencies from the lockfile.

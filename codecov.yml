@@ -14,7 +14,10 @@ coverage:
 
 # The Next.js dashboard (ui/) and the vendored FalkorDB client (vendor/) are not
 # part of the Rust crate's unit tests, so they're excluded from coverage reporting.
+# The Criterion harness (benches/) is a live-server bench, not run under `cargo test`,
+# so its substantive logic lives in the (covered) library and the harness is excluded.
 ignore:
   - "ui"
   - "vendor"
   - "scripts"
+  - "benches"

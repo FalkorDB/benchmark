@@ -57,14 +57,20 @@ falkordb = { path = "vendor/falkordb-rs" }
 name = "benchmark"
 path = "src/main.rs"
 
-
-
+# Criterion C=1 single-flight latency baselines for the synthetic read ops (Part 6b). `harness =
+# false` lets `benches/synthetic_ops.rs` provide its own `main` via `criterion_main!`.
+[[bench]]
+name = "synthetic_ops"
+harness = false
 
 
 [dev-dependencies]
 # `test-util` (not in tokio's `full`) enables `#[tokio::test(start_paused = true)]` so the
 # concurrency-engine throughput test drives a virtual clock deterministically.
 tokio = { version = "1.52.3", features = ["test-util"] }
+# Criterion powers the C=1 latency baselines (`just synthetic-baseline` / `synthetic-compare`):
+# `async_tokio` to drive the async client, `html_reports` for the browsable plots.
+criterion = { version = "0.5", features = ["async_tokio", "html_reports"] }
 
 [profile.release]
 opt-level = 3  # This is the default

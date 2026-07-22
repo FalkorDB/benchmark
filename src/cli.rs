@@ -335,6 +335,15 @@ pub enum SyntheticCommands {
     },
     #[command(about = "list the available operations")]
     ListOps,
+    #[command(
+        about = "guard a version comparison: abort if the saved baseline and the current run measured different workloads (corpus_hash mismatch)"
+    )]
+    BaselineGuard {
+        #[arg(long, help = "path to the saved baseline's synthetic report JSON")]
+        baseline: String,
+        #[arg(long, help = "path to the current run's synthetic report JSON")]
+        current: String,
+    },
 }
 
 fn parse_write_ratio(val: &str) -> Result<f32, String> {
