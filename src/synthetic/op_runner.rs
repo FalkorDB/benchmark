@@ -227,6 +227,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn canonical_value_covers_every_shape() {
+        assert_eq!(canonical_value(&FalkorValue::I64(7)), "i:7");
+        assert_eq!(canonical_value(&FalkorValue::Bool(true)), "b:true");
+        assert_eq!(canonical_value(&FalkorValue::String("x".into())), "s:x");
+        assert_eq!(canonical_value(&FalkorValue::None), "null");
+        // Floats use their bit pattern so equal values render identically.
+        assert_eq!(
+            canonical_value(&FalkorValue::F64(1.5)),
+            canonical_value(&FalkorValue::F64(1.5))
+        );
+        assert!(canonical_value(&FalkorValue::F64(1.5)).starts_with("f:"));
+        // A non-scalar falls back to Debug (tagged `o:`).
+        assert!(canonical_value(&FalkorValue::Array(vec![FalkorValue::I64(1)])).starts_with("o:"));
+    }
+
+    #[test]
+    fn canonical_row_joins_columns_stably() {
+        let row = vec![FalkorValue::I64(3), FalkorValue::String("a".into())];
+        let s = canonical_row(&row);
+        assert!(s.contains("i:3") && s.contains("s:a"));
+        // Column order is preserved (a different order ⇒ different string).
+        let swapped = vec![FalkorValue::String("a".into()), FalkorValue::I64(3)];
+        assert_ne!(canonical_row(&row), canonical_row(&swapped));
+    }
+
+    #[test]
     fn validate_server_ms_accepts_finite_non_negative() {
         assert_eq!(validate_server_ms(Some(0.0), "q").unwrap(), 0.0);
         assert_eq!(validate_server_ms(Some(1.5), "q").unwrap(), 1.5);

@@ -1579,6 +1579,47 @@ mod tests {
         let _ = std::fs::remove_file(&cfg_path);
     }
 
+    #[tokio::test]
+    async fn run_recording_rejects_conflicting_flags() {
+        // --recording is exclusive with generate/probe knobs; the conflict is caught before any I/O.
+        let command = crate::cli::SyntheticCommands::Run {
+            config: None,
+            endpoint: None,
+            graph: None,
+            ops: vec![],
+            all_reads: false,
+            samples: None,
+            warmup: None,
+            concurrency: vec![],
+            reset_every: None,
+            seed: None,
+            cache: None,
+            server_timeout_ms: None,
+            client_deadline_ms: None,
+            out: None,
+            server_image: None,
+            generate: true,
+            nodes: None,
+            edges: None,
+            recording: Some("/nonexistent/rec".to_string()),
+            no_load: false,
+        };
+        let err = run_command(command).await.expect_err("recording + generate ⇒ error");
+        assert!(format!("{err}").contains("--recording"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn report_requires_input_or_diff() {
+        let err = run_command(crate::cli::SyntheticCommands::Report {
+            input: None,
+            diff: vec![],
+            out: None,
+        })
+        .await
+        .expect_err("report with no args ⇒ error");
+        assert!(format!("{err}").contains("report needs"), "got: {err}");
+    }
+
     #[test]
     fn list_ops_mentions_each_op() {
         let listing = list_ops();
