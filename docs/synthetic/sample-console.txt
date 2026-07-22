@@ -3,10 +3,10 @@ $ benchmark synthetic record --graph tutorial_demo \
     --out-dir recordings/demo
 recorded 3 op(s) into recordings/demo (workload_hash sha256:57638f31c17b7be582ca3c15f7e3c4ad050189e4200f5af478f6711658dd5eb5)
 
-$ benchmark synthetic replay --recording recordings/demo \
-    --endpoint falkor://127.0.0.1:6379 --samples 500 --warmup 100 --out recordings/demo/version-a.json
+$ benchmark synthetic run --recording recordings/demo --endpoint falkor://127.0.0.1:6379 \
+    --concurrency 1,4 --samples 500 --warmup 100 --out recordings/demo/version-a.json
 
-synthetic benchmark — endpoint falkor://127.0.0.1:6379  graph tutorial_demo  samples 500  warmup 100  concurrency [1]  seed 42  connection pool(size=1)
+synthetic benchmark — endpoint falkor://127.0.0.1:6379  graph tutorial_demo  samples 500  warmup 100  concurrency [1,4]  seed 42  connection pool(size=1) per worker
 server — falkordb module ver 4.20.1  redis 8.6.3  CACHE_SIZE 25
 client host — bench-host · macOS 26.5.2 Tahoe · Apple M1 Pro (10c/10t) · 16.0 GiB · arm64
 dataset — seed 42  nodes 1000  edges 5000  corpus_hash sha256:57638f31c17b7be582ca3c15f7e3c4ad050189e4200f5af478f6711658dd5eb5
@@ -14,25 +14,21 @@ dataset — seed 42  nodes 1000  edges 5000  corpus_hash sha256:57638f31c17b7be5
 aggregate_count
   [cached — plan reused, execution only]
     C    throughput(ops/s)   server p50/p90/p95/p99             total p50/p90/p95/p99              miss%
-    1              1969     0.089 / 0.113 / 0.126 / 0.145     0.472 / 0.600 / 0.646 / 0.726     0.0  <- knee
-
-expand_1_hop
-  [cached — plan reused, execution only]
+    1              2793     0.077 / 0.084 / 0.087 / 0.092     0.353 / 0.378 / 0.388 / 0.408     0.0
+    4              8308     0.093 / 0.139 / 0.155 / 0.186     0.466 / 0.564 / 0.591 / 0.646     0.0  <- knee
+  [uncached — plan-cache miss each run, execution + compilation]
     C    throughput(ops/s)   server p50/p90/p95/p99             total p50/p90/p95/p99              miss%
-    1              1726     0.089 / 0.133 / 0.146 / 0.175     0.531 / 0.745 / 0.824 / 0.957     0.0  <- knee
+    1              2389     0.128 / 0.142 / 0.148 / 0.157     0.407 / 0.438 / 0.449 / 0.476   100.0
+    4              7196     0.168 / 0.224 / 0.250 / 0.293     0.538 / 0.644 / 0.688 / 0.791   100.0  <- knee
+  compilation_ms (median uncached-cached server time) by level:
+    …(remaining ops omitted for brevity)…
 
-match_by_index
-  [cached — plan reused, execution only]
-    C    throughput(ops/s)   server p50/p90/p95/p99             total p50/p90/p95/p99              miss%
-    1              2615     0.039 / 0.052 / 0.060 / 0.069     0.362 / 0.451 / 0.479 / 0.532     0.0  <- knee
-
-# replay a second version the same way (here shown against the same server), then guard:
-$ benchmark synthetic replay --recording recordings/demo --no-load \
-    --endpoint falkor://127.0.0.1:6379 --samples 500 --warmup 100 --out recordings/demo/version-b.json
-(prints the same per-op summary table as the first replay — omitted here for brevity)
+# run the second version the same way (here: same server, --no-load), then diff:
+$ benchmark synthetic run --recording recordings/demo --no-load --endpoint falkor://127.0.0.1:6379 \
+    --concurrency 1,4 --samples 500 --warmup 100 --out recordings/demo/version-b.json
 report written to recordings/demo/version-b.json
-markdown written to recordings/demo/version-b.md
 
-$ benchmark synthetic baseline-guard \
-    --baseline recordings/demo/version-a.json --current recordings/demo/version-b.json
-baseline guard: OK — same workload, safe to compare
+$ benchmark synthetic report --diff recordings/demo/version-a.json recordings/demo/version-b.json \
+    --out recordings/demo/diff.md
+⚠ baseline and candidate ran the same FalkorDB module version (4.20.1) — there is no version delta to measure
+diff written to recordings/demo/diff.md   # see sample-diff.md
