@@ -19,7 +19,7 @@ the CLI. This doc was rubber-duck reviewed; §7/§8/§9 fold in that feedback.
 
 Per `op × cache-mode`, one table, one row per concurrency `C` (8 columns):
 
-```
+```markdown
 _cached_
 
 | C | main p50 (ms) | pr p50 (ms) | Δp50 | main tput | pr tput | Δtput | verdict |
@@ -42,7 +42,7 @@ verified against GitHub's Markdown renderer). One row per `C`; each row reads as
 
 Raw Markdown:
 
-```
+```markdown
 _cached_ — **only p50 is gated.** The `context:` line (p90/p99, throughput) is informational and never affects the verdict.
 
 | C | main p50 (ms) | pr p50 (ms) | Δp50 (Δms) | p50 guard (>% AND >ms) | verdict |
@@ -53,7 +53,7 @@ _cached_ — **only p50 is gated.** The `context:` line (p90/p99, throughput) is
 
 Rendered, each row is two lines — the gate on top, the tucked-under context beneath each value:
 
-```
+```text
  C | main p50 (ms)          | pr p50 (ms)           | Δp50 (Δms)      | p50 guard (>% AND >ms) | verdict
  2 | 0.190                  | 0.202                 | +6.4% (+0.012)  | 15% AND 0.5 ms         | 🟢
      context: p90 0.36 …       context: p90 0.38 …
@@ -89,9 +89,9 @@ Why this meets both goals:
 - **C. Extra plain columns** (`main p90`, `pr p90`, `main p99`, `pr p99`). Clearest alignment, but ~13
   columns — wide horizontal scroll and the largest comment.
 
-**Recommendation:** ship **§3** (your folded-line steer) with the §7 guardrails, *or* **§4-A** if we
-want the leanest comment. §3 keeps every number on-screen; §4-A is smaller and separates gate/context
-most strongly. This is **open question §8.1**.
+**Selected (shipped): §3** (the folded-line layout) with the §7 guardrails **plus collapsed per-op
+`<details>` sections**. §4-A/B/C are retained as historical alternatives. (This closes former open
+question §8.1.)
 
 ## 5. Gated vs. context (the gate does not change)
 
@@ -103,7 +103,7 @@ most strongly. This is **open question §8.1**.
 | budget_pct / floor_ms | The threshold **applied to p50** | new `guard` column |
 | absolute Δms | Audit aid for the ms floor | primary line, next to Δp50 |
 
-`p95` is also computed but **left out initially** (§8.2). Tail **Δ**s are left out initially (§8.3).
+`p95` is also computed but **left out** (§8.2). Tail **Δ**s are left out (§8.3).
 
 ## 6. Data availability (no new collection)
 
@@ -136,8 +136,7 @@ Pure formatting change in the renderer; measurement/recording/JSON untouched.
   the verdict already `🔴 N/A` ("shown, not evaluated"); an **unknown** diverged op stays `—` in the
   guard (no `resolve` input). Neither counts toward comparable cells.
 - Header `Thresholds` table (`settings_markdown`): **keep** as the policy-at-a-glance summary (defaults
-  + overrides); per-line `guard` is the *effective* value, the header is the *policy* (drop only if
-  §8.1 says so).
+  + overrides); per-line `guard` is the *effective* value, the header is the *policy* (kept — §8.4).
 - **Tests (must prove tail isolation, not just presence):**
   - unchanged p50 + a *catastrophic* p90/p99 regression → **same** 🟢 verdict and same comparable count;
   - 🔴 p50 + *improved* tails → still 🔴;
@@ -148,16 +147,17 @@ Pure formatting change in the renderer; measurement/recording/JSON untouched.
     `context:` substrings render.
 - Docs: `readme.md` `--regression` section + this doc.
 
-## 8. Open questions (for you)
+## 8. Decisions (resolved — this shipped)
 
-1. **Layout:** §3 (folded context line — your steer) **or** §4-A (collapsed context table, leanest +
-   clearest separation)?
-2. **p95:** include it (`p90 · p95 · p99`) or keep just `p90 · p99`?
-3. **Tail Δ:** show only raw p90/p99 (compact) or also `Δp90`/`Δp99` to quantify tail moves?
-4. **Header Thresholds table:** keep it as the policy summary, or drop it now that each line shows the
-   effective guard?
-5. **`<br>` dependency:** the report targets GitHub Markdown (PR comments + job summaries) where `<br>`
-   renders; it degrades in a plain terminal. OK to depend on that? (§4-A/B/C avoid multi-line cells.)
+1. **Layout:** **§3** (folded context line) **+ collapsed per-op `<details>`**. §4-A/B/C kept as
+   historical alternatives.
+2. **p95:** **not** shown — just `p90 · p99` (keeps the context line compact). p95 stays available in
+   the report JSON if we want it later.
+3. **Tail Δ:** **raw p90/p99 only** (no `Δp90`/`Δp99`) — compact, and they are context, not gated.
+4. **Header Thresholds table:** **kept** as the policy-at-a-glance summary; per-line `guard` is the
+   *effective* value.
+5. **`<br>` dependency:** **yes** — the report targets GitHub Markdown (PR comments + job summaries)
+   where `<br>`/`<sub>`/`<details>` render; it degrades gracefully to plain text elsewhere.
 
 ## 9. Comment-size budget (important, from review)
 
