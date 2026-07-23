@@ -239,7 +239,7 @@ pub fn regression_markdown(
     let lb = col_label(candidate, "candidate");
     let mut head = String::new();
     head.push_str(&format!(
-        "### 🧪 Synthetic per-op regression — {} vs {} (same machine)\n\n",
+        "### 🧪 Synthetic per-op regression — {} vs {}\n\n",
         md_cell(&lb),
         md_cell(&la)
     ));
