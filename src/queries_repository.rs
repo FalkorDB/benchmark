@@ -167,7 +167,7 @@ impl QueriesRepositoryBuilder<Flavour> {
         generator: F,
     ) -> Self
     where
-        F: Fn(&mut RandomUtil, Flavour) -> Query + Send + Sync + 'static,
+        F: Fn(&mut RandomUtil<'_>, Flavour) -> Query + Send + Sync + 'static,
     {
         let vertices = self.vertices;
         let edges = self.edges;
