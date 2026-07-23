@@ -868,9 +868,10 @@ pub fn summarize(
 }
 
 impl SyntheticSummary {
-    /// The machine-usable artifact written by `report --summary`: pretty-printed JSON.
-    pub fn to_json(&self) -> String {
-        serde_json::to_string_pretty(self).unwrap_or_else(|_| "{}".to_string())
+    /// The machine-usable artifact written by `report --summary`: pretty-printed JSON. Fallible so
+    /// a serialization failure surfaces loudly instead of writing a misleading empty object.
+    pub fn to_json(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string_pretty(self)
     }
 
     /// A compact Markdown rendering for a PR sticky comment (well under GitHub's 65 KB limit): the
@@ -1767,7 +1768,7 @@ mod tests {
         let b = report(42002, 2.0, 500.0);
         let g = regression_guard(&a, &b);
         let s = summarize(&a, &b, &g, &Thresholds::builtin());
-        let json = s.to_json();
+        let json = s.to_json().unwrap();
         let back: SyntheticSummary = serde_json::from_str(&json).unwrap();
         assert_eq!(s, back);
         // Machine-usable: snake_case verdict tokens.

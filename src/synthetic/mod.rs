@@ -1434,7 +1434,7 @@ async fn report_command(
             // SAME guard + thresholds so it can never disagree with the full report above.
             if let Some(summary_path) = summary {
                 let compact = diff::summarize(&a, &b, &guard, &budgets);
-                tokio::fs::write(&summary_path, compact.to_json()).await?;
+                tokio::fs::write(&summary_path, compact.to_json()?).await?;
                 println!("summary written to {}", summary_path);
             }
             return Ok(());
