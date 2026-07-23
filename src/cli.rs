@@ -566,6 +566,14 @@ pub enum SyntheticCommands {
             help = "Markdown output path: the diff (default synthetic-diff.md) with --diff, the regression report (default synthetic-regression.md) with --diff --regression, or the re-rendered report's Markdown when re-rendering a single report"
         )]
         out: Option<String>,
+        #[arg(
+            long = "elapsed-secs",
+            value_name = "SECONDS",
+            value_parser = parse_elapsed_secs,
+            requires = "regression",
+            help = "with --diff --regression: total wall-clock seconds the caller spent computing this check (benchmark + reporting), rendered as a compute-time line in the report header"
+        )]
+        elapsed_secs: Option<f64>,
     },
 }
 
@@ -577,9 +585,28 @@ fn parse_write_ratio(val: &str) -> Result<f32, String> {
     }
 }
 
+/// Parse `--elapsed-secs`: a finite, non-negative number of seconds (rejects `-1`, `inf`, `NaN`).
+fn parse_elapsed_secs(val: &str) -> Result<f64, String> {
+    match val.parse::<f64>() {
+        Ok(value) if value.is_finite() && value >= 0.0 => Ok(value),
+        Ok(_) => Err(String::from("must be a finite, non-negative number of seconds")),
+        Err(_) => Err(String::from("Invalid float value")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_elapsed_secs_accepts_nonnegative_rejects_bad() {
+        assert_eq!(parse_elapsed_secs("0").unwrap(), 0.0);
+        assert_eq!(parse_elapsed_secs("754.5").unwrap(), 754.5);
+        assert!(parse_elapsed_secs("-1").is_err());
+        assert!(parse_elapsed_secs("inf").is_err());
+        assert!(parse_elapsed_secs("NaN").is_err());
+        assert!(parse_elapsed_secs("abc").is_err());
+    }
 
     #[test]
     fn parse_op_selector_accepts_magic_and_names() {

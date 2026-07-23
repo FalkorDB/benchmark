@@ -1235,8 +1235,8 @@ pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkRes
             );
             Ok(())
         }
-        crate::cli::SyntheticCommands::Report { input, diff, regression, thresholds, out } => {
-            report_command(input, diff, regression, thresholds, out).await
+        crate::cli::SyntheticCommands::Report { input, diff, regression, thresholds, out, elapsed_secs } => {
+            report_command(input, diff, regression, thresholds, out, elapsed_secs).await
         }
     }
 }
@@ -1251,6 +1251,7 @@ async fn report_command(
     regression: bool,
     thresholds: Option<String>,
     out: Option<String>,
+    elapsed_secs: Option<f64>,
 ) -> BenchmarkResult<()> {
     let load = |path: &str| -> BenchmarkResult<crate::synthetic::report::Report> {
         let text = std::fs::read_to_string(path)
@@ -1270,7 +1271,7 @@ async fn report_command(
                 None => crate::synthetic::thresholds::Thresholds::builtin(),
             };
             let guard = baseline::regression_guard(&a, &b);
-            let md = diff::regression_markdown(&a, &b, &guard, &budgets);
+            let md = diff::regression_markdown(&a, &b, &guard, &budgets, elapsed_secs);
             let out_path = out.unwrap_or_else(|| "synthetic-regression.md".to_string());
             tokio::fs::write(&out_path, &md).await?;
             println!("{}", md);
@@ -1655,6 +1656,7 @@ mod tests {
             thresholds: None,
             diff: vec![],
             out: None,
+            elapsed_secs: None,
         })
         .await
         .expect_err("report with no args ⇒ error");
@@ -1701,6 +1703,7 @@ mod tests {
             thresholds: None,
             diff: vec![base.clone(), ok.clone()],
             out: Some(diff_out.clone()),
+            elapsed_secs: None,
         })
         .await
         .is_ok());
@@ -1712,6 +1715,7 @@ mod tests {
             thresholds: None,
             diff: vec![base.clone(), bad.clone()],
             out: Some(diff_out.clone()),
+            elapsed_secs: None,
         })
         .await
         .expect_err("workload_hash mismatch must abort");
@@ -1754,6 +1758,7 @@ mod tests {
             thresholds: None,
             diff: vec![a.clone(), b.clone()],
             out: Some(out.clone()),
+            elapsed_secs: None,
         })
         .await
         .is_ok());

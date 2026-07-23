@@ -191,6 +191,26 @@ fn pct(
     }
 }
 
+/// Human-readable duration from seconds: `1h 2m 3s`, `4m 5s`, `12s`, or `0.4s` sub-second.
+/// `n/a` for a non-finite or negative input.
+fn fmt_duration_secs(secs: f64) -> String {
+    if !secs.is_finite() || secs < 0.0 {
+        return "n/a".to_string();
+    }
+    if secs < 1.0 {
+        return format!("{secs:.1}s");
+    }
+    let total = secs.round() as u64;
+    let (h, m, s) = (total / 3600, (total % 3600) / 60, total % 60);
+    if h > 0 {
+        format!("{h}h {m}m {s}s")
+    } else if m > 0 {
+        format!("{m}m {s}s")
+    } else {
+        format!("{s}s")
+    }
+}
+
 fn ver(report: &Report) -> String {
     report
         .meta
@@ -235,6 +255,7 @@ pub fn regression_markdown(
     candidate: &Report,
     guard: &RegressionGuard,
     thresholds: &Thresholds,
+    elapsed_secs: Option<f64>,
 ) -> String {
     let la = col_label(baseline, "baseline");
     let lb = col_label(candidate, "candidate");
@@ -244,6 +265,12 @@ pub fn regression_markdown(
         md_cell(&lb),
         md_cell(&la)
     ));
+    if let Some(secs) = elapsed_secs {
+        head.push_str(&format!(
+            "⏱ Computed in {} (benchmark + reporting).\n\n",
+            fmt_duration_secs(secs)
+        ));
+    }
     head.push_str(&format!("| field | {} | {} |\n|---|---|---|\n", md_cell(&la), md_cell(&lb)));
     row2(&mut head, "FalkorDB module", &ver(baseline), &ver(candidate));
     row2(
@@ -259,6 +286,8 @@ pub fn regression_markdown(
         &format!("{} / {}", baseline.meta.samples, baseline.meta.warmup),
         &format!("{} / {}", candidate.meta.samples, candidate.meta.warmup),
     );
+    head.push('\n');
+    head.push_str(&thresholds.settings_markdown());
 
     let (diverged, warnings) = match guard {
         RegressionGuard::NotComparable { reason } => {
@@ -560,13 +589,13 @@ mod tests {
         // within budget: +5% and +0.05 ms (below the 0.5 ms floor) => green
         let b_ok = report(42002, 1.05, 1000.0);
         let g = regression_guard(&a, &b_ok);
-        let md = regression_markdown(&a, &b_ok, &g, &Thresholds::builtin());
+        let md = regression_markdown(&a, &b_ok, &g, &Thresholds::builtin(), None);
         assert!(md.contains("🟢"), "{md}");
         assert!(md.contains("no p50 regression"), "{md}");
         // over budget: +100% and +1 ms => red
         let b_bad = report(42002, 2.0, 500.0);
         let g2 = regression_guard(&a, &b_bad);
-        let md2 = regression_markdown(&a, &b_bad, &g2, &Thresholds::builtin());
+        let md2 = regression_markdown(&a, &b_bad, &g2, &Thresholds::builtin(), None);
         assert!(md2.contains("🔴"), "{md2}");
         assert!(md2.contains("1 of 1 comparable cell(s) over budget"), "{md2}");
     }
@@ -580,7 +609,7 @@ mod tests {
         b.operations.get_mut("match_by_index").unwrap().result_digest =
             Some("sha256:bb".to_string());
         let g = regression_guard(&a, &b);
-        let md = regression_markdown(&a, &b, &g, &Thresholds::builtin());
+        let md = regression_markdown(&a, &b, &g, &Thresholds::builtin(), None);
         assert!(md.contains("results differ"), "{md}");
         assert!(md.contains("🔴 N/A"), "{md}");
         // The top-line summary must be 🔴 (correctness), not a misleading 🟢.
@@ -596,7 +625,7 @@ mod tests {
         let mut b = report(42002, 1.0, 1000.0);
         b.meta.dataset.as_mut().unwrap().workload_hash = "sha256:zzz".to_string();
         let g = regression_guard(&a, &b);
-        let md = regression_markdown(&a, &b, &g, &Thresholds::builtin());
+        let md = regression_markdown(&a, &b, &g, &Thresholds::builtin(), None);
         assert!(md.contains("not comparable"), "{md}");
     }
 
@@ -613,7 +642,7 @@ mod tests {
         assert!(md.contains("v1\\|x") && md.contains("v2\\|y"), "diff headers not escaped: {md}");
         // regression headers (field header + per-op header)
         let g = regression_guard(&a, &b);
-        let reg = regression_markdown(&a, &b, &g, &Thresholds::builtin());
+        let reg = regression_markdown(&a, &b, &g, &Thresholds::builtin(), None);
         assert!(reg.contains("v1\\|x") && reg.contains("v2\\|y"), "regression headers not escaped: {reg}");
     }
 
@@ -625,7 +654,38 @@ mod tests {
         let a = report(42001, 0.0, 1000.0);
         let b = report(42002, 1.0, 1000.0);
         let g = regression_guard(&a, &b);
-        let md = regression_markdown(&a, &b, &g, &Thresholds::builtin());
+        let md = regression_markdown(&a, &b, &g, &Thresholds::builtin(), None);
         assert!(md.contains("across 0 comparable cell(s)"), "{md}");
+    }
+
+    #[test]
+    fn regression_header_shows_thresholds_and_compute_time() {
+        use crate::synthetic::baseline::regression_guard;
+        use crate::synthetic::thresholds::Thresholds;
+        let a = report(42001, 1.0, 1000.0);
+        let b = report(42002, 1.0, 1000.0);
+        let g = regression_guard(&a, &b);
+        // With an elapsed value the compute-time line renders alongside the thresholds settings.
+        let md = regression_markdown(&a, &b, &g, &Thresholds::builtin(), Some(754.0));
+        assert!(md.contains("**Thresholds**"), "settings table missing: {md}");
+        assert!(md.contains("| _default_ | 10.0% | 0.50 ms |"), "{md}");
+        assert!(md.contains("Budget precedence: per-op×concurrency"), "rule missing: {md}");
+        assert!(
+            md.contains("⏱ Computed in 12m 34s (benchmark + reporting)."),
+            "timing missing: {md}"
+        );
+        // Without an elapsed value there is no compute-time line.
+        let md_none = regression_markdown(&a, &b, &g, &Thresholds::builtin(), None);
+        assert!(!md_none.contains('⏱'), "unexpected timing line: {md_none}");
+    }
+
+    #[test]
+    fn fmt_duration_secs_formats_ranges() {
+        assert_eq!(fmt_duration_secs(0.4), "0.4s");
+        assert_eq!(fmt_duration_secs(12.0), "12s");
+        assert_eq!(fmt_duration_secs(754.0), "12m 34s");
+        assert_eq!(fmt_duration_secs(3723.0), "1h 2m 3s");
+        assert_eq!(fmt_duration_secs(-1.0), "n/a");
+        assert_eq!(fmt_duration_secs(f64::NAN), "n/a");
     }
 }
