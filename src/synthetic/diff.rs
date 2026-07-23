@@ -337,6 +337,7 @@ pub fn regression_markdown(
         let op_diverged = diverged.contains(op);
         let opname = OpName::from_tag(op);
         let regressed_before = regressed;
+        let comparable_before = comparable_cells;
         // Render this op's cache-mode tables into a temp buffer so the whole op section can be
         // wrapped in a **collapsed** <details> — keeps the PR sticky comment compact by default.
         let mut op_body = String::new();
@@ -349,8 +350,16 @@ pub fn regression_markdown(
         if op_body.trim().is_empty() {
             continue;
         }
-        // Per-op headline shown on the collapsed row: 🔴 if any cell regressed OR results diverged.
-        let op_emoji = if op_diverged || regressed > regressed_before { "🔴" } else { "🟢" };
+        // Per-op headline on the collapsed row: 🔴 if any cell regressed OR results diverged; 🟢 if
+        // it had ≥1 comparable cell and none regressed; N/A when no cell was evaluable (all rows
+        // N/A) so it never reads like a pass.
+        let op_emoji = if op_diverged || regressed > regressed_before {
+            "🔴"
+        } else if comparable_cells > comparable_before {
+            "🟢"
+        } else {
+            "N/A"
+        };
         let diverged_note =
             if op_diverged { " — ⚠ results differ (perf verdict N/A)" } else { "" };
         body.push_str(&format!(
@@ -441,9 +450,13 @@ fn render_regression_mode(
 
         let a_cell = latency_cell(am);
         let b_cell = latency_cell(bm);
-        // Gated delta: p50 % change, plus the signed absolute ms change (so the ms floor is auditable).
+        // Gated delta: p50 % change + signed absolute ms change (so the ms floor is auditable).
+        // Only shown when both p50s are valid (finite, > 0) — i.e. exactly when a verdict exists;
+        // otherwise the cell is N/A and an absolute Δ would be misleading.
         let dp50 = match (ap, bp) {
-            (Some(x), Some(y)) => format!("{} ({:+.3})", pct(x, y), y - x),
+            (Some(x), Some(y)) if x.is_finite() && x > 0.0 && y.is_finite() && y > 0.0 => {
+                format!("{} ({:+.3})", pct(x, y), y - x)
+            }
             _ => "—".to_string(),
         };
         // The configured guard for this exact cell — only resolvable for a known op.
@@ -685,6 +698,11 @@ mod tests {
         let g = regression_guard(&a, &b);
         let md = regression_markdown(&a, &b, &g, &Thresholds::builtin(), None);
         assert!(md.contains("across 0 comparable cell(s)"), "{md}");
+        // An all-N/A op reads as N/A on its collapsed summary, never a green pass.
+        assert!(md.contains("N/A <code>match_by_index</code></summary>"), "{md}");
+        assert!(!md.contains("🟢 <code>match_by_index</code>"), "{md}");
+        // A zero/invalid p50 ⇒ the Δp50 (Δms) cell is `—`, not a misleading `n/a (+…)`.
+        assert!(!md.contains("n/a (+"), "no absolute Δ for N/A cells: {md}");
     }
 
     #[test]
