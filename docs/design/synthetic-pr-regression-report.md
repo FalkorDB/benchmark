@@ -226,8 +226,8 @@ bundle is reported **unavailable**, not compared.
 ### 🧪 Synthetic per-op regression — PR vs main (same machine)
 
 Identical recorded workload, each build measured back-to-back on one VM (one container at a time).
-🟢 = faster or within budget · 🔴 = slower than budget · N/A = results differ or not comparable.
-Non-blocking.
+🟢 = faster or within budget · 🔴 = slower than budget **or** results differ · N/A = no perf verdict
+(results differ or not comparable). Non-blocking.
 
 **pr vs main** — 🔴 2 of 108 cells over budget (match_by_index @ C=16); 1 op with differing results
 
@@ -235,7 +235,7 @@ Non-blocking.
 |---|--:|---|--:|--:|--:|:--:|
 | match_by_index | 16 | cached | 2.21 | 2.65 | +19.9% | 🔴 |
 | match_by_index | 32 | cached | 5.15 | 4.58 | −11.0% | 🟢 |
-| expand_hops_5 | 8 | cached | 1.90 | 1.88 | _(−1%)_ | N/A ⚠ results differ |
+| expand_hops_5 | 8 | cached | 1.90 | 1.88 | _(−1%)_ | 🔴 N/A ⚠ results differ |
 | … | | | | | | |
 ```
 
