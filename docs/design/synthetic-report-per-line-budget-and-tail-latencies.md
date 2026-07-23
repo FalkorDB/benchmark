@@ -122,7 +122,8 @@ Pure formatting change in the renderer; measurement/recording/JSON untouched.
   ms`) so the header *policy* and the per-line *guard* can never disagree on the same number.
 - **Missing / partial data:** `LevelMetrics` is optional per side. If one side is absent, still render
   the present side and show the absent side's tails **and** throughput as `—` (e.g.
-  `context: p90 — · p99 — · — op/s`). A zero/None baseline p50 stays **N/A** (unchanged). For an
+  `context: p90 — · p99 — · — op/s`). A zero/None/non-finite p50 on **either** side (baseline or
+  candidate) stays **N/A**, matching `ResolvedBudget::verdict` (unchanged). For an
   **unknown op** (`OpName::from_tag` → `None`) there is no resolvable guard → print `—`. For a
   **diverged** op **whose name is known**, show the context tails and the resolved `guard` value with
   the verdict already `🔴 N/A` ("shown, not evaluated"); an **unknown** diverged op stays `—` in the
