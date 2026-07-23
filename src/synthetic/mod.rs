@@ -1388,8 +1388,8 @@ pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkRes
             );
             Ok(())
         }
-        crate::cli::SyntheticCommands::Report { input, diff, regression, thresholds, out, elapsed_secs } => {
-            report_command(input, diff, regression, thresholds, out, elapsed_secs).await
+        crate::cli::SyntheticCommands::Report { input, diff, regression, thresholds, out, elapsed_secs, summary } => {
+            report_command(input, diff, regression, thresholds, out, elapsed_secs, summary).await
         }
     }
 }
@@ -1405,6 +1405,7 @@ async fn report_command(
     thresholds: Option<String>,
     out: Option<String>,
     elapsed_secs: Option<f64>,
+    summary: Option<String>,
 ) -> BenchmarkResult<()> {
     let load = |path: &str| -> BenchmarkResult<crate::synthetic::report::Report> {
         let text = std::fs::read_to_string(path)
@@ -1429,6 +1430,13 @@ async fn report_command(
             tokio::fs::write(&out_path, &md).await?;
             println!("{}", md);
             println!("regression report written to {}", out_path);
+            // Optionally also emit the compact machine-usable summary (Decision 5), derived from the
+            // SAME guard + thresholds so it can never disagree with the full report above.
+            if let Some(summary_path) = summary {
+                let compact = diff::summarize(&a, &b, &guard, &budgets);
+                tokio::fs::write(&summary_path, compact.to_json()).await?;
+                println!("summary written to {}", summary_path);
+            }
             return Ok(());
         }
 
@@ -1985,6 +1993,7 @@ mod tests {
             diff: vec![],
             out: None,
             elapsed_secs: None,
+            summary: None,
         })
         .await
         .expect_err("report with no args ⇒ error");
@@ -2035,6 +2044,7 @@ mod tests {
             diff: vec![base.clone(), ok.clone()],
             out: Some(diff_out.clone()),
             elapsed_secs: None,
+            summary: None,
         })
         .await
         .is_ok());
@@ -2047,6 +2057,7 @@ mod tests {
             diff: vec![base.clone(), bad.clone()],
             out: Some(diff_out.clone()),
             elapsed_secs: None,
+            summary: None,
         })
         .await
         .expect_err("workload_hash mismatch must abort");
@@ -2083,6 +2094,10 @@ mod tests {
             .join(format!("reg-out-{}.md", std::process::id()))
             .to_string_lossy()
             .into_owned();
+        let sum = dir
+            .join(format!("reg-sum-{}.json", std::process::id()))
+            .to_string_lossy()
+            .into_owned();
         assert!(run_command(crate::cli::SyntheticCommands::Report {
             input: None,
             regression: true,
@@ -2090,13 +2105,20 @@ mod tests {
             diff: vec![a.clone(), b.clone()],
             out: Some(out.clone()),
             elapsed_secs: None,
+            summary: Some(sum.clone()),
         })
         .await
         .is_ok());
         let md = std::fs::read_to_string(&out).unwrap();
         assert!(md.contains("results differ"), "{md}");
         assert!(md.contains("main") && md.contains("pr"), "labels in header: {md}");
-        for p in [a, b, out] {
+        // The compact summary must be written, parse back, and agree with the full report: a
+        // correctness divergence ⇒ Regressed verdict with the diverged op surfaced.
+        let compact: diff::SyntheticSummary =
+            serde_json::from_str(&std::fs::read_to_string(&sum).unwrap()).unwrap();
+        assert_eq!(compact.verdict, diff::SummaryVerdict::Regressed);
+        assert_eq!(compact.diverged_ops, vec!["match_by_index".to_string()]);
+        for p in [a, b, out, sum] {
             let _ = std::fs::remove_file(p);
         }
     }

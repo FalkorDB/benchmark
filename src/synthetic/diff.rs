@@ -7,7 +7,8 @@ use crate::synthetic::baseline::RegressionGuard;
 use crate::synthetic::provenance::decode_module_version;
 use crate::synthetic::report::{md_cell, LevelMetrics, LevelReport, Report};
 use crate::synthetic::thresholds::{Thresholds, Verdict};
-use crate::synthetic::OpName;
+use crate::synthetic::{OpName, Tier};
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 /// Which cache mode of a [`LevelReport`] to read.
@@ -486,6 +487,446 @@ fn render_regression_mode(
     }
 }
 
+// -------------------------------------------------------------------------------------------------
+// Lean, machine-usable summary (design §3.5 "lean PR comment" / Decision 5).
+//
+// The full `regression_markdown` report is authoritative but too big to embed in a PR comment for
+// the full 64-shape corpus (GitHub caps a comment at 65 KB). [`summarize`] distills the *same*
+// inputs (baseline, candidate, guard, thresholds) into a compact structure — overall verdict,
+// per-tier 🟢/🔴/N-A counts and the worst offenders — that CI can post inline while hosting the full
+// report externally under [`SyntheticSummary::slug`]. Its per-op verdict mirrors the collapsed row
+// in `regression_markdown` exactly; a consistency test pins the two together.
+// -------------------------------------------------------------------------------------------------
+
+/// Schema version of the JSON emitted by `report --summary`, bumped on any breaking field change.
+pub const SUMMARY_SCHEMA_VERSION: u32 = 1;
+
+/// Maximum number of regressed ops listed under "worst offenders" (keeps the comment compact).
+const MAX_OFFENDERS: usize = 5;
+
+/// Overall verdict of a regression comparison, for the compact [`SyntheticSummary`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SummaryVerdict {
+    /// No p50 regression beyond budget and no result divergence.
+    Pass,
+    /// At least one p50 cell over budget, or ≥1 op whose results differ.
+    Regressed,
+    /// The two runs measured different workloads/configs — no latency verdict.
+    NotComparable,
+}
+
+impl SummaryVerdict {
+    /// The emoji shown before the headline.
+    fn emoji(self) -> &'static str {
+        match self {
+            SummaryVerdict::Pass => "🟢",
+            SummaryVerdict::Regressed => "🔴",
+            SummaryVerdict::NotComparable => "⚠",
+        }
+    }
+}
+
+/// Per-op outcome, mirroring the collapsed-row emoji in [`regression_markdown`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OpOutcome {
+    /// ≥1 comparable p50 cell and none over budget (🟢).
+    Pass,
+    /// Results diverged, or ≥1 p50 cell over budget (🔴).
+    Regressed,
+    /// The op has cells but none were evaluable — no verdict (N/A).
+    NotApplicable,
+}
+
+/// A 🟢 / 🔴 / N-A tally.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutcomeCounts {
+    pub pass: usize,
+    pub regressed: usize,
+    pub not_applicable: usize,
+}
+
+impl OutcomeCounts {
+    fn add(
+        &mut self,
+        outcome: OpOutcome,
+    ) {
+        match outcome {
+            OpOutcome::Pass => self.pass += 1,
+            OpOutcome::Regressed => self.regressed += 1,
+            OpOutcome::NotApplicable => self.not_applicable += 1,
+        }
+    }
+}
+
+/// Per-[`Tier`] outcome counts (`core` / `full`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TierSummary {
+    /// The tier tag: `core` or `full`.
+    pub tier: String,
+    pub counts: OutcomeCounts,
+}
+
+/// A regressed op highlighted in the summary's "worst offenders" list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Offender {
+    pub op: String,
+    /// The op's tier tag (`core`/`full`), or `None` for an unknown op.
+    pub tier: Option<String>,
+    /// Results diverged (correctness) — takes priority over a latency regression.
+    pub diverged: bool,
+    /// Number of p50 cells over budget.
+    pub regressed_cells: usize,
+}
+
+/// A compact, machine-usable summary of a `report --diff --regression` comparison: overall verdict,
+/// per-tier 🟢/🔴/N-A counts and the worst offenders — small enough to embed in a PR comment while
+/// the full Markdown report is hosted externally and linked by [`slug`](Self::slug). Emitted as JSON
+/// by `report --summary`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyntheticSummary {
+    pub schema_version: u32,
+    pub baseline_label: String,
+    pub candidate_label: String,
+    /// Stable, filesystem- and anchor-safe id for this comparison (for hosting/linking the full
+    /// report). The same pair of runs always yields the same slug.
+    pub slug: String,
+    pub verdict: SummaryVerdict,
+    /// One-line human headline (no leading emoji — [`verdict`](Self::verdict) carries it).
+    pub headline: String,
+    /// Present only when `verdict == NotComparable`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub not_comparable_reason: Option<String>,
+    pub comparable_cells: usize,
+    pub regressed_cells: usize,
+    /// Ops whose results differ (correctness divergence), sorted.
+    pub diverged_ops: Vec<String>,
+    /// Outcome counts across every op.
+    pub totals: OutcomeCounts,
+    /// Outcome counts split by coverage tier (`core` then `full`).
+    pub per_tier: Vec<TierSummary>,
+    /// Worst offenders (regressed ops): diverged first, then by cells-over-budget, capped at
+    /// [`MAX_OFFENDERS`].
+    pub worst_offenders: Vec<Offender>,
+}
+
+/// Count the regressed and comparable p50 cells for one op across both cache modes, using the same
+/// level-union and verdict rules as [`render_regression_mode`]. Returns `None` when the op has no
+/// renderable cell in either report, so the summary skips it exactly like the Markdown does.
+fn op_cell_counts(
+    baseline: &Report,
+    candidate: &Report,
+    op: &str,
+    thresholds: &Thresholds,
+) -> Option<(usize, usize)> {
+    let opname = OpName::from_tag(op);
+    let mut regressed = 0usize;
+    let mut comparable = 0usize;
+    let mut had_cell = false;
+    for mode in [Mode::Cached, Mode::Uncached] {
+        let mut levels: BTreeSet<usize> = BTreeSet::new();
+        for rep in [baseline, candidate] {
+            if let Some(opr) = rep.operations.get(op) {
+                for lvl in &opr.levels {
+                    if mode.pick(lvl).is_some() {
+                        levels.insert(lvl.concurrency);
+                    }
+                }
+            }
+        }
+        for c in levels {
+            had_cell = true;
+            let ap = level_metrics(baseline, op, c, mode).map(|m| m.metrics.total_ms.median);
+            let bp = level_metrics(candidate, op, c, mode).map(|m| m.metrics.total_ms.median);
+            let resolved = opname.map(|name| thresholds.resolve(name, c));
+            if let (Some(x), Some(y), Some(r)) = (ap, bp, resolved) {
+                match r.verdict(x, y) {
+                    Verdict::Regressed => {
+                        regressed += 1;
+                        comparable += 1;
+                    }
+                    Verdict::Ok => comparable += 1,
+                    Verdict::NotApplicable => {}
+                }
+            }
+        }
+    }
+    had_cell.then_some((regressed, comparable))
+}
+
+/// Collapse one op's cell counts + divergence into a single [`OpOutcome`], matching the collapsed
+/// `<summary>` emoji rule in [`regression_markdown`].
+fn op_outcome(
+    regressed: usize,
+    comparable: usize,
+    diverged: bool,
+) -> OpOutcome {
+    if diverged || regressed > 0 {
+        OpOutcome::Regressed
+    } else if comparable > 0 {
+        OpOutcome::Pass
+    } else {
+        OpOutcome::NotApplicable
+    }
+}
+
+/// Lowercase, hyphenate and trim `s` into an anchor/filesystem-safe slug fragment (runs of
+/// non-alphanumerics collapse to a single `-`; empty input becomes `run`).
+fn slugify(s: &str) -> String {
+    let mut out = String::new();
+    for ch in s.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+        } else if !out.ends_with('-') && !out.is_empty() {
+            out.push('-');
+        }
+    }
+    while out.ends_with('-') {
+        out.pop();
+    }
+    if out.is_empty() {
+        out.push_str("run");
+    }
+    out
+}
+
+/// A stable slug identifying this comparison, so CI can host the full report at a predictable path
+/// and link it from the summary. Derived from the run labels and the shared `workload_hash` digest,
+/// so the same pair of runs always produces the same slug.
+fn summary_slug(
+    candidate: &Report,
+    baseline: &Report,
+    candidate_label: &str,
+    baseline_label: &str,
+) -> String {
+    let hash = candidate
+        .meta
+        .dataset
+        .as_ref()
+        .or(baseline.meta.dataset.as_ref())
+        .map(|d| d.workload_hash.as_str())
+        .unwrap_or("nohash");
+    // Keep the digest, not the algorithm prefix (e.g. `sha256:abcdef…` → `abcdef…`).
+    let digest: String = hash
+        .rsplit(':')
+        .next()
+        .unwrap_or(hash)
+        .chars()
+        .take(12)
+        .collect();
+    format!(
+        "synthetic-{}-vs-{}-{}",
+        slugify(candidate_label),
+        slugify(baseline_label),
+        slugify(&digest)
+    )
+}
+
+/// Distill a regression comparison into a compact [`SyntheticSummary`]. Uses the *same* inputs and
+/// per-op verdict rules as [`regression_markdown`], so the two never disagree (pinned by test).
+pub fn summarize(
+    baseline: &Report,
+    candidate: &Report,
+    guard: &RegressionGuard,
+    thresholds: &Thresholds,
+) -> SyntheticSummary {
+    let baseline_label = col_label(baseline, "baseline");
+    let candidate_label = col_label(candidate, "candidate");
+    let slug = summary_slug(candidate, baseline, &candidate_label, &baseline_label);
+
+    let diverged = match guard {
+        RegressionGuard::NotComparable { reason } => {
+            return SyntheticSummary {
+                schema_version: SUMMARY_SCHEMA_VERSION,
+                baseline_label,
+                candidate_label,
+                slug,
+                verdict: SummaryVerdict::NotComparable,
+                headline: format!("not comparable — {}", reason),
+                not_comparable_reason: Some(reason.clone()),
+                comparable_cells: 0,
+                regressed_cells: 0,
+                diverged_ops: Vec::new(),
+                totals: OutcomeCounts::default(),
+                per_tier: Vec::new(),
+                worst_offenders: Vec::new(),
+            };
+        }
+        RegressionGuard::Comparable { diverged_ops, .. } => diverged_ops,
+    };
+
+    let mut totals = OutcomeCounts::default();
+    let mut core = OutcomeCounts::default();
+    let mut full = OutcomeCounts::default();
+    let mut comparable_cells = 0usize;
+    let mut regressed_cells = 0usize;
+    let mut offenders: Vec<Offender> = Vec::new();
+
+    let ops: BTreeSet<&String> = baseline
+        .operations
+        .keys()
+        .chain(candidate.operations.keys())
+        .collect();
+    for op in ops {
+        // Skip ops with no renderable cell — exactly what the Markdown report does.
+        let Some((cell_regressed, cell_comparable)) =
+            op_cell_counts(baseline, candidate, op, thresholds)
+        else {
+            continue;
+        };
+        let op_diverged = diverged.contains(op);
+        let outcome = op_outcome(cell_regressed, cell_comparable, op_diverged);
+        // Global cell tallies mirror the Markdown report, which does NOT budget-check a diverged
+        // op's cells (they render as "🔴 N/A"), so a divergence never inflates the cell counts.
+        if !op_diverged {
+            comparable_cells += cell_comparable;
+            regressed_cells += cell_regressed;
+        }
+
+        totals.add(outcome);
+        let tier = OpName::from_tag(op).map(OpName::tier);
+        match tier {
+            Some(Tier::Core) => core.add(outcome),
+            Some(Tier::Full) => full.add(outcome),
+            None => {}
+        }
+        if outcome == OpOutcome::Regressed {
+            offenders.push(Offender {
+                op: op.to_string(),
+                tier: tier.map(|t| t.as_str().to_string()),
+                diverged: op_diverged,
+                regressed_cells: if op_diverged { 0 } else { cell_regressed },
+            });
+        }
+    }
+
+    let mut diverged_ops: Vec<String> = diverged.iter().cloned().collect();
+    diverged_ops.sort();
+    // A correctness divergence is the worst signal, so surface every diverged op — including ones
+    // with no measured cell, which the op loop above skips exactly like the Markdown report.
+    for op in &diverged_ops {
+        if !offenders.iter().any(|o| &o.op == op) {
+            offenders.push(Offender {
+                op: op.clone(),
+                tier: OpName::from_tag(op).map(|n| n.tier().as_str().to_string()),
+                diverged: true,
+                regressed_cells: 0,
+            });
+        }
+    }
+    // Worst first: correctness divergences, then most cells over budget, then name for stability.
+    offenders.sort_by(|a, b| {
+        b.diverged
+            .cmp(&a.diverged)
+            .then(b.regressed_cells.cmp(&a.regressed_cells))
+            .then(a.op.cmp(&b.op))
+    });
+    offenders.truncate(MAX_OFFENDERS);
+
+    // Verdict + headline mirror the top line of `regression_markdown` (minus its leading emoji).
+    let verdict = if regressed_cells > 0 || !diverged_ops.is_empty() {
+        SummaryVerdict::Regressed
+    } else {
+        SummaryVerdict::Pass
+    };
+    let headline = if regressed_cells > 0 {
+        format!("{regressed_cells} of {comparable_cells} comparable cell(s) over budget")
+    } else if !diverged_ops.is_empty() {
+        format!(
+            "no p50 regression beyond budget, but {} op(s) have differing results (correctness)",
+            diverged_ops.len()
+        )
+    } else {
+        format!("no p50 regression beyond budget across {comparable_cells} comparable cell(s)")
+    };
+
+    SyntheticSummary {
+        schema_version: SUMMARY_SCHEMA_VERSION,
+        baseline_label,
+        candidate_label,
+        slug,
+        verdict,
+        headline,
+        not_comparable_reason: None,
+        comparable_cells,
+        regressed_cells,
+        diverged_ops,
+        totals,
+        per_tier: vec![
+            TierSummary {
+                tier: Tier::Core.as_str().to_string(),
+                counts: core,
+            },
+            TierSummary {
+                tier: Tier::Full.as_str().to_string(),
+                counts: full,
+            },
+        ],
+        worst_offenders: offenders,
+    }
+}
+
+impl SyntheticSummary {
+    /// The machine-usable artifact written by `report --summary`: pretty-printed JSON.
+    pub fn to_json(&self) -> String {
+        serde_json::to_string_pretty(self).unwrap_or_else(|_| "{}".to_string())
+    }
+
+    /// A compact Markdown rendering for a PR sticky comment (well under GitHub's 65 KB limit): the
+    /// verdict headline, a per-tier 🟢/🔴/N-A table and the worst offenders, ending with the stable
+    /// [`slug`](Self::slug) so CI can link the externally-hosted full report.
+    pub fn to_markdown(&self) -> String {
+        let mut out = String::new();
+        out.push_str(&format!(
+            "### 🧪 Synthetic per-op regression — {} vs {}\n\n",
+            md_cell(&self.candidate_label),
+            md_cell(&self.baseline_label)
+        ));
+        out.push_str(&format!(
+            "{} {}\n",
+            self.verdict.emoji(),
+            md_cell(&self.headline)
+        ));
+        if self.not_comparable_reason.is_some() {
+            // NotComparable: the headline already carries the reason; there is nothing to tally.
+            out.push_str(&format!("\n_report: {}_\n", self.slug));
+            return out;
+        }
+        out.push_str("\n| tier | 🟢 | 🔴 | N/A |\n|---|---:|---:|---:|\n");
+        for t in &self.per_tier {
+            out.push_str(&format!(
+                "| {} | {} | {} | {} |\n",
+                md_cell(&t.tier),
+                t.counts.pass,
+                t.counts.regressed,
+                t.counts.not_applicable
+            ));
+        }
+        out.push_str(&format!(
+            "| **all** | {} | {} | {} |\n",
+            self.totals.pass, self.totals.regressed, self.totals.not_applicable
+        ));
+        if !self.worst_offenders.is_empty() {
+            let items: Vec<String> = self
+                .worst_offenders
+                .iter()
+                .map(|o| {
+                    let why = if o.diverged {
+                        "results differ".to_string()
+                    } else {
+                        format!("{} cell(s) over budget", o.regressed_cells)
+                    };
+                    format!("`{}` ({})", md_cell(&o.op), why)
+                })
+                .collect();
+            out.push_str(&format!("\n**Worst offenders:** {}\n", items.join(", ")));
+        }
+        out.push_str(&format!("\n_report: {}_\n", self.slug));
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -906,5 +1347,430 @@ mod tests {
         let md = regression_markdown(&a, &b, &g, &Thresholds::builtin(), None);
         assert!(md.contains("<code>x&lt;b&gt;&amp;y</code>"), "op not HTML-escaped: {md}");
         assert!(!md.contains("<code>x<b>&y"), "raw HTML leaked: {md}");
+    }
+    // --- Lean summary (Decision 5) ---------------------------------------------------------------
+
+    use crate::synthetic::baseline::regression_guard;
+    use crate::synthetic::thresholds::Thresholds;
+
+    /// Build a report with one cached level (concurrency 1) per `(op_tag, p50_median, digest)`.
+    fn rpt(
+        label: &str,
+        ver: u64,
+        ops: &[(&str, f64, &str)],
+    ) -> Report {
+        let mut operations = BTreeMap::new();
+        for (tag, median, digest) in ops {
+            operations.insert(
+                (*tag).to_string(),
+                OperationReport {
+                    levels: vec![LevelReport {
+                        concurrency: 1,
+                        cached: Some(metrics(*median, 1000.0)),
+                        uncached: None,
+                        compilation_ms_median: None,
+                    }],
+                    result_digest: Some((*digest).to_string()),
+                },
+            );
+        }
+        Report {
+            schema_version: 2,
+            meta: Meta {
+                tool_version: "0.1.0".to_string(),
+                endpoint: "e".to_string(),
+                graph: "g".to_string(),
+                samples: 1000,
+                warmup: 200,
+                concurrency: vec![1],
+                seed: 0,
+                corpus_size: 256,
+                server_timeout_ms: 5000,
+                client_deadline_ms: 6000,
+                connection: "c".to_string(),
+                started_at_epoch_secs: 0,
+                server: ServerInfo {
+                    module_graph_ver: Some(ver),
+                    ..Default::default()
+                },
+                host: Default::default(),
+                dataset: Some(DatasetInfo {
+                    seed: 0,
+                    nodes: 10,
+                    edges: 20,
+                    workload_hash: "sha256:abc".to_string(),
+                }),
+                label: Some(label.to_string()),
+            },
+            operations,
+        }
+    }
+
+    /// The collapsed-row emoji `regression_markdown` renders for `op` (`🟢`/`🔴`/`N/A`), or `None`
+    /// when the op has no collapsed row (skipped for having no cell).
+    fn md_collapsed_emoji(
+        md: &str,
+        op: &str,
+    ) -> Option<String> {
+        let needle = format!("<code>{}</code>", op);
+        md.lines().find_map(|line| {
+            let pos = line.find(&needle)?;
+            let before = &line[..pos];
+            let start = before.rfind("<summary>")? + "<summary>".len();
+            Some(before[start..].trim().to_string())
+        })
+    }
+
+    fn outcome_emoji(o: OpOutcome) -> &'static str {
+        match o {
+            OpOutcome::Pass => "🟢",
+            OpOutcome::Regressed => "🔴",
+            OpOutcome::NotApplicable => "N/A",
+        }
+    }
+
+    #[test]
+    fn summarize_counts_a_within_budget_op_green() {
+        let a = report(42001, 1.0, 1000.0);
+        let b = report(42002, 1.05, 1000.0); // +5%, below the 0.5ms floor ⇒ within budget
+        let g = regression_guard(&a, &b);
+        let s = summarize(&a, &b, &g, &Thresholds::builtin());
+        assert_eq!(s.schema_version, SUMMARY_SCHEMA_VERSION);
+        assert_eq!(s.verdict, SummaryVerdict::Pass);
+        assert_eq!(
+            s.totals,
+            OutcomeCounts {
+                pass: 1,
+                regressed: 0,
+                not_applicable: 0
+            }
+        );
+        assert_eq!(s.comparable_cells, 1);
+        assert_eq!(s.regressed_cells, 0);
+        assert!(s.diverged_ops.is_empty());
+        assert!(s.worst_offenders.is_empty());
+        // match_by_index is a Core op.
+        let core = s.per_tier.iter().find(|t| t.tier == "core").unwrap();
+        assert_eq!(
+            core.counts,
+            OutcomeCounts {
+                pass: 1,
+                regressed: 0,
+                not_applicable: 0
+            }
+        );
+        let md = s.to_markdown();
+        assert!(md.contains("🟢 no p50 regression"), "{md}");
+        assert!(md.contains("| **all** | 1 | 0 | 0 |"), "{md}");
+        assert!(md.contains(&format!("_report: {}_", s.slug)), "{md}");
+    }
+
+    #[test]
+    fn summarize_flags_an_over_budget_op_red() {
+        let a = report(42001, 1.0, 1000.0);
+        let b = report(42002, 2.0, 500.0); // +100%, +1ms ⇒ over budget
+        let g = regression_guard(&a, &b);
+        let s = summarize(&a, &b, &g, &Thresholds::builtin());
+        assert_eq!(s.verdict, SummaryVerdict::Regressed);
+        assert_eq!(s.regressed_cells, 1);
+        assert_eq!(s.comparable_cells, 1);
+        assert_eq!(s.totals.regressed, 1);
+        assert_eq!(s.worst_offenders.len(), 1);
+        let o = &s.worst_offenders[0];
+        assert_eq!(o.op, "match_by_index");
+        assert!(!o.diverged);
+        assert_eq!(o.regressed_cells, 1);
+        assert_eq!(o.tier.as_deref(), Some("core"));
+        let md = s.to_markdown();
+        assert!(
+            md.contains("🔴 1 of 1 comparable cell(s) over budget"),
+            "{md}"
+        );
+        assert!(
+            md.contains("`match_by_index` (1 cell(s) over budget)"),
+            "{md}"
+        );
+    }
+
+    #[test]
+    fn summarize_marks_a_diverged_op_red_without_counting_its_cells() {
+        let a = report(42001, 1.0, 1000.0);
+        let mut b = report(42002, 1.0, 1000.0);
+        b.operations
+            .get_mut("match_by_index")
+            .unwrap()
+            .result_digest = Some("sha256:bb".to_string());
+        let g = regression_guard(&a, &b);
+        let s = summarize(&a, &b, &g, &Thresholds::builtin());
+        assert_eq!(s.verdict, SummaryVerdict::Regressed);
+        assert_eq!(s.diverged_ops, vec!["match_by_index".to_string()]);
+        // A diverged op's cells are NOT counted (they render as 🔴 N/A), mirroring the full report.
+        assert_eq!(s.comparable_cells, 0);
+        assert_eq!(s.regressed_cells, 0);
+        assert_eq!(s.totals.regressed, 1);
+        assert_eq!(s.worst_offenders.len(), 1);
+        assert!(s.worst_offenders[0].diverged);
+        let md = s.to_markdown();
+        assert!(md.contains("differing results (correctness)"), "{md}");
+        assert!(md.contains("`match_by_index` (results differ)"), "{md}");
+    }
+
+    #[test]
+    fn summarize_not_comparable_yields_empty_tallies() {
+        let a = report(42001, 1.0, 1000.0);
+        let mut b = report(42002, 1.0, 1000.0);
+        b.meta.dataset.as_mut().unwrap().workload_hash = "sha256:zzz".to_string();
+        let g = regression_guard(&a, &b);
+        let s = summarize(&a, &b, &g, &Thresholds::builtin());
+        assert_eq!(s.verdict, SummaryVerdict::NotComparable);
+        assert!(s.not_comparable_reason.is_some());
+        assert!(s.headline.starts_with("not comparable"));
+        assert!(s.per_tier.is_empty());
+        assert!(s.worst_offenders.is_empty());
+        assert_eq!(s.totals, OutcomeCounts::default());
+        let md = s.to_markdown();
+        assert!(md.contains("⚠ not comparable"), "{md}");
+        assert!(
+            !md.contains("| tier |"),
+            "no tier table when not comparable: {md}"
+        );
+        assert!(md.contains(&format!("_report: {}_", s.slug)), "{md}");
+    }
+
+    #[test]
+    fn summarize_splits_counts_by_tier() {
+        // Core op within budget (green) + Full op over budget (red).
+        let a = rpt(
+            "main",
+            42001,
+            &[("match_by_index", 1.0, "d1"), ("expand_hops_5", 1.0, "d2")],
+        );
+        let b = rpt(
+            "pr",
+            42002,
+            &[("match_by_index", 1.05, "d1"), ("expand_hops_5", 2.0, "d2")],
+        );
+        let g = regression_guard(&a, &b);
+        let s = summarize(&a, &b, &g, &Thresholds::builtin());
+        assert_eq!(
+            s.totals,
+            OutcomeCounts {
+                pass: 1,
+                regressed: 1,
+                not_applicable: 0
+            }
+        );
+        let core = s.per_tier.iter().find(|t| t.tier == "core").unwrap();
+        let full = s.per_tier.iter().find(|t| t.tier == "full").unwrap();
+        assert_eq!(
+            core.counts,
+            OutcomeCounts {
+                pass: 1,
+                regressed: 0,
+                not_applicable: 0
+            }
+        );
+        assert_eq!(
+            full.counts,
+            OutcomeCounts {
+                pass: 0,
+                regressed: 1,
+                not_applicable: 0
+            }
+        );
+        let md = s.to_markdown();
+        assert!(md.contains("| core | 1 | 0 | 0 |"), "{md}");
+        assert!(md.contains("| full | 0 | 1 | 0 |"), "{md}");
+    }
+
+    #[test]
+    fn summarize_excludes_unknown_tag_ops_from_tier_counts() {
+        // A dynamic, string-keyed op (Phase 1a) whose tag is not a static OpName has no tier and
+        // no resolvable budget, so it counts as N/A in the totals but toward neither tier.
+        let a = rpt("main", 42001, &[("mystery_op", 1.0, "d1")]);
+        let b = rpt("pr", 42002, &[("mystery_op", 1.0, "d1")]);
+        let g = regression_guard(&a, &b);
+        let s = summarize(&a, &b, &g, &Thresholds::builtin());
+        assert_eq!(
+            s.totals,
+            OutcomeCounts {
+                pass: 0,
+                regressed: 0,
+                not_applicable: 1
+            }
+        );
+        let core = s.per_tier.iter().find(|t| t.tier == "core").unwrap();
+        let full = s.per_tier.iter().find(|t| t.tier == "full").unwrap();
+        assert_eq!(core.counts, OutcomeCounts::default());
+        assert_eq!(full.counts, OutcomeCounts::default());
+        assert!(s.worst_offenders.is_empty());
+    }
+
+    #[test]
+    fn summarize_and_regression_markdown_agree_on_every_op() {
+        // One green (Core), one red (Full), one diverged (Core), one N/A (Core, zero baseline).
+        let a = rpt(
+            "main",
+            42001,
+            &[
+                ("match_by_index", 1.0, "d1"),
+                ("expand_hops_5", 1.0, "d2"),
+                ("aggregate_count", 1.0, "d3"),
+                ("return_const", 0.0, "d4"),
+            ],
+        );
+        let b = rpt(
+            "pr",
+            42002,
+            &[
+                ("match_by_index", 1.05, "d1"),
+                ("expand_hops_5", 2.0, "d2"),
+                ("aggregate_count", 1.0, "d3-diff"),
+                ("return_const", 1.0, "d4"),
+            ],
+        );
+        let th = Thresholds::builtin();
+        let g = regression_guard(&a, &b);
+        let md = regression_markdown(&a, &b, &g, &th, None);
+        let s = summarize(&a, &b, &g, &th);
+
+        // Per-op: the summary's outcome emoji must equal the collapsed-row emoji in the report.
+        let diverged: std::collections::BTreeSet<&str> = match &g {
+            RegressionGuard::Comparable { diverged_ops, .. } => {
+                diverged_ops.iter().map(String::as_str).collect()
+            }
+            RegressionGuard::NotComparable { .. } => unreachable!(),
+        };
+        for op in [
+            "match_by_index",
+            "expand_hops_5",
+            "aggregate_count",
+            "return_const",
+        ] {
+            let (r, c) = op_cell_counts(&a, &b, op, &th).unwrap();
+            let outcome = op_outcome(r, c, diverged.contains(op));
+            assert_eq!(
+                md_collapsed_emoji(&md, op).as_deref(),
+                Some(outcome_emoji(outcome)),
+                "op {op} emoji mismatch"
+            );
+        }
+        // Top line: the reconstructed "{emoji} {headline}" must appear verbatim in the full report.
+        assert!(
+            md.contains(&format!("{} {}", s.verdict.emoji(), s.headline)),
+            "headline mismatch\nsummary: {} {}\nmd: {md}",
+            s.verdict.emoji(),
+            s.headline
+        );
+    }
+
+    #[test]
+    fn summarize_caps_and_orders_worst_offenders() {
+        // Six over-budget ops + one diverged op ⇒ capped at MAX_OFFENDERS with the divergence first.
+        let over = [
+            "aggregate_count",
+            "aggregate_group",
+            "expand_1_hop",
+            "expand_hops_5",
+            "match_by_index",
+            "match_by_label_scan",
+        ];
+        let mut a_ops: Vec<(&str, f64, &str)> = over.iter().map(|op| (*op, 1.0, "same")).collect();
+        let mut b_ops: Vec<(&str, f64, &str)> = over.iter().map(|op| (*op, 2.0, "same")).collect();
+        a_ops.push(("property_projection", 1.0, "d"));
+        b_ops.push(("property_projection", 1.0, "d-diff")); // diverged
+        let a = rpt("main", 42001, &a_ops);
+        let b = rpt("pr", 42002, &b_ops);
+        let g = regression_guard(&a, &b);
+        let s = summarize(&a, &b, &g, &Thresholds::builtin());
+        assert_eq!(s.worst_offenders.len(), 5, "capped at MAX_OFFENDERS");
+        assert_eq!(
+            s.worst_offenders[0].op, "property_projection",
+            "divergence sorts first"
+        );
+        assert!(s.worst_offenders[0].diverged);
+        // The remaining four are the alphabetically-first over-budget ops.
+        let rest: Vec<&str> = s.worst_offenders[1..]
+            .iter()
+            .map(|o| o.op.as_str())
+            .collect();
+        assert_eq!(
+            rest,
+            vec![
+                "aggregate_count",
+                "aggregate_group",
+                "expand_1_hop",
+                "expand_hops_5"
+            ]
+        );
+    }
+
+    #[test]
+    fn summarize_surfaces_a_diverged_op_with_no_measured_cell() {
+        // An op present in both runs but with empty levels: skipped from the tallies (no cell) yet
+        // still surfaced as a worst offender because its results diverged.
+        let mut a = rpt("main", 42001, &[("match_by_index", 1.0, "d1")]);
+        let mut b = rpt("pr", 42002, &[("match_by_index", 1.0, "d2")]);
+        a.operations
+            .get_mut("match_by_index")
+            .unwrap()
+            .levels
+            .clear();
+        b.operations
+            .get_mut("match_by_index")
+            .unwrap()
+            .levels
+            .clear();
+        let g = regression_guard(&a, &b);
+        let s = summarize(&a, &b, &g, &Thresholds::builtin());
+        assert_eq!(s.verdict, SummaryVerdict::Regressed);
+        assert_eq!(
+            s.totals,
+            OutcomeCounts::default(),
+            "no cell ⇒ no outcome tallied"
+        );
+        assert_eq!(s.worst_offenders.len(), 1);
+        assert_eq!(s.worst_offenders[0].op, "match_by_index");
+        assert!(s.worst_offenders[0].diverged);
+    }
+
+    #[test]
+    fn slugify_normalizes_hyphenates_and_falls_back() {
+        assert_eq!(slugify("Release 1.2.3"), "release-1-2-3");
+        assert_eq!(slugify("  PR / main  "), "pr-main");
+        assert_eq!(slugify("a__b--c"), "a-b-c");
+        assert_eq!(slugify("***"), "run");
+        assert_eq!(slugify(""), "run");
+    }
+
+    #[test]
+    fn summary_slug_is_stable_and_derived_from_labels_and_hash() {
+        let a = report(42001, 1.0, 1000.0);
+        let mut b = report(42002, 1.0, 1000.0);
+        b.meta.label = Some("release 2.0".to_string());
+        b.meta.dataset.as_mut().unwrap().workload_hash = "sha256:abc".to_string();
+        let g = regression_guard(&a, &b);
+        let s1 = summarize(&a, &b, &g, &Thresholds::builtin());
+        let s2 = summarize(&a, &b, &g, &Thresholds::builtin());
+        assert_eq!(s1.slug, s2.slug, "same inputs ⇒ same slug");
+        assert!(
+            s1.slug.starts_with("synthetic-release-2-0-vs-"),
+            "{}",
+            s1.slug
+        );
+        assert!(s1.slug.ends_with("-abc"), "digest suffix: {}", s1.slug);
+    }
+
+    #[test]
+    fn synthetic_summary_json_round_trips() {
+        let a = report(42001, 1.0, 1000.0);
+        let b = report(42002, 2.0, 500.0);
+        let g = regression_guard(&a, &b);
+        let s = summarize(&a, &b, &g, &Thresholds::builtin());
+        let json = s.to_json();
+        let back: SyntheticSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(s, back);
+        // Machine-usable: snake_case verdict tokens.
+        assert!(json.contains("\"verdict\": \"regressed\""), "{json}");
     }
 }
