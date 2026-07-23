@@ -469,7 +469,12 @@ just synthetic-compare-versions demo falkor://127.0.0.1:6379 falkor://127.0.0.1:
   note and a perf verdict of **N/A** (a mismatched workload/config renders the whole report
   *not comparable*). The report **header echoes the resolved thresholds** (the default budget/floor
   plus any per-op and per-op×concurrency overrides) with a one-line 🟢/🔴 rule, and — when the caller
-  passes **`--elapsed-secs <n>`** — a compute-time line (benchmark + reporting) for the run.
+  passes **`--elapsed-secs <n>`** — a compute-time line (benchmark + reporting) for the run. Each cell
+  row also prints the **effective `p50 guard`** applied to it (e.g. `15% AND 0.5 ms`, per-op×C
+  overrides included) and the absolute `Δms`, and folds **p90/p99 + throughput** onto a smaller,
+  clearly non-gated `context:` line — the verdict stays **p50-only**. Each op's tables are wrapped in
+  a **collapsed `<details>`** (with the op's 🟢/🔴 verdict on the summary row) so the PR sticky
+  comment stays compact — the reader expands only the ops they care about.
 - **`just synthetic-sanity`** self-checks the tool: it records the same workload twice (asserting an
   identical `workload_hash` — deterministic recording), then `run --recording` at C=1,4 + `report
   --diff` (incl. the C>1 result verification) against a throwaway Docker FalkorDB. Latency is not
