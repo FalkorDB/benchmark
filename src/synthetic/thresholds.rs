@@ -350,4 +350,31 @@ concurrency = { 32 = 40.0 }
         // deny_unknown_fields guards typos like `budjet_pct`.
         assert!(Thresholds::from_toml_str("[default]\nbudjet_pct = 10.0\n").is_err());
     }
+
+    #[test]
+    fn verdict_emoji_covers_all_variants() {
+        assert_eq!(Verdict::Ok.emoji(), "🟢");
+        assert_eq!(Verdict::Regressed.emoji(), "🔴");
+        assert_eq!(Verdict::NotApplicable.emoji(), "N/A");
+    }
+
+    #[test]
+    fn default_equals_builtin() {
+        let b = Thresholds::default().resolve(OpName::MatchByIndex, 1);
+        assert_eq!(b.budget_pct, DEFAULT_BUDGET_PCT);
+        assert_eq!(b.floor_ms, DEFAULT_FLOOR_MS);
+        assert_eq!(b.metric, Metric::P50);
+    }
+
+    #[test]
+    fn from_file_reads_validates_and_errors_on_missing() {
+        let dir = std::env::temp_dir();
+        let p = dir.join(format!("thr-{}.toml", std::process::id()));
+        // op-level metric override exercises the op metric validation path.
+        std::fs::write(&p, "[op.match_by_index]\nmetric = \"p50\"\nbudget_pct = 7.0\n").unwrap();
+        let t = Thresholds::from_file(p.to_str().unwrap()).unwrap();
+        assert_eq!(t.resolve(OpName::MatchByIndex, 1).budget_pct, 7.0);
+        let _ = std::fs::remove_file(&p);
+        assert!(Thresholds::from_file("/no/such/thresholds-xyz.toml").is_err());
+    }
 }
