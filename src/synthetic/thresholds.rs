@@ -393,7 +393,12 @@ concurrency = { 32 = 40.0 }
     #[test]
     fn from_file_reads_validates_and_errors_on_missing() {
         let dir = std::env::temp_dir();
-        let p = dir.join(format!("thr-{}.toml", std::process::id()));
+        // Unique per (process, nanos) so parallel tests can't collide on the temp file name.
+        let uniq = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let p = dir.join(format!("thr-{}-{}.toml", std::process::id(), uniq));
         // op-level metric override exercises the op metric validation path.
         std::fs::write(&p, "[op.match_by_index]\nmetric = \"p50\"\nbudget_pct = 7.0\n").unwrap();
         let t = Thresholds::from_file(p.to_str().unwrap()).unwrap();
