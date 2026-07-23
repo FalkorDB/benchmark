@@ -548,10 +548,11 @@ mod tests {
 
     #[test]
     fn canonical_value_distinguishes_structurally_different_shapes() {
-        // A string that happens to look like a compound's rendering can't alias the real compound
-        // (distinct type tags + length framing).
+        // A string that happens to look like a compound's rendering can't alias the real compound:
+        // even when its *content* is byte-identical to the array's canonical rendering, the `s:`
+        // type tag keeps the two apart.
         let arr = FalkorValue::Array(vec![FalkorValue::I64(1)]);
-        let lookalike = FalkorValue::String(canonical_value(&arr).trim_start_matches("arr").into());
+        let lookalike = FalkorValue::String(canonical_value(&arr));
         assert_ne!(canonical_value(&arr), canonical_value(&lookalike));
         // A node and an edge with the same id don't collide.
         let node = FalkorValue::Node(Node {
