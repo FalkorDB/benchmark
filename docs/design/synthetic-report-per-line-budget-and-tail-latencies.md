@@ -93,7 +93,7 @@ most strongly. This is **open question §8.1**.
 | --- | --- | --- |
 | **p50** (`total_ms.median`) | **Gated** — unchanged `ResolvedBudget::verdict` | primary line |
 | p90, p99 (`total_ms.p90/.p99`) | Context only | `context:` line (or §4-A block) |
-| throughput (`op/s`, Δ) | Context only | `context:` line |
+| throughput (per-side `op/s`) | Context only | `context:` line |
 | budget_pct / floor_ms | The threshold **applied to p50** | new `guard` column |
 | absolute Δms | Audit aid for the ms floor | primary line, next to Δp50 |
 
@@ -117,13 +117,16 @@ Pure formatting change in the renderer; measurement/recording/JSON untouched.
   signed absolute delta; print the `guard` from the reused `ResolvedBudget`.
 - **Threshold formatting must be lossless-enough:** print `budget_pct` and `floor_ms` with trailing
   zeros trimmed and enough precision to round-trip the configured value (e.g. `15%`, `12.5%`,
-  `0.5 ms`, `0.05 ms`) — never round `10.04%`→`10.0%`. Guard against implying false precision.
-- **Missing / partial data:** `LevelMetrics` is optional per side. If one side is absent, still show
-  the other's context (`… · —` / `— · …`) and throughput direction (`5550→—`). A zero/None baseline p50
-  stays **N/A** (unchanged). For an **unknown op** (`OpName::from_tag` → `None`) there is no resolvable
-  guard → print `—`. For a **diverged** op, show the context tails but the `guard` cell prints the
-  configured value with the verdict already `🔴 N/A` ("shown, not evaluated"); it must **not** count
-  toward comparable cells.
+  `0.5 ms`, `0.05 ms`) — never round `10.04%`→`10.0%`. Guard against implying false precision. Apply
+  the **same** formatter to the header `Thresholds::settings_markdown` (today fixed `{:.1}%` / `{:.2}
+  ms`) so the header *policy* and the per-line *guard* can never disagree on the same number.
+- **Missing / partial data:** `LevelMetrics` is optional per side. If one side is absent, still render
+  the present side and show the absent side's tails **and** throughput as `—` (e.g.
+  `context: p90 — · p99 — · — op/s`). A zero/None baseline p50 stays **N/A** (unchanged). For an
+  **unknown op** (`OpName::from_tag` → `None`) there is no resolvable guard → print `—`. For a
+  **diverged** op **whose name is known**, show the context tails and the resolved `guard` value with
+  the verdict already `🔴 N/A` ("shown, not evaluated"); an **unknown** diverged op stays `—` in the
+  guard (no `resolve` input). Neither counts toward comparable cells.
 - Header `Thresholds` table (`settings_markdown`): **keep** as the policy-at-a-glance summary (defaults
   + overrides); per-line `guard` is the *effective* value, the header is the *policy* (drop only if
   §8.1 says so).
