@@ -566,6 +566,13 @@ pub enum SyntheticCommands {
             help = "Markdown output path: the diff (default synthetic-diff.md) with --diff, the regression report (default synthetic-regression.md) with --diff --regression, or the re-rendered report's Markdown when re-rendering a single report"
         )]
         out: Option<String>,
+        #[arg(
+            long = "elapsed-secs",
+            value_name = "SECONDS",
+            requires = "regression",
+            help = "with --diff --regression: total wall-clock seconds the caller spent computing this check (benchmark + reporting), rendered as a compute-time line in the report header"
+        )]
+        elapsed_secs: Option<f64>,
     },
 }
 

@@ -37,6 +37,17 @@ pub enum Metric {
     Both,
 }
 
+impl Metric {
+    /// The stable lowercase id used in configs and reports.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Metric::P50 => "p50",
+            Metric::Throughput => "throughput",
+            Metric::Both => "both",
+        }
+    }
+}
+
 /// The per-cell verdict.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
@@ -241,6 +252,40 @@ impl Thresholds {
             floor_ms,
         }
     }
+
+    /// Render the resolved thresholds (`[default]` plus any per-op / per-op×concurrency overrides)
+    /// and the pass/fail rule as Markdown, for the regression report header.
+    pub fn settings_markdown(&self) -> String {
+        let metric = self.default.metric.as_str();
+        let mut s = String::from("**Thresholds**\n\n");
+        s.push_str("| scope | budget (slower than baseline) | floor (min Δ) |\n");
+        s.push_str("|---|---|---|\n");
+        s.push_str(&format!(
+            "| _default_ | {:.1}% | {:.2} ms |\n",
+            self.default.budget_pct, self.default.floor_ms
+        ));
+        for (op, o) in &self.ops {
+            let base = o.budget_pct.unwrap_or(self.default.budget_pct);
+            let mut budget = format!("{base:.1}%");
+            if !o.per_concurrency_budget_pct.is_empty() {
+                let per: Vec<String> = o
+                    .per_concurrency_budget_pct
+                    .iter()
+                    .map(|(c, p)| format!("c{c} {p:.1}%"))
+                    .collect();
+                budget.push_str(&format!(" ({})", per.join(", ")));
+            }
+            let floor = o.floor_ms.unwrap_or(self.default.floor_ms);
+            s.push_str(&format!("| `{}` | {budget} | {floor:.2} ms |\n", op.as_str()));
+        }
+        s.push_str(&format!(
+            "\n_Metric `{metric}`. A cell is 🔴 only when the candidate is **slower** than the \
+             baseline by **more than** its budget **and** the absolute {metric} increase exceeds \
+             the floor; faster (or slower within either bound) is 🟢 (N/A if the baseline is \
+             missing or ≤ 0). Budget precedence: per-op×concurrency > per-op > default._\n"
+        ));
+        s
+    }
 }
 
 fn check_metric(m: Metric) -> Result<Metric, String> {
@@ -405,5 +450,50 @@ concurrency = { 32 = 40.0 }
         assert_eq!(t.resolve(OpName::MatchByIndex, 1).budget_pct, 7.0);
         let _ = std::fs::remove_file(&p);
         assert!(Thresholds::from_file("/no/such/thresholds-xyz.toml").is_err());
+    }
+
+    #[test]
+    fn metric_as_str_covers_all_variants() {
+        assert_eq!(Metric::P50.as_str(), "p50");
+        assert_eq!(Metric::Throughput.as_str(), "throughput");
+        assert_eq!(Metric::Both.as_str(), "both");
+    }
+
+    #[test]
+    fn settings_markdown_builtin_shows_default_and_rule() {
+        let md = Thresholds::builtin().settings_markdown();
+        assert!(md.contains("**Thresholds**"), "{md}");
+        assert!(md.contains("| _default_ | 10.0% | 0.50 ms |"), "{md}");
+        // No per-op rows for the builtin defaults (an op row's first cell is a `backtick` name).
+        assert!(!md.contains("| `"), "builtin should have no per-op rows: {md}");
+        // The red/green rule references the metric, budget, floor, and precedence.
+        assert!(md.contains("Metric `p50`"), "{md}");
+        assert!(md.contains("🔴") && md.contains("🟢"), "{md}");
+        assert!(md.contains("budget") && md.contains("floor"), "{md}");
+        assert!(md.contains("per-op×concurrency > per-op > default"), "{md}");
+    }
+
+    #[test]
+    fn settings_markdown_renders_op_and_per_concurrency_overrides() {
+        let cfg = r#"
+[default]
+budget_pct = 10.0
+floor_ms = 0.5
+
+[op.match_by_index]
+budget_pct = 15.0
+
+[op.expand_hops_5]
+budget_pct = 12.0
+concurrency = { 16 = 18.0, 32 = 25.0 }
+"#;
+        let md = Thresholds::from_toml_str(cfg).unwrap().settings_markdown();
+        // Per-op override row (falls back to the default floor).
+        assert!(md.contains("| `match_by_index` | 15.0% | 0.50 ms |"), "{md}");
+        // Per-op×concurrency budgets are listed inline next to the op budget.
+        assert!(
+            md.contains("| `expand_hops_5` | 12.0% (c16 18.0%, c32 25.0%) | 0.50 ms |"),
+            "{md}"
+        );
     }
 }

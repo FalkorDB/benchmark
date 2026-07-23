@@ -134,6 +134,10 @@ Add a non-fatal, colored mode alongside the strict `--diff` guard. Invocation (t
 - Emits a per-op **verdict line** and an overall count (`🔴 2 of 108 cells over budget: …`) so the
   "suspect calls that got worse" are immediately visible, plus the full per-op × cache × concurrency
   table with a 🟢/🔴/N/A column and the two runs' `--label`s as headers.
+- The report **header echoes the resolved thresholds** — a small table of the `[default]`
+  budget/floor plus any per-op and per-op×concurrency overrides, with a one-line 🟢/🔴 rule (so a
+  reviewer sees *why* a cell passed without opening the TOML) — and, when the caller passes
+  **`--elapsed-secs <n>`**, a **compute-time line** (benchmark + reporting) for the run.
 
 ### A4. Fail-soft is the *job's* responsibility, not the tool's
 

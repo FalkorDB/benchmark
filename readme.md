@@ -467,7 +467,9 @@ just synthetic-compare-versions demo falkor://127.0.0.1:6379 falkor://127.0.0.1:
   in a TOML file (`[default]` + `[op.<name>]` with a `concurrency` inline table). Unlike `--diff`,
   it **never aborts**: an op whose `result_digest` differs is shown 🔴 with a `⚠ results differ`
   note and a perf verdict of **N/A** (a mismatched workload/config renders the whole report
-  *not comparable*).
+  *not comparable*). The report **header echoes the resolved thresholds** (the default budget/floor
+  plus any per-op and per-op×concurrency overrides) with a one-line 🟢/🔴 rule, and — when the caller
+  passes **`--elapsed-secs <n>`** — a compute-time line (benchmark + reporting) for the run.
 - **`just synthetic-sanity`** self-checks the tool: it records the same workload twice (asserting an
   identical `workload_hash` — deterministic recording), then `run --recording` at C=1,4 + `report
   --diff` (incl. the C>1 result verification) against a throwaway Docker FalkorDB. Latency is not
