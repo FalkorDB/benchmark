@@ -6,8 +6,9 @@
 //! sub-millisecond ops). Faster — or slower within either bound — is **🟢**. A missing/zero
 //! baseline is **N/A**.
 //!
-//! The budget is resolved per `(op, concurrency)` with precedence
-//! `op.<name>.concurrency.<C>` > `op.<name>` > `[default]`, per field. The config ships a built-in
+//! The budget is resolved per `(op, concurrency)`; the **per-concurrency** override applies to
+//! `budget_pct` only, with precedence `op.<name>.concurrency.<C>` > `op.<name>` > `[default]`,
+//! while `floor_ms`/`metric` resolve at `op.<name>` > `[default]`. The config ships a built-in
 //! default (10 %, `floor_ms = 0.5`, `metric = "p50"`) and is overridable from a TOML file that
 //! lives in the consuming repo (e.g. `falkordb-rs-next-gen`).
 

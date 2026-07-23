@@ -101,7 +101,8 @@ pub fn diff_markdown(
     out
 }
 
-/// The display name for a run's column: its `--label` if set, else the `fallback` (`A`/`B`).
+/// The display name for a run's column: its `--label` if set, else the caller-supplied `fallback`
+/// (`A`/`B` for `diff_markdown`; `baseline`/`candidate` for the regression report).
 fn col_label(r: &Report, fallback: &str) -> String {
     r.meta.label.clone().unwrap_or_else(|| fallback.to_string())
 }
