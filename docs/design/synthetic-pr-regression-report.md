@@ -117,7 +117,7 @@ Add a dedicated mode rather than overloading the strict `--diff` guard. New invo
   `candidate_p50 > baseline_p50 × (1 + budget_pct/100)`; else 🟢. Zero/missing baseline → N/A.
 - Emits a per-op **verdict line** and an overall count (`🔴 2 of 108 cells over budget: …`) so the
   "suspect calls that got worse" are immediately visible, plus the full per-op × cache × concurrency
-  table with a 🟢/🔴/N-A column and the two runs' `--label`s as headers.
+  table with a 🟢/🔴/N/A column and the two runs' `--label`s as headers.
 
 ### A4. Fail-soft is the *job's* responsibility, not the tool's
 
@@ -133,7 +133,7 @@ Keep the tool's unit of work a single pair (`--baseline`, `--candidate`). The **
 it once per baseline (`main→pr`, `release→pr`) and concatenates the two tables under one sticky
 comment. (A combined multi-baseline subcommand is a possible future consolidation, out of scope.)
 
-### A5. Release + docs
+### A6. Release + docs
 
 - Update `readme.md`, `.github/copilot-instructions.md` recipe/flag tables, and the cookbook with
   `--label` and `--thresholds`.
@@ -246,7 +246,7 @@ Non-blocking.
 
 ## 8. Deliverables checklist (on approval)
 
-**`FalkorDB/benchmark`:** `run --label`; `report --regression` (non-fatal, colored 🟢/🔴/N-A,
+**`FalkorDB/benchmark`:** `run --label`; `report --regression` (non-fatal, colored 🟢/🔴/N/A,
 p50=total-median verdict with `budget_pct` + `floor_ms`); **split guard** (workload/config mismatch
 = global not-comparable; per-op digest mismatch = per-op N/A, no abort — strict `--diff` unchanged);
 threshold TOML parsing + validation + precedence; unit tests (≥ 90 % patch); docs
