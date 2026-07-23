@@ -169,7 +169,9 @@ struct OpThresholds {
 #[derive(Debug, Clone)]
 pub struct Thresholds {
     default: ResolvedBudget,
-    ops: BTreeMap<OpName, OpThresholds>,
+    /// Per-op overrides keyed by the op's **stable string name** (`OpName::as_str`, or a dynamic
+    /// op's query name — design §3.1), so a string-keyed op resolves exactly like a built-in one.
+    ops: BTreeMap<String, OpThresholds>,
 }
 
 impl Default for Thresholds {
@@ -212,7 +214,9 @@ impl Thresholds {
 
         let mut ops = BTreeMap::new();
         for (name, raw_op) in raw.op {
-            let op = OpName::from_tag(&name).ok_or_else(|| {
+            // Validate the name maps to a known op, but key the map by the **string name** so a
+            // dynamic (string-keyed) op resolves exactly like a built-in one (design §3.1).
+            OpName::from_tag(&name).ok_or_else(|| {
                 format!("unknown operation '{name}' in [op.{name}] — see `synthetic list-ops`")
             })?;
             if let Some(m) = raw_op.metric {
@@ -240,7 +244,7 @@ impl Thresholds {
                 per_concurrency_budget_pct.insert(c, pct);
             }
             ops.insert(
-                op,
+                name,
                 OpThresholds {
                     metric: raw_op.metric,
                     budget_pct,
@@ -256,7 +260,15 @@ impl Thresholds {
     /// Resolve the budget for one `(op, concurrency)` cell. Precedence per field:
     /// `op.<op>.concurrency.<C>` (budget only) > `op.<op>` > `[default]`.
     pub fn resolve(&self, op: OpName, concurrency: usize) -> ResolvedBudget {
-        let over = self.ops.get(&op);
+        self.resolve_by_name(op.as_str(), concurrency)
+    }
+
+    /// Resolve the budget for one `(op name, concurrency)` cell, keyed by the op's **stable string
+    /// name** so a dynamic (string-keyed) op resolves exactly like a built-in [`OpName`] (design
+    /// §3.1); [`resolve`](Self::resolve) delegates here. Precedence per field:
+    /// `op.<name>.concurrency.<C>` (budget only) > `op.<name>` > `[default]`.
+    pub fn resolve_by_name(&self, name: &str, concurrency: usize) -> ResolvedBudget {
+        let over = self.ops.get(name);
         let budget_pct = over
             .and_then(|o| o.per_concurrency_budget_pct.get(&concurrency).copied())
             .or_else(|| over.and_then(|o| o.budget_pct))
@@ -298,7 +310,7 @@ impl Thresholds {
                 budget.push_str(&format!(" ({})", per.join(", ")));
             }
             let floor = o.floor_ms.unwrap_or(self.default.floor_ms);
-            s.push_str(&format!("| `{}` | {budget} | {} ms |\n", op.as_str(), fmt_threshold(floor)));
+            s.push_str(&format!("| `{op}` | {budget} | {} ms |\n", fmt_threshold(floor)));
         }
         s.push_str(&format!(
             "\n_Metric `{metric}`. A cell is 🔴 only when the candidate is **slower** than the \
@@ -397,6 +409,36 @@ concurrency = { 32 = 40.0 }
         let r32 = t.resolve(OpName::MatchByIndex, 32);
         assert_eq!(r32.budget_pct, 40.0);
         assert_eq!(r32.floor_ms, 0.1);
+    }
+
+    #[test]
+    fn resolve_by_name_keys_on_string_and_matches_opname() {
+        let cfg = r#"
+[default]
+budget_pct = 10.0
+floor_ms = 0.5
+
+[op.match_by_index]
+budget_pct = 20.0
+floor_ms = 0.1
+concurrency = { 32 = 40.0 }
+"#;
+        let t = Thresholds::from_toml_str(cfg).unwrap();
+        // A string-keyed lookup resolves exactly like the OpName-keyed one (`resolve` delegates
+        // here), across the default, per-op and per-op×concurrency precedence tiers.
+        for c in [1usize, 16, 32] {
+            assert_eq!(
+                t.resolve_by_name("match_by_index", c),
+                t.resolve(OpName::MatchByIndex, c),
+            );
+        }
+        assert_eq!(t.resolve_by_name("match_by_index", 32).budget_pct, 40.0);
+        // An unknown / dynamic op name (no override) falls back to `[default]` — the string key
+        // needn't correspond to any `OpName`, which is what lets dynamic ops resolve (design §3.1).
+        let dynamic = t.resolve_by_name("some_dynamic_shape", 8);
+        assert_eq!(dynamic.budget_pct, 10.0);
+        assert_eq!(dynamic.floor_ms, 0.5);
+        assert_eq!(dynamic.metric, Metric::P50);
     }
 
     #[test]
