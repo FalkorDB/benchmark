@@ -29,7 +29,7 @@ at a glance (🟢 good / 🔴 regressed). It never fails the PR.
 | Verdict rule | 🟢 if PR is **faster** *or* **slower within budget**; 🔴 if slower beyond budget **and** the absolute p50 delta exceeds a noise floor; diverged op → correctness-🔴, perf verdict **N/A**. |
 | Metric definition | `p50` = the **total-latency median** (`total_ms` p50) of a cell. |
 | Tool ref | a **separate** `SYNTHETIC_BENCHMARK_REF` **pinned to an immutable commit SHA** (tagged for reference) — the A/B's `BENCHMARK_REF=v2.2` is left untouched. |
-| Failure handling | the synthetic job is **allowed-to-fail / always concludes green**; any tool/infra failure posts a "benchmark unavailable" note instead of blocking. |
+| Failure handling | the synthetic job is **non-blocking** (allowed-to-fail / not a required check); any tool/infra failure posts a "benchmark unavailable" note instead of blocking. |
 | Trigger scope | PR-triggered runs only (dispatch has no PR); **arch-specific** comment markers to avoid x86/arm races. |
 
 ## 3. Context from recon (why the design is shaped this way)
@@ -169,7 +169,8 @@ comment. (A combined multi-baseline subcommand is a possible future consolidatio
 
 Add a job (reusing the A/B's GCE-VM provisioning) on **its own VM** of the same type, with a
 **unique runner label** so no A/B variant is ever scheduled onto it, running **one container at a
-time**. It is **allowed-to-fail / always concludes green** (`continue-on-error` + non-required);
+time**. It is **non-blocking** (`continue-on-error` + not a required check, so a failure never
+blocks the merge);
 every tool/infra failure is caught and turned into a "benchmark unavailable" comment (A4).
 
 1. **Resolve immutable images.** Wait for the PR's RC build **for the event's exact head SHA** (not
@@ -196,7 +197,7 @@ every tool/infra failure is caught and turned into a "benchmark unavailable" com
    job-summary step and the sticky-PR-comment step (`pull-requests: write`) are guarded by
    `if: always()`; a missing report, a comment-write failure, or a read-only fork token (fork PRs
    get a read-only `GITHUB_TOKEN` regardless of the declared permission) is handled by **warning and
-   exiting 0**, so publication can never stop the always-concludes-green job.
+   exiting 0**, so publication can never stop the non-blocking job.
 
 ### B3. Trigger, serialization, and the tool ref
 
