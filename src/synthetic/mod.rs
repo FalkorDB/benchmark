@@ -37,7 +37,7 @@ use crate::falkor::falkor_endpoint_to_redis_url;
 use crate::queries_repository::QueryType;
 use crate::query::Query;
 use crate::synthetic::catalog::{
-    spec, DatasetHandle, DatasetRequirement, OperationSpec, CORPUS_SIZE,
+    spec, DatasetHandle, DatasetRequirement, OpBudget, OperationSpec, CORPUS_SIZE,
 };
 use crate::synthetic::dataset::DatasetSpec;
 use crate::synthetic::engine::{run_closed_loop, OpInvoker};
@@ -467,6 +467,36 @@ impl Default for Config {
     }
 }
 
+impl Config {
+    /// A per-operation view of this config with `budget`'s overrides applied (design §3.5). Each
+    /// `None` field in the [`OpBudget`] inherits the corresponding global knob, so
+    /// [`OpBudget::INHERIT`] yields a config equal to `self` — preserving today's behaviour and the
+    /// record-once / replay-verbatim A/B comparability for every current op. Used per op by [`run`]
+    /// to derive that op's effective knobs before measuring it.
+    pub fn with_budget(&self, budget: &OpBudget) -> Config {
+        let mut cfg = self.clone();
+        if let Some(samples) = budget.samples {
+            cfg.samples = samples;
+        }
+        if let Some(warmup) = budget.warmup {
+            cfg.warmup = warmup;
+        }
+        if let Some(concurrency) = budget.concurrency {
+            cfg.concurrency = concurrency.to_vec();
+        }
+        if let Some(cache) = budget.cache {
+            cfg.cache = cache;
+        }
+        if let Some(server_timeout_ms) = budget.server_timeout_ms {
+            cfg.server_timeout_ms = server_timeout_ms;
+        }
+        if let Some(client_deadline_ms) = budget.client_deadline_ms {
+            cfg.client_deadline_ms = client_deadline_ms;
+        }
+        cfg
+    }
+}
+
 /// Print the available operations (for `synthetic list-ops`).
 pub fn list_ops() -> String {
     let mut out = String::from("Available operations:\n");
@@ -639,6 +669,14 @@ pub async fn run(config: &Config) -> BenchmarkResult<Report> {
     let mut op_fingerprints: Vec<(OpName, String)> = Vec::with_capacity(ops.len());
     for op in ops {
         let op_spec = spec(op);
+        // Per-op runtime budget (design §3.5): overlay this op's `OpBudget` on the global config.
+        // Every current op is `INHERIT`, so `op_config`/`op_concurrency`/`op_client_deadline` equal
+        // the global values and behaviour — and the record-once/replay-verbatim A/B comparability —
+        // is unchanged. The corpus is still seeded from the global `config.seed` (never budgeted),
+        // so the recorded query strings stay identical regardless of any budget.
+        let op_config = config.with_budget(&op_spec.budget);
+        let op_concurrency = normalize_concurrency(&op_config.concurrency)?;
+        let op_client_deadline = Duration::from_millis(op_config.client_deadline_ms);
         // Seed each op's corpus deterministically (same --seed ⇒ byte-identical corpus).
         let mut rng = StdRng::seed_from_u64(config.seed ^ op.salt());
         let corpus = Arc::new(op_spec.build_corpus(&mut rng, &dataset, 0, 1)?);
@@ -654,13 +692,13 @@ pub async fn run(config: &Config) -> BenchmarkResult<Report> {
         // bundle stores, so a generated run and a `--recording` run measure identically.
         let rendered: Arc<Vec<String>> = Arc::new(corpus.iter().map(|q| q.to_cypher()).collect());
         let op_report = measure_op(
-            config,
-            &concurrency,
+            &op_config,
+            &op_concurrency,
             &op_spec,
             rendered,
             run_token,
             &uid_alloc,
-            client_deadline,
+            op_client_deadline,
         )
         .await?;
         operations.insert(op.as_str().to_string(), op_report);
@@ -1779,6 +1817,100 @@ mod tests {
         // Empty and zero-containing sweeps are rejected.
         assert!(normalize_concurrency(&[]).is_err());
         assert!(normalize_concurrency(&[1, 0, 4]).is_err());
+    }
+
+    #[test]
+    fn with_budget_inherit_preserves_every_knob() {
+        // `OpBudget::INHERIT` (no overrides) must yield a config equal to the original, so the
+        // existing ops measure exactly as before and the A/B comparability is preserved.
+        let base = Config {
+            samples: 123,
+            warmup: 45,
+            concurrency: vec![1, 4, 16],
+            cache: CacheSelection::Cached,
+            server_timeout_ms: 999,
+            client_deadline_ms: 1234,
+            seed: 77,
+            reset_every: 5,
+            ..Config::default()
+        };
+        let got = base.with_budget(&OpBudget::INHERIT);
+        assert_eq!(got.samples, base.samples);
+        assert_eq!(got.warmup, base.warmup);
+        assert_eq!(got.concurrency, base.concurrency);
+        assert_eq!(got.cache, base.cache);
+        assert_eq!(got.server_timeout_ms, base.server_timeout_ms);
+        assert_eq!(got.client_deadline_ms, base.client_deadline_ms);
+        // Un-budgeted knobs are always inherited.
+        assert_eq!(got.seed, base.seed);
+        assert_eq!(got.reset_every, base.reset_every);
+    }
+
+    #[test]
+    fn with_budget_overrides_every_knob_independently() {
+        // Each `Some` field overrides exactly its own knob; everything else is inherited. Setting
+        // all six exercises every override branch.
+        let base = Config::default();
+        let budget = OpBudget {
+            samples: Some(7),
+            warmup: Some(3),
+            concurrency: Some(&[9, 2]),
+            cache: Some(CacheSelection::Uncached),
+            server_timeout_ms: Some(111),
+            client_deadline_ms: Some(222),
+        };
+        let got = base.with_budget(&budget);
+        assert_eq!(got.samples, 7);
+        assert_eq!(got.warmup, 3);
+        // The static override slice is copied verbatim (normalization happens later, per op).
+        assert_eq!(got.concurrency, vec![9, 2]);
+        assert_eq!(got.cache, CacheSelection::Uncached);
+        assert_eq!(got.server_timeout_ms, 111);
+        assert_eq!(got.client_deadline_ms, 222);
+        // Never-budgeted knobs (seed/reset_every) stay put — critical for record/replay determinism.
+        assert_eq!(got.seed, base.seed);
+        assert_eq!(got.reset_every, base.reset_every);
+    }
+
+    #[test]
+    fn with_budget_partial_override_leaves_other_knobs_inherited() {
+        let base = Config {
+            samples: 100,
+            warmup: 20,
+            concurrency: vec![1, 8],
+            cache: CacheSelection::Both,
+            server_timeout_ms: 5_000,
+            client_deadline_ms: 6_000,
+            ..Config::default()
+        };
+        // Override only samples + concurrency.
+        let budget = OpBudget {
+            samples: Some(10),
+            concurrency: Some(&[2, 4]),
+            ..OpBudget::INHERIT
+        };
+        let got = base.with_budget(&budget);
+        assert_eq!(got.samples, 10);
+        assert_eq!(got.concurrency, vec![2, 4]);
+        // The rest inherit the global config.
+        assert_eq!(got.warmup, base.warmup);
+        assert_eq!(got.cache, base.cache);
+        assert_eq!(got.server_timeout_ms, base.server_timeout_ms);
+        assert_eq!(got.client_deadline_ms, base.client_deadline_ms);
+    }
+
+    #[test]
+    fn inherit_is_the_default_budget_and_every_catalog_op_uses_it() {
+        // The reads-only scope carries no per-op budgets yet: every op inherits the global knobs, so
+        // enabling budgets later is purely additive. This tripwire flags any op that gains one.
+        assert_eq!(OpBudget::default(), OpBudget::INHERIT);
+        for op in OpName::all() {
+            assert_eq!(
+                spec(*op).budget,
+                OpBudget::INHERIT,
+                "op should inherit its budget until a phase deliberately sets one"
+            );
+        }
     }
 
     #[test]
