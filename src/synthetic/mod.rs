@@ -763,15 +763,24 @@ pub(crate) fn normalize_concurrency(concurrency: &[usize]) -> BenchmarkResult<Ve
     Ok(levels)
 }
 
-/// Validate a per-op resolved [`Config`]: the global `run()` guard only checks the global
-/// `samples`, so a per-op [`OpBudget`] that zeroed `samples` would slip past it and fail later
-/// deep inside sampling with a less actionable error. Reject it up front, naming the op.
+/// Validate a per-op resolved [`Config`]: the global `run()` guard only checks the global knobs, so
+/// a per-op [`OpBudget`] that zeroed `samples` or set an invalid concurrency sweep would slip past
+/// it and fail later with a less actionable error. Reject it up front, naming the op. Concurrency
+/// reuses [`normalize_concurrency`]'s rules (kept the single source of truth) with the op prefixed.
 pub(crate) fn validate_op_config(op: OpName, cfg: &Config) -> BenchmarkResult<()> {
     if cfg.samples == 0 {
         return Err(OtherError(format!(
             "operation '{}' resolved to a per-op budget with samples = 0; samples must be greater than 0",
             op.as_str()
         )));
+    }
+    if let Err(e) = normalize_concurrency(&cfg.concurrency) {
+        // Unwrap the inner message so the op-prefixed error isn't double-wrapped with "Other error:".
+        let detail = match e {
+            OtherError(m) => m,
+            other => other.to_string(),
+        };
+        return Err(OtherError(format!("operation '{}': {detail}", op.as_str())));
     }
     Ok(())
 }
@@ -1914,22 +1923,45 @@ mod tests {
     }
 
     #[test]
-    fn validate_op_config_rejects_a_zero_samples_budget() {
-        // The global `run()` guard only checks the global samples; a per-op budget that zeroed
-        // samples must still fail fast with a message that names the offending op.
+    fn validate_op_config_rejects_invalid_per_op_budgets() {
+        // The global `run()` guard only checks the global knobs; a per-op budget that zeroed
+        // samples or produced an invalid concurrency sweep must fail fast, naming the offending op.
         let base = Config {
             samples: 100,
+            concurrency: vec![1, 4],
             ..Config::default()
         };
+        // samples = 0.
         let zeroed = base.with_budget(&OpBudget {
             samples: Some(0),
             ..OpBudget::INHERIT
         });
-        let err = validate_op_config(OpName::ReturnConst, &zeroed).unwrap_err();
-        let msg = err.to_string();
+        let msg = validate_op_config(OpName::ReturnConst, &zeroed)
+            .unwrap_err()
+            .to_string();
         assert!(msg.contains("samples must be greater than 0"), "{msg}");
         assert!(msg.contains("return_const"), "{msg}");
-        // A non-zero (inherited) config passes.
+        // Empty concurrency sweep — reuses normalize_concurrency's rule, op-named.
+        let empty = Config {
+            concurrency: vec![],
+            ..base.clone()
+        };
+        let msg = validate_op_config(OpName::MatchByIndex, &empty)
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("match_by_index"), "{msg}");
+        assert!(msg.contains("at least one level"), "{msg}");
+        // A concurrency level of 0 — op-named.
+        let zero_level = Config {
+            concurrency: vec![0],
+            ..base.clone()
+        };
+        let msg = validate_op_config(OpName::MatchByIndex, &zero_level)
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("match_by_index"), "{msg}");
+        assert!(msg.contains(">= 1"), "{msg}");
+        // A fully valid (inherited) config passes.
         validate_op_config(OpName::ReturnConst, &base).unwrap();
     }
 
