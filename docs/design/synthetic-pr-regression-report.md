@@ -21,14 +21,14 @@ at a glance (🟢 good / 🔴 regressed). It never fails the PR.
 | Baselines | **PR vs main** always. **PR vs last release** only when a release image exists (none today → PR-vs-main only). |
 | Names in the report | `pr`, `main`, `release X.Y.Z`. |
 | Verdict metric | **p50 latency** (primary); throughput shown for context. |
-| Default budget | **10 %** slowdown before 🔴; overridable **per-command** and **per-command×concurrency**. |
+| Default budget | **10 %** slowdown before 🔴; overridable **per-operation** and **per-operation×concurrency**. |
 | Threshold config | **TOML file in `falkordb-rs-next-gen`** (tool ships built-in defaults). |
 | Result divergence | **Non-fatal**: mark diverged ops 🔴 with `⚠ results differ`, keep going. |
 | Coloring | 🟢 / 🔴 emoji per cell in the Markdown table. |
 | Sweep | full concurrency `1,2,4,8,16,32` × both cache modes (matches merged `synthetic-verify`). |
 | Verdict rule | 🟢 if PR is **faster** *or* **slower within budget**; 🔴 if slower beyond budget **and** the absolute p50 delta exceeds a noise floor; diverged op → correctness-🔴, perf verdict **N/A**. |
 | Metric definition | `p50` = the **total-latency median** (`total_ms` p50) of a cell. |
-| Tool ref | a **separate** `SYNTHETIC_BENCHMARK_REF` (new tag) — the A/B's `BENCHMARK_REF=v2.2` is left untouched. |
+| Tool ref | a **separate** `SYNTHETIC_BENCHMARK_REF` **pinned to an immutable commit SHA** (tagged for reference) — the A/B's `BENCHMARK_REF=v2.2` is left untouched. |
 | Failure handling | the synthetic job is **allowed-to-fail / always concludes green**; any tool/infra failure posts a "benchmark unavailable" note instead of blocking. |
 | Trigger scope | PR-triggered runs only (dispatch has no PR); **arch-specific** comment markers to avoid x86/arm races. |
 
@@ -148,8 +148,10 @@ comment. (A combined multi-baseline subcommand is a possible future consolidatio
 
 - Update `readme.md`, `.github/copilot-instructions.md` recipe/flag tables, and the cookbook with
   `--label` and `--thresholds`.
-- Cut a **new benchmark tag** (post-`v2.2`, containing `synthetic` + this feature) so
-  `falkordb-rs-next-gen` can bump `BENCHMARK_REF` to a pinned SHA/tag.
+- Cut a **new benchmark tag** (post-`v2.2`, containing `synthetic` + this feature) and pin
+  `falkordb-rs-next-gen`'s `SYNTHETIC_BENCHMARK_REF` to that tag's **immutable commit SHA** (with a
+  `# vX.Y.Z` comment, matching the existing `BENCHMARK_REF = deca7752 # v2.2` convention) so CI can
+  never execute changed benchmark code without a corresponding change in `falkordb-rs-next-gen`.
 - Patch coverage ≥ 90 % on the new logic (`just coverage`).
 
 ## 5. Part B — changes in `FalkorDB/falkordb-rs-next-gen` (the CI)
@@ -190,9 +192,11 @@ every tool/infra failure is caught and turned into a "benchmark unavailable" com
 4. **Diff + color (non-fatal):** `benchmark synthetic report --regression --baseline main.json
    --candidate pr.json --thresholds .github/synthetic-thresholds.toml --out syn-main.md`, and
    likewise for release. Each call catches failure → "unavailable" fragment.
-5. **Publish (non-blocking):** assemble one body (arch-specific marker — see B3), **upsert a sticky
-   PR comment** (`pull-requests: write`) + job summary, `if: always()`, best-effort (a read-only
-   fork token warns, never fails).
+5. **Publish (non-blocking):** assemble one body (arch-specific marker — see B3). **Both** the
+   job-summary step and the sticky-PR-comment step (`pull-requests: write`) are guarded by
+   `if: always()`; a missing report, a comment-write failure, or a read-only fork token (fork PRs
+   get a read-only `GITHUB_TOKEN` regardless of the declared permission) is handled by **warning and
+   exiting 0**, so publication can never stop the always-concludes-green job.
 
 ### B3. Trigger, serialization, and the tool ref
 
@@ -202,9 +206,10 @@ every tool/infra failure is caught and turned into a "benchmark unavailable" com
   "≤ 1 benchmark per machine" without contending with A/B variant VMs.
 - **Arch-specific markers** to avoid x86/arm comment races (mirroring the A/B's
   `-arm` marker): `<!-- synthetic-benchmark -->` / `<!-- synthetic-benchmark-arm -->`.
-- **Separate `SYNTHETIC_BENCHMARK_REF`** (a new benchmark tag with `synthetic` + this feature) and a
-  **separate checkout**, so the A/B's `BENCHMARK_REF=v2.2` (coupled to the legacy `ab-compare`
-  vendor mode + its trend continuity) is left completely untouched.
+- **Separate `SYNTHETIC_BENCHMARK_REF`** pinned to an **immutable commit SHA** (with a `# vX.Y.Z`
+  comment, like `BENCHMARK_REF = deca7752 # v2.2`) and a **separate checkout**, so the A/B's
+  `BENCHMARK_REF=v2.2` (coupled to the legacy `ab-compare` vendor mode + its trend continuity) is
+  left completely untouched.
 
 ### B4. "No release yet" handling
 
@@ -262,8 +267,8 @@ p50=total-median verdict with `budget_pct` + `floor_ms`); **split guard** on a *
 manifest** (`workload_hash` + `generator_version` + samples/warmup + sweep + applied server
 settings, recorded in the report → global not-comparable on mismatch; per-op digest mismatch =
 per-op N/A, no abort — strict `--diff` unchanged); threshold TOML parsing + validation + precedence;
-unit tests (≥ 90 % patch); docs (readme/copilot-instructions/cookbook); **new tag** for
-`SYNTHETIC_BENCHMARK_REF`.
+unit tests (≥ 90 % patch); docs (readme/copilot-instructions/cookbook); **new tag + its immutable
+commit SHA** for `SYNTHETIC_BENCHMARK_REF`.
 
 **`FalkorDB/falkordb-rs-next-gen`:** `.github/synthetic-thresholds.toml` +
 `.github/synthetic-workload.toml`; a new **synthetic-A/B job** in the benchmark pipeline (own
