@@ -675,6 +675,7 @@ pub async fn run(config: &Config) -> BenchmarkResult<Report> {
         // is unchanged. The corpus is still seeded from the global `config.seed` (never budgeted),
         // so the recorded query strings stay identical regardless of any budget.
         let op_config = config.with_budget(&op_spec.budget);
+        validate_op_config(op, &op_config)?;
         let op_concurrency = normalize_concurrency(&op_config.concurrency)?;
         let op_client_deadline = Duration::from_millis(op_config.client_deadline_ms);
         // Seed each op's corpus deterministically (same --seed ⇒ byte-identical corpus).
@@ -760,6 +761,19 @@ pub(crate) fn normalize_concurrency(concurrency: &[usize]) -> BenchmarkResult<Ve
     levels.sort_unstable();
     levels.dedup();
     Ok(levels)
+}
+
+/// Validate a per-op resolved [`Config`]: the global `run()` guard only checks the global
+/// `samples`, so a per-op [`OpBudget`] that zeroed `samples` would slip past it and fail later
+/// deep inside sampling with a less actionable error. Reject it up front, naming the op.
+pub(crate) fn validate_op_config(op: OpName, cfg: &Config) -> BenchmarkResult<()> {
+    if cfg.samples == 0 {
+        return Err(OtherError(format!(
+            "operation '{}' resolved to a per-op budget with samples = 0; samples must be greater than 0",
+            op.as_str()
+        )));
+    }
+    Ok(())
 }
 
 /// Deduplicate the selected ops, preserving first-occurrence order (so a repeated `--op` or an
@@ -1897,6 +1911,26 @@ mod tests {
         assert_eq!(got.cache, base.cache);
         assert_eq!(got.server_timeout_ms, base.server_timeout_ms);
         assert_eq!(got.client_deadline_ms, base.client_deadline_ms);
+    }
+
+    #[test]
+    fn validate_op_config_rejects_a_zero_samples_budget() {
+        // The global `run()` guard only checks the global samples; a per-op budget that zeroed
+        // samples must still fail fast with a message that names the offending op.
+        let base = Config {
+            samples: 100,
+            ..Config::default()
+        };
+        let zeroed = base.with_budget(&OpBudget {
+            samples: Some(0),
+            ..OpBudget::INHERIT
+        });
+        let err = validate_op_config(OpName::ReturnConst, &zeroed).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("samples must be greater than 0"), "{msg}");
+        assert!(msg.contains("return_const"), "{msg}");
+        // A non-zero (inherited) config passes.
+        validate_op_config(OpName::ReturnConst, &base).unwrap();
     }
 
     #[test]
