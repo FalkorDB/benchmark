@@ -225,18 +225,25 @@ pub fn regression_guard(
         }
     }
 
-    // 2. Per-op result divergence — reported, never fatal. An op the baseline recorded a digest for
-    //    that the candidate doesn't match (or is missing) is diverged.
+    // 2. Per-op result divergence — reported, never fatal. Over the *union* of ops: two present
+    //    digests that differ, or an asymmetric one-side-only digest, is diverged (we can't verify
+    //    correctness). Two absent digests carry no correctness info (e.g. a non-recording run) and
+    //    are left comparable, matching the strict guard.
     let mut diverged_ops = BTreeSet::new();
-    for (op, bop) in &baseline.operations {
-        let Some(bd) = &bop.result_digest else {
-            continue;
+    let all_ops: BTreeSet<&String> = baseline
+        .operations
+        .keys()
+        .chain(candidate.operations.keys())
+        .collect();
+    for op in all_ops {
+        let bd = baseline.operations.get(op).and_then(|o| o.result_digest.as_ref());
+        let cd = candidate.operations.get(op).and_then(|o| o.result_digest.as_ref());
+        let diverged = match (bd, cd) {
+            (Some(a), Some(b)) => a != b,
+            (None, None) => false,
+            _ => true, // asymmetric: only one side recorded a digest
         };
-        let cd = candidate
-            .operations
-            .get(op)
-            .and_then(|o| o.result_digest.as_ref());
-        if cd != Some(bd) {
+        if diverged {
             diverged_ops.insert(op.clone());
         }
     }
@@ -540,6 +547,26 @@ mod regression_guard_tests {
             RegressionGuard::Comparable { diverged_ops, .. } => {
                 assert!(diverged_ops.contains("match_by_index"));
             }
+            other => panic!("expected Comparable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn asymmetric_digest_is_diverged_but_both_absent_is_comparable() {
+        // baseline None, candidate Some ⇒ diverged (can't verify correctness).
+        let a = rep("h", 100, 50, vec![1], None, None, &[("match_by_index", None)]);
+        let b = rep("h", 100, 50, vec![1], None, None, &[("match_by_index", Some("d1"))]);
+        match regression_guard(&a, &b) {
+            RegressionGuard::Comparable { diverged_ops, .. } => {
+                assert!(diverged_ops.contains("match_by_index"));
+            }
+            other => panic!("expected Comparable, got {other:?}"),
+        }
+        // Both absent ⇒ no correctness info, not diverged.
+        let a2 = rep("h", 100, 50, vec![1], None, None, &[("match_by_index", None)]);
+        let b2 = rep("h", 100, 50, vec![1], None, None, &[("match_by_index", None)]);
+        match regression_guard(&a2, &b2) {
+            RegressionGuard::Comparable { diverged_ops, .. } => assert!(diverged_ops.is_empty()),
             other => panic!("expected Comparable, got {other:?}"),
         }
     }

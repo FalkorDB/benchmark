@@ -69,9 +69,14 @@ pub struct ResolvedBudget {
 
 impl ResolvedBudget {
     /// Verdict for a cell given the baseline and candidate p50 (ms). A non-finite or non-positive
-    /// baseline (or non-finite candidate) yields [`Verdict::NotApplicable`].
+    /// baseline **or candidate** yields [`Verdict::NotApplicable`] (latencies are strictly positive,
+    /// so a `0`/negative/NaN reading is a missing/invalid metric, not a real speedup).
     pub fn verdict(&self, baseline_p50: f64, candidate_p50: f64) -> Verdict {
-        if !baseline_p50.is_finite() || baseline_p50 <= 0.0 || !candidate_p50.is_finite() {
+        if !baseline_p50.is_finite()
+            || baseline_p50 <= 0.0
+            || !candidate_p50.is_finite()
+            || candidate_p50 <= 0.0
+        {
             return Verdict::NotApplicable;
         }
         let slower = candidate_p50 > baseline_p50;
@@ -287,6 +292,10 @@ mod tests {
         // zero/non-finite baseline => N/A
         assert_eq!(b.verdict(0.0, 1.0), Verdict::NotApplicable);
         assert_eq!(b.verdict(f64::NAN, 1.0), Verdict::NotApplicable);
+        // zero/negative/non-finite candidate => N/A (invalid latency, not a speedup)
+        assert_eq!(b.verdict(1.0, 0.0), Verdict::NotApplicable);
+        assert_eq!(b.verdict(1.0, -1.0), Verdict::NotApplicable);
+        assert_eq!(b.verdict(1.0, f64::INFINITY), Verdict::NotApplicable);
     }
 
     #[test]

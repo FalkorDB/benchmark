@@ -295,12 +295,18 @@ pub fn regression_markdown(
         }
     }
 
-    // Assemble: header + summary + warnings + legend + body.
+    // Assemble: header + summary + warnings + legend + body. The top-line is 🟢 only when there
+    // is neither a p50 regression NOR a correctness (result) divergence.
     let mut out = head;
-    let summary = if regressed == 0 {
-        format!("🟢 no p50 regression beyond budget across {comparable_cells} comparable cell(s)")
-    } else {
+    let summary = if regressed > 0 {
         format!("🔴 {regressed} of {comparable_cells} comparable cell(s) over budget")
+    } else if !diverged.is_empty() {
+        format!(
+            "🔴 no p50 regression beyond budget, but {} op(s) have differing results (correctness)",
+            diverged.len()
+        )
+    } else {
+        format!("🟢 no p50 regression beyond budget across {comparable_cells} comparable cell(s)")
     };
     out.push_str(&format!("\n**{} vs {}** — {}\n", md_cell(&lb), md_cell(&la), summary));
     if !diverged.is_empty() {
@@ -577,6 +583,9 @@ mod tests {
         let md = regression_markdown(&a, &b, &g, &Thresholds::builtin());
         assert!(md.contains("results differ"), "{md}");
         assert!(md.contains("🔴 N/A"), "{md}");
+        // The top-line summary must be 🔴 (correctness), not a misleading 🟢.
+        assert!(md.contains("differing results (correctness)"), "{md}");
+        assert!(!md.contains("🟢 no p50 regression"), "summary should not be green: {md}");
     }
 
     #[test]
