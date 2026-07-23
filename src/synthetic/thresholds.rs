@@ -193,6 +193,11 @@ impl Thresholds {
                 let c: usize = c_str.parse().map_err(|_| {
                     format!("[op.{name}].concurrency has a non-integer key '{c_str}'")
                 })?;
+                if c == 0 {
+                    return Err(format!(
+                        "[op.{name}].concurrency has an invalid level 0 (must be ≥ 1)"
+                    ));
+                }
                 let pct = check_budget(pct, &format!("[op.{name}].concurrency.{c}"))?;
                 per_concurrency_budget_pct.insert(c, pct);
             }
@@ -343,6 +348,15 @@ concurrency = { 32 = 40.0 }
         )
         .unwrap_err();
         assert!(err.contains("non-integer key 'fast'"), "{err}");
+    }
+
+    #[test]
+    fn rejects_zero_concurrency_key() {
+        let err = Thresholds::from_toml_str(
+            "[op.match_by_index]\nconcurrency = { 0 = 40.0 }\n",
+        )
+        .unwrap_err();
+        assert!(err.contains("invalid level 0"), "{err}");
     }
 
     #[test]

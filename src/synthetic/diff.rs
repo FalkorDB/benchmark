@@ -42,7 +42,11 @@ pub fn diff_markdown(
     let mut out = String::new();
     let la = col_label(baseline, "A");
     let lb = col_label(candidate, "B");
-    out.push_str(&format!("# Synthetic benchmark diff — {la} → {lb}\n\n"));
+    out.push_str(&format!(
+        "# Synthetic benchmark diff — {} → {}\n\n",
+        md_cell(&la),
+        md_cell(&lb)
+    ));
     out.push_str(&format!(
         "| field | {} (baseline) | {} (candidate) |\n|---|---|---|\n",
         md_cell(&la),

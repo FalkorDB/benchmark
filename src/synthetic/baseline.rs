@@ -185,8 +185,9 @@ pub fn regression_guard(
         }
         _ => {
             return RegressionGuard::NotComparable {
-                reason: "missing workload_hash — comparing needs recorded (`--recording`) runs so \
-                         the workload can be fingerprinted"
+                reason: "missing workload_hash — both runs must have a fingerprinted workload \
+                         (a `--recording` or `--generate` run); an externally-loaded graph can't \
+                         be compared"
                     .to_string(),
             }
         }
