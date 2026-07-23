@@ -196,6 +196,86 @@ impl OpName {
     }
 }
 
+/// A stable, name-derived RNG salt for a **string-keyed** synthetic op (design §3.1) — the dynamic
+/// counterpart to [`OpName::salt`]'s hand-assigned constants.
+///
+/// It is a 64-bit FNV-1a hash of the name's bytes: a fixed algorithm with fixed constants, so it is
+/// **process-independent and stable across Rust/`rand` versions** (unlike [`std::hash::DefaultHasher`],
+/// whose output is unspecified). That lets a dynamic op — e.g. a query shape pulled from
+/// `queries_repository` by name, which has no `OpName` variant — derive a reproducible salt from its
+/// name alone, so `seed ^ salt` yields the same corpus every run without a curated constant.
+pub fn salt_from_name(name: &str) -> u64 {
+    // FNV-1a (64-bit): offset basis then, per byte, xor-in and multiply by the FNV prime.
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in name.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+/// A synthetic op's identity, keyed by a **stable string name**.
+///
+/// Built-in ops wrap an [`OpName`] and keep its fixed [`OpName::salt`], so recorded baselines stay
+/// valid. A **dynamic** op — e.g. a query shape pulled from `queries_repository` by name (design
+/// §3.1), which has no `OpName` variant — is identified purely by its stable query name, with a
+/// **name-derived salt** ([`salt_from_name`]) so it needs no hand-assigned constant. Both expose the
+/// same [`name`](Self::name)/[`salt`](Self::salt)/[`kind`](Self::kind), so record/replay/threshold
+/// lookups can key on the string name uniformly (existing `OpName` ops keep working unchanged).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OpKey {
+    /// One of the built-in [`OpName`] operations.
+    Named(OpName),
+    /// A dynamic op identified only by its stable string name.
+    Dynamic {
+        /// The op's stable string name (its report / threshold / CLI key).
+        name: String,
+        /// Whether the op reads or writes.
+        kind: QueryType,
+    },
+}
+
+impl OpKey {
+    /// Build a dynamic (string-keyed) op identity from its stable name and kind.
+    pub fn dynamic(name: impl Into<String>, kind: QueryType) -> Self {
+        OpKey::Dynamic {
+            name: name.into(),
+            kind,
+        }
+    }
+
+    /// This op's stable string name — its report / threshold / CLI key.
+    pub fn name(&self) -> &str {
+        match self {
+            OpKey::Named(op) => op.as_str(),
+            OpKey::Dynamic { name, .. } => name,
+        }
+    }
+
+    /// The stable RNG salt mixed into the seed. Built-in ops keep [`OpName::salt`]; dynamic ops
+    /// derive it from their name ([`salt_from_name`]), so an op is reproducible from its name alone.
+    pub fn salt(&self) -> u64 {
+        match self {
+            OpKey::Named(op) => op.salt(),
+            OpKey::Dynamic { name, .. } => salt_from_name(name),
+        }
+    }
+
+    /// Whether this op reads or writes (selects `RO_QUERY` vs `QUERY`).
+    pub fn kind(&self) -> QueryType {
+        match self {
+            OpKey::Named(op) => op.kind(),
+            OpKey::Dynamic { kind, .. } => *kind,
+        }
+    }
+}
+
+impl From<OpName> for OpKey {
+    fn from(op: OpName) -> Self {
+        OpKey::Named(op)
+    }
+}
+
 /// Deserialize an `OpName` from its canonical [`OpName::as_str`] name, so a `synthetic-bench.toml`
 /// `operations = ["expand_1_hop", ...]` list uses the exact same spelling as the CLI (a plain
 /// `rename_all = "snake_case"` derive would produce `expand1_hop`).
@@ -1325,6 +1405,54 @@ mod tests {
         assert_eq!(OpName::ReturnConst.as_str(), "return_const");
         assert_eq!(OpName::ReturnConst.kind(), QueryType::Read);
         assert!(!OpName::ReturnConst.description().is_empty());
+    }
+
+    #[test]
+    fn salt_from_name_is_stable_distinct_and_pinned() {
+        // Deterministic within and across processes (a fixed FNV-1a, not a randomized hasher).
+        assert_eq!(salt_from_name("expand_1_hop"), salt_from_name("expand_1_hop"));
+        // Pinned outputs: changing the hash would silently shift every dynamic op's corpus and
+        // invalidate recorded baselines, so these must fail loudly if the algorithm ever changes.
+        assert_eq!(salt_from_name(""), 0xcbf2_9ce4_8422_2325); // FNV-1a 64-bit offset basis
+        assert_eq!(salt_from_name("expand_1_hop"), 0x306d_432a_b8ba_7b21);
+        assert_eq!(salt_from_name("query_shape_42"), 0xbaf3_f049_7b8e_fed0);
+        // Distinct names get distinct salts, including near-identical ones.
+        assert_ne!(salt_from_name("a"), salt_from_name("b"));
+        assert_ne!(salt_from_name("expand_1_hop"), salt_from_name("expand_hops_5"));
+    }
+
+    #[test]
+    fn op_key_named_matches_its_opname() {
+        let key = OpKey::from(OpName::MatchByIndex);
+        assert_eq!(key, OpKey::Named(OpName::MatchByIndex));
+        assert_eq!(key.name(), OpName::MatchByIndex.as_str());
+        assert_eq!(key.kind(), OpName::MatchByIndex.kind());
+        // A built-in op keeps its curated salt constant — NOT the name-derived one — so existing
+        // recorded baselines stay valid.
+        assert_eq!(key.salt(), OpName::MatchByIndex.salt());
+        assert_ne!(key.salt(), salt_from_name("match_by_index"));
+    }
+
+    #[test]
+    fn op_key_dynamic_uses_name_derived_salt() {
+        let key = OpKey::dynamic("query_shape_42", QueryType::Read);
+        assert_eq!(key.name(), "query_shape_42");
+        assert_eq!(key.kind(), QueryType::Read);
+        assert_eq!(key.salt(), salt_from_name("query_shape_42"));
+        // The kind is carried verbatim (a write shape stays a write).
+        assert_eq!(
+            OpKey::dynamic("w", QueryType::Write).kind(),
+            QueryType::Write
+        );
+        // Two dynamic ops with different names are distinct and draw different salts.
+        assert_ne!(
+            OpKey::dynamic("shape_a", QueryType::Read),
+            OpKey::dynamic("shape_b", QueryType::Read)
+        );
+        assert_ne!(
+            OpKey::dynamic("shape_a", QueryType::Read).salt(),
+            OpKey::dynamic("shape_b", QueryType::Read).salt()
+        );
     }
 
     #[test]
