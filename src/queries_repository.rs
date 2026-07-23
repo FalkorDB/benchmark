@@ -107,8 +107,9 @@ impl QueryGenerator {
         }
     }
 
-    /// Render this query using an entropy-seeded thread RNG — the compatibility path that preserves
-    /// today's A/B behavior (each call draws fresh randomness).
+    /// Render this query from the thread-local RNG (seeded once per thread from OS entropy) — the
+    /// compatibility path that preserves today's A/B behavior: each call advances that shared
+    /// stream, so successive renders vary without any caller-supplied seed.
     pub fn generate(&self) -> Query {
         let mut rng = rand::rng();
         (self.generator)(&mut rng)
@@ -1164,14 +1165,35 @@ mod tests {
         assert_eq!(query.text, "MATCH (p:Person) RETURN p");
     }
 
-    #[test]
-    fn generate_with_rng_renders_identically_for_a_fixed_seed() {
-        use rand::rngs::StdRng;
-        use rand::SeedableRng;
+    /// A test RNG that delegates to `StdRng` while counting the primitive draws it serves, so a
+    /// test can assert *deterministically* (no probability) that `generate_with_rng` consumes the
+    /// RNG it is handed. Implementing `TryRng` gives us `Rng` for free via rand's blanket impl.
+    struct CountingRng {
+        inner: rand::rngs::StdRng,
+        draws: usize,
+    }
 
-        // A shape that draws several random vertices from a large space, so a fixed seed renders a
-        // fixed Cypher+params and two different seeds render differently.
-        let repo = QueriesRepositoryBuilder::new(1_000_000, 1_000_000)
+    impl rand::TryRng for CountingRng {
+        type Error = std::convert::Infallible;
+        fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+            self.draws += 1;
+            Ok(self.inner.next_u32())
+        }
+        fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+            self.draws += 1;
+            Ok(self.inner.next_u64())
+        }
+        fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
+            self.draws += 1;
+            self.inner.fill_bytes(dst);
+            Ok(())
+        }
+    }
+
+    /// A shape that draws a random path (≥2 vertices) from a large space — enough randomness that a
+    /// seed fully determines the rendered Cypher+params.
+    fn seedable_probe_repo() -> QueriesRepository {
+        QueriesRepositoryBuilder::new(1_000_000, 1_000_000)
             .flavour(Flavour::FalkorDB)
             .add_query("seedable_probe", QueryType::Read, |random, _flavour| {
                 let (s, e) = random.random_path();
@@ -1181,7 +1203,15 @@ mod tests {
                     .param("e", e)
                     .build()
             })
-            .build();
+            .build()
+    }
+
+    #[test]
+    fn generate_with_rng_renders_identically_for_a_fixed_seed() {
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
+
+        let repo = seedable_probe_repo();
         let generator = repo
             .read_queries
             .get("seedable_probe")
@@ -1192,12 +1222,34 @@ mod tests {
             generator.generate_with_rng(&mut rng).to_cypher()
         };
 
-        // Same seed ⇒ byte-identical Cypher+params. This proves the *seeded* RNG (not the entropy
-        // thread RNG) drives generation — the determinism the A/B non-divergence gate relies on.
+        // A fixed seed renders byte-identical Cypher+params on every call: generation is a
+        // deterministic function of the supplied RNG — the reproducibility the A/B non-divergence
+        // gate relies on.
         assert_eq!(render(0x00C0_FFEE), render(0x00C0_FFEE));
-        // The seed actually threads through: different seeds render differently. `random_path`
-        // draws ≥2 ids from a 1e6 space, so a collision is ~1e-12 — not flaky.
-        assert_ne!(render(1), render(2));
+    }
+
+    #[test]
+    fn generate_with_rng_consumes_the_supplied_rng() {
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
+
+        let repo = seedable_probe_repo();
+        let generator = repo
+            .read_queries
+            .get("seedable_probe")
+            .expect("probe shape present");
+
+        // Deterministic proof (no probability) that the seam threads the *caller's* RNG rather than
+        // an internal thread RNG: generation must draw from the supplied RNG at least once.
+        let mut counting = CountingRng {
+            inner: StdRng::seed_from_u64(1),
+            draws: 0,
+        };
+        let _ = generator.generate_with_rng(&mut counting);
+        assert!(
+            counting.draws > 0,
+            "generate_with_rng must consume the caller-supplied RNG"
+        );
     }
 
     #[test]
