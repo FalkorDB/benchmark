@@ -75,7 +75,7 @@ overrides. `p50` means the cell's **total-latency median** (`total_ms` p50). For
 # Regression budget for the per-PR synthetic check. A cell is 🔴 only if the PR's p50 is slower
 # than the baseline by MORE than budget_pct AND the absolute p50 increase exceeds floor_ms (a
 # noise guard for sub-millisecond ops). Faster — or slower within either bound — is 🟢.
-# Precedence: [op.<name>.concurrency.<C>] > [op.<name>] > [default].
+# Precedence per field: the matching C under [op.<name>].concurrency > [op.<name>] > [default].
 
 [default]
 metric     = "p50"   # p50 (implemented). throughput|both reserved for a later iteration.
@@ -91,9 +91,13 @@ concurrency = { 16 = 30.0, 32 = 40.0 }
 ```
 
 Parsing **validates** the file (unknown op keys and non-positive/invalid budgets are hard errors so
-a typo can't silently disable a budget) and resolves precedence. Parsing + precedence + the verdict
-function are pure logic → **unit-tested** (faster, exactly at budget, just over, per-op vs per-op×C
-precedence, floor suppression, divergence → N/A, zero/missing baseline → N/A).
+a typo can't silently disable a budget). **Resolution contract** — the config is a single inline
+representation (`[op.<name>]` with an optional `concurrency = { <C> = <pct>, … }` inline table); for
+each `(op, C)` and each field (`budget_pct`, `floor_ms`, `metric`) the tool takes
+`op.<op>.concurrency.<C>` if present, else `op.<op>.<field>`, else `default.<field>`. Parsing +
+precedence + the verdict function are pure logic → **unit-tested** (faster, exactly at budget, just
+over, per-op vs per-op×C precedence, floor suppression, divergence → N/A, zero/missing baseline →
+N/A).
 
 ### A3. Explicit non-fatal regression mode — `report --regression`
 
@@ -102,9 +106,16 @@ Add a dedicated mode rather than overloading the strict `--diff` guard. New invo
 <file>] [--out <md>]` (or, equivalently, `report --diff … --regression`), which:
 
 - **Splits the guard** (today `baseline::guard` conflates the two — src/synthetic/baseline.rs):
-  - a **`workload_hash`/config mismatch** ⇒ *globally not comparable* → the whole table is rendered
-    as `⚠ not comparable` (this should never happen for PR-vs-main since both replay the **same**
-    recorded bundle, which copies one manifest hash into every report — but we fail safe);
+  - a **comparability mismatch** ⇒ *globally not comparable* → the whole table is rendered as
+    `⚠ not comparable`. The **comparability manifest** — the behavior-affecting inputs that must
+    match for a latency comparison to be valid — is: the `workload_hash` (recorded graph +
+    commands), the `generator_version` (tool workload version), `samples`/`warmup`, the concurrency
+    sweep + cache modes, and the controlled **server settings** that affect throughput (e.g.
+    `MAX_QUEUED_QUERIES`). The report JSON already records the first four; the design **adds the
+    applied server settings to the report** so a mismatch is *detectable*, not assumed. In the CI
+    flow these are identical by construction (same recorded bundle → one manifest hash copied into
+    every report; same sweep; same settings applied to every container), so this should never trip
+    for PR-vs-main — but the check fails safe;
   - a **per-op `result_digest` mismatch** ⇒ only *that* op is correctness-🔴 with `⚠ results
     differ`, its perf verdict **N/A** (a different result means different work — the latency Δ is
     kept only as a dim diagnostic, excluded from the "over budget" count). No abort.
@@ -247,10 +258,12 @@ Non-blocking.
 ## 8. Deliverables checklist (on approval)
 
 **`FalkorDB/benchmark`:** `run --label`; `report --regression` (non-fatal, colored 🟢/🔴/N/A,
-p50=total-median verdict with `budget_pct` + `floor_ms`); **split guard** (workload/config mismatch
-= global not-comparable; per-op digest mismatch = per-op N/A, no abort — strict `--diff` unchanged);
-threshold TOML parsing + validation + precedence; unit tests (≥ 90 % patch); docs
-(readme/copilot-instructions/cookbook); **new tag** for `SYNTHETIC_BENCHMARK_REF`.
+p50=total-median verdict with `budget_pct` + `floor_ms`); **split guard** on a **comparability
+manifest** (`workload_hash` + `generator_version` + samples/warmup + sweep + applied server
+settings, recorded in the report → global not-comparable on mismatch; per-op digest mismatch =
+per-op N/A, no abort — strict `--diff` unchanged); threshold TOML parsing + validation + precedence;
+unit tests (≥ 90 % patch); docs (readme/copilot-instructions/cookbook); **new tag** for
+`SYNTHETIC_BENCHMARK_REF`.
 
 **`FalkorDB/falkordb-rs-next-gen`:** `.github/synthetic-thresholds.toml` +
 `.github/synthetic-workload.toml`; a new **synthetic-A/B job** in the benchmark pipeline (own
