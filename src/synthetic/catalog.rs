@@ -13,7 +13,7 @@ use crate::error::BenchmarkResult;
 use crate::queries_repository::QueryType;
 use crate::query::{Query, QueryBuilder};
 use crate::synthetic::writes::{ExpectedMutation, WritePlan, WriteScratch};
-use crate::synthetic::{OpName, Tier};
+use crate::synthetic::{CacheSelection, OpName, Tier};
 use rand::{Rng, RngExt};
 
 /// Number of distinct parameterizations pre-generated per operation. The measured loop cycles
@@ -88,6 +88,42 @@ impl DatasetRequirement {
 pub type CorpusFn =
     fn(&mut dyn Rng, &DatasetHandle, usize, usize) -> BenchmarkResult<Vec<Query>>;
 
+/// Per-operation runtime budget: optional overrides layered on the global
+/// [`Config`](crate::synthetic::Config) (design §3.5). Each `None` field inherits the corresponding
+/// global knob; a `Some` value overrides it for this operation only. Every operation in the catalog
+/// currently uses [`OpBudget::INHERIT`] (no overrides), so today's behaviour — and the record-once /
+/// replay-verbatim A/B comparability — is unchanged. The machinery lets heavier future shapes (e.g.
+/// algorithms) dial their own samples/timeout/concurrency/cache down without perturbing the rest of
+/// the catalog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct OpBudget {
+    /// Override the measured sample count for this op.
+    pub samples: Option<usize>,
+    /// Override the warm-up (discarded) sample count for this op.
+    pub warmup: Option<usize>,
+    /// Replace the concurrency sweep for this op (closed-loop worker counts).
+    pub concurrency: Option<&'static [usize]>,
+    /// Override which plan-cache condition(s) to measure this op under.
+    pub cache: Option<CacheSelection>,
+    /// Override the per-query server timeout (ms) for this op.
+    pub server_timeout_ms: Option<i64>,
+    /// Override the per-query client deadline (ms) for this op.
+    pub client_deadline_ms: Option<u64>,
+}
+
+impl OpBudget {
+    /// Inherit every knob from the global [`Config`](crate::synthetic::Config) — no per-op override.
+    /// The default for every current operation.
+    pub const INHERIT: OpBudget = OpBudget {
+        samples: None,
+        warmup: None,
+        concurrency: None,
+        cache: None,
+        server_timeout_ms: None,
+        client_deadline_ms: None,
+    };
+}
+
 /// One catalog entry: an operation's identity, its read/write kind, a one-line description, the
 /// seed data it needs, and its corpus builder. `OpName` stays the single source of truth; this
 /// spec is what the runner and `--help`/completion all agree on.
@@ -100,6 +136,9 @@ pub struct OperationSpec {
     /// Coverage tier: `Core` gates every PR, `Full` runs nightly/on-demand (design §3.5). Reads
     /// are split across tiers; write ops always carry [`Tier::Full`] (opt-in, reads-only scope).
     pub tier: Tier,
+    /// Per-op runtime budget overriding global [`Config`](crate::synthetic::Config) knobs. Defaults
+    /// to [`OpBudget::INHERIT`] (no override) for every current op — see [`OpBudget`].
+    pub budget: OpBudget,
     pub corpus: CorpusFn,
     /// Present for write operations (Part 5): the lifecycle hooks, mutation to verify, and timed
     /// query builder. `None` for reads, which use `corpus` instead.
@@ -144,6 +183,7 @@ pub fn spec(op: OpName) -> OperationSpec {
             description: "RETURN $i — pure round-trip baseline (no dataset required)",
             requirement: DatasetRequirement::None,
             tier: Tier::Core,
+            budget: OpBudget::INHERIT,
             corpus: corpus_return_const,
             write: None,
         },
@@ -153,6 +193,7 @@ pub fn spec(op: OpName) -> OperationSpec {
             description: "point lookup on the :User(id) index",
             requirement: DatasetRequirement::OneId,
             tier: Tier::Core,
+            budget: OpBudget::INHERIT,
             corpus: corpus_match_by_index,
             write: None,
         },
@@ -162,6 +203,7 @@ pub fn spec(op: OpName) -> OperationSpec {
             description: "full :User label scan with a non-indexable predicate",
             requirement: DatasetRequirement::None,
             tier: Tier::Core,
+            budget: OpBudget::INHERIT,
             corpus: corpus_match_by_label_scan,
             write: None,
         },
@@ -171,6 +213,7 @@ pub fn spec(op: OpName) -> OperationSpec {
             description: "1-hop :Friend expansion from a seed node",
             requirement: DatasetRequirement::OneId,
             tier: Tier::Core,
+            budget: OpBudget::INHERIT,
             corpus: corpus_expand_1_hop,
             write: None,
         },
@@ -180,6 +223,7 @@ pub fn spec(op: OpName) -> OperationSpec {
             description: "fixed 5-hop :Friend expansion from a seed node",
             requirement: DatasetRequirement::OneId,
             tier: Tier::Full,
+            budget: OpBudget::INHERIT,
             corpus: corpus_expand_hops_5,
             write: None,
         },
@@ -189,6 +233,7 @@ pub fn spec(op: OpName) -> OperationSpec {
             description: "count a seed node's 1-hop :Friend neighbours",
             requirement: DatasetRequirement::OneId,
             tier: Tier::Core,
+            budget: OpBudget::INHERIT,
             corpus: corpus_aggregate_count,
             write: None,
         },
@@ -198,6 +243,7 @@ pub fn spec(op: OpName) -> OperationSpec {
             description: "group a seed node's neighbours by age with counts",
             requirement: DatasetRequirement::OneId,
             tier: Tier::Full,
+            budget: OpBudget::INHERIT,
             corpus: corpus_aggregate_group,
             write: None,
         },
@@ -207,6 +253,7 @@ pub fn spec(op: OpName) -> OperationSpec {
             description: "bounded shortest :Friend path between two seed nodes",
             requirement: DatasetRequirement::TwoIds,
             tier: Tier::Full,
+            budget: OpBudget::INHERIT,
             corpus: corpus_shortest_path,
             write: None,
         },
@@ -216,6 +263,7 @@ pub fn spec(op: OpName) -> OperationSpec {
             description: "project scalar properties of an indexed node",
             requirement: DatasetRequirement::OneId,
             tier: Tier::Core,
+            budget: OpBudget::INHERIT,
             corpus: corpus_property_projection,
             write: None,
         },
@@ -225,6 +273,7 @@ pub fn spec(op: OpName) -> OperationSpec {
             description: "create a fresh scratch node each invocation",
             requirement: DatasetRequirement::None,
             tier: Tier::Full,
+            budget: OpBudget::INHERIT,
             corpus: write_corpus_stub,
             write: Some(WritePlan {
                 expected: ExpectedMutation::NodeCreated,
@@ -242,6 +291,7 @@ pub fn spec(op: OpName) -> OperationSpec {
             description: "MERGE a fresh scratch node each invocation (always misses → creates)",
             requirement: DatasetRequirement::None,
             tier: Tier::Full,
+            budget: OpBudget::INHERIT,
             corpus: write_corpus_stub,
             write: Some(WritePlan {
                 expected: ExpectedMutation::NodeCreated,
@@ -259,6 +309,7 @@ pub fn spec(op: OpName) -> OperationSpec {
             description: "create a fresh edge between two of this worker's scratch nodes",
             requirement: DatasetRequirement::None,
             tier: Tier::Full,
+            budget: OpBudget::INHERIT,
             corpus: write_corpus_stub,
             write: Some(WritePlan {
                 expected: ExpectedMutation::RelationshipCreated,
@@ -276,6 +327,7 @@ pub fn spec(op: OpName) -> OperationSpec {
             description: "set a property on a pre-created scratch node each invocation",
             requirement: DatasetRequirement::None,
             tier: Tier::Full,
+            budget: OpBudget::INHERIT,
             corpus: write_corpus_stub,
             write: Some(WritePlan {
                 expected: ExpectedMutation::PropertySet,
@@ -293,6 +345,7 @@ pub fn spec(op: OpName) -> OperationSpec {
             description: "delete a pre-created scratch node each invocation",
             requirement: DatasetRequirement::None,
             tier: Tier::Full,
+            budget: OpBudget::INHERIT,
             corpus: write_corpus_stub,
             write: Some(WritePlan {
                 expected: ExpectedMutation::NodeDeleted,
@@ -310,6 +363,7 @@ pub fn spec(op: OpName) -> OperationSpec {
             description: "MERGE an existing scratch node each invocation (always hits)",
             requirement: DatasetRequirement::None,
             tier: Tier::Full,
+            budget: OpBudget::INHERIT,
             corpus: write_corpus_stub,
             write: Some(WritePlan {
                 expected: ExpectedMutation::NodeMatched,
