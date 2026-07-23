@@ -17,7 +17,7 @@ at a glance (🟢 good / 🔴 regressed). It never fails the PR.
 | Decision | Choice |
 |---|---|
 | Blocking? | **No** — informational report only; never fails the PR. |
-| Relationship to the existing A/B benchmark | **Add to it**, never remove it. Same machine *type*, own VM, sequenced before/after; **never >1 benchmark per machine at once**. |
+| Relationship to the existing A/B benchmark | **Add to it**, never remove it. Same machine *type*, own VM, **sequenced (never in parallel with the A/B — chained via `needs:`)**; **never >1 benchmark per machine at once**. |
 | Baselines | **PR vs main** always. **PR vs last release** only when a release image exists (none today → PR-vs-main only). |
 | Names in the report | `pr`, `main`, `release X.Y.Z`. |
 | Verdict metric | **p50 latency** (primary); throughput shown for context. |
@@ -202,9 +202,11 @@ every tool/infra failure is caught and turned into a "benchmark unavailable" com
 ### B3. Trigger, serialization, and the tool ref
 
 - **PR-triggered only.** Runs with the A/B benchmark (same `benchmark-*` labels / `/benchmark` /
-  PR-scoped dispatch). Skip on plain `workflow_dispatch` with no PR (no PR number/image). Because it
-  has its **own** uniquely-labelled VM and runs containers strictly sequentially, it satisfies
-  "≤ 1 benchmark per machine" without contending with A/B variant VMs.
+  PR-scoped dispatch). Skip on plain `workflow_dispatch` with no PR (no PR number/image).
+- **Sequenced, never in parallel with the A/B.** The synthetic job is chained relative to the A/B
+  jobs (via `needs:` — it runs strictly **before or after** them, never concurrently), and on its
+  **own** uniquely-labelled VM it runs containers strictly one at a time. So there is never more
+  than one benchmark running — neither on a machine nor across the pipeline.
 - **Arch-specific markers** to avoid x86/arm comment races (mirroring the A/B's
   `-arm` marker): `<!-- synthetic-benchmark -->` / `<!-- synthetic-benchmark-arm -->`.
 - **Separate `SYNTHETIC_BENCHMARK_REF`** pinned to an **immutable commit SHA** (with a `# vX.Y.Z`

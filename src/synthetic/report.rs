@@ -106,6 +106,10 @@ pub struct Meta {
     /// externally-provided graph, whose contents we can't fingerprint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dataset: Option<DatasetInfo>,
+    /// Operator-supplied display name for this run (e.g. `pr`, `main`, `release 1.2.3`). Used as the
+    /// column header in `report --diff`/`--regression`; falls back to `A`/`B` when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 /// Provenance for a synthetic dataset: its knobs and the `workload_hash` that identifies the whole
@@ -669,6 +673,7 @@ mod tests {
                     total_memory_bytes: 34_359_738_368,
                 },
                 dataset: None,
+                label: None,
             },
             operations,
         }

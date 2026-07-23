@@ -28,6 +28,7 @@ pub mod recording;
 pub mod replay;
 pub mod report;
 pub mod stats;
+pub mod thresholds;
 pub mod writes;
 
 use crate::error::BenchmarkError::OtherError;
@@ -294,6 +295,8 @@ pub struct Config {
     pub cache: CacheSelection,
     pub out: String,
     pub server_image: Option<String>,
+    /// Optional display name for this run (e.g. `pr`/`main`), recorded into the report.
+    pub label: Option<String>,
     /// When `Some`, generate a reproducible synthetic dataset (Part 3) into `graph`, **replacing**
     /// its contents, before measuring. Gated behind explicit CLI consent (`--generate`).
     pub dataset: Option<DatasetSpec>,
@@ -315,6 +318,7 @@ impl Default for Config {
             cache: CacheSelection::Both,
             out: "synthetic-report.json".to_string(),
             server_image: None,
+            label: None,
             dataset: None,
         }
     }
@@ -546,6 +550,7 @@ pub async fn run(config: &Config) -> BenchmarkResult<Report> {
             server,
             host: host::collect(),
             dataset: dataset_info,
+            label: config.label.clone(),
         },
         operations,
     })
@@ -1106,6 +1111,7 @@ pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkRes
             client_deadline_ms,
             out,
             server_image,
+            label,
             generate,
             nodes,
             edges,
@@ -1142,6 +1148,7 @@ pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkRes
                     client_deadline_ms: client_deadline_ms.unwrap_or(6_000),
                     out: out.unwrap_or_else(|| "synthetic-report.json".to_string()),
                     server_image,
+                    label,
                 };
                 return replay::run_and_report(&replay_config).await;
             }
@@ -1160,6 +1167,7 @@ pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkRes
                 client_deadline_ms,
                 out,
                 server_image,
+                label,
                 generate,
                 nodes,
                 edges,
@@ -1201,6 +1209,7 @@ pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkRes
                 client_deadline_ms: None,
                 out: None,
                 server_image: None,
+                label: None,
                 generate: true,
                 nodes,
                 edges,
@@ -1533,6 +1542,7 @@ mod tests {
             client_deadline_ms: Some(6_000),
             out: Some("unused.json".to_string()),
             server_image: None,
+            label: None,
             generate: false,
             nodes: None,
             edges: None,
@@ -1574,6 +1584,7 @@ mod tests {
             client_deadline_ms: Some(6_000),
             out: Some("unused.json".to_string()),
             server_image: None,
+            label: None,
             generate: false,
             nodes: None,
             edges: None,
@@ -1607,6 +1618,7 @@ mod tests {
             client_deadline_ms: None,
             out: None,
             server_image: None,
+            label: None,
             generate: true,
             nodes: None,
             edges: None,

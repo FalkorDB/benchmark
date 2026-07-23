@@ -468,6 +468,11 @@ pub enum SyntheticCommands {
         server_image: Option<String>,
         #[arg(
             long,
+            help = "display name for this run (e.g. pr / main / 'release 1.2.3'), recorded into the report and used as the column header in report --diff/--regression"
+        )]
+        label: Option<String>,
+        #[arg(
+            long,
             help = "GENERATE a reproducible dataset into --graph before measuring. DESTRUCTIVE: drops and rewrites the graph. Requires --nodes/--edges (or config)."
         )]
         generate: bool,

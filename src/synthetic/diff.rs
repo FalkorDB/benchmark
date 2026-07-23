@@ -37,8 +37,12 @@ pub fn diff_markdown(
     warnings: &[String],
 ) -> String {
     let mut out = String::new();
-    out.push_str("# Synthetic benchmark diff — A → B\n\n");
-    out.push_str("| field | A (baseline) | B (candidate) |\n|---|---|---|\n");
+    let la = col_label(baseline, "A");
+    let lb = col_label(candidate, "B");
+    out.push_str(&format!("# Synthetic benchmark diff — {la} → {lb}\n\n"));
+    out.push_str(&format!(
+        "| field | {la} (baseline) | {lb} (candidate) |\n|---|---|---|\n"
+    ));
     row2(&mut out, "FalkorDB module", &ver(baseline), &ver(candidate));
     row2(
         &mut out,
@@ -66,8 +70,8 @@ pub fn diff_markdown(
     );
 
     out.push_str(
-        "\n_Δ is 100·(B−A)/A. **Latency: lower is better** (a positive Δ = slower / regressed); \
-         **throughput: higher is better**. `—` = not measured in that run._\n",
+        "\n_Δ is 100·(candidate−baseline)/baseline. **Latency: lower is better** (a positive Δ = \
+         slower / regressed); **throughput: higher is better**. `—` = not measured in that run._\n",
     );
     for w in warnings {
         out.push_str(&format!("\n> ⚠ {w}\n"));
@@ -86,6 +90,11 @@ pub fn diff_markdown(
         }
     }
     out
+}
+
+/// The display name for a run's column: its `--label` if set, else the `fallback` (`A`/`B`).
+fn col_label(r: &Report, fallback: &str) -> String {
+    r.meta.label.clone().unwrap_or_else(|| fallback.to_string())
 }
 
 /// Render one op × cache-mode table (rows = concurrency levels present in either run). Skipped
@@ -112,10 +121,12 @@ fn render_mode(
         return;
     }
     out.push_str(&format!("\n_{}_\n\n", mode.label()));
-    out.push_str(
-        "| C | A total p50/p90/p95/p99 (ms) | B total p50/p90/p95/p99 (ms) | Δp50 | A tput (ops/s) | B tput (ops/s) | Δtput |\n\
+    let la = col_label(a, "A");
+    let lb = col_label(b, "B");
+    out.push_str(&format!(
+        "| C | {la} total p50/p90/p95/p99 (ms) | {lb} total p50/p90/p95/p99 (ms) | Δp50 | {la} tput (ops/s) | {lb} tput (ops/s) | Δtput |\n\
          |---:|---|---|---:|---:|---:|---:|\n",
-    );
+    ));
     for c in levels {
         let am = level_metrics(a, op, c, mode);
         let bm = level_metrics(b, op, c, mode);
@@ -276,6 +287,7 @@ mod tests {
                     edges: 20,
                     workload_hash: "sha256:abc".to_string(),
                 }),
+                label: None,
             },
             operations,
         }
@@ -294,6 +306,18 @@ mod tests {
         assert!(md.contains("+10.0%"), "expected latency +10%: {md}");
         assert!(md.contains("-10.0%"), "expected throughput -10%: {md}");
         assert!(md.contains("⚠ server image changed"));
+    }
+
+    #[test]
+    fn diff_uses_run_labels_as_headers() {
+        let mut a = report(42001, 1.0, 1000.0);
+        let mut b = report(42002, 1.1, 900.0);
+        a.meta.label = Some("main".to_string());
+        b.meta.label = Some("pr".to_string());
+        let md = diff_markdown(&a, &b, &[]);
+        assert!(md.contains("diff — main → pr"), "title: {md}");
+        assert!(md.contains("| main (baseline) | pr (candidate) |"), "header: {md}");
+        assert!(md.contains("main total p50") && md.contains("pr tput"), "op header: {md}");
     }
 
     #[test]
