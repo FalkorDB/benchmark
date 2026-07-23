@@ -1,6 +1,7 @@
 # Design — per-line budget/floor + non-gated tail latencies (p90/p99) in the synthetic regression report
 
-**Status:** proposal for review — **not implemented**. Shared for approval before any code lands.
+**Status:** **implemented** in this PR (design retained as the record). Shared as a design first, then
+built after sign-off.
 **Scope:** presentation only, in `benchmark synthetic report --diff … --regression`
 (`regression_markdown` / `render_regression_mode`, `src/synthetic/diff.rs`). **No change** to the
 gate (still **p50-only**, `ResolvedBudget::verdict`), the comparable-cell counts, the report JSON, or

@@ -179,6 +179,23 @@ fn percentiles(m: &LevelMetrics) -> String {
     format!("{:.3} / {:.3} / {:.3} / {:.3}", s.median, s.p90, s.p95, s.p99)
 }
 
+/// A regression-table latency cell: the gated **p50** on the primary line, with p90/p99 and
+/// throughput folded onto a smaller `context:` line (informational, never gated). `—` when the
+/// side is absent. Values are fixed-precision measurements, so no operator-supplied text is
+/// interpolated (no `md_cell` escaping needed).
+fn latency_cell(m: Option<&LevelMetrics>) -> String {
+    match m {
+        None => "—".to_string(),
+        Some(m) => {
+            let s = &m.metrics.total_ms;
+            format!(
+                "{:.3}<br><sub>context: p90 {:.3} · p99 {:.3} · {:.0} op/s</sub>",
+                s.median, s.p90, s.p99, m.throughput_ops_per_sec
+            )
+        }
+    }
+}
+
 /// `100·(b−a)/a`, formatted with a sign; `n/a` when `a == 0`.
 fn pct(
     a: f64,
@@ -351,7 +368,8 @@ pub fn regression_markdown(
     }
     out.push_str(
         "\n🟢 = faster or within budget · 🔴 = slower than budget **or** results differ · \
-         N/A = no perf verdict. Non-blocking.\n",
+         N/A = no perf verdict. Only **p50** is gated — the `context:` line (p90/p99 · throughput) \
+         and `Δms` are informational, never part of the verdict. Non-blocking.\n",
     );
     out.push_str(&body);
     out
@@ -389,10 +407,8 @@ fn render_regression_mode(
     }
     out.push_str(&format!("\n_{}_\n\n", mode.label()));
     out.push_str(&format!(
-        "| C | {} p50 (ms) | {} p50 (ms) | Δp50 | {} tput | {} tput | Δtput | verdict |\n\
-         |---:|---:|---:|---:|---:|---:|---:|:--:|\n",
-        md_cell(la),
-        md_cell(lb),
+        "| C | {} p50 (ms) | {} p50 (ms) | Δp50 (Δms) | p50 guard (>% AND >ms) | verdict |\n\
+         |---:|---:|---:|---:|:--:|:--:|\n",
         md_cell(la),
         md_cell(lb),
     ));
@@ -401,28 +417,25 @@ fn render_regression_mode(
         let bm = level_metrics(b, op, c, mode);
         let ap = am.map(|m| m.metrics.total_ms.median);
         let bp = bm.map(|m| m.metrics.total_ms.median);
-        let a_s = ap.map(|v| format!("{v:.3}")).unwrap_or_else(|| "—".to_string());
-        let b_s = bp.map(|v| format!("{v:.3}")).unwrap_or_else(|| "—".to_string());
+        // Resolve the budget ONCE per (op, C) and reuse it for both the printed guard and the
+        // verdict, so the shown threshold can never disagree with the one that was applied.
+        let resolved = opname.map(|name| thresholds.resolve(name, c));
+
+        let a_cell = latency_cell(am);
+        let b_cell = latency_cell(bm);
+        // Gated delta: p50 % change, plus the signed absolute ms change (so the ms floor is auditable).
         let dp50 = match (ap, bp) {
-            (Some(x), Some(y)) => pct(x, y),
+            (Some(x), Some(y)) => format!("{} ({:+.3})", pct(x, y), y - x),
             _ => "—".to_string(),
         };
-        let a_tp = am
-            .map(|m| format!("{:.0}", m.throughput_ops_per_sec))
-            .unwrap_or_else(|| "—".to_string());
-        let b_tp = bm
-            .map(|m| format!("{:.0}", m.throughput_ops_per_sec))
-            .unwrap_or_else(|| "—".to_string());
-        let dtp = match (am, bm) {
-            (Some(x), Some(y)) => pct(x.throughput_ops_per_sec, y.throughput_ops_per_sec),
-            _ => "—".to_string(),
-        };
+        // The configured guard for this exact cell — only resolvable for a known op.
+        let guard = resolved.map(|r| r.guard_cell()).unwrap_or_else(|| "—".to_string());
         let verdict = if op_diverged {
             "🔴 N/A".to_string()
         } else {
-            match (ap, bp, opname) {
-                (Some(x), Some(y), Some(name)) => {
-                    let v = thresholds.resolve(name, c).verdict(x, y);
+            match (ap, bp, resolved) {
+                (Some(x), Some(y), Some(r)) => {
+                    let v = r.verdict(x, y);
                     match v {
                         Verdict::Regressed => {
                             *regressed += 1;
@@ -430,7 +443,7 @@ fn render_regression_mode(
                         }
                         // A real (comparable) 🟢 cell.
                         Verdict::Ok => *comparable_cells += 1,
-                        // Zero/non-finite baseline ⇒ no verdict; not a comparable cell.
+                        // Zero/non-finite p50 on either side ⇒ no verdict; not a comparable cell.
                         Verdict::NotApplicable => {}
                     }
                     v.emoji().to_string()
@@ -438,9 +451,7 @@ fn render_regression_mode(
                 _ => "N/A".to_string(),
             }
         };
-        out.push_str(&format!(
-            "| {c} | {a_s} | {b_s} | {dp50} | {a_tp} | {b_tp} | {dtp} | {verdict} |\n"
-        ));
+        out.push_str(&format!("| {c} | {a_cell} | {b_cell} | {dp50} | {guard} | {verdict} |\n"));
     }
 }
 
@@ -668,7 +679,7 @@ mod tests {
         // With an elapsed value the compute-time line renders alongside the thresholds settings.
         let md = regression_markdown(&a, &b, &g, &Thresholds::builtin(), Some(754.0));
         assert!(md.contains("**Thresholds**"), "settings table missing: {md}");
-        assert!(md.contains("| _default_ | 10.0% | 0.50 ms |"), "{md}");
+        assert!(md.contains("| _default_ | 10% | 0.5 ms |"), "{md}");
         assert!(md.contains("Budget precedence: per-op×concurrency"), "rule missing: {md}");
         assert!(
             md.contains("⏱ Computed in 12m 34s (benchmark + reporting)."),
@@ -687,5 +698,136 @@ mod tests {
         assert_eq!(fmt_duration_secs(3723.0), "1h 2m 3s");
         assert_eq!(fmt_duration_secs(-1.0), "n/a");
         assert_eq!(fmt_duration_secs(f64::NAN), "n/a");
+    }
+
+    // --- folded layout: per-line guard + non-gated p90/p99 context -----------------------------
+
+    /// Mutate the candidate's cached `total_ms` percentiles in place (keeping p50) so tests can
+    /// isolate tail behaviour from the gated p50.
+    fn set_tails(r: &mut Report, p90: f64, p99: f64) {
+        let m = r
+            .operations
+            .get_mut("match_by_index")
+            .unwrap()
+            .levels[0]
+            .cached
+            .as_mut()
+            .unwrap();
+        m.metrics.total_ms.p90 = p90;
+        m.metrics.total_ms.p99 = p99;
+    }
+
+    #[test]
+    fn regression_row_folds_context_and_shows_per_line_guard() {
+        use crate::synthetic::baseline::regression_guard;
+        use crate::synthetic::thresholds::Thresholds;
+        let a = report(42001, 1.0, 1000.0);
+        let b = report(42002, 1.1, 900.0); // +10% p50 (+0.100 ms), −10% tput
+        let g = regression_guard(&a, &b);
+        let md = regression_markdown(&a, &b, &g, &Thresholds::builtin(), None);
+        // Header keeps p50 named and adds the guard column.
+        assert!(md.contains("p50 (ms)") && md.contains("p50 guard (>% AND >ms)"), "{md}");
+        // Δp50 carries the signed absolute ms delta so the floor is auditable.
+        assert!(md.contains("(+0.100)"), "Δms missing: {md}");
+        // p90/p99 + throughput are folded onto the context line (not their own columns).
+        assert!(md.contains("<br><sub>context: p90 ") && md.contains("op/s</sub>"), "{md}");
+        // The per-line guard shows the resolved default (10%) + floor.
+        assert!(md.contains("10% AND 0.5 ms"), "guard cell: {md}");
+        // Legend states the gate is p50-only.
+        assert!(md.contains("Only **p50** is gated"), "{md}");
+    }
+
+    #[test]
+    fn catastrophic_tail_regression_does_not_change_the_p50_verdict() {
+        use crate::synthetic::baseline::regression_guard;
+        use crate::synthetic::thresholds::Thresholds;
+        // Identical p50 on both sides ⇒ green. Baseline unchanged, candidate tails blown up.
+        let a = report(42001, 1.0, 1000.0);
+        let mut b = report(42002, 1.0, 1000.0);
+        set_tails(&mut b, 50.0, 500.0);
+        let g = regression_guard(&a, &b);
+        let md = regression_markdown(&a, &b, &g, &Thresholds::builtin(), None);
+        // Verdict + comparable count are exactly what they'd be without the tail blow-up.
+        assert!(
+            md.contains("🟢 no p50 regression beyond budget across 1 comparable cell(s)"),
+            "tails must not gate: {md}"
+        );
+        // …and the blown-up tail is still shown, as context.
+        assert!(md.contains("context: p90 50.000 · p99 500.000"), "{md}");
+    }
+
+    #[test]
+    fn red_p50_stays_red_even_with_improved_tails() {
+        use crate::synthetic::baseline::regression_guard;
+        use crate::synthetic::thresholds::Thresholds;
+        let a = report(42001, 1.0, 1000.0);
+        let mut b = report(42002, 2.0, 500.0); // +100% p50 ⇒ red
+        set_tails(&mut b, 0.10, 0.20); // tails *better* than baseline — must not rescue the verdict
+        let g = regression_guard(&a, &b);
+        let md = regression_markdown(&a, &b, &g, &Thresholds::builtin(), None);
+        assert!(md.contains("🔴 1 of 1 comparable cell(s) over budget"), "{md}");
+    }
+
+    #[test]
+    fn per_line_guard_reflects_op_override_with_inherited_floor() {
+        use crate::synthetic::baseline::regression_guard;
+        use crate::synthetic::thresholds::Thresholds;
+        // Op override changes the budget; the floor is inherited from [default].
+        let t = Thresholds::from_toml_str("[op.match_by_index]\nbudget_pct = 20.0\n").unwrap();
+        let a = report(42001, 1.0, 1000.0);
+        let b = report(42002, 1.0, 1000.0);
+        let g = regression_guard(&a, &b);
+        let md = regression_markdown(&a, &b, &g, &t, None);
+        assert!(md.contains("20% AND 0.5 ms"), "resolved override guard: {md}");
+    }
+
+    /// A full-size report: every read op × the whole concurrency sweep × both cache modes.
+    fn big_report(ver: u64) -> Report {
+        let ops = [
+            "return_const",
+            "match_by_index",
+            "match_by_label_scan",
+            "expand_1_hop",
+            "expand_hops_5",
+            "aggregate_count",
+            "aggregate_group",
+            "shortest_path",
+            "property_projection",
+        ];
+        let sweep = [1usize, 2, 4, 8, 16, 32];
+        let mut operations = BTreeMap::new();
+        for op in ops {
+            let levels = sweep
+                .iter()
+                .map(|&c| LevelReport {
+                    concurrency: c,
+                    cached: Some(metrics(0.512, 5000.0)),
+                    uncached: Some(metrics(0.987, 3000.0)),
+                    compilation_ms_median: None,
+                })
+                .collect();
+            operations.insert(
+                op.to_string(),
+                OperationReport { levels, result_digest: Some("sha256:aa".to_string()) },
+            );
+        }
+        let mut r = report(ver, 1.0, 1000.0);
+        r.operations = operations;
+        r
+    }
+
+    #[test]
+    fn full_report_stays_under_comment_budget() {
+        use crate::synthetic::baseline::regression_guard;
+        use crate::synthetic::thresholds::Thresholds;
+        let a = big_report(1);
+        let b = big_report(2);
+        let g = regression_guard(&a, &b);
+        let md = regression_markdown(&a, &b, &g, &Thresholds::builtin(), Some(300.0));
+        // 9 ops × 6 concurrencies × 2 cache modes = 108 cells. Keep the rendered report well under
+        // GitHub's 65_536-char comment cap so the Part-B sticky comment keeps headroom for its
+        // wrappers/warnings (see the design's comment-size budget).
+        assert!(md.len() < 45_000, "regression report too large: {} bytes", md.len());
+        assert!(md.contains("`shortest_path`") && md.contains("`return_const`"), "missing ops");
     }
 }
