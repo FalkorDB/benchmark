@@ -328,17 +328,27 @@ pub fn regression_markdown(
         .collect();
     for op in ops {
         let op_diverged = diverged.contains(op);
-        body.push_str(&format!(
-            "\n#### `{op}`{}\n",
-            if op_diverged { "  —  ⚠ results differ (perf verdict N/A)" } else { "" }
-        ));
         let opname = OpName::from_tag(op);
+        let regressed_before = regressed;
+        // Render this op's cache-mode tables into a temp buffer so the whole op section can be
+        // wrapped in a **collapsed** <details> — keeps the PR sticky comment compact by default.
+        let mut op_body = String::new();
         for mode in [Mode::Cached, Mode::Uncached] {
             render_regression_mode(
-                &mut body, baseline, candidate, op, opname, mode, op_diverged, thresholds, &la,
+                &mut op_body, baseline, candidate, op, opname, mode, op_diverged, thresholds, &la,
                 &lb, &mut regressed, &mut comparable_cells,
             );
         }
+        if op_body.trim().is_empty() {
+            continue;
+        }
+        // Per-op headline shown on the collapsed row: 🔴 if any cell regressed OR results diverged.
+        let op_emoji = if op_diverged || regressed > regressed_before { "🔴" } else { "🟢" };
+        let diverged_note =
+            if op_diverged { " — ⚠ results differ (perf verdict N/A)" } else { "" };
+        body.push_str(&format!(
+            "\n<details><summary>{op_emoji} <code>{op}</code>{diverged_note}</summary>\n{op_body}\n</details>\n"
+        ));
     }
 
     // Assemble: header + summary + warnings + legend + body. The top-line is 🟢 only when there
@@ -752,6 +762,8 @@ mod tests {
             md.contains("🟢 no p50 regression beyond budget across 1 comparable cell(s)"),
             "tails must not gate: {md}"
         );
+        // …the op's collapsed summary is 🟢 (its p50 didn't regress)…
+        assert!(md.contains("🟢 <code>match_by_index</code></summary>"), "{md}");
         // …and the blown-up tail is still shown, as context.
         assert!(md.contains("context: p90 50.000 · p99 500.000"), "{md}");
     }
@@ -828,6 +840,27 @@ mod tests {
         // GitHub's 65_536-char comment cap so the Part-B sticky comment keeps headroom for its
         // wrappers/warnings (see the design's comment-size budget).
         assert!(md.len() < 45_000, "regression report too large: {} bytes", md.len());
-        assert!(md.contains("`shortest_path`") && md.contains("`return_const`"), "missing ops");
+        assert!(
+            md.contains("<code>shortest_path</code>") && md.contains("<code>return_const</code>"),
+            "missing ops"
+        );
+    }
+
+    #[test]
+    fn per_op_sections_are_collapsed_with_verdict_in_summary() {
+        use crate::synthetic::baseline::regression_guard;
+        use crate::synthetic::thresholds::Thresholds;
+        // A regressed op shows 🔴 on its collapsed summary row; the `####` heading is gone.
+        let a = report(42001, 1.0, 1000.0);
+        let b = report(42002, 2.0, 500.0); // +100% p50 ⇒ regressed
+        let g = regression_guard(&a, &b);
+        let md = regression_markdown(&a, &b, &g, &Thresholds::builtin(), None);
+        assert!(md.contains("<details><summary>"), "sections must be collapsible: {md}");
+        assert!(md.contains("</details>"), "{md}");
+        assert!(
+            md.contains("🔴 <code>match_by_index</code></summary>"),
+            "per-op verdict in the collapsed summary: {md}"
+        );
+        assert!(!md.contains("#### `match_by_index`"), "old heading should be gone: {md}");
     }
 }

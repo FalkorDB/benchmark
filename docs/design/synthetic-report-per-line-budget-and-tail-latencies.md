@@ -71,6 +71,11 @@ Why this meets both goals:
   verdict."* Absolute throughput is folded into the same context line (also not gated).
 - **Auditable floor** — the primary line adds the absolute `Δms` next to `Δp50` so the reader can
   check the ms floor directly (the % alone can't be checked against a ms floor).
+- **Collapsed per-op sections** — each op's cache-mode tables are wrapped in a **`<details>` collapsed
+  by default**, with the op's worst verdict (🔴 if any cell regressed or results diverged, else 🟢) on
+  the `<summary>` row. The overview (title, compute time, thresholds, summary verdict, legend) stays
+  visible; only the verbose tables collapse, so the PR sticky comment is compact and you expand just
+  the ops you care about.
 
 ## 4. Alternatives (so we choose deliberately)
 
