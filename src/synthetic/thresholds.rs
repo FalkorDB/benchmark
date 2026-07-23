@@ -116,6 +116,9 @@ impl ResolvedBudget {
 /// configured value (Rust's `f64` `Display` gives the shortest exact form — `10`, `12.5`, `0.5`,
 /// `0.05`). Shared by the header settings table and the per-line guard so they never disagree.
 fn fmt_threshold(v: f64) -> String {
+    // Normalize `-0.0` (accepted by check_budget/check_floor, since it isn't `< 0.0`) so it never
+    // renders as a spurious "-0".
+    let v = if v == 0.0 { 0.0 } else { v };
     format!("{v}")
 }
 
@@ -522,6 +525,7 @@ concurrency = { 16 = 18.0, 32 = 25.0 }
         assert_eq!(fmt_threshold(12.5), "12.5");
         assert_eq!(fmt_threshold(0.5), "0.5");
         assert_eq!(fmt_threshold(0.05), "0.05");
+        assert_eq!(fmt_threshold(-0.0), "0"); // normalized, never "-0"
         let b = ResolvedBudget { metric: Metric::P50, budget_pct: 12.0, floor_ms: 0.5 };
         assert_eq!(b.guard_cell(), "12% AND 0.5 ms");
         // A non-round budget must not be rounded away.

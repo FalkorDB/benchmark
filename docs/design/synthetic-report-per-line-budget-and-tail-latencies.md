@@ -126,9 +126,10 @@ Pure formatting change in the renderer; measurement/recording/JSON untouched.
   `0.5 ms`, `0.05 ms`) — never round `10.04%`→`10.0%`. Guard against implying false precision. Apply
   the **same** formatter to the header `Thresholds::settings_markdown` (today fixed `{:.1}%` / `{:.2}
   ms`) so the header *policy* and the per-line *guard* can never disagree on the same number.
-- **Missing / partial data:** `LevelMetrics` is optional per side. If one side is absent, still render
-  the present side and show the absent side's tails **and** throughput as `—` (e.g.
-  `context: p90 — · p99 — · — op/s`). A zero/None/non-finite p50 on **either** side (baseline or
+- **Missing / partial data:** `LevelMetrics` is optional per side. If one side is absent, that side's
+  whole cell is `—` — a `LevelMetrics` is all-or-nothing (its percentiles come as one `Summary`), so
+  there is no partial-within-a-side data to preserve; the present side still renders its p50 +
+  `context:` line. A zero/None/non-finite p50 on **either** side (baseline or
   candidate) stays **N/A**, matching `ResolvedBudget::verdict` (unchanged). For an
   **unknown op** (`OpName::from_tag` → `None`) there is no resolvable guard → print `—`. For a
   **diverged** op **whose name is known**, show the context tails and the resolved `guard` value with
