@@ -22,6 +22,10 @@ pub struct ServerInfo {
     /// The server's query plan-cache size (`GRAPH.CONFIG GET CACHE_SIZE`), for context on the
     /// cached-vs-uncached comparison. `None` if it couldn't be read.
     pub cache_size: Option<u64>,
+    /// The server's queued-query limit (`GRAPH.CONFIG GET MAX_QUEUED_QUERIES`). Part of the
+    /// comparability manifest (it bounds sustained throughput under load). `None` if unreadable.
+    #[serde(default)]
+    pub max_queued_queries: Option<u64>,
     pub redis_version: Option<String>,
     pub redis_build_id: Option<String>,
     pub redis_git_sha1: Option<String>,
@@ -106,6 +110,10 @@ pub struct Meta {
     /// externally-provided graph, whose contents we can't fingerprint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dataset: Option<DatasetInfo>,
+    /// Operator-supplied display name for this run (e.g. `pr`, `main`, `release 1.2.3`). Used as the
+    /// column header in `report --diff`/`--regression`; falls back to `A`/`B` when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 /// Provenance for a synthetic dataset: its knobs and the `workload_hash` that identifies the whole
@@ -669,6 +677,7 @@ mod tests {
                     total_memory_bytes: 34_359_738_368,
                 },
                 dataset: None,
+                label: None,
             },
             operations,
         }

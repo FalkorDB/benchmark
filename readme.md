@@ -451,13 +451,23 @@ just synthetic-compare-versions demo falkor://127.0.0.1:6379 falkor://127.0.0.1:
   values). It also **verifies results are identical at the highest concurrency** (an untimed
   concurrent pass) so a wrong result under concurrency is a hard fail. `--no-load` skips the reload
   for a load-once / run-many flow (still count-verifying first). `just synthetic-replay <name>
-  <endpoint>` wraps this.
+  <endpoint>` wraps this. Pass **`--label <name>`** (e.g. `pr`/`main`) to name the run — the label
+  becomes the column header in `report --diff`/`--regression`.
 - **`benchmark synthetic report --diff <A.json> <B.json> [--out diff.md]`** **guards** the pair (it
   aborts unless the `workload_hash` **and** every op's `result_digest` match, so a version returning
   wrong/empty results faster can't masquerade as an improvement — the version difference itself is
   expected and recorded), then writes a **Markdown diff** across every op × cache-mode × concurrency
   level (throughput + total-latency p50/p90/p95/p99 with deltas). `just synthetic-compare-versions`
   runs `run --recording` against both endpoints then `report --diff`.
+- **`benchmark synthetic report --diff <A.json> <B.json> --regression [--thresholds t.toml]`** is a
+  **non-fatal, colored** variant for a per-PR regression report: each op × cache-mode × concurrency
+  cell gets a **🟢 / 🔴 / N/A** verdict on **p50** — 🟢 if the candidate (B) is faster or slower
+  within budget, 🔴 if slower beyond it. The budget is a `budget_pct` plus an absolute `floor_ms`
+  noise guard, defaulting to 10 % / 0.5 ms and overridable per-operation and per-operation×concurrency
+  in a TOML file (`[default]` + `[op.<name>]` with a `concurrency` inline table). Unlike `--diff`,
+  it **never aborts**: an op whose `result_digest` differs is shown 🔴 with a `⚠ results differ`
+  note and a perf verdict of **N/A** (a mismatched workload/config renders the whole report
+  *not comparable*).
 - **`just synthetic-sanity`** self-checks the tool: it records the same workload twice (asserting an
   identical `workload_hash` — deterministic recording), then `run --recording` at C=1,4 + `report
   --diff` (incl. the C>1 result verification) against a throwaway Docker FalkorDB. Latency is not

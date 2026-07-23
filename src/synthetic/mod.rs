@@ -28,6 +28,7 @@ pub mod recording;
 pub mod replay;
 pub mod report;
 pub mod stats;
+pub mod thresholds;
 pub mod writes;
 
 use crate::error::BenchmarkError::OtherError;
@@ -294,6 +295,8 @@ pub struct Config {
     pub cache: CacheSelection,
     pub out: String,
     pub server_image: Option<String>,
+    /// Optional display name for this run (e.g. `pr`/`main`), recorded into the report.
+    pub label: Option<String>,
     /// When `Some`, generate a reproducible synthetic dataset (Part 3) into `graph`, **replacing**
     /// its contents, before measuring. Gated behind explicit CLI consent (`--generate`).
     pub dataset: Option<DatasetSpec>,
@@ -315,6 +318,7 @@ impl Default for Config {
             cache: CacheSelection::Both,
             out: "synthetic-report.json".to_string(),
             server_image: None,
+            label: None,
             dataset: None,
         }
     }
@@ -546,6 +550,7 @@ pub async fn run(config: &Config) -> BenchmarkResult<Report> {
             server,
             host: host::collect(),
             dataset: dataset_info,
+            label: config.label.clone(),
         },
         operations,
     })
@@ -1106,6 +1111,7 @@ pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkRes
             client_deadline_ms,
             out,
             server_image,
+            label,
             generate,
             nodes,
             edges,
@@ -1142,6 +1148,7 @@ pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkRes
                     client_deadline_ms: client_deadline_ms.unwrap_or(6_000),
                     out: out.unwrap_or_else(|| "synthetic-report.json".to_string()),
                     server_image,
+                    label,
                 };
                 return replay::run_and_report(&replay_config).await;
             }
@@ -1160,6 +1167,7 @@ pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkRes
                 client_deadline_ms,
                 out,
                 server_image,
+                label,
                 generate,
                 nodes,
                 edges,
@@ -1201,6 +1209,7 @@ pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkRes
                 client_deadline_ms: None,
                 out: None,
                 server_image: None,
+                label: None,
                 generate: true,
                 nodes,
                 edges,
@@ -1226,8 +1235,8 @@ pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkRes
             );
             Ok(())
         }
-        crate::cli::SyntheticCommands::Report { input, diff, out } => {
-            report_command(input, diff, out).await
+        crate::cli::SyntheticCommands::Report { input, diff, regression, thresholds, out } => {
+            report_command(input, diff, regression, thresholds, out).await
         }
     }
 }
@@ -1239,6 +1248,8 @@ pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkRes
 async fn report_command(
     input: Option<String>,
     diff: Vec<String>,
+    regression: bool,
+    thresholds: Option<String>,
     out: Option<String>,
 ) -> BenchmarkResult<()> {
     let load = |path: &str| -> BenchmarkResult<crate::synthetic::report::Report> {
@@ -1251,6 +1262,22 @@ async fn report_command(
     if diff.len() == 2 {
         let a = load(&diff[0])?;
         let b = load(&diff[1])?;
+
+        // NON-FATAL regression mode: colored per-cell verdicts, never aborts on divergence.
+        if regression {
+            let budgets = match thresholds {
+                Some(path) => crate::synthetic::thresholds::Thresholds::from_file(&path)?,
+                None => crate::synthetic::thresholds::Thresholds::builtin(),
+            };
+            let guard = baseline::regression_guard(&a, &b);
+            let md = diff::regression_markdown(&a, &b, &guard, &budgets);
+            let out_path = out.unwrap_or_else(|| "synthetic-regression.md".to_string());
+            tokio::fs::write(&out_path, &md).await?;
+            println!("{}", md);
+            println!("regression report written to {}", out_path);
+            return Ok(());
+        }
+
         let warnings = match baseline::guard(
             &baseline::BaselineKey::from_report(&a),
             &baseline::BaselineKey::from_report(&b),
@@ -1533,6 +1560,7 @@ mod tests {
             client_deadline_ms: Some(6_000),
             out: Some("unused.json".to_string()),
             server_image: None,
+            label: None,
             generate: false,
             nodes: None,
             edges: None,
@@ -1574,6 +1602,7 @@ mod tests {
             client_deadline_ms: Some(6_000),
             out: Some("unused.json".to_string()),
             server_image: None,
+            label: None,
             generate: false,
             nodes: None,
             edges: None,
@@ -1607,6 +1636,7 @@ mod tests {
             client_deadline_ms: None,
             out: None,
             server_image: None,
+            label: None,
             generate: true,
             nodes: None,
             edges: None,
@@ -1621,6 +1651,8 @@ mod tests {
     async fn report_requires_input_or_diff() {
         let err = run_command(crate::cli::SyntheticCommands::Report {
             input: None,
+            regression: false,
+            thresholds: None,
             diff: vec![],
             out: None,
         })
@@ -1665,6 +1697,8 @@ mod tests {
             .into_owned();
         assert!(run_command(crate::cli::SyntheticCommands::Report {
             input: None,
+            regression: false,
+            thresholds: None,
             diff: vec![base.clone(), ok.clone()],
             out: Some(diff_out.clone()),
         })
@@ -1674,6 +1708,8 @@ mod tests {
         let bad = write_report("sha256:different", 42002);
         let err = run_command(crate::cli::SyntheticCommands::Report {
             input: None,
+            regression: false,
+            thresholds: None,
             diff: vec![base.clone(), bad.clone()],
             out: Some(diff_out.clone()),
         })
@@ -1684,6 +1720,49 @@ mod tests {
             let _ = std::fs::remove_file(p);
         }
         let _ = std::fs::remove_file(&diff_out);
+    }
+
+    #[tokio::test]
+    async fn report_regression_command_is_non_fatal_on_divergence() {
+        // Hermetic: two reports with the SAME workload_hash but a differing result digest for one
+        // op. `report --diff --regression` must NOT error (unlike strict --diff) — it renders the
+        // op as "results differ" and returns Ok.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir();
+        let write = |label: &str, digest: &str| -> String {
+            let p = dir.join(format!(
+                "reg-{}-{}.json",
+                std::process::id(),
+                SEQ.fetch_add(1, Ordering::Relaxed)
+            ));
+            let json = format!(
+                r#"{{"meta":{{"tool_version":"0.1.0","endpoint":"x","samples":1,"warmup":0,"concurrency":[1],"server_timeout_ms":5000,"client_deadline_ms":6000,"connection":"c","started_at_epoch_secs":0,"server":{{"module_graph_ver":42001}},"dataset":{{"seed":1,"nodes":10,"edges":20,"corpus_hash":"sha256:same"}},"label":"{label}"}},"operations":{{"match_by_index":{{"levels":[],"result_digest":"{digest}"}}}}}}"#
+            );
+            std::fs::write(&p, json).unwrap();
+            p.to_string_lossy().into_owned()
+        };
+        let a = write("main", "sha256:aa");
+        let b = write("pr", "sha256:bb"); // diverged result
+        let out = dir
+            .join(format!("reg-out-{}.md", std::process::id()))
+            .to_string_lossy()
+            .into_owned();
+        assert!(run_command(crate::cli::SyntheticCommands::Report {
+            input: None,
+            regression: true,
+            thresholds: None,
+            diff: vec![a.clone(), b.clone()],
+            out: Some(out.clone()),
+        })
+        .await
+        .is_ok());
+        let md = std::fs::read_to_string(&out).unwrap();
+        assert!(md.contains("results differ"), "{md}");
+        assert!(md.contains("main") && md.contains("pr"), "labels in header: {md}");
+        for p in [a, b, out] {
+            let _ = std::fs::remove_file(p);
+        }
     }
 
     #[test]

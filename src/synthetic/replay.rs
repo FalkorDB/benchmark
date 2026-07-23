@@ -63,6 +63,8 @@ pub struct ReplayConfig {
     pub out: String,
     /// Operator-supplied server image identity, recorded verbatim.
     pub server_image: Option<String>,
+    /// Optional display name for this run (e.g. `pr`/`main`), recorded into the report.
+    pub label: Option<String>,
 }
 
 /// Replay `config`'s bundle: load the recorded graph, then measure the recorded commands through the
@@ -166,6 +168,7 @@ pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
         cache: config.cache,
         out: config.out.clone(),
         server_image: config.server_image.clone(),
+        label: config.label.clone(),
         dataset: None,
     };
     let run_token = rand::random_range(0..=u64::MAX);
@@ -242,6 +245,7 @@ pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
                 edges: dataset_spec.edges,
                 workload_hash: bundle.manifest.workload_hash.clone(),
             }),
+            label: config.label.clone(),
         },
         operations,
     })
@@ -392,6 +396,7 @@ mod tests {
             client_deadline_ms: 6_000,
             out: "unused.json".to_string(),
             server_image: None,
+            label: None,
         };
         let err = run(&config).await.unwrap_err();
         assert!(format!("{err}").contains("samples must be greater than 0"), "got: {err}");

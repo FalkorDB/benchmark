@@ -89,6 +89,7 @@ pub struct CliOverrides {
     pub client_deadline_ms: Option<u64>,
     pub out: Option<String>,
     pub server_image: Option<String>,
+    pub label: Option<String>,
     /// Explicit destructive consent to generate + load a dataset into `graph`.
     pub generate: bool,
     pub nodes: Option<usize>,
@@ -188,6 +189,7 @@ pub fn resolve(
         cache: cli.cache.or(file.cache).unwrap_or(default_cache),
         out: cli.out.or(file.out).unwrap_or(default_out),
         server_image: cli.server_image,
+        label: cli.label,
         dataset,
     })
 }

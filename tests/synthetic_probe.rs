@@ -36,6 +36,7 @@ fn base_config(graph: &str) -> Config {
         cache: CacheSelection::Both,
         out: "synthetic-report.json".to_string(),
         server_image: None,
+        label: None,
         dataset: None,
     }
 }
@@ -958,6 +959,7 @@ fn replay_config(dir: &std::path::Path, graph: &str, out: &str, load: bool) -> R
         client_deadline_ms: 6_000,
         out: out.to_string(),
         server_image: None,
+        label: None,
     }
 }
 
@@ -1088,6 +1090,7 @@ async fn record_and_replay_via_run_command() {
         client_deadline_ms: None,
         out: Some(report_out.clone()),
         server_image: None,
+        label: None,
         generate: false,
         nodes: None,
         edges: None,
@@ -1142,6 +1145,7 @@ async fn replay_concurrency_sweep_verifies_results_and_reports_levels() {
         client_deadline_ms: 6_000,
         out: dir.join("conc.json").to_string_lossy().into_owned(),
         server_image: None,
+        label: None,
     };
     // If any op returned different results at C=4 vs the single-flight reference, run() errors here.
     // The two LIMIT ops (expand_hops_5, aggregate_group) are totally ordered, so their value digests

@@ -77,6 +77,18 @@ pub async fn collect(
         Err(e) => warn!("provenance: GRAPH.CONFIG GET CACHE_SIZE failed: {}", e),
     }
 
+    // The queued-query limit bounds sustained throughput under load — part of the comparability
+    // manifest, so two runs compared for regression must agree on it.
+    match redis::cmd("GRAPH.CONFIG")
+        .arg("GET")
+        .arg("MAX_QUEUED_QUERIES")
+        .query_async::<redis::Value>(&mut conn)
+        .await
+    {
+        Ok(v) => info.max_queued_queries = parse_config_get_u64(&v),
+        Err(e) => warn!("provenance: GRAPH.CONFIG GET MAX_QUEUED_QUERIES failed: {}", e),
+    }
+
     Ok(info)
 }
 
