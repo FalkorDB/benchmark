@@ -130,6 +130,21 @@ impl OpName {
             .collect()
     }
 
+    /// This operation's coverage [`Tier`] (from its [`spec`](catalog::spec)).
+    pub fn tier(self) -> Tier {
+        spec(self).tier
+    }
+
+    /// Every **read** op in `tier`, in catalog order. `Core` ⊆ `Full`, so `Tier::Full` yields the
+    /// same set as [`all_reads`](Self::all_reads). Write ops are opt-in (reads-only scope) and are
+    /// never selected by a tier.
+    pub fn reads_in_tier(tier: Tier) -> Vec<OpName> {
+        OpName::all_reads()
+            .into_iter()
+            .filter(|op| tier.includes(op.tier()))
+            .collect()
+    }
+
     /// The stable string id used in reports and on the CLI.
     pub fn as_str(self) -> &'static str {
         match self {
@@ -312,6 +327,38 @@ impl<'de> Deserialize<'de> for OpName {
     }
 }
 
+/// Coverage tier controlling how often an operation is gated (design §3.5 / §7.1c).
+///
+/// [`Tier::Core`] is a small, cheap, representative **read** subset that gates **every PR** for a
+/// fast signal; [`Tier::Full`] is the complete read set, run **nightly and on-demand**. `Core` is a
+/// subset of `Full`: selecting `full` measures every read op, selecting `core` measures only the
+/// core subset. Write ops are opt-in (reads-only scope) and always carry [`Tier::Full`], so
+/// `--tier` never selects a write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[value(rename_all = "snake_case")]
+pub enum Tier {
+    /// Small representative read subset gated on every PR.
+    Core,
+    /// The full read set, run nightly / on-demand (a superset of [`Tier::Core`]).
+    Full,
+}
+
+impl Tier {
+    /// The stable lowercase tag used on the CLI and in `list-ops` (`core`/`full`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Tier::Core => "core",
+            Tier::Full => "full",
+        }
+    }
+
+    /// Whether an op whose tier is `op_tier` is selected when measuring *this* tier. `Full` selects
+    /// everything (`Core` ⊆ `Full`); `Core` selects only core ops.
+    pub fn includes(self, op_tier: Tier) -> bool {
+        matches!((self, op_tier), (Tier::Full, _) | (Tier::Core, Tier::Core))
+    }
+}
+
 /// Which plan-cache condition to measure an operation under.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, ValueEnum)]
 #[value(rename_all = "snake_case")]
@@ -424,7 +471,13 @@ impl Default for Config {
 pub fn list_ops() -> String {
     let mut out = String::from("Available operations:\n");
     for op in OpName::all() {
-        out.push_str(&format!("  {:<20} {}\n", op.as_str(), op.description()));
+        let op_spec = spec(*op);
+        out.push_str(&format!(
+            "  {:<20} [{:<4}] {}\n",
+            op.as_str(),
+            op_spec.tier.as_str(),
+            op_spec.description
+        ));
     }
     out
 }
@@ -1197,6 +1250,7 @@ pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkRes
             graph,
             ops,
             all_reads,
+            tier,
             samples,
             warmup,
             concurrency,
@@ -1219,10 +1273,10 @@ pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkRes
             // A recorded workload takes a different, exclusive path: measure the recorded commands
             // across the concurrency sweep + cache modes (no generation/probing).
             if let Some(recording) = recording {
-                if config_path.is_some() || generate || all_reads || !ops.is_empty() || nodes.is_some() || edges.is_some() || seed.is_some() {
+                if config_path.is_some() || generate || all_reads || tier.is_some() || !ops.is_empty() || nodes.is_some() || edges.is_some() || seed.is_some() {
                     return Err(OtherError(
                         "--recording measures a recorded bundle and can't be combined with \
-                         --config/--generate/--op/--all-reads/--nodes/--edges/--seed (the bundle \
+                         --config/--generate/--op/--all-reads/--tier/--nodes/--edges/--seed (the bundle \
                          defines the workload; pass --endpoint/--graph/--concurrency/--cache directly)"
                             .to_string(),
                     ));
@@ -1253,6 +1307,7 @@ pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkRes
                 graph,
                 ops,
                 all_reads,
+                tier,
                 samples,
                 warmup,
                 concurrency,
@@ -1281,6 +1336,7 @@ pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkRes
             graph,
             ops,
             all_reads,
+            tier,
             seed,
             nodes,
             edges,
@@ -1295,6 +1351,7 @@ pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkRes
                 graph,
                 ops,
                 all_reads,
+                tier,
                 samples: None,
                 warmup: None,
                 concurrency: Vec::new(),
@@ -1604,6 +1661,79 @@ mod tests {
     }
 
     #[test]
+    fn tier_includes_is_core_subset_of_full() {
+        // `Full` selects everything; `Core` selects only core ops (Core ⊆ Full).
+        assert!(Tier::Full.includes(Tier::Core));
+        assert!(Tier::Full.includes(Tier::Full));
+        assert!(Tier::Core.includes(Tier::Core));
+        assert!(!Tier::Core.includes(Tier::Full));
+    }
+
+    #[test]
+    fn tier_as_str_round_trips_the_cli_tags() {
+        assert_eq!(Tier::Core.as_str(), "core");
+        assert_eq!(Tier::Full.as_str(), "full");
+    }
+
+    #[test]
+    fn reads_in_tier_full_equals_all_reads_and_core_is_a_strict_nonempty_subset() {
+        let full = OpName::reads_in_tier(Tier::Full);
+        // `--tier full` is exactly `--all-reads` (Core ⊆ Full, and every read is at most Full).
+        assert_eq!(full, OpName::all_reads());
+
+        let core = OpName::reads_in_tier(Tier::Core);
+        assert!(!core.is_empty(), "core tier must select at least one op");
+        assert!(
+            core.len() < full.len(),
+            "core must be a *strict* subset of full (cheap per-PR signal)"
+        );
+        // Every core-selected op is a read tagged Core; catalog order is preserved.
+        assert!(core.iter().all(|op| op.kind() == QueryType::Read));
+        assert!(core.iter().all(|op| op.tier() == Tier::Core));
+        assert!(
+            core.iter().all(|op| full.contains(op)),
+            "core ⊆ full"
+        );
+    }
+
+    #[test]
+    fn core_tier_pins_the_representative_read_subset() {
+        // Pin the curated core set so an accidental tier flip on any op is caught in review. Core
+        // is one cheap representative per fundamental read category; the heavier/deeper variants
+        // (5-hop expand, group-by, shortest-path) run in Full/nightly only.
+        assert_eq!(
+            OpName::reads_in_tier(Tier::Core),
+            vec![
+                OpName::ReturnConst,
+                OpName::MatchByIndex,
+                OpName::MatchByLabelScan,
+                OpName::Expand1Hop,
+                OpName::AggregateCount,
+                OpName::PropertyProjection,
+            ]
+        );
+    }
+
+    #[test]
+    fn write_ops_are_full_tier_and_never_selected_by_a_tier() {
+        // Writes are opt-in (reads-only scope): they carry `Full` and no `--tier` selection ever
+        // includes them (both tiers filter over reads).
+        let writes: Vec<OpName> = OpName::all()
+            .iter()
+            .copied()
+            .filter(|op| op.kind() == QueryType::Write)
+            .collect();
+        assert!(!writes.is_empty(), "the catalog has write ops");
+        assert!(writes.iter().all(|op| op.tier() == Tier::Full));
+        // Neither tier ever selects a write op (both filter over reads).
+        for tier in [Tier::Core, Tier::Full] {
+            assert!(OpName::reads_in_tier(tier)
+                .iter()
+                .all(|op| op.kind() == QueryType::Read));
+        }
+    }
+
+    #[test]
     fn render_cypher_cached_stable_uncached_unique() {
         let q = QueryBuilder::new()
             .text("MATCH (n:User {id: $id}) RETURN n.id")
@@ -1711,6 +1841,7 @@ mod tests {
             graph: Some("falkor".to_string()),
             ops: vec![crate::cli::OpSelector::One(OpName::ReturnConst)],
             all_reads: false,
+            tier: None,
             samples: Some(0),
             warmup: Some(0),
             concurrency: vec![],
@@ -1730,6 +1861,41 @@ mod tests {
         };
         assert!(run_command(command).await.is_err());
         let _ = std::fs::remove_file(&cfg_path);
+    }
+
+    #[tokio::test]
+    async fn run_command_record_offline_records_only_the_selected_tier() {
+        // `synthetic record --tier core` runs OFFLINE (no server): it writes a bundle containing
+        // exactly the core read ops, and a full-only op (shortest_path) is absent. Exercises the
+        // Record handler's `tier` plumbing end-to-end.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let out_dir = std::env::temp_dir().join(format!(
+            "syn-rec-tier-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let command = crate::cli::SyntheticCommands::Record {
+            config: None,
+            graph: Some("gtier".to_string()),
+            ops: vec![],
+            all_reads: false,
+            tier: Some(Tier::Core),
+            seed: Some(3),
+            nodes: Some(200),
+            edges: Some(600),
+            out_dir: out_dir.to_string_lossy().into_owned(),
+        };
+        run_command(command).await.expect("offline record succeeds without a server");
+        assert!(out_dir.join("manifest.json").exists());
+        let commands = out_dir.join("commands");
+        // Every core read op is recorded…
+        for op in OpName::reads_in_tier(Tier::Core) {
+            assert!(commands.join(format!("{}.jsonl", op.as_str())).exists());
+        }
+        // …and a full-only op (shortest_path) is not.
+        assert!(!commands.join("shortest_path.jsonl").exists());
+        std::fs::remove_dir_all(&out_dir).ok();
     }
 
     #[tokio::test]
@@ -1753,6 +1919,7 @@ mod tests {
             graph: Some("falkor".to_string()),
             ops: vec![],
             all_reads: false,
+            tier: None,
             samples: Some(100),
             warmup: Some(0),
             concurrency: vec![],
@@ -1787,6 +1954,7 @@ mod tests {
             graph: None,
             ops: vec![],
             all_reads: false,
+            tier: None,
             samples: None,
             warmup: None,
             concurrency: vec![],
@@ -1829,6 +1997,9 @@ mod tests {
         for op in OpName::value_variants() {
             assert!(listing.contains(op.as_str()));
         }
+        // Every row carries its coverage tier tag so `list-ops` shows what `--tier core` selects.
+        assert!(listing.contains("[core]"), "{listing}");
+        assert!(listing.contains("[full]"), "{listing}");
     }
 
     #[tokio::test]

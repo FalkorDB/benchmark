@@ -1,6 +1,6 @@
 use crate::queries_repository::{QueryCoverageProfile, QueryType};
 use crate::scenario::Vendor;
-use crate::synthetic::{CacheSelection, OpName};
+use crate::synthetic::{CacheSelection, OpName, Tier};
 use clap::{Parser, Subcommand};
 use clap_complete::Shell;
 
@@ -421,6 +421,13 @@ pub enum SyntheticCommands {
             help = "measure every read operation (same as --op all; mutually exclusive with --op)"
         )]
         all_reads: bool,
+        #[arg(
+            long,
+            value_enum,
+            conflicts_with_all = ["ops", "all_reads"],
+            help = "measure a coverage tier: `core` (small per-PR read subset) or `full` (every read op; same as --all-reads, run nightly/on-demand). Mutually exclusive with --op/--all-reads."
+        )]
+        tier: Option<Tier>,
         #[arg(long, help = "number of measured invocations (default 1000)")]
         samples: Option<usize>,
         #[arg(long, help = "number of warm-up invocations, discarded (default 200)")]
@@ -482,7 +489,7 @@ pub enum SyntheticCommands {
         edges: Option<usize>,
         #[arg(
             long = "recording",
-            help = "measure a RECORDED workload bundle (from `synthetic record`) instead of generating/probing: loads the recorded graph, then measures the recorded commands across --concurrency + --cache. Conflicts with --config/--generate/--op/--all-reads/--nodes/--edges/--seed."
+            help = "measure a RECORDED workload bundle (from `synthetic record`) instead of generating/probing: loads the recorded graph, then measures the recorded commands across --concurrency + --cache. Conflicts with --config/--generate/--op/--all-reads/--tier/--nodes/--edges/--seed."
         )]
         recording: Option<String>,
         #[arg(
@@ -519,6 +526,13 @@ pub enum SyntheticCommands {
             help = "record every read operation (same as --op all; mutually exclusive with --op)"
         )]
         all_reads: bool,
+        #[arg(
+            long,
+            value_enum,
+            conflicts_with_all = ["ops", "all_reads"],
+            help = "record a coverage tier: `core` (small per-PR read subset) or `full` (every read op; same as --all-reads). Mutually exclusive with --op/--all-reads."
+        )]
+        tier: Option<Tier>,
         #[arg(
             long,
             help = "seed for the dataset and the per-operation corpora (same seed + same tool build ⇒ identical bundle; default 0)"
@@ -734,6 +748,29 @@ mod tests {
             "create_node",
             "--out-dir",
             "/tmp/does-not-matter",
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn cli_tier_flag_parses_and_conflicts_with_op_selection() {
+        use clap::Parser;
+        // `--tier core|full` parses on both `run` and `record`.
+        assert!(Cli::try_parse_from(["benchmark", "synthetic", "run", "--tier", "core"]).is_ok());
+        assert!(Cli::try_parse_from(["benchmark", "synthetic", "run", "--tier", "full"]).is_ok());
+        assert!(Cli::try_parse_from([
+            "benchmark", "synthetic", "record", "--tier", "core", "--out-dir", "rec-out",
+        ])
+        .is_ok());
+        // An unknown tier is rejected.
+        assert!(Cli::try_parse_from(["benchmark", "synthetic", "run", "--tier", "nope"]).is_err());
+        // `--tier` is mutually exclusive with `--op` and with `--all-reads`.
+        assert!(Cli::try_parse_from([
+            "benchmark", "synthetic", "run", "--tier", "core", "--op", "match_by_index",
+        ])
+        .is_err());
+        assert!(Cli::try_parse_from([
+            "benchmark", "synthetic", "run", "--tier", "core", "--all-reads",
         ])
         .is_err());
     }
