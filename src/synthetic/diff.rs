@@ -196,6 +196,13 @@ fn latency_cell(m: Option<&LevelMetrics>) -> String {
     }
 }
 
+/// Escape a string for safe embedding as **HTML text** (e.g. inside a `<code>`/`<summary>`): a
+/// crafted report could carry an op key with `<`, `>` or `&` that would otherwise break the
+/// `<details>` markup or inject HTML into the PR comment. Order matters — `&` first.
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+}
+
 /// `100·(b−a)/a`, formatted with a sign; `n/a` when `a == 0`.
 fn pct(
     a: f64,
@@ -347,7 +354,8 @@ pub fn regression_markdown(
         let diverged_note =
             if op_diverged { " — ⚠ results differ (perf verdict N/A)" } else { "" };
         body.push_str(&format!(
-            "\n<details><summary>{op_emoji} <code>{op}</code>{diverged_note}</summary>\n{op_body}\n</details>\n"
+            "\n<details><summary>{op_emoji} <code>{}</code>{diverged_note}</summary>\n{op_body}\n</details>\n",
+            html_escape(op)
         ));
     }
 
@@ -862,5 +870,23 @@ mod tests {
             "per-op verdict in the collapsed summary: {md}"
         );
         assert!(!md.contains("#### `match_by_index`"), "old heading should be gone: {md}");
+    }
+
+    #[test]
+    fn op_name_is_html_escaped_in_the_collapsed_summary() {
+        use crate::synthetic::baseline::regression_guard;
+        use crate::synthetic::thresholds::Thresholds;
+        // A crafted report could carry an op key with HTML-special chars; it must not break markup.
+        let evil = "x<b>&y";
+        let mut a = report(42001, 1.0, 1000.0);
+        let mut b = report(42002, 1.0, 1000.0);
+        let va = a.operations.remove("match_by_index").unwrap();
+        a.operations.insert(evil.to_string(), va);
+        let vb = b.operations.remove("match_by_index").unwrap();
+        b.operations.insert(evil.to_string(), vb);
+        let g = regression_guard(&a, &b);
+        let md = regression_markdown(&a, &b, &g, &Thresholds::builtin(), None);
+        assert!(md.contains("<code>x&lt;b&gt;&amp;y</code>"), "op not HTML-escaped: {md}");
+        assert!(!md.contains("<code>x<b>&y"), "raw HTML leaked: {md}");
     }
 }
