@@ -1233,6 +1233,18 @@ mod tests {
         use rand::rngs::StdRng;
         use rand::SeedableRng;
 
+        // The instrument itself: every primitive draw is counted (covers all three `TryRng`
+        // delegations and proves the counter is wired correctly).
+        let mut probe = CountingRng {
+            inner: StdRng::seed_from_u64(2),
+            draws: 0,
+        };
+        let _ = probe.next_u32();
+        let _ = probe.next_u64();
+        let mut buf = [0u8; 8];
+        probe.fill_bytes(&mut buf);
+        assert_eq!(probe.draws, 3, "each primitive draw must be counted");
+
         let repo = seedable_probe_repo();
         let generator = repo
             .read_queries
@@ -1270,12 +1282,12 @@ mod tests {
         let generator = repo.read_queries.get("one_vertex").expect("shape present");
 
         for _ in 0..64 {
-            match generator.generate().params.get("v") {
-                Some(QueryParam::Integer(v)) => {
-                    assert!((1..=50).contains(v), "vertex {v} out of range");
-                }
-                other => panic!("expected an integer 'v' param, got {other:?}"),
-            }
+            let query = generator.generate();
+            let v = query.params.get("v").expect("v param present");
+            assert!(
+                matches!(v, QueryParam::Integer(n) if (1..=50).contains(n)),
+                "expected an in-range integer 'v' param, got {v:?}"
+            );
         }
     }
 
