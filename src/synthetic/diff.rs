@@ -44,7 +44,9 @@ pub fn diff_markdown(
     let lb = col_label(candidate, "B");
     out.push_str(&format!("# Synthetic benchmark diff — {la} → {lb}\n\n"));
     out.push_str(&format!(
-        "| field | {la} (baseline) | {lb} (candidate) |\n|---|---|---|\n"
+        "| field | {} (baseline) | {} (candidate) |\n|---|---|---|\n",
+        md_cell(&la),
+        md_cell(&lb)
     ));
     row2(&mut out, "FalkorDB module", &ver(baseline), &ver(candidate));
     row2(
@@ -124,8 +126,8 @@ fn render_mode(
         return;
     }
     out.push_str(&format!("\n_{}_\n\n", mode.label()));
-    let la = col_label(a, "A");
-    let lb = col_label(b, "B");
+    let la = md_cell(&col_label(a, "A"));
+    let lb = md_cell(&col_label(b, "B"));
     out.push_str(&format!(
         "| C | {la} total p50/p90/p95/p99 (ms) | {lb} total p50/p90/p95/p99 (ms) | Δp50 | {la} tput (ops/s) | {lb} tput (ops/s) | Δtput |\n\
          |---:|---|---|---:|---:|---:|---:|\n",
@@ -347,8 +349,12 @@ fn render_regression_mode(
     }
     out.push_str(&format!("\n_{}_\n\n", mode.label()));
     out.push_str(&format!(
-        "| C | {la} p50 (ms) | {lb} p50 (ms) | Δp50 | {la} tput | {lb} tput | Δtput | verdict |\n\
-         |---:|---:|---:|---:|---:|---:|---:|:--:|\n"
+        "| C | {} p50 (ms) | {} p50 (ms) | Δp50 | {} tput | {} tput | Δtput | verdict |\n\
+         |---:|---:|---:|---:|---:|---:|---:|:--:|\n",
+        md_cell(la),
+        md_cell(lb),
+        md_cell(la),
+        md_cell(lb),
     ));
     for c in levels {
         let am = level_metrics(a, op, c, mode);
@@ -572,5 +578,22 @@ mod tests {
         let g = regression_guard(&a, &b);
         let md = regression_markdown(&a, &b, &g, &Thresholds::builtin());
         assert!(md.contains("not comparable"), "{md}");
+    }
+
+    #[test]
+    fn labels_with_pipes_are_escaped_in_headers() {
+        use crate::synthetic::baseline::regression_guard;
+        use crate::synthetic::thresholds::Thresholds;
+        let mut a = report(42001, 1.0, 1000.0);
+        let mut b = report(42002, 1.2, 1000.0);
+        a.meta.label = Some("v1|x".to_string());
+        b.meta.label = Some("v2|y".to_string());
+        // diff headers (field header + per-op header)
+        let md = diff_markdown(&a, &b, &[]);
+        assert!(md.contains("v1\\|x") && md.contains("v2\\|y"), "diff headers not escaped: {md}");
+        // regression headers (field header + per-op header)
+        let g = regression_guard(&a, &b);
+        let reg = regression_markdown(&a, &b, &g, &Thresholds::builtin());
+        assert!(reg.contains("v1\\|x") && reg.contains("v2\\|y"), "regression headers not escaped: {reg}");
     }
 }
