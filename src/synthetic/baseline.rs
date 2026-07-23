@@ -10,7 +10,7 @@
 
 use crate::synthetic::report::{Report, ServerInfo};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// The workload + environment identity of a run (extracted from its [`Report`]) that a
 /// version-comparison must agree on — or knowingly differ on.
@@ -145,6 +145,134 @@ pub fn guard(
 fn ver_str(v: Option<u64>) -> String {
     v.map(crate::synthetic::provenance::decode_module_version)
         .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// The result of the non-fatal comparability check used by `report --regression`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RegressionGuard {
+    /// The runs measured the same workload/configuration and can be compared. `diverged_ops` are
+    /// operations whose result digests differ (the caller renders those N/A, not a latency
+    /// verdict); `warnings` are advisory (version/image).
+    Comparable {
+        diverged_ops: BTreeSet<String>,
+        warnings: Vec<String>,
+    },
+    /// The runs are not comparable at all (different workload or run configuration); the whole
+    /// report should be rendered as "not comparable".
+    NotComparable { reason: String },
+}
+
+/// Comparability guard for the **non-fatal** `report --regression` mode.
+///
+/// Unlike [`guard`], a per-op result-digest mismatch does **not** abort the whole comparison — it's
+/// reported per-op via `diverged_ops` (the caller shows those ops N/A). Only a *comparability*
+/// mismatch in the behaviour-affecting inputs (workload_hash, samples/warmup, concurrency sweep)
+/// makes the whole pair [`RegressionGuard::NotComparable`].
+pub fn regression_guard(
+    baseline: &Report,
+    candidate: &Report,
+) -> RegressionGuard {
+    // 1. Comparability manifest: the inputs that must match for a latency comparison to be valid.
+    let bh = baseline.meta.dataset.as_ref().map(|d| d.workload_hash.as_str());
+    let ch = candidate.meta.dataset.as_ref().map(|d| d.workload_hash.as_str());
+    match (bh, ch) {
+        (Some(a), Some(b)) if a == b => {}
+        (Some(_), Some(_)) => {
+            return RegressionGuard::NotComparable {
+                reason: "workload_hash differs — the two runs measured different workloads"
+                    .to_string(),
+            }
+        }
+        _ => {
+            return RegressionGuard::NotComparable {
+                reason: "missing workload_hash — comparing needs recorded (`--recording`) runs so \
+                         the workload can be fingerprinted"
+                    .to_string(),
+            }
+        }
+    }
+    if baseline.meta.samples != candidate.meta.samples
+        || baseline.meta.warmup != candidate.meta.warmup
+    {
+        return RegressionGuard::NotComparable {
+            reason: format!(
+                "sampling differs — baseline {}/{} vs candidate {}/{} (samples/warmup)",
+                baseline.meta.samples,
+                baseline.meta.warmup,
+                candidate.meta.samples,
+                candidate.meta.warmup
+            ),
+        };
+    }
+    let bc = sorted_levels(&baseline.meta.concurrency);
+    let cc = sorted_levels(&candidate.meta.concurrency);
+    if bc != cc {
+        return RegressionGuard::NotComparable {
+            reason: format!("concurrency sweep differs — baseline {bc:?} vs candidate {cc:?}"),
+        };
+    }
+
+    // 2. Per-op result divergence — reported, never fatal. An op the baseline recorded a digest for
+    //    that the candidate doesn't match (or is missing) is diverged.
+    let mut diverged_ops = BTreeSet::new();
+    for (op, bop) in &baseline.operations {
+        let Some(bd) = &bop.result_digest else {
+            continue;
+        };
+        let cd = candidate
+            .operations
+            .get(op)
+            .and_then(|o| o.result_digest.as_ref());
+        if cd != Some(bd) {
+            diverged_ops.insert(op.clone());
+        }
+    }
+
+    RegressionGuard::Comparable {
+        diverged_ops,
+        warnings: advisory_warnings(baseline, candidate),
+    }
+}
+
+/// Sorted, deduped concurrency levels for the comparability comparison.
+fn sorted_levels(levels: &[usize]) -> Vec<usize> {
+    let mut v: Vec<usize> = levels.to_vec();
+    v.sort_unstable();
+    v.dedup();
+    v
+}
+
+/// Advisory (non-blocking) version/image notes shared by the regression report.
+fn advisory_warnings(
+    baseline: &Report,
+    candidate: &Report,
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let bv = baseline.meta.server.module_graph_ver;
+    let cv = candidate.meta.server.module_graph_ver;
+    if bv.is_some() && bv == cv {
+        warnings.push(format!(
+            "baseline and candidate ran the same FalkorDB module version ({}) — there is no \
+             version delta to measure",
+            ver_str(cv)
+        ));
+    }
+    if bv == Some(ServerInfo::PLACEHOLDER_VER) || cv == Some(ServerInfo::PLACEHOLDER_VER) {
+        warnings.push(
+            "a FalkorDB module version is the dev placeholder — use tagged release images for a \
+             meaningful version comparison"
+                .to_string(),
+        );
+    }
+    if let (Some(a), Some(b)) = (
+        &baseline.meta.server.server_image,
+        &candidate.meta.server.server_image,
+    ) {
+        if a != b {
+            warnings.push(format!("server image changed: {a} → {b}"));
+        }
+    }
+    warnings
 }
 
 #[cfg(test)]
@@ -302,5 +430,120 @@ mod tests {
             }
             other => panic!("expected Proceed, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod regression_guard_tests {
+    use super::*;
+    use crate::synthetic::report::{
+        DatasetInfo, Meta, OperationReport, Report, ServerInfo, SCHEMA_VERSION,
+    };
+
+    #[allow(clippy::too_many_arguments)]
+    fn rep(
+        hash: &str,
+        samples: usize,
+        warmup: usize,
+        concurrency: Vec<usize>,
+        ver: Option<u64>,
+        image: Option<&str>,
+        ops: &[(&str, Option<&str>)],
+    ) -> Report {
+        let mut operations = BTreeMap::new();
+        for (name, dig) in ops {
+            operations.insert(
+                name.to_string(),
+                OperationReport {
+                    levels: vec![],
+                    result_digest: dig.map(|s| s.to_string()),
+                },
+            );
+        }
+        Report {
+            schema_version: SCHEMA_VERSION,
+            meta: Meta {
+                tool_version: "t".to_string(),
+                endpoint: "e".to_string(),
+                graph: "g".to_string(),
+                samples,
+                warmup,
+                concurrency,
+                seed: 0,
+                corpus_size: 0,
+                server_timeout_ms: 5000,
+                client_deadline_ms: 6000,
+                connection: "c".to_string(),
+                started_at_epoch_secs: 0,
+                server: ServerInfo {
+                    module_graph_ver: ver,
+                    server_image: image.map(|s| s.to_string()),
+                    ..Default::default()
+                },
+                host: Default::default(),
+                dataset: Some(DatasetInfo {
+                    seed: 0,
+                    nodes: 1,
+                    edges: 1,
+                    workload_hash: hash.to_string(),
+                }),
+                label: None,
+            },
+            operations,
+        }
+    }
+
+    #[test]
+    fn comparable_when_manifest_matches_no_divergence() {
+        let a = rep("h", 100, 50, vec![1, 4], Some(42001), Some("main"), &[("match_by_index", Some("d1"))]);
+        let b = rep("h", 100, 50, vec![1, 4], Some(42002), Some("pr"), &[("match_by_index", Some("d1"))]);
+        match regression_guard(&a, &b) {
+            RegressionGuard::Comparable { diverged_ops, warnings } => {
+                assert!(diverged_ops.is_empty());
+                assert!(warnings.iter().any(|w| w.contains("server image changed")));
+            }
+            other => panic!("expected Comparable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn per_op_divergence_is_reported_not_fatal() {
+        let a = rep("h", 100, 50, vec![1], None, None, &[("match_by_index", Some("d1")), ("expand_1_hop", Some("e1"))]);
+        let b = rep("h", 100, 50, vec![1], None, None, &[("match_by_index", Some("d1")), ("expand_1_hop", Some("DIFFERENT"))]);
+        match regression_guard(&a, &b) {
+            RegressionGuard::Comparable { diverged_ops, .. } => {
+                assert_eq!(diverged_ops.len(), 1);
+                assert!(diverged_ops.contains("expand_1_hop"));
+            }
+            other => panic!("expected Comparable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn candidate_missing_digest_is_diverged() {
+        let a = rep("h", 100, 50, vec![1], None, None, &[("match_by_index", Some("d1"))]);
+        let b = rep("h", 100, 50, vec![1], None, None, &[("match_by_index", None)]);
+        match regression_guard(&a, &b) {
+            RegressionGuard::Comparable { diverged_ops, .. } => {
+                assert!(diverged_ops.contains("match_by_index"));
+            }
+            other => panic!("expected Comparable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn workload_mismatch_is_not_comparable() {
+        let a = rep("h1", 100, 50, vec![1], None, None, &[]);
+        let b = rep("h2", 100, 50, vec![1], None, None, &[]);
+        assert!(matches!(regression_guard(&a, &b), RegressionGuard::NotComparable { .. }));
+    }
+
+    #[test]
+    fn sampling_or_sweep_mismatch_is_not_comparable() {
+        let base = rep("h", 100, 50, vec![1, 4], None, None, &[]);
+        let diff_samples = rep("h", 200, 50, vec![1, 4], None, None, &[]);
+        assert!(matches!(regression_guard(&base, &diff_samples), RegressionGuard::NotComparable { .. }));
+        let diff_sweep = rep("h", 100, 50, vec![1, 4, 8], None, None, &[]);
+        assert!(matches!(regression_guard(&base, &diff_sweep), RegressionGuard::NotComparable { .. }));
     }
 }

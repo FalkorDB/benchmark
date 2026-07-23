@@ -550,6 +550,19 @@ pub enum SyntheticCommands {
         diff: Vec<String>,
         #[arg(
             long,
+            requires = "diff",
+            help = "with --diff: emit a NON-FATAL, colored regression report (per-cell 🟢/🔴/N/A by p50 budget; diverged ops are marked, never aborted) instead of the strict diff. Candidate is the second (B) report."
+        )]
+        regression: bool,
+        #[arg(
+            long,
+            value_name = "FILE",
+            requires = "regression",
+            help = "TOML thresholds file for --regression (default: built-in 10% budget, 0.5ms floor; per-op + per-op×concurrency overrides)"
+        )]
+        thresholds: Option<String>,
+        #[arg(
+            long,
             help = "Markdown output path: the diff (default synthetic-diff.md) with --diff, or the re-rendered report's Markdown when re-rendering a single report"
         )]
         out: Option<String>,

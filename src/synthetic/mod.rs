@@ -1235,8 +1235,8 @@ pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkRes
             );
             Ok(())
         }
-        crate::cli::SyntheticCommands::Report { input, diff, out } => {
-            report_command(input, diff, out).await
+        crate::cli::SyntheticCommands::Report { input, diff, regression, thresholds, out } => {
+            report_command(input, diff, regression, thresholds, out).await
         }
     }
 }
@@ -1248,6 +1248,8 @@ pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkRes
 async fn report_command(
     input: Option<String>,
     diff: Vec<String>,
+    regression: bool,
+    thresholds: Option<String>,
     out: Option<String>,
 ) -> BenchmarkResult<()> {
     let load = |path: &str| -> BenchmarkResult<crate::synthetic::report::Report> {
@@ -1260,6 +1262,22 @@ async fn report_command(
     if diff.len() == 2 {
         let a = load(&diff[0])?;
         let b = load(&diff[1])?;
+
+        // NON-FATAL regression mode: colored per-cell verdicts, never aborts on divergence.
+        if regression {
+            let budgets = match thresholds {
+                Some(path) => crate::synthetic::thresholds::Thresholds::from_file(&path)?,
+                None => crate::synthetic::thresholds::Thresholds::builtin(),
+            };
+            let guard = baseline::regression_guard(&a, &b);
+            let md = diff::regression_markdown(&a, &b, &guard, &budgets);
+            let out_path = out.unwrap_or_else(|| "synthetic-regression.md".to_string());
+            tokio::fs::write(&out_path, &md).await?;
+            println!("{}", md);
+            println!("regression report written to {}", out_path);
+            return Ok(());
+        }
+
         let warnings = match baseline::guard(
             &baseline::BaselineKey::from_report(&a),
             &baseline::BaselineKey::from_report(&b),
@@ -1633,6 +1651,8 @@ mod tests {
     async fn report_requires_input_or_diff() {
         let err = run_command(crate::cli::SyntheticCommands::Report {
             input: None,
+            regression: false,
+            thresholds: None,
             diff: vec![],
             out: None,
         })
@@ -1677,6 +1697,8 @@ mod tests {
             .into_owned();
         assert!(run_command(crate::cli::SyntheticCommands::Report {
             input: None,
+            regression: false,
+            thresholds: None,
             diff: vec![base.clone(), ok.clone()],
             out: Some(diff_out.clone()),
         })
@@ -1686,6 +1708,8 @@ mod tests {
         let bad = write_report("sha256:different", 42002);
         let err = run_command(crate::cli::SyntheticCommands::Report {
             input: None,
+            regression: false,
+            thresholds: None,
             diff: vec![base.clone(), bad.clone()],
             out: Some(diff_out.clone()),
         })

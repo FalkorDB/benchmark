@@ -3,8 +3,11 @@
 //! as pasteable Markdown. Used by `synthetic report --diff` after the [`crate::synthetic::baseline`]
 //! guard confirms the two runs measured the same workload.
 
+use crate::synthetic::baseline::RegressionGuard;
 use crate::synthetic::provenance::decode_module_version;
 use crate::synthetic::report::{md_cell, LevelMetrics, LevelReport, Report};
+use crate::synthetic::thresholds::{Thresholds, Verdict};
+use crate::synthetic::OpName;
 use std::collections::BTreeSet;
 
 /// Which cache mode of a [`LevelReport`] to read.
@@ -214,6 +217,181 @@ fn row2(
     ));
 }
 
+// ==== Non-fatal regression report ===============================================================
+
+/// Render the **non-fatal** `report --regression` markdown: per-cell 🟢/🔴/N/A verdicts on p50
+/// (total-latency median) against the threshold budget, with throughput shown for context. Ops the
+/// `guard` flags as diverged get a perf verdict of N/A (correctness-🔴). A `NotComparable` guard
+/// renders a single "not comparable" note. Never errors.
+pub fn regression_markdown(
+    baseline: &Report,
+    candidate: &Report,
+    guard: &RegressionGuard,
+    thresholds: &Thresholds,
+) -> String {
+    let la = col_label(baseline, "baseline");
+    let lb = col_label(candidate, "candidate");
+    let mut head = String::new();
+    head.push_str(&format!(
+        "### 🧪 Synthetic per-op regression — {} vs {} (same machine)\n\n",
+        md_cell(&lb),
+        md_cell(&la)
+    ));
+    head.push_str(&format!("| field | {} | {} |\n|---|---|---|\n", md_cell(&la), md_cell(&lb)));
+    row2(&mut head, "FalkorDB module", &ver(baseline), &ver(candidate));
+    row2(
+        &mut head,
+        "server image",
+        baseline.meta.server.server_image.as_deref().unwrap_or("—"),
+        candidate.meta.server.server_image.as_deref().unwrap_or("—"),
+    );
+    row2(&mut head, "workload_hash", &opt_hash(baseline), &opt_hash(candidate));
+    row2(
+        &mut head,
+        "samples / warmup",
+        &format!("{} / {}", baseline.meta.samples, baseline.meta.warmup),
+        &format!("{} / {}", candidate.meta.samples, candidate.meta.warmup),
+    );
+
+    let (diverged, warnings) = match guard {
+        RegressionGuard::NotComparable { reason } => {
+            head.push_str(&format!(
+                "\n> ⚠ **not comparable** — {}. No latency verdict is shown.\n",
+                md_cell(reason)
+            ));
+            return head;
+        }
+        RegressionGuard::Comparable { diverged_ops, warnings } => (diverged_ops, warnings),
+    };
+
+    // Render the per-op tables into `body`, counting regressed cells as we go.
+    let mut body = String::new();
+    let mut regressed = 0usize;
+    let mut comparable_cells = 0usize;
+    let ops: BTreeSet<&String> = baseline
+        .operations
+        .keys()
+        .chain(candidate.operations.keys())
+        .collect();
+    for op in ops {
+        let op_diverged = diverged.contains(op);
+        body.push_str(&format!(
+            "\n#### `{op}`{}\n",
+            if op_diverged { "  —  ⚠ results differ (perf verdict N/A)" } else { "" }
+        ));
+        let opname = OpName::from_tag(op);
+        for mode in [Mode::Cached, Mode::Uncached] {
+            render_regression_mode(
+                &mut body, baseline, candidate, op, opname, mode, op_diverged, thresholds, &la,
+                &lb, &mut regressed, &mut comparable_cells,
+            );
+        }
+    }
+
+    // Assemble: header + summary + warnings + legend + body.
+    let mut out = head;
+    let summary = if regressed == 0 {
+        format!("🟢 no p50 regression beyond budget across {comparable_cells} comparable cell(s)")
+    } else {
+        format!("🔴 {regressed} of {comparable_cells} comparable cell(s) over budget")
+    };
+    out.push_str(&format!("\n**{} vs {}** — {}\n", md_cell(&lb), md_cell(&la), summary));
+    if !diverged.is_empty() {
+        let names: Vec<&str> = diverged.iter().map(String::as_str).collect();
+        out.push_str(&format!(
+            "\n_⚠ {} op(s) with differing results (perf N/A): {}_\n",
+            diverged.len(),
+            names.join(", ")
+        ));
+    }
+    for w in warnings {
+        out.push_str(&format!("\n> ⚠ {}\n", md_cell(w)));
+    }
+    out.push_str(
+        "\n🟢 = faster or within budget · 🔴 = slower than budget **or** results differ · \
+         N/A = no perf verdict. Non-blocking.\n",
+    );
+    out.push_str(&body);
+    out
+}
+
+/// Render one op × cache-mode regression table with a verdict column, accumulating the
+/// regressed/comparable cell counts.
+#[allow(clippy::too_many_arguments)]
+fn render_regression_mode(
+    out: &mut String,
+    a: &Report,
+    b: &Report,
+    op: &str,
+    opname: Option<OpName>,
+    mode: Mode,
+    op_diverged: bool,
+    thresholds: &Thresholds,
+    la: &str,
+    lb: &str,
+    regressed: &mut usize,
+    comparable_cells: &mut usize,
+) {
+    let mut levels: BTreeSet<usize> = BTreeSet::new();
+    for rep in [a, b] {
+        if let Some(opr) = rep.operations.get(op) {
+            for lvl in &opr.levels {
+                if mode.pick(lvl).is_some() {
+                    levels.insert(lvl.concurrency);
+                }
+            }
+        }
+    }
+    if levels.is_empty() {
+        return;
+    }
+    out.push_str(&format!("\n_{}_\n\n", mode.label()));
+    out.push_str(&format!(
+        "| C | {la} p50 (ms) | {lb} p50 (ms) | Δp50 | {la} tput | {lb} tput | Δtput | verdict |\n\
+         |---:|---:|---:|---:|---:|---:|---:|:--:|\n"
+    ));
+    for c in levels {
+        let am = level_metrics(a, op, c, mode);
+        let bm = level_metrics(b, op, c, mode);
+        let ap = am.map(|m| m.metrics.total_ms.median);
+        let bp = bm.map(|m| m.metrics.total_ms.median);
+        let a_s = ap.map(|v| format!("{v:.3}")).unwrap_or_else(|| "—".to_string());
+        let b_s = bp.map(|v| format!("{v:.3}")).unwrap_or_else(|| "—".to_string());
+        let dp50 = match (ap, bp) {
+            (Some(x), Some(y)) => pct(x, y),
+            _ => "—".to_string(),
+        };
+        let a_tp = am
+            .map(|m| format!("{:.0}", m.throughput_ops_per_sec))
+            .unwrap_or_else(|| "—".to_string());
+        let b_tp = bm
+            .map(|m| format!("{:.0}", m.throughput_ops_per_sec))
+            .unwrap_or_else(|| "—".to_string());
+        let dtp = match (am, bm) {
+            (Some(x), Some(y)) => pct(x.throughput_ops_per_sec, y.throughput_ops_per_sec),
+            _ => "—".to_string(),
+        };
+        let verdict = if op_diverged {
+            "🔴 N/A".to_string()
+        } else {
+            match (ap, bp, opname) {
+                (Some(x), Some(y), Some(name)) => {
+                    let v = thresholds.resolve(name, c).verdict(x, y);
+                    *comparable_cells += 1;
+                    if v == Verdict::Regressed {
+                        *regressed += 1;
+                    }
+                    v.emoji().to_string()
+                }
+                _ => "N/A".to_string(),
+            }
+        };
+        out.push_str(&format!(
+            "| {c} | {a_s} | {b_s} | {dp50} | {a_tp} | {b_tp} | {dtp} | {verdict} |\n"
+        ));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -349,5 +527,50 @@ mod tests {
         let md = diff_markdown(&a, &b, &[]);
         assert!(md.contains("left\\|right"), "pipe not escaped: {md}");
         assert!(!md.contains("`left|right`"), "raw pipe leaked into a cell");
+    }
+
+    #[test]
+    fn regression_marks_within_budget_green_and_over_budget_red() {
+        use crate::synthetic::baseline::regression_guard;
+        use crate::synthetic::thresholds::Thresholds;
+        let a = report(42001, 1.0, 1000.0);
+        // within budget: +5% and +0.05 ms (below the 0.5 ms floor) => green
+        let b_ok = report(42002, 1.05, 1000.0);
+        let g = regression_guard(&a, &b_ok);
+        let md = regression_markdown(&a, &b_ok, &g, &Thresholds::builtin());
+        assert!(md.contains("🟢"), "{md}");
+        assert!(md.contains("no p50 regression"), "{md}");
+        // over budget: +100% and +1 ms => red
+        let b_bad = report(42002, 2.0, 500.0);
+        let g2 = regression_guard(&a, &b_bad);
+        let md2 = regression_markdown(&a, &b_bad, &g2, &Thresholds::builtin());
+        assert!(md2.contains("🔴"), "{md2}");
+        assert!(md2.contains("1 of 1 comparable cell(s) over budget"), "{md2}");
+    }
+
+    #[test]
+    fn regression_marks_diverged_op_na_not_fatal() {
+        use crate::synthetic::baseline::regression_guard;
+        use crate::synthetic::thresholds::Thresholds;
+        let a = report(42001, 1.0, 1000.0);
+        let mut b = report(42002, 1.0, 1000.0);
+        b.operations.get_mut("match_by_index").unwrap().result_digest =
+            Some("sha256:bb".to_string());
+        let g = regression_guard(&a, &b);
+        let md = regression_markdown(&a, &b, &g, &Thresholds::builtin());
+        assert!(md.contains("results differ"), "{md}");
+        assert!(md.contains("🔴 N/A"), "{md}");
+    }
+
+    #[test]
+    fn regression_not_comparable_when_workload_differs() {
+        use crate::synthetic::baseline::regression_guard;
+        use crate::synthetic::thresholds::Thresholds;
+        let a = report(42001, 1.0, 1000.0);
+        let mut b = report(42002, 1.0, 1000.0);
+        b.meta.dataset.as_mut().unwrap().workload_hash = "sha256:zzz".to_string();
+        let g = regression_guard(&a, &b);
+        let md = regression_markdown(&a, &b, &g, &Thresholds::builtin());
+        assert!(md.contains("not comparable"), "{md}");
     }
 }
