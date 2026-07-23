@@ -2,6 +2,7 @@ use crate::query::{Bolt, Query, QueryBuilder};
 use clap::ValueEnum;
 use rand::prelude::IndexedRandom;
 use rand::random;
+use rand::{Rng, RngExt};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -89,7 +90,7 @@ struct Empty;
 
 pub struct QueryGenerator {
     query_type: QueryType,
-    generator: Box<dyn Fn() -> Query + Send + Sync>,
+    generator: QueryFn,
 }
 
 impl QueryGenerator {
@@ -98,7 +99,7 @@ impl QueryGenerator {
         generator: F,
     ) -> Self
     where
-        F: Fn() -> Query + Send + Sync + 'static,
+        F: Fn(&mut dyn Rng) -> Query + Send + Sync + 'static,
     {
         QueryGenerator {
             query_type,
@@ -106,13 +107,23 @@ impl QueryGenerator {
         }
     }
 
+    /// Render this query from the thread-local RNG (seeded once per thread from OS entropy) — the
+    /// compatibility path that preserves today's A/B behavior: each call advances that shared
+    /// stream, so successive renders vary without any caller-supplied seed.
     pub fn generate(&self) -> Query {
-        (self.generator)()
+        let mut rng = rand::rng();
+        (self.generator)(&mut rng)
+    }
+
+    /// Render this query from a caller-supplied RNG, so a fixed seed yields a byte-identical
+    /// Cypher+params corpus (design §4.1 — the seedable named-generation entry).
+    pub fn generate_with_rng(&self, rng: &mut dyn Rng) -> Query {
+        (self.generator)(rng)
     }
 }
 
 // Define a type alias for the function type
-type QueryFn = Box<dyn Fn() -> Query + Send + Sync>;
+type QueryFn = Box<dyn Fn(&mut dyn Rng) -> Query + Send + Sync>;
 
 // Define a type alias for the tuple
 type QueryEntry = (String, QueryType, QueryFn);
@@ -156,7 +167,7 @@ impl QueriesRepositoryBuilder<Flavour> {
         generator: F,
     ) -> Self
     where
-        F: Fn(&RandomUtil, Flavour) -> Query + Send + Sync + 'static,
+        F: Fn(&mut RandomUtil<'_>, Flavour) -> Query + Send + Sync + 'static,
     {
         let vertices = self.vertices;
         let edges = self.edges;
@@ -164,12 +175,13 @@ impl QueriesRepositoryBuilder<Flavour> {
         self.queries.push((
             name.into(),
             query_type,
-            Box::new(move || {
-                let random = RandomUtil {
+            Box::new(move |rng: &mut dyn Rng| {
+                let mut random = RandomUtil {
+                    rng,
                     vertices,
                     _edges: edges,
                 };
-                generator(&random, flavour)
+                generator(&mut random, flavour)
             }),
         ));
         self
@@ -226,7 +238,7 @@ impl QueriesRepository {
         query_type: QueryType,
         generator: F,
     ) where
-        F: Fn() -> Query + Send + Sync + 'static,
+        F: Fn(&mut dyn Rng) -> Query + Send + Sync + 'static,
     {
         let name = name.into();
         self.name_to_id.insert(name.clone(), id);
@@ -300,17 +312,18 @@ impl QueriesRepository {
     }
 }
 
-struct RandomUtil {
+struct RandomUtil<'a> {
+    rng: &'a mut dyn Rng,
     vertices: i32,
     _edges: i32,
 }
 
-impl RandomUtil {
-    fn random_vertex(&self) -> i32 {
-        rand::random_range(1..=self.vertices)
+impl RandomUtil<'_> {
+    fn random_vertex(&mut self) -> i32 {
+        self.rng.random_range(1..=self.vertices)
     }
     #[allow(dead_code)]
-    fn random_path(&self) -> (i32, i32) {
+    fn random_path(&mut self) -> (i32, i32) {
         let start = self.random_vertex();
         let mut end = self.random_vertex();
 
@@ -1142,7 +1155,7 @@ mod tests {
 
     #[test]
     fn test_query_generator() {
-        let generator = QueryGenerator::new(QueryType::Read, || {
+        let generator = QueryGenerator::new(QueryType::Read, |_rng| {
             QueryBuilder::new()
                 .text("MATCH (p:Person) RETURN p")
                 .build()
@@ -1150,6 +1163,132 @@ mod tests {
 
         let query = generator.generate();
         assert_eq!(query.text, "MATCH (p:Person) RETURN p");
+    }
+
+    /// A test RNG that delegates to `StdRng` while counting the primitive draws it serves, so a
+    /// test can assert *deterministically* (no probability) that `generate_with_rng` consumes the
+    /// RNG it is handed. Implementing `TryRng` gives us `Rng` for free via rand's blanket impl.
+    struct CountingRng {
+        inner: rand::rngs::StdRng,
+        draws: usize,
+    }
+
+    impl rand::TryRng for CountingRng {
+        type Error = std::convert::Infallible;
+        fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+            self.draws += 1;
+            Ok(self.inner.next_u32())
+        }
+        fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+            self.draws += 1;
+            Ok(self.inner.next_u64())
+        }
+        fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
+            self.draws += 1;
+            self.inner.fill_bytes(dst);
+            Ok(())
+        }
+    }
+
+    /// A shape that draws a random path (≥2 vertices) from a large space — enough randomness that a
+    /// seed fully determines the rendered Cypher+params.
+    fn seedable_probe_repo() -> QueriesRepository {
+        QueriesRepositoryBuilder::new(1_000_000, 1_000_000)
+            .flavour(Flavour::FalkorDB)
+            .add_query("seedable_probe", QueryType::Read, |random, _flavour| {
+                let (s, e) = random.random_path();
+                QueryBuilder::new()
+                    .text("MATCH (a:User {id: $s}), (b:User {id: $e}) RETURN a, b")
+                    .param("s", s)
+                    .param("e", e)
+                    .build()
+            })
+            .build()
+    }
+
+    #[test]
+    fn generate_with_rng_renders_identically_for_a_fixed_seed() {
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
+
+        let repo = seedable_probe_repo();
+        let generator = repo
+            .read_queries
+            .get("seedable_probe")
+            .expect("probe shape present");
+
+        let render = |seed: u64| {
+            let mut rng = StdRng::seed_from_u64(seed);
+            generator.generate_with_rng(&mut rng).to_cypher()
+        };
+
+        // A fixed seed renders byte-identical Cypher+params on every call: generation is a
+        // deterministic function of the supplied RNG — the reproducibility the A/B non-divergence
+        // gate relies on.
+        assert_eq!(render(0x00C0_FFEE), render(0x00C0_FFEE));
+    }
+
+    #[test]
+    fn generate_with_rng_consumes_the_supplied_rng() {
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
+
+        // The instrument itself: every primitive draw is counted (covers all three `TryRng`
+        // delegations and proves the counter is wired correctly).
+        let mut probe = CountingRng {
+            inner: StdRng::seed_from_u64(2),
+            draws: 0,
+        };
+        let _ = probe.next_u32();
+        let _ = probe.next_u64();
+        let mut buf = [0u8; 8];
+        probe.fill_bytes(&mut buf);
+        assert_eq!(probe.draws, 3, "each primitive draw must be counted");
+
+        let repo = seedable_probe_repo();
+        let generator = repo
+            .read_queries
+            .get("seedable_probe")
+            .expect("probe shape present");
+
+        // Deterministic proof (no probability) that the seam threads the *caller's* RNG rather than
+        // an internal thread RNG: generation must draw from the supplied RNG at least once.
+        let mut counting = CountingRng {
+            inner: StdRng::seed_from_u64(1),
+            draws: 0,
+        };
+        let _ = generator.generate_with_rng(&mut counting);
+        assert!(
+            counting.draws > 0,
+            "generate_with_rng must consume the caller-supplied RNG"
+        );
+    }
+
+    #[test]
+    fn generate_compatibility_path_uses_entropy_within_range() {
+        use crate::query::QueryParam;
+
+        // The `generate()` compatibility entry seeds its own thread RNG; it must still render a
+        // valid query whose drawn vertex stays within `[1, vertices]`.
+        let repo = QueriesRepositoryBuilder::new(50, 50)
+            .flavour(Flavour::FalkorDB)
+            .add_query("one_vertex", QueryType::Read, |random, _flavour| {
+                QueryBuilder::new()
+                    .text("RETURN $v")
+                    .param("v", random.random_vertex())
+                    .build()
+            })
+            .build();
+        let generator = repo.read_queries.get("one_vertex").expect("shape present");
+
+        for _ in 0..64 {
+            let query = generator.generate();
+            let v = query.params.get("v").expect("v param present");
+            assert!(
+                matches!(v, QueryParam::Integer(n) if (1..=50).contains(n)),
+                "expected an in-range integer 'v' param, got {v:?}"
+            );
+        }
     }
 
     #[test]
