@@ -563,7 +563,7 @@ pub enum SyntheticCommands {
         thresholds: Option<String>,
         #[arg(
             long,
-            help = "Markdown output path: the diff (default synthetic-diff.md) with --diff, or the re-rendered report's Markdown when re-rendering a single report"
+            help = "Markdown output path: the diff (default synthetic-diff.md) with --diff, the regression report (default synthetic-regression.md) with --diff --regression, or the re-rendered report's Markdown when re-rendering a single report"
         )]
         out: Option<String>,
     },
