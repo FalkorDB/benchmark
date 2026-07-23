@@ -99,6 +99,27 @@ impl ResolvedBudget {
             Verdict::Ok
         }
     }
+
+    /// The per-cell guard as printed in the report: `<budget>% AND <floor> ms`. Named "AND" because
+    /// a cell is 🔴 only when the candidate p50 is slower by MORE than the budget **and** the
+    /// absolute increase exceeds the floor — both must hold (see [`Self::verdict`]).
+    pub fn guard_cell(&self) -> String {
+        format!(
+            "{}% AND {} ms",
+            fmt_threshold(self.budget_pct),
+            fmt_threshold(self.floor_ms)
+        )
+    }
+}
+
+/// Lossless-enough rendering of a threshold number: trailing zeros trimmed, round-tripping the
+/// configured value (Rust's `f64` `Display` gives the shortest exact form — `10`, `12.5`, `0.5`,
+/// `0.05`). Shared by the header settings table and the per-line guard so they never disagree.
+fn fmt_threshold(v: f64) -> String {
+    // Normalize `-0.0` (accepted by check_budget/check_floor, since it isn't `< 0.0`) so it never
+    // renders as a spurious "-0".
+    let v = if v == 0.0 { 0.0 } else { v };
+    format!("{v}")
 }
 
 // ---- On-disk (raw) TOML shape ------------------------------------------------------------------
@@ -261,22 +282,23 @@ impl Thresholds {
         s.push_str("| scope | budget (slower than baseline) | floor (min Δ) |\n");
         s.push_str("|---|---|---|\n");
         s.push_str(&format!(
-            "| _default_ | {:.1}% | {:.2} ms |\n",
-            self.default.budget_pct, self.default.floor_ms
+            "| _default_ | {}% | {} ms |\n",
+            fmt_threshold(self.default.budget_pct),
+            fmt_threshold(self.default.floor_ms)
         ));
         for (op, o) in &self.ops {
             let base = o.budget_pct.unwrap_or(self.default.budget_pct);
-            let mut budget = format!("{base:.1}%");
+            let mut budget = format!("{}%", fmt_threshold(base));
             if !o.per_concurrency_budget_pct.is_empty() {
                 let per: Vec<String> = o
                     .per_concurrency_budget_pct
                     .iter()
-                    .map(|(c, p)| format!("c{c} {p:.1}%"))
+                    .map(|(c, p)| format!("c{c} {}%", fmt_threshold(*p)))
                     .collect();
                 budget.push_str(&format!(" ({})", per.join(", ")));
             }
             let floor = o.floor_ms.unwrap_or(self.default.floor_ms);
-            s.push_str(&format!("| `{}` | {budget} | {floor:.2} ms |\n", op.as_str()));
+            s.push_str(&format!("| `{}` | {budget} | {} ms |\n", op.as_str(), fmt_threshold(floor)));
         }
         s.push_str(&format!(
             "\n_Metric `{metric}`. A cell is 🔴 only when the candidate is **slower** than the \
@@ -463,7 +485,7 @@ concurrency = { 32 = 40.0 }
     fn settings_markdown_builtin_shows_default_and_rule() {
         let md = Thresholds::builtin().settings_markdown();
         assert!(md.contains("**Thresholds**"), "{md}");
-        assert!(md.contains("| _default_ | 10.0% | 0.50 ms |"), "{md}");
+        assert!(md.contains("| _default_ | 10% | 0.5 ms |"), "{md}");
         // No per-op rows for the builtin defaults (an op row's first cell is a `backtick` name).
         assert!(!md.contains("| `"), "builtin should have no per-op rows: {md}");
         // The red/green rule references the metric, budget, floor, and precedence.
@@ -489,11 +511,25 @@ concurrency = { 16 = 18.0, 32 = 25.0 }
 "#;
         let md = Thresholds::from_toml_str(cfg).unwrap().settings_markdown();
         // Per-op override row (falls back to the default floor).
-        assert!(md.contains("| `match_by_index` | 15.0% | 0.50 ms |"), "{md}");
+        assert!(md.contains("| `match_by_index` | 15% | 0.5 ms |"), "{md}");
         // Per-op×concurrency budgets are listed inline next to the op budget.
         assert!(
-            md.contains("| `expand_hops_5` | 12.0% (c16 18.0%, c32 25.0%) | 0.50 ms |"),
+            md.contains("| `expand_hops_5` | 12% (c16 18%, c32 25%) | 0.5 ms |"),
             "{md}"
         );
+    }
+
+    #[test]
+    fn guard_cell_and_fmt_threshold_are_lossless() {
+        assert_eq!(fmt_threshold(10.0), "10");
+        assert_eq!(fmt_threshold(12.5), "12.5");
+        assert_eq!(fmt_threshold(0.5), "0.5");
+        assert_eq!(fmt_threshold(0.05), "0.05");
+        assert_eq!(fmt_threshold(-0.0), "0"); // normalized, never "-0"
+        let b = ResolvedBudget { metric: Metric::P50, budget_pct: 12.0, floor_ms: 0.5 };
+        assert_eq!(b.guard_cell(), "12% AND 0.5 ms");
+        // A non-round budget must not be rounded away.
+        let b2 = ResolvedBudget { metric: Metric::P50, budget_pct: 10.04, floor_ms: 0.05 };
+        assert_eq!(b2.guard_cell(), "10.04% AND 0.05 ms");
     }
 }
