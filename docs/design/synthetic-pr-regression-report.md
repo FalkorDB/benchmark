@@ -1,6 +1,7 @@
 # Design: per-PR synthetic benchmark regression report for `falkordb-rs-next-gen`
 
-**Status:** proposed (awaiting approval before implementation).
+**Status:** approved. Part A (the `FalkorDB/benchmark` tool) is implemented in this PR; Part B (the
+`falkordb-rs-next-gen` CI workflow + config) follows in that repo.
 **Scope:** changes in **two** repos — `FalkorDB/benchmark` (the tool) and
 `FalkorDB/falkordb-rs-next-gen` (the CI that consumes it).
 
@@ -211,6 +212,11 @@ every tool/infra failure is caught and turned into a "benchmark unavailable" com
   than one benchmark running — neither on a machine nor across the pipeline.
 - **Arch-specific markers** to avoid x86/arm comment races (mirroring the A/B's
   `-arm` marker): `<!-- synthetic-benchmark -->` / `<!-- synthetic-benchmark-arm -->`.
+- **Serialize same-arch runs.** A workflow `concurrency:` group keyed by PR **and** architecture
+  (e.g. `synthetic-bench-${{ pr }}-${{ arch }}`, `cancel-in-progress: true`) ensures two concurrent
+  same-arch runs for one PR (a re-added label, or a new push) can't update the sticky comment out
+  of order — x86 and arm stay independent via the group key + their own markers. Mirrors the A/B's
+  own concurrency group.
 - **Separate `SYNTHETIC_BENCHMARK_REF`** pinned to an **immutable commit SHA** (with a `# vX.Y.Z`
   comment, like `BENCHMARK_REF = deca7752 # v2.2`) and a **separate checkout**, so the A/B's
   `BENCHMARK_REF=v2.2` (coupled to the legacy `ab-compare` vendor mode + its trend continuity) is
