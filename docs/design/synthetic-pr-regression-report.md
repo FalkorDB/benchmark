@@ -43,7 +43,7 @@ at a glance (🟢 good / 🔴 regressed). It never fails the PR.
 - **Existing A/B benchmark** (`benchmark.yml` → reusable `_benchmark.yml`): label-triggered
   (`benchmark-{small,medium,large}[-arm]`) / `/benchmark` comment / dispatch; provisions ephemeral
   **GCE VMs** (one per size×variant); already uses **`FalkorDB/benchmark`** but pinned at
-  `BENCHMARK_REF = deca7752 (v2.2)`, which **predates the `synthetic` subcommand**, in the
+  `BENCHMARK_REF = deca7752 # v2.2`, which **predates the `synthetic` subcommand**, in the
   `ab-compare` *vendor* mode; publishes a gh-pages dashboard + a sticky comment
   `<!-- ab-benchmark-comment -->`. It is **informational**, not a gate.
 - **No latency-threshold/gating config** exists in either repo today.
