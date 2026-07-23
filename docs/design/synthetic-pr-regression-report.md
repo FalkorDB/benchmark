@@ -34,8 +34,8 @@ at a glance (🟢 good / 🔴 regressed). It never fails the PR.
 
 ## 3. Context from recon (why the design is shaped this way)
 
-- **Images** (all `ghcr.io/falkordb/falkordb-server:<tag>`, `EXPOSE 6379`, `redis-server
-  --loadmodule …/falkordb.so`, no auth → `falkor://host:6379`):
+- **Images** (all `ghcr.io/falkordb/falkordb-server:<tag>`, `EXPOSE 6379`, no auth, running
+  `redis-server --loadmodule …/falkordb.so` → reachable at `falkor://host:6379`):
   - PR build: `rc-pr-<N>` — published **early** by `rust-pr.yml` (before tests).
   - main build: `edge-rs` — retagged on every merge to `main` by `rust-push.yml`.
   - release build: `<X.Y.Z>` — only on a GitHub `release: published` event via `release-image.yml`;
@@ -109,12 +109,14 @@ Add a dedicated mode rather than overloading the strict `--diff` guard. New invo
   - a **comparability mismatch** ⇒ *globally not comparable* → the whole table is rendered as
     `⚠ not comparable`. The **comparability manifest** — the behavior-affecting inputs that must
     match for a latency comparison to be valid — is: the `workload_hash` (recorded graph +
-    commands), the `generator_version` (tool workload version), `samples`/`warmup`, the concurrency
-    sweep + cache modes, and the controlled **server settings** that affect throughput (e.g.
-    `MAX_QUEUED_QUERIES`). The report JSON already records the first four; the design **adds the
-    applied server settings to the report** so a mismatch is *detectable*, not assumed. In the CI
-    flow these are identical by construction (same recorded bundle → one manifest hash copied into
-    every report; same sweep; same settings applied to every container), so this should never trip
+    commands; it also folds in the `generator_version`, since the recording manifest is hashed into
+    it, so the tool version is covered transitively — no separate report field needed),
+    `samples`/`warmup`, the concurrency sweep + cache modes, and the controlled **server settings**
+    that affect throughput (e.g. `MAX_QUEUED_QUERIES`). The report JSON already records the
+    `workload_hash`, samples/warmup and sweep; the design **adds the applied server settings to the
+    report** so a mismatch is *detectable*, not assumed. In the CI flow these are identical by
+    construction (same recorded bundle → one manifest hash copied into every report; same sweep;
+    same settings applied to every container), so this should never trip
     for PR-vs-main — but the check fails safe;
   - a **per-op `result_digest` mismatch** ⇒ only *that* op is correctness-🔴 with `⚠ results
     differ`, its perf verdict **N/A** (a different result means different work — the latency Δ is
