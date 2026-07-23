@@ -387,9 +387,15 @@ fn render_regression_mode(
             match (ap, bp, opname) {
                 (Some(x), Some(y), Some(name)) => {
                     let v = thresholds.resolve(name, c).verdict(x, y);
-                    *comparable_cells += 1;
-                    if v == Verdict::Regressed {
-                        *regressed += 1;
+                    match v {
+                        Verdict::Regressed => {
+                            *regressed += 1;
+                            *comparable_cells += 1;
+                        }
+                        // A real (comparable) 🟢 cell.
+                        Verdict::Ok => *comparable_cells += 1,
+                        // Zero/non-finite baseline ⇒ no verdict; not a comparable cell.
+                        Verdict::NotApplicable => {}
                     }
                     v.emoji().to_string()
                 }
@@ -599,5 +605,17 @@ mod tests {
         let g = regression_guard(&a, &b);
         let reg = regression_markdown(&a, &b, &g, &Thresholds::builtin());
         assert!(reg.contains("v1\\|x") && reg.contains("v2\\|y"), "regression headers not escaped: {reg}");
+    }
+
+    #[test]
+    fn regression_na_cells_are_not_counted_as_comparable() {
+        use crate::synthetic::baseline::regression_guard;
+        use crate::synthetic::thresholds::Thresholds;
+        // A zero baseline p50 ⇒ the cell's verdict is N/A; it must NOT inflate the comparable count.
+        let a = report(42001, 0.0, 1000.0);
+        let b = report(42002, 1.0, 1000.0);
+        let g = regression_guard(&a, &b);
+        let md = regression_markdown(&a, &b, &g, &Thresholds::builtin());
+        assert!(md.contains("across 0 comparable cell(s)"), "{md}");
     }
 }
