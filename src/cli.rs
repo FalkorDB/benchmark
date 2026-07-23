@@ -588,6 +588,13 @@ pub enum SyntheticCommands {
             help = "with --diff --regression: total wall-clock seconds the caller spent computing this check (benchmark + reporting), rendered as a compute-time line in the report header"
         )]
         elapsed_secs: Option<f64>,
+        #[arg(
+            long = "summary",
+            value_name = "FILE",
+            requires = "regression",
+            help = "with --diff --regression: also write a compact machine-usable SUMMARY (JSON: overall verdict + per-tier 🟢/🔴/N-A counts + worst offenders + a stable slug) to FILE — small enough for a PR comment, while the full report is hosted externally and linked by the slug"
+        )]
+        summary: Option<String>,
     },
 }
 
