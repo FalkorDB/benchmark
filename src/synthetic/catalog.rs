@@ -13,7 +13,7 @@ use crate::error::BenchmarkResult;
 use crate::queries_repository::QueryType;
 use crate::query::{Query, QueryBuilder};
 use crate::synthetic::writes::{ExpectedMutation, WritePlan, WriteScratch};
-use crate::synthetic::OpName;
+use crate::synthetic::{OpName, Tier};
 use rand::{Rng, RngExt};
 
 /// Number of distinct parameterizations pre-generated per operation. The measured loop cycles
@@ -97,6 +97,9 @@ pub struct OperationSpec {
     pub kind: QueryType,
     pub description: &'static str,
     pub requirement: DatasetRequirement,
+    /// Coverage tier: `Core` gates every PR, `Full` runs nightly/on-demand (design §3.5). Reads
+    /// are split across tiers; write ops always carry [`Tier::Full`] (opt-in, reads-only scope).
+    pub tier: Tier,
     pub corpus: CorpusFn,
     /// Present for write operations (Part 5): the lifecycle hooks, mutation to verify, and timed
     /// query builder. `None` for reads, which use `corpus` instead.
@@ -140,6 +143,7 @@ pub fn spec(op: OpName) -> OperationSpec {
             kind: QueryType::Read,
             description: "RETURN $i — pure round-trip baseline (no dataset required)",
             requirement: DatasetRequirement::None,
+            tier: Tier::Core,
             corpus: corpus_return_const,
             write: None,
         },
@@ -148,6 +152,7 @@ pub fn spec(op: OpName) -> OperationSpec {
             kind: QueryType::Read,
             description: "point lookup on the :User(id) index",
             requirement: DatasetRequirement::OneId,
+            tier: Tier::Core,
             corpus: corpus_match_by_index,
             write: None,
         },
@@ -156,6 +161,7 @@ pub fn spec(op: OpName) -> OperationSpec {
             kind: QueryType::Read,
             description: "full :User label scan with a non-indexable predicate",
             requirement: DatasetRequirement::None,
+            tier: Tier::Core,
             corpus: corpus_match_by_label_scan,
             write: None,
         },
@@ -164,6 +170,7 @@ pub fn spec(op: OpName) -> OperationSpec {
             kind: QueryType::Read,
             description: "1-hop :Friend expansion from a seed node",
             requirement: DatasetRequirement::OneId,
+            tier: Tier::Core,
             corpus: corpus_expand_1_hop,
             write: None,
         },
@@ -172,6 +179,7 @@ pub fn spec(op: OpName) -> OperationSpec {
             kind: QueryType::Read,
             description: "fixed 5-hop :Friend expansion from a seed node",
             requirement: DatasetRequirement::OneId,
+            tier: Tier::Full,
             corpus: corpus_expand_hops_5,
             write: None,
         },
@@ -180,6 +188,7 @@ pub fn spec(op: OpName) -> OperationSpec {
             kind: QueryType::Read,
             description: "count a seed node's 1-hop :Friend neighbours",
             requirement: DatasetRequirement::OneId,
+            tier: Tier::Core,
             corpus: corpus_aggregate_count,
             write: None,
         },
@@ -188,6 +197,7 @@ pub fn spec(op: OpName) -> OperationSpec {
             kind: QueryType::Read,
             description: "group a seed node's neighbours by age with counts",
             requirement: DatasetRequirement::OneId,
+            tier: Tier::Full,
             corpus: corpus_aggregate_group,
             write: None,
         },
@@ -196,6 +206,7 @@ pub fn spec(op: OpName) -> OperationSpec {
             kind: QueryType::Read,
             description: "bounded shortest :Friend path between two seed nodes",
             requirement: DatasetRequirement::TwoIds,
+            tier: Tier::Full,
             corpus: corpus_shortest_path,
             write: None,
         },
@@ -204,6 +215,7 @@ pub fn spec(op: OpName) -> OperationSpec {
             kind: QueryType::Read,
             description: "project scalar properties of an indexed node",
             requirement: DatasetRequirement::OneId,
+            tier: Tier::Core,
             corpus: corpus_property_projection,
             write: None,
         },
@@ -212,6 +224,7 @@ pub fn spec(op: OpName) -> OperationSpec {
             kind: QueryType::Write,
             description: "create a fresh scratch node each invocation",
             requirement: DatasetRequirement::None,
+            tier: Tier::Full,
             corpus: write_corpus_stub,
             write: Some(WritePlan {
                 expected: ExpectedMutation::NodeCreated,
@@ -228,6 +241,7 @@ pub fn spec(op: OpName) -> OperationSpec {
             kind: QueryType::Write,
             description: "MERGE a fresh scratch node each invocation (always misses → creates)",
             requirement: DatasetRequirement::None,
+            tier: Tier::Full,
             corpus: write_corpus_stub,
             write: Some(WritePlan {
                 expected: ExpectedMutation::NodeCreated,
@@ -244,6 +258,7 @@ pub fn spec(op: OpName) -> OperationSpec {
             kind: QueryType::Write,
             description: "create a fresh edge between two of this worker's scratch nodes",
             requirement: DatasetRequirement::None,
+            tier: Tier::Full,
             corpus: write_corpus_stub,
             write: Some(WritePlan {
                 expected: ExpectedMutation::RelationshipCreated,
@@ -260,6 +275,7 @@ pub fn spec(op: OpName) -> OperationSpec {
             kind: QueryType::Write,
             description: "set a property on a pre-created scratch node each invocation",
             requirement: DatasetRequirement::None,
+            tier: Tier::Full,
             corpus: write_corpus_stub,
             write: Some(WritePlan {
                 expected: ExpectedMutation::PropertySet,
@@ -276,6 +292,7 @@ pub fn spec(op: OpName) -> OperationSpec {
             kind: QueryType::Write,
             description: "delete a pre-created scratch node each invocation",
             requirement: DatasetRequirement::None,
+            tier: Tier::Full,
             corpus: write_corpus_stub,
             write: Some(WritePlan {
                 expected: ExpectedMutation::NodeDeleted,
@@ -292,6 +309,7 @@ pub fn spec(op: OpName) -> OperationSpec {
             kind: QueryType::Write,
             description: "MERGE an existing scratch node each invocation (always hits)",
             requirement: DatasetRequirement::None,
+            tier: Tier::Full,
             corpus: write_corpus_stub,
             write: Some(WritePlan {
                 expected: ExpectedMutation::NodeMatched,

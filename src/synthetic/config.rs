@@ -8,7 +8,7 @@
 use crate::error::BenchmarkError::OtherError;
 use crate::error::BenchmarkResult;
 use crate::synthetic::dataset::DatasetSpec;
-use crate::synthetic::{CacheSelection, Config, OpName, DEFAULT_GRAPH};
+use crate::synthetic::{CacheSelection, Config, OpName, Tier, DEFAULT_GRAPH};
 use serde::Deserialize;
 use std::path::Path;
 
@@ -77,6 +77,9 @@ pub struct CliOverrides {
     pub ops: Vec<OpName>,
     /// `--all-reads` selects every read op (mutually exclusive with `--op`).
     pub all_reads: bool,
+    /// `--tier <core|full>` selects the read ops in that tier (mutually exclusive with
+    /// `--op`/`--all-reads`). `None` = not passed.
+    pub tier: Option<Tier>,
     pub samples: Option<usize>,
     pub warmup: Option<usize>,
     /// Explicit `--concurrency` sweep (empty = not passed).
@@ -98,9 +101,10 @@ pub struct CliOverrides {
 
 /// Merge CLI overrides over an optional file config to produce the final [`Config`].
 ///
-/// Operation selection precedence: explicit `--op` replaces everything; else `--all-reads`; else
-/// the file's `operations`; else it's an error (nothing to measure). Generation is enabled only by
-/// `--generate`, and then `nodes`/`edges` must resolve from a flag or the file.
+/// Operation selection precedence: explicit `--op` replaces everything; else `--tier <t>` (the
+/// read ops in that tier); else `--all-reads`; else the file's `operations`; else it's an error
+/// (nothing to measure). Generation is enabled only by `--generate`, and then `nodes`/`edges` must
+/// resolve from a flag or the file.
 pub fn resolve(
     cli: CliOverrides,
     file: Option<FileConfig>,
@@ -110,6 +114,8 @@ pub fn resolve(
 
     let ops = if !cli.ops.is_empty() {
         cli.ops.clone()
+    } else if let Some(tier) = cli.tier {
+        OpName::reads_in_tier(tier)
     } else if cli.all_reads {
         OpName::all_reads()
     } else {
@@ -118,7 +124,7 @@ pub fn resolve(
     if ops.is_empty() {
         return Err(OtherError(
             "no operations selected — pass --op <name> (repeatable/comma-separated), --all-reads, \
-             or set `operations = [...]` in the config file"
+             --tier <core|full>, or set `operations = [...]` in the config file"
                 .to_string(),
         ));
     }
@@ -328,6 +334,57 @@ mod tests {
         };
         let cfg = resolve(cli, None).unwrap();
         assert_eq!(cfg.ops, OpName::all_reads());
+    }
+
+    #[test]
+    fn tier_selects_that_read_subset_with_op_taking_precedence() {
+        // `--tier core` resolves to the core read subset…
+        let core = resolve(
+            CliOverrides {
+                tier: Some(Tier::Core),
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(core.ops, OpName::reads_in_tier(Tier::Core));
+
+        // …`--tier full` equals `--all-reads`…
+        let full = resolve(
+            CliOverrides {
+                tier: Some(Tier::Full),
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(full.ops, OpName::all_reads());
+
+        // …and `--tier` overrides the file's `operations`, while an explicit `--op` still wins.
+        let file = FileConfig {
+            operations: Some(vec![OpName::ShortestPath]),
+            ..Default::default()
+        };
+        let over_file = resolve(
+            CliOverrides {
+                tier: Some(Tier::Core),
+                ..Default::default()
+            },
+            Some(file.clone()),
+        )
+        .unwrap();
+        assert_eq!(over_file.ops, OpName::reads_in_tier(Tier::Core));
+
+        let op_wins = resolve(
+            CliOverrides {
+                ops: vec![OpName::AggregateGroup],
+                tier: Some(Tier::Core),
+                ..Default::default()
+            },
+            Some(file),
+        )
+        .unwrap();
+        assert_eq!(op_wins.ops, vec![OpName::AggregateGroup]);
     }
 
     #[test]

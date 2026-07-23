@@ -207,10 +207,14 @@ See [`synthetic-benchmark.md`](synthetic-benchmark.md) for the concurrency model
 
 #### Operation catalog
 
-Select operations with `--op <name>` (repeatable and comma-separated) or `--all-reads`. `--all-reads`
+Select operations with `--op <name>` (repeatable and comma-separated), `--all-reads`, or
+`--tier <core|full>`. `--all-reads`
 selects every **read** op; **write** ops (`create_node`, `merge_miss`, `create_edge`, `set_property`,
 `delete_node`, `merge_hit`) are opt-in via `--op` so a
-sweep never mutates a graph unless you ask. All read ops except `return_const` target the benchmark's
+sweep never mutates a graph unless you ask. `--tier core` selects a small, cheap, representative read
+subset gated on every PR; `--tier full` selects every read op (same as `--all-reads`, run
+nightly/on-demand). `--tier` is mutually exclusive with `--op`/`--all-reads`, and only ever selects
+reads (write ops are `full`-tier but stay opt-in). All read ops except `return_const` target the benchmark's
 `:User {id, age}` / `(:User)-[:Friend]->(:User)` schema (with an index on `:User(id)`). Most draw
 their parameters from `:User` ids sampled out of
 `--graph` (`shortest_path` needs two, `match_by_index`/`expand_*`/`aggregate_*`/`property_projection`
@@ -222,23 +226,23 @@ already holds that schema, or let the tool **generate a reproducible one** (see
 (never whole nodes) and is parameterized; the corpus is seeded (`--seed`) so the same seed yields an
 identical corpus.
 
-| Operation | What it measures | Cypher (body) |
-|---|---|---|
-| `return_const` | round-trip / parse+exec baseline (no dataset) | `RETURN $i AS x` |
-| `match_by_index` | point lookup on the `:User(id)` index | `MATCH (n:User {id: $id}) RETURN n.id` |
-| `match_by_label_scan` | full `:User` label scan (non-indexable predicate) | `MATCH (n:User) WHERE n.id % $modulus = 0 RETURN count(n) AS c` |
-| `expand_1_hop` | 1-hop `:Friend` expansion | `MATCH (s:User {id: $id})-[:Friend]->(n:User) RETURN n.id` |
-| `expand_hops_5` | fixed 5-hop `:Friend` expansion | `MATCH (s:User {id: $id})-[:Friend*5..5]->(n:User) RETURN DISTINCT n.id LIMIT 100` |
-| `aggregate_count` | count a node's 1-hop neighbours | `MATCH (s:User {id: $id})-[:Friend]->(n:User) RETURN count(n) AS c` |
-| `aggregate_group` | group neighbours by age with counts | `MATCH (s:User {id: $id})-[:Friend]->(n:User) RETURN n.age AS age, count(*) AS c ORDER BY c DESC LIMIT 10` |
-| `shortest_path` | bounded shortest `:Friend` path between two nodes | `MATCH (s:User {id: $from}), (t:User {id: $to}) WITH shortestPath((s)-[:Friend*1..6]->(t)) AS p RETURN coalesce(length(p), -1) AS len` |
-| `property_projection` | project scalar properties of an indexed node | `MATCH (n:User {id: $id}) RETURN n.id, n.age` |
-| `create_node` *(write)* | create a fresh scratch node each invocation | `CREATE (n:BenchScratch_<run> {id: $id}) RETURN n.id` |
-| `merge_miss` *(write)* | `MERGE` a fresh scratch node (always misses → creates) | `MERGE (n:BenchScratch_<run> {id: $id}) RETURN n.id` |
-| `create_edge` *(write)* | create a fresh edge between two scratch nodes | `MATCH (a:BenchScratch_<run> {id: $src}), (b:BenchScratch_<run> {id: $dst}) CREATE (a)-[:BenchEdge]->(b)` |
-| `set_property` *(write)* | set one property on a pre-created scratch node | `MATCH (n:BenchScratch_<run> {id: $id}) WHERE n.touched IS NULL SET n.touched = $id` |
-| `delete_node` *(write)* | delete a pre-created scratch node | `MATCH (n:BenchScratch_<run> {id: $id}) DELETE n` |
-| `merge_hit` *(write)* | `MERGE` an existing scratch node (always hits) | `MERGE (n:BenchScratch_<run> {id: $id}) RETURN n.id` |
+| Operation | Tier | What it measures | Cypher (body) |
+|---|---|---|---|
+| `return_const` | `core` | round-trip / parse+exec baseline (no dataset) | `RETURN $i AS x` |
+| `match_by_index` | `core` | point lookup on the `:User(id)` index | `MATCH (n:User {id: $id}) RETURN n.id` |
+| `match_by_label_scan` | `core` | full `:User` label scan (non-indexable predicate) | `MATCH (n:User) WHERE n.id % $modulus = 0 RETURN count(n) AS c` |
+| `expand_1_hop` | `core` | 1-hop `:Friend` expansion | `MATCH (s:User {id: $id})-[:Friend]->(n:User) RETURN n.id` |
+| `expand_hops_5` | `full` | fixed 5-hop `:Friend` expansion | `MATCH (s:User {id: $id})-[:Friend*5..5]->(n:User) RETURN DISTINCT n.id LIMIT 100` |
+| `aggregate_count` | `core` | count a node's 1-hop neighbours | `MATCH (s:User {id: $id})-[:Friend]->(n:User) RETURN count(n) AS c` |
+| `aggregate_group` | `full` | group neighbours by age with counts | `MATCH (s:User {id: $id})-[:Friend]->(n:User) RETURN n.age AS age, count(*) AS c ORDER BY c DESC LIMIT 10` |
+| `shortest_path` | `full` | bounded shortest `:Friend` path between two nodes | `MATCH (s:User {id: $from}), (t:User {id: $to}) WITH shortestPath((s)-[:Friend*1..6]->(t)) AS p RETURN coalesce(length(p), -1) AS len` |
+| `property_projection` | `core` | project scalar properties of an indexed node | `MATCH (n:User {id: $id}) RETURN n.id, n.age` |
+| `create_node` *(write)* | `full` | create a fresh scratch node each invocation | `CREATE (n:BenchScratch_<run> {id: $id}) RETURN n.id` |
+| `merge_miss` *(write)* | `full` | `MERGE` a fresh scratch node (always misses → creates) | `MERGE (n:BenchScratch_<run> {id: $id}) RETURN n.id` |
+| `create_edge` *(write)* | `full` | create a fresh edge between two scratch nodes | `MATCH (a:BenchScratch_<run> {id: $src}), (b:BenchScratch_<run> {id: $dst}) CREATE (a)-[:BenchEdge]->(b)` |
+| `set_property` *(write)* | `full` | set one property on a pre-created scratch node | `MATCH (n:BenchScratch_<run> {id: $id}) WHERE n.touched IS NULL SET n.touched = $id` |
+| `delete_node` *(write)* | `full` | delete a pre-created scratch node | `MATCH (n:BenchScratch_<run> {id: $id}) DELETE n` |
+| `merge_hit` *(write)* | `full` | `MERGE` an existing scratch node (always hits) | `MERGE (n:BenchScratch_<run> {id: $id}) RETURN n.id` |
 
 Because `OpName` is a clap `ValueEnum`, `--op <TAB>` completes the operation names once you've
 installed completion (`benchmark generate-auto-complete <shell>`), and `just synthetic-ops` (or
