@@ -344,7 +344,7 @@ pub enum Tier {
 }
 
 impl Tier {
-    /// The stable lowercase tag used on the CLI, in `list-ops`, and in reports.
+    /// The stable lowercase tag used on the CLI and in `list-ops` (`core`/`full`).
     pub fn as_str(self) -> &'static str {
         match self {
             Tier::Core => "core",
@@ -471,11 +471,12 @@ impl Default for Config {
 pub fn list_ops() -> String {
     let mut out = String::from("Available operations:\n");
     for op in OpName::all() {
+        let op_spec = spec(*op);
         out.push_str(&format!(
             "  {:<20} [{:<4}] {}\n",
             op.as_str(),
-            op.tier().as_str(),
-            op.description()
+            op_spec.tier.as_str(),
+            op_spec.description
         ));
     }
     out
