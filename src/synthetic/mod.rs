@@ -216,63 +216,79 @@ pub fn salt_from_name(name: &str) -> u64 {
 
 /// A synthetic op's identity, keyed by a **stable string name**.
 ///
-/// Built-in ops wrap an [`OpName`] and keep its fixed [`OpName::salt`], so recorded baselines stay
-/// valid. A **dynamic** op — e.g. a query shape pulled from `queries_repository` by name (design
-/// §3.1), which has no `OpName` variant — is identified purely by its stable query name, with a
+/// The representation is **opaque**: an `OpKey` is built only via [`OpKey::from`] (a built-in
+/// [`OpName`]) or [`OpKey::dynamic`] (a string-keyed op), which guarantees a built-in op's name can
+/// never be carried by a dynamic key with a conflicting salt or kind (see [`OpKey::dynamic`]).
+///
+/// Built-in ops keep [`OpName`]'s fixed [`OpName::salt`], so recorded baselines stay valid. A
+/// **dynamic** op — e.g. a query shape pulled from `queries_repository` by name (design §3.1),
+/// which has no `OpName` variant — is identified purely by its stable query name, with a
 /// **name-derived salt** ([`salt_from_name`]) so it needs no hand-assigned constant. Both expose the
 /// same [`name`](Self::name)/[`salt`](Self::salt)/[`kind`](Self::kind), so record/replay/threshold
 /// lookups can key on the string name uniformly (existing `OpName` ops keep working unchanged).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum OpKey {
+pub struct OpKey(OpKeyRepr);
+
+/// Private representation of an [`OpKey`]. Kept private so a dynamic key with a built-in name (which
+/// would carry the wrong salt/kind) is impossible to construct — [`OpKey::dynamic`] canonicalizes
+/// built-in names to [`OpKeyRepr::Named`], and there is no other way in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum OpKeyRepr {
     /// One of the built-in [`OpName`] operations.
     Named(OpName),
     /// A dynamic op identified only by its stable string name.
-    Dynamic {
-        /// The op's stable string name (its report / threshold / CLI key).
-        name: String,
-        /// Whether the op reads or writes.
-        kind: QueryType,
-    },
+    Dynamic { name: String, kind: QueryType },
 }
 
 impl OpKey {
     /// Build a dynamic (string-keyed) op identity from its stable name and kind.
+    ///
+    /// If `name` matches a built-in [`OpName`] tag it **canonicalizes to that `OpName`** (keeping
+    /// the built-in's salt and kind, and ignoring the passed `kind`), so a dynamic key can never
+    /// shadow a built-in op with a conflicting salt/kind — the two would otherwise collide on the
+    /// string name used by reports, thresholds and recordings.
     pub fn dynamic(name: impl Into<String>, kind: QueryType) -> Self {
-        OpKey::Dynamic {
-            name: name.into(),
-            kind,
+        let name = name.into();
+        match OpName::from_tag(&name) {
+            Some(op) => OpKey(OpKeyRepr::Named(op)),
+            None => OpKey(OpKeyRepr::Dynamic { name, kind }),
         }
     }
 
     /// This op's stable string name — its report / threshold / CLI key.
     pub fn name(&self) -> &str {
-        match self {
-            OpKey::Named(op) => op.as_str(),
-            OpKey::Dynamic { name, .. } => name,
+        match &self.0 {
+            OpKeyRepr::Named(op) => op.as_str(),
+            OpKeyRepr::Dynamic { name, .. } => name,
         }
     }
 
     /// The stable RNG salt mixed into the seed. Built-in ops keep [`OpName::salt`]; dynamic ops
     /// derive it from their name ([`salt_from_name`]), so an op is reproducible from its name alone.
     pub fn salt(&self) -> u64 {
-        match self {
-            OpKey::Named(op) => op.salt(),
-            OpKey::Dynamic { name, .. } => salt_from_name(name),
+        match &self.0 {
+            OpKeyRepr::Named(op) => op.salt(),
+            OpKeyRepr::Dynamic { name, .. } => salt_from_name(name),
         }
     }
 
     /// Whether this op reads or writes (selects `RO_QUERY` vs `QUERY`).
     pub fn kind(&self) -> QueryType {
-        match self {
-            OpKey::Named(op) => op.kind(),
-            OpKey::Dynamic { kind, .. } => *kind,
+        match &self.0 {
+            OpKeyRepr::Named(op) => op.kind(),
+            OpKeyRepr::Dynamic { kind, .. } => *kind,
         }
+    }
+
+    /// Whether this key resolves to a built-in [`OpName`] op (vs a dynamic string-keyed op).
+    pub fn is_named(&self) -> bool {
+        matches!(self.0, OpKeyRepr::Named(_))
     }
 }
 
 impl From<OpName> for OpKey {
     fn from(op: OpName) -> Self {
-        OpKey::Named(op)
+        OpKey(OpKeyRepr::Named(op))
     }
 }
 
@@ -1424,7 +1440,8 @@ mod tests {
     #[test]
     fn op_key_named_matches_its_opname() {
         let key = OpKey::from(OpName::MatchByIndex);
-        assert_eq!(key, OpKey::Named(OpName::MatchByIndex));
+        assert!(key.is_named());
+        assert_eq!(key, OpKey::from(OpName::MatchByIndex));
         assert_eq!(key.name(), OpName::MatchByIndex.as_str());
         assert_eq!(key.kind(), OpName::MatchByIndex.kind());
         // A built-in op keeps its curated salt constant — NOT the name-derived one — so existing
@@ -1436,6 +1453,7 @@ mod tests {
     #[test]
     fn op_key_dynamic_uses_name_derived_salt() {
         let key = OpKey::dynamic("query_shape_42", QueryType::Read);
+        assert!(!key.is_named());
         assert_eq!(key.name(), "query_shape_42");
         assert_eq!(key.kind(), QueryType::Read);
         assert_eq!(key.salt(), salt_from_name("query_shape_42"));
@@ -1453,6 +1471,20 @@ mod tests {
             OpKey::dynamic("shape_a", QueryType::Read).salt(),
             OpKey::dynamic("shape_b", QueryType::Read).salt()
         );
+    }
+
+    #[test]
+    fn op_key_dynamic_canonicalizes_builtin_names() {
+        // A dynamic key built from a *built-in* op name must collapse to the `Named` identity, so it
+        // can't shadow the built-in with a conflicting salt/kind on the shared string name (the key
+        // reports, thresholds and recordings all use).
+        let canon = OpKey::dynamic("match_by_index", QueryType::Write);
+        assert!(canon.is_named());
+        assert_eq!(canon, OpKey::from(OpName::MatchByIndex));
+        // The built-in's real salt and kind win; the passed `Write` kind is ignored.
+        assert_eq!(canon.salt(), OpName::MatchByIndex.salt());
+        assert_eq!(canon.kind(), OpName::MatchByIndex.kind());
+        assert_ne!(canon.salt(), salt_from_name("match_by_index"));
     }
 
     #[test]
