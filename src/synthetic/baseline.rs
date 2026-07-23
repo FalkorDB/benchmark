@@ -211,6 +211,18 @@ pub fn regression_guard(
             reason: format!("concurrency sweep differs — baseline {bc:?} vs candidate {cc:?}"),
         };
     }
+    // Server settings that affect sustained throughput (recorded when readable). Only a *known*
+    // difference is disqualifying — an unread setting (None) can't be compared, so we don't block.
+    if let (Some(bq), Some(cq)) = (
+        baseline.meta.server.max_queued_queries,
+        candidate.meta.server.max_queued_queries,
+    ) {
+        if bq != cq {
+            return RegressionGuard::NotComparable {
+                reason: format!("MAX_QUEUED_QUERIES differs — baseline {bq} vs candidate {cq}"),
+            };
+        }
+    }
 
     // 2. Per-op result divergence — reported, never fatal. An op the baseline recorded a digest for
     //    that the candidate doesn't match (or is missing) is diverged.
@@ -545,5 +557,17 @@ mod regression_guard_tests {
         assert!(matches!(regression_guard(&base, &diff_samples), RegressionGuard::NotComparable { .. }));
         let diff_sweep = rep("h", 100, 50, vec![1, 4, 8], None, None, &[]);
         assert!(matches!(regression_guard(&base, &diff_sweep), RegressionGuard::NotComparable { .. }));
+    }
+
+    #[test]
+    fn differing_max_queued_queries_is_not_comparable_but_unread_is_ok() {
+        let mut a = rep("h", 100, 50, vec![1], None, None, &[]);
+        let mut b = rep("h", 100, 50, vec![1], None, None, &[]);
+        a.meta.server.max_queued_queries = Some(1000);
+        b.meta.server.max_queued_queries = Some(25);
+        assert!(matches!(regression_guard(&a, &b), RegressionGuard::NotComparable { .. }));
+        // One side unread (None) can't be compared, so it does not disqualify.
+        b.meta.server.max_queued_queries = None;
+        assert!(matches!(regression_guard(&a, &b), RegressionGuard::Comparable { .. }));
     }
 }

@@ -22,6 +22,10 @@ pub struct ServerInfo {
     /// The server's query plan-cache size (`GRAPH.CONFIG GET CACHE_SIZE`), for context on the
     /// cached-vs-uncached comparison. `None` if it couldn't be read.
     pub cache_size: Option<u64>,
+    /// The server's queued-query limit (`GRAPH.CONFIG GET MAX_QUEUED_QUERIES`). Part of the
+    /// comparability manifest (it bounds sustained throughput under load). `None` if unreadable.
+    #[serde(default)]
+    pub max_queued_queries: Option<u64>,
     pub redis_version: Option<String>,
     pub redis_build_id: Option<String>,
     pub redis_git_sha1: Option<String>,
