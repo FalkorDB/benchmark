@@ -100,11 +100,12 @@ precedence + the verdict function are pure logic → **unit-tested** (faster, ex
 over, per-op vs per-op×C precedence, floor suppression, divergence → N/A, zero/missing baseline →
 N/A).
 
-### A3. Explicit non-fatal regression mode — `report --regression`
+### A3. Non-fatal regression mode — `report --diff … --regression`
 
-Add a dedicated mode rather than overloading the strict `--diff` guard. New invocation
-`synthetic report --regression --baseline <base.json> --candidate <cand.json> [--thresholds
-<file>] [--out <md>]` (or, equivalently, `report --diff … --regression`), which:
+Add a non-fatal, colored mode alongside the strict `--diff` guard. Invocation (the second report
+`B` is the **candidate**, the first `A` is the **baseline**):
+`synthetic report --diff <baseline.json> <candidate.json> --regression [--thresholds <file>]
+[--out <md>]`, which:
 
 - **Splits the guard** (today `baseline::guard` conflates the two — src/synthetic/baseline.rs):
   - a **comparability mismatch** ⇒ *globally not comparable* → the whole table is rendered as
@@ -144,7 +145,8 @@ of a table. This keeps correctness/infra failures visible without ever blocking 
 
 ### A5. Two baselines in one report
 
-Keep the tool's unit of work a single pair (`--baseline`, `--candidate`). The **workflow** invokes
+Keep the tool's unit of work a single pair (`report --diff <baseline> <candidate> --regression`).
+The **workflow** invokes
 it once per baseline (`main→pr`, `release→pr`) and concatenates the two tables under one sticky
 comment. (A combined multi-baseline subcommand is a possible future consolidation, out of scope.)
 
@@ -194,9 +196,9 @@ every tool/infra failure is caught and turned into a "benchmark unavailable" com
      --server-image pr@sha256:… --concurrency 1,2,4,8,16,32 --cache both --samples 200 --warmup 50
      --out pr.json`; **`docker rm -f`** (guaranteed cleanup via trap).
    - repeat for `main` (`--label main`) and, if present, `release` (`--label "release X.Y.Z"`).
-4. **Diff + color (non-fatal):** `benchmark synthetic report --regression --baseline main.json
-   --candidate pr.json --thresholds .github/synthetic-thresholds.toml --out syn-main.md`, and
-   likewise for release. Each call catches failure → "unavailable" fragment.
+4. **Diff + color (non-fatal):** `benchmark synthetic report --diff main.json pr.json --regression
+   --thresholds .github/synthetic-thresholds.toml --out syn-main.md` (the second report, `pr.json`,
+   is the candidate), and likewise for release. Each call catches failure → "unavailable" fragment.
 5. **Publish (non-blocking):** assemble one body (arch-specific marker — see B3). **Both** the
    job-summary step and the sticky-PR-comment step (`pull-requests: write`) are guarded by
    `if: always()`; a missing report, a comment-write failure, or a read-only fork token (fork PRs
@@ -274,7 +276,7 @@ Identical recorded workload, each build measured back-to-back on one VM (one con
 
 ## 8. Deliverables checklist (on approval)
 
-**`FalkorDB/benchmark`:** `run --label`; `report --regression` (non-fatal, colored 🟢/🔴/N/A,
+**`FalkorDB/benchmark`:** `run --label`; `report --diff … --regression` (non-fatal, colored 🟢/🔴/N/A,
 p50=total-median verdict with `budget_pct` + `floor_ms`); **split guard** on a **comparability
 manifest** (`workload_hash` + `generator_version` + samples/warmup + sweep + applied server
 settings, recorded in the report → global not-comparable on mismatch; per-op digest mismatch =
