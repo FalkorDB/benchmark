@@ -26,7 +26,9 @@ use crate::error::BenchmarkError::OtherError;
 use crate::error::BenchmarkResult;
 use crate::queries_repository::QueryType;
 use crate::synthetic::catalog::spec;
-use crate::synthetic::dataset::{load_statements, DatasetSpec, LoadPhase, GENERATOR_VERSION};
+use crate::synthetic::dataset::{
+    fixture_statements, load_statements, DatasetSpec, LoadPhase, GENERATOR_VERSION,
+};
 use crate::synthetic::{OpKey, OpName};
 use rand::rngs::StdRng;
 use rand::SeedableRng;
@@ -315,6 +317,41 @@ pub fn record_rendered(
     batch_size: usize,
     out_dir: &Path,
 ) -> BenchmarkResult<Manifest> {
+    record_rendered_impl(dataset, graph, ops, corpus_seed, batch_size, out_dir, false)
+}
+
+/// Like [`record_rendered`], but also appends the post-load [`fixture_statements`] (the fulltext +
+/// vector index DDL and their deterministic seed data) to `graph.jsonl`, folded into the
+/// [`Manifest::workload_hash`]. Used when a recording includes the FixtureDependent read shapes so
+/// every replay endpoint gets the identical fulltext/vector fixture (record-once → replay-verbatim).
+/// A bundle written this way stays byte-identical across replays; the fixture statements are constant
+/// (no `spec`/seed-derived values). The seed `SET`s are inherently idempotent; the index DDL
+/// (`CREATE FULLTEXT/VECTOR INDEX …`) assumes a **fresh load** — which replay guarantees by dropping
+/// and reloading the graph before executing `graph.jsonl` (design §3.4). The fixture DDL is
+/// FalkorDB-specific, so these shapes are for FalkorDB-vs-FalkorDB A/B, not cross-database runs.
+pub fn record_rendered_with_fixture(
+    dataset: &DatasetSpec,
+    graph: &str,
+    ops: &[RecordedOp],
+    corpus_seed: u64,
+    batch_size: usize,
+    out_dir: &Path,
+) -> BenchmarkResult<Manifest> {
+    record_rendered_impl(dataset, graph, ops, corpus_seed, batch_size, out_dir, true)
+}
+
+/// Shared body of [`record_rendered`] / [`record_rendered_with_fixture`]. When `include_fixture` is
+/// set, the fixture statements are streamed into `graph.jsonl` after the base load statements and
+/// hashed in the same order, so the two entry points differ only by whether the fixture is present.
+fn record_rendered_impl(
+    dataset: &DatasetSpec,
+    graph: &str,
+    ops: &[RecordedOp],
+    corpus_seed: u64,
+    batch_size: usize,
+    out_dir: &Path,
+    include_fixture: bool,
+) -> BenchmarkResult<Manifest> {
     dataset.validate()?;
     if batch_size == 0 {
         return Err(OtherError("record batch_size must be greater than 0".to_string()));
@@ -354,11 +391,19 @@ pub fn record_rendered(
         corpus_seed,
     );
 
-    // graph.jsonl — streamed straight from the lazy statement iterator (one batch in memory).
+    // graph.jsonl — streamed straight from the lazy statement iterator (one batch in memory). When
+    // a fixture is requested, its statements follow the base load statements in the same stream, so
+    // they are written and hashed in that exact order (index → nodes → edges → fixture).
     let graph_path = out_dir.join("graph.jsonl");
     {
         let mut w = BufWriter::new(create_file(&graph_path)?);
-        for (seq, (phase, stmt)) in load_statements(dataset, batch_size).enumerate() {
+        // Append the fixture statements only when requested; `None` contributes nothing to the stream.
+        let fixture = include_fixture
+            .then(fixture_statements)
+            .into_iter()
+            .flatten();
+        let stmts = load_statements(dataset, batch_size).chain(fixture);
+        for (seq, (phase, stmt)) in stmts.enumerate() {
             hasher.graph_record(phase.tag(), &stmt);
             let rec = GraphRecord {
                 seq,
@@ -756,6 +801,51 @@ mod tests {
         assert_eq!(key.kind(), QueryType::Read);
         assert_eq!(cmds, &ops[0].commands);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn record_rendered_with_fixture_appends_fixture_and_changes_hash() {
+        // Recording the FixtureDependent shapes bakes the fulltext/vector fixture into `graph.jsonl`
+        // (record-once → replay-verbatim) and folds it into the workload_hash.
+        let dir = temp_bundle_dir("synthrec-fixture");
+        let spec = DatasetSpec {
+            seed: 5,
+            nodes: 200,
+            edges: 400,
+        };
+        let ops = vec![RecordedOp {
+            // Mirrors a fixture-dependent shape: a non-gated (result-N/A) read.
+            key: OpKey::dynamic("vector_query_nodes_smoke", QueryType::Read),
+            result_gated: false,
+            commands: vec![
+                "CALL db.idx.vector.queryNodes('User', 'embedding', 10, vecf32([0.1, 0.2, 0.3])) \
+                 YIELD node, score RETURN id(node), score LIMIT 10"
+                    .to_string(),
+            ],
+        }];
+        let with = record_rendered_with_fixture(&spec, "gfix", &ops, 9, 32, &dir).unwrap();
+
+        // The bundle survives the integrity gate and its graph is base load stmts + the fixture.
+        let bundle = load(&dir).unwrap();
+        assert_eq!(bundle.manifest, with);
+        let base: Vec<(LoadPhase, String)> = load_statements(&spec, 32).collect();
+        let fixture: Vec<(LoadPhase, String)> = fixture_statements().collect();
+        let want: Vec<(LoadPhase, String)> = base.iter().chain(fixture.iter()).cloned().collect();
+        assert_eq!(bundle.graph_statements, want);
+        // The trailing statements are exactly the fixture phase, in order.
+        let tail = &bundle.graph_statements[bundle.graph_statements.len() - fixture.len()..];
+        assert_eq!(tail, fixture.as_slice());
+        // The recorded op stays non-gated (result-N/A) through the round-trip.
+        assert!(!bundle.manifest.ops[0].result_gated);
+
+        // Recording the same spec/ops *without* the fixture yields a different workload_hash, proving
+        // the fixture is folded into the hash (so it can't be silently dropped on replay).
+        let dir2 = temp_bundle_dir("synthrec-nofixture");
+        let without = record_rendered(&spec, "gfix", &ops, 9, 32, &dir2).unwrap();
+        assert_ne!(with.workload_hash, without.workload_hash);
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&dir2).ok();
     }
 
     #[test]
