@@ -221,7 +221,7 @@ fn read_shapes_repository(
 /// (`corpus_seed ^ salt`, the op's [`OpKey::salt`]), so a given seed yields a byte-identical corpus
 /// (record-once → replay-verbatim). [`Tier::Full`] selects every repo read; [`Tier::Core`] selects
 /// only the core subset. Returns an error if the annotation table names a shape that isn't an
-/// auto-discovered `queries_repository` read (annotation drift).
+/// auto-discovered `queries_repository` non-algorithm read (annotation drift).
 pub fn record_repo_reads(
     tier: Tier,
     vertices: i32,
@@ -257,7 +257,7 @@ fn record_selected_shapes(
     for shape in shapes {
         if !available.contains(shape.name) {
             return Err(OtherError(format!(
-                "repo read shape '{}' is annotated but not a queries_repository read \
+                "repo read shape '{}' is annotated but not a queries_repository non-algorithm read \
                  (annotation drift — update src/synthetic/shapes.rs)",
                 shape.name
             )));
