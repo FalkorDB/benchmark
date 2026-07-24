@@ -191,7 +191,7 @@ rec/commands: aggregate_count.jsonl aggregate_group.jsonl expand_1_hop.jsonl
 ```json
 {
   "format_version": 1,
-  "generator_version": "synthbench/v3",
+  "generator_version": "synthbench/v4",
   "dataset": { "seed": 7, "nodes": 1000, "edges": 5000 },
   "ops": [ { "name": "return_const", "count": 256 }, { "name": "match_by_index", "count": 256 } ],
   "workload_hash": "sha256:7be5c44c…3058e2"

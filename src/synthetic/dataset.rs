@@ -1,13 +1,18 @@
 //! Seeded, reproducible synthetic dataset generator (Part 3).
 //!
-//! Generates a deterministic `:User {id, age}` / `(:User)-[:Friend]->(:User)` graph from a
-//! [`DatasetSpec`] and bulk-loads it via `UNWIND` batches, so operation numbers are controlled and
-//! comparable across runs, machines and FalkorDB versions. All randomness is derived from a
+//! Generates a deterministic `:User {id, age}` / `(:User)-[:Friend {bench_capacity}]->(:User)`
+//! graph from a [`DatasetSpec`] and bulk-loads it via `UNWIND` batches, so operation numbers are
+//! controlled and comparable across runs. To mirror the A/B benchmark's baseline fixture (design
+//! §3.4) it builds **both** the `:User(id)` and `:User(age)` indexes and stamps every `:Friend`
+//! edge with a deterministic [`bench_capacity`](crate::data_prep::bench_capacity), so shapes that
+//! filter on `age` or `r.bench_capacity` exercise the intended plan/predicate rather than a
+//! degenerate empty result. All randomness is derived from a
 //! portable [`splitmix64`] stream keyed by `(seed, domain, index)` — **not** `rand`'s `StdRng`,
 //! whose output isn't guaranteed stable across versions — so "same seed ⇒ same dataset" holds
 //! everywhere. A [`corpus_hash`] over the spec + selected operations + query bodies + sampled pools
 //! is recorded in the report so runs are only compared when the workload truly matches.
 
+use crate::data_prep::bench_capacity;
 use crate::error::BenchmarkError::OtherError;
 use crate::error::BenchmarkResult;
 use crate::query::Query;
@@ -22,7 +27,7 @@ use std::time::Duration;
 
 /// Bumped whenever the generator algorithm or the operation catalog's query bodies change, so a
 /// [`corpus_hash`] from an older build never compares equal to a newer, differently-generated one.
-pub const GENERATOR_VERSION: &str = "synthbench/v3";
+pub const GENERATOR_VERSION: &str = "synthbench/v4";
 
 /// Max distinct `:User` ids sampled into the [`DatasetHandle`] id pool.
 const POOL_IDS: usize = 4096;
@@ -255,8 +260,13 @@ impl LoadPhase {
     }
 }
 
-/// The `:User(id)` index DDL — created before any data so every insert maintains it.
-const INDEX_STMT: &str = "CREATE INDEX FOR (u:User) ON (u.id)";
+/// The baseline index DDL, created before any data so every insert maintains the indexes. Mirrors
+/// the A/B benchmark's baseline fixture, which builds **both** a `:User(id)` and a `:User(age)`
+/// index (design §3.4); `id` backs point lookups, `age` backs the age-filtered read shapes.
+const INDEX_STMTS: [&str; 2] = [
+    "CREATE INDEX FOR (u:User) ON (u.id)",
+    "CREATE INDEX FOR (u:User) ON (u.age)",
+];
 
 /// One node `UNWIND` batch covering ids `lo..=hi` (inclusive, 1-based).
 fn node_batch(
@@ -274,7 +284,9 @@ fn node_batch(
     format!("UNWIND [{}] AS row CREATE (u:User) SET u = row", maps)
 }
 
-/// One edge `UNWIND` batch covering edge indices `lo..hi` (half-open).
+/// One edge `UNWIND` batch covering edge indices `lo..hi` (half-open). Each `:Friend` edge carries
+/// a deterministic [`bench_capacity`] (same formula as the A/B fixture) so shapes that filter on
+/// `r.bench_capacity` exercise a real predicate instead of always matching zero rows (design §3.4).
 fn edge_batch(
     spec: &DatasetSpec,
     lo: usize,
@@ -286,20 +298,22 @@ fn edge_batch(
             maps.push(',');
         }
         let (src, dst) = spec.edge_at(e);
-        let _ = write!(maps, "{{src:{},dst:{}}}", src, dst);
+        let capacity = bench_capacity(src as u64, dst as u64);
+        let _ = write!(maps, "{{src:{},dst:{},capacity:{}}}", src, dst, capacity);
     }
     format!(
-        "UNWIND [{}] AS row MATCH (n:User {{id: row.src}}), (m:User {{id: row.dst}}) CREATE (n)-[:Friend]->(m)",
+        "UNWIND [{}] AS row MATCH (n:User {{id: row.src}}), (m:User {{id: row.dst}}) CREATE (n)-[:Friend {{bench_capacity: row.capacity}}]->(m)",
         maps
     )
 }
 
-/// The exact ordered sequence of load statements that builds `spec`'s dataset: the index DDL, then
-/// `batch_size`-sized node `UNWIND` batches, then edge batches. **Lazy** — each batch string is
-/// built on demand as the iterator advances, so only one batch is materialized at a time (no
-/// full-script `Vec`). Shared by the live loader ([`generate_and_load`]) and the offline recorder
-/// so a replay loads a byte-identical graph to what a `--generate` run would. Callers must pass a
-/// validated `spec` (`spec.validate()`) and `batch_size >= 1`.
+/// The exact ordered sequence of load statements that builds `spec`'s dataset: the index DDL (both
+/// the `:User(id)` and `:User(age)` indexes), then `batch_size`-sized node `UNWIND` batches, then
+/// edge batches. **Lazy** — each batch string is built on demand as the iterator advances, so only
+/// one batch is materialized at a time (no full-script `Vec`). Shared by the live loader
+/// ([`generate_and_load`]) and the offline recorder so a replay loads a byte-identical graph to
+/// what a `--generate` run would. Callers must pass a validated `spec` (`spec.validate()`) and
+/// `batch_size >= 1`.
 pub(crate) fn load_statements(
     spec: &DatasetSpec,
     batch_size: usize,
@@ -307,7 +321,9 @@ pub(crate) fn load_statements(
     debug_assert!(batch_size >= 1, "batch_size must be >= 1");
     let nodes = spec.nodes as i32;
     let edges = spec.edges;
-    let index = std::iter::once((LoadPhase::Index, INDEX_STMT.to_string()));
+    let index = INDEX_STMTS
+        .iter()
+        .map(|stmt| (LoadPhase::Index, (*stmt).to_string()));
     let node_batches = (1..=nodes).step_by(batch_size).map(move |lo| {
         // Widen to i64 so `lo + batch_size` can't overflow i32 near the id ceiling.
         let hi = ((lo as i64) + (batch_size as i64) - 1).min(nodes as i64) as i32;
@@ -321,9 +337,9 @@ pub(crate) fn load_statements(
 }
 
 /// Generate the dataset described by `spec` and bulk-load it into `graph`, **replacing** whatever
-/// was there (the graph key is dropped first). Creates the `:User(id)` index, loads nodes then
-/// edges in `batch_size` `UNWIND` batches, verifies the final counts, and returns the seeded
-/// [`DatasetHandle`] the operation corpora draw from. `load_deadline` bounds each batch.
+/// was there (the graph key is dropped first). Creates the `:User(id)` and `:User(age)` indexes,
+/// loads nodes then edges in `batch_size` `UNWIND` batches, verifies the final counts, and returns
+/// the seeded [`DatasetHandle`] the operation corpora draw from. `load_deadline` bounds each batch.
 pub(crate) async fn generate_and_load(
     graph: &mut AsyncGraph,
     spec: &DatasetSpec,
@@ -512,13 +528,15 @@ mod tests {
 
     #[test]
     fn load_statements_are_ordered_and_batched() {
-        // 5 nodes, 6 edges, batch 2 → index + ceil(5/2)=3 node batches + ceil(6/2)=3 edge batches.
+        // 5 nodes, 6 edges, batch 2 → 2 index stmts + ceil(5/2)=3 node batches + ceil(6/2)=3 edge
+        // batches.
         let s = spec(3, 5, 6);
         let stmts: Vec<(LoadPhase, String)> = load_statements(&s, 2).collect();
         let phases: Vec<LoadPhase> = stmts.iter().map(|(p, _)| *p).collect();
         assert_eq!(
             phases,
             vec![
+                LoadPhase::Index,
                 LoadPhase::Index,
                 LoadPhase::Nodes,
                 LoadPhase::Nodes,
@@ -528,11 +546,12 @@ mod tests {
                 LoadPhase::Edges,
             ]
         );
-        // The index DDL comes first, verbatim.
-        assert_eq!(stmts[0].1, INDEX_STMT);
+        // Both index DDLs come first, verbatim: `:User(id)` then `:User(age)`.
+        assert_eq!(stmts[0].1, INDEX_STMTS[0]);
+        assert_eq!(stmts[1].1, INDEX_STMTS[1]);
         // First node batch has ids 1,2 with their deterministic ages; last has the lone id 5.
         assert_eq!(
-            stmts[1].1,
+            stmts[2].1,
             format!(
                 "UNWIND [{{id:1,age:{}}},{{id:2,age:{}}}] AS row CREATE (u:User) SET u = row",
                 s.node_age(1),
@@ -540,19 +559,22 @@ mod tests {
             )
         );
         assert_eq!(
-            stmts[3].1,
+            stmts[4].1,
             format!(
                 "UNWIND [{{id:5,age:{}}}] AS row CREATE (u:User) SET u = row",
                 s.node_age(5)
             )
         );
-        // First edge batch covers edge indices 0,1 (the ring backbone start).
+        // First edge batch covers edge indices 0,1 (the ring backbone start), each stamped with its
+        // deterministic bench_capacity.
         let (e0s, e0d) = s.edge_at(0);
         let (e1s, e1d) = s.edge_at(1);
+        let e0c = bench_capacity(e0s as u64, e0d as u64);
+        let e1c = bench_capacity(e1s as u64, e1d as u64);
         assert_eq!(
-            stmts[4].1,
+            stmts[5].1,
             format!(
-                "UNWIND [{{src:{e0s},dst:{e0d}}},{{src:{e1s},dst:{e1d}}}] AS row MATCH (n:User {{id: row.src}}), (m:User {{id: row.dst}}) CREATE (n)-[:Friend]->(m)"
+                "UNWIND [{{src:{e0s},dst:{e0d},capacity:{e0c}}},{{src:{e1s},dst:{e1d},capacity:{e1c}}}] AS row MATCH (n:User {{id: row.src}}), (m:User {{id: row.dst}}) CREATE (n)-[:Friend {{bench_capacity: row.capacity}}]->(m)"
             )
         );
     }
@@ -573,8 +595,8 @@ mod tests {
     fn load_statements_batch_size_one_yields_one_statement_per_row() {
         let s = spec(1, 3, 3);
         let stmts: Vec<_> = load_statements(&s, 1).collect();
-        // index + 3 node batches + 3 edge batches.
-        assert_eq!(stmts.len(), 1 + 3 + 3);
+        // 2 index stmts + 3 node batches + 3 edge batches.
+        assert_eq!(stmts.len(), 2 + 3 + 3);
     }
 
     #[test]
@@ -724,7 +746,7 @@ mod tests {
         )];
         assert_eq!(
             corpus_hash(&s, 0, 256, &bodies, &s.handle()),
-            "sha256:ad6dec1c5dc2f7700383cddecbdb23b0a7b02bead9a12ff64239b3c9aa836ab0"
+            "sha256:9be33d3926a50d91f3ec80d5c0a0abb3256e5700945ab3a1fd202950e8f7e450"
         );
     }
 }
