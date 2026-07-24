@@ -1,7 +1,10 @@
 # Design — cover the A/B benchmark's query shapes in the synthetic per-op check
 
-**Status:** **reads-scope implemented and merged** — Phases 1–5 landed in PRs #240–#250; the per-PR
-non-divergence gate is being hardened to mirror the CI matrix (#251, in flight). **Writes (Phase 7)**
+**Status:** the **reads-scope implementation has already landed on `master`** via separate merged PRs
+(#240–#250); the per-PR non-divergence gate is being hardened to mirror the CI matrix (#251, in
+flight). **This PR carries the design-of-record + status doc itself** (doc-only) — the symbols it
+references (`OpKey`, `--tier`, `generate_with_rng`, `--repo-reads`, …) live in `master`, not in this
+one-file diff, so the doc intentionally lags the code it describes. **Writes (Phase 7)**
 and **algorithms (Phase 6)** are **deferred** by the reads-first decision. This is now a **living
 design + status record**, kept in sync as work lands — see the status table (§0) and the per-phase
 markers in §3/§7. §2/§3 describe the **pre-implementation baseline** that motivated the work; the
@@ -21,6 +24,9 @@ a **multi-PR effort with three hard prerequisites** (dynamic op identity, result
 per-op runtime budgets) that must land **before** any shapes are added.
 
 ## 0. Implementation status (kept in sync)
+
+All ✅ rows below are **merged to `master`** in the referenced PRs; this design doc (the present PR) is
+the design-of-record and intentionally lags the code it describes.
 
 | Phase | What | Status |
 | --- | --- | --- |
