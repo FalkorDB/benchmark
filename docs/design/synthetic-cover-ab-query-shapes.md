@@ -1,8 +1,7 @@
 # Design — cover the A/B benchmark's query shapes in the synthetic per-op check
 
-**Status:** the **reads-scope implementation has already landed on `master`** via separate merged PRs
-(#240–#250); the per-PR non-divergence gate is being hardened to mirror the CI matrix (#251, in
-flight). **This PR carries the design-of-record + status doc itself** (doc-only) — the symbols it
+**Status:** the reads-scope implementation has already landed on `master` via separate merged PRs
+(#240–#250); the per-PR non-divergence gate now mirrors the CI matrix (#251, merged). **This PR carries the design-of-record + status doc itself** (doc-only) — the symbols it
 references (`OpKey`, `--tier`, `generate_with_rng`, `--repo-reads`, …) live in `master`, not in this
 one-file diff, so the doc intentionally lags the code it describes. **Writes (Phase 7)**
 and **algorithms (Phase 6)** are **deferred** by the reads-first decision. This is now a **living
@@ -37,8 +36,8 @@ the design-of-record and intentionally lags the code it describes.
 | 3 | Baseline fixture parity (age index + deterministic `bench_capacity`) + string-`OpKey` record/replay plumbing + the ~46 Baseline reads via `--repo-reads` | ✅ #246 (3a), #247 (3b), #248 (B2) |
 | 4 | ExtendedCore `temporal_spatial_roundtrip` read | ✅ #249 |
 | 5 | Fulltext/vector fixture + fixture-dependent reads | ✅ #250 |
-| — | Per-PR non-divergence gate mirrors the CI matrix (uncached, C=1 & C=8) | 🚧 #251 |
-| 6 | Algorithms (capability-gated, per-op budgets, determinism exclusions) | ⛔ deferred |
+| — | Per-PR non-divergence gate mirrors the CI matrix (uncached, C=1 & C=8) | ✅ #251 |
+| 6 | Algorithms (capability-gated, per-op budgets, determinism exclusions) | 🚧 design ([phase 6](./synthetic-cover-algorithms-phase6.md)) |
 | 7 | Writes (base-fixture mutation + non-determinism; needs a state-isolation design) | ⛔ deferred (own design) |
 
 **Decisions (locked):** **reads-first** (writes/algorithms deferred to their own designs);
@@ -222,7 +221,7 @@ Land the phases in `FalkorDB/benchmark`; `falkordb-rs-next-gen` picks each up on
 `SYNTHETIC_BENCHMARK_REF` bump. The per-PR synthetic job stays non-blocking; `synthetic-verify` guards
 every phase.
 > **Status:** Phases 1–5 landed (#240–#250); the `synthetic-verify` non-divergence gate now mirrors the
-> per-PR matrix (`--repo-reads full` × C=1,8 × uncached) — #251, in flight.
+> per-PR matrix (`--repo-reads full` × C=1,8 × uncached) — #251, merged.
 
 ## 11. What the rubber-duck corrected (so reviewers can trust this revision)
 1. **No "automatic flow"** — synthetic is `OpName`-static; needs a string-keyed dynamic op (§3.1).
