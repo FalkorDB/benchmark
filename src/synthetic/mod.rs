@@ -1437,7 +1437,7 @@ pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkRes
             let ops = crate::cli::expand_op_selectors(&ops);
             // Reuse the run-config resolution (with generate=true) to validate + resolve the
             // dataset knobs, graph and read-op selection, then record OFFLINE (no server).
-            // `--repo-reads` selects the baseline read SHAPES implicitly (not catalog ops), so it
+            // `--repo-reads` selects the repo read SHAPES implicitly (not catalog ops), so it
             // forces `all_reads` only to satisfy op resolution; the resolved ops are ignored below.
             let overrides = config::CliOverrides {
                 endpoint: None,
