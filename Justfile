@@ -310,6 +310,14 @@ synthetic-verify:
     # out of `docker image inspect` JSON rather than using its Go template format, whose brace
     # syntax collides with just's own interpolation.
     server_image=$(docker image inspect "$image" 2>/dev/null | grep -oE '"[^"]+@sha256:[0-9a-f]+"' | head -1 | tr -d '"' || true)
+    if [ -z "$server_image" ]; then
+        # No registry digest (image built locally / not pulled by digest): fall back to Docker's
+        # immutable content-addressable image ID rather than the mutable tag, so the report still
+        # pins an exact image. (Kept as sed, not docker's Go-template --format, whose braces collide
+        # with just's own interpolation.)
+        server_image=$(docker image inspect "$image" 2>/dev/null | sed -nE 's/^[[:space:]]*"Id": "([^"]+)".*/\1/p' | head -1 || true)
+    fi
+    # Last resort: the (mutable) tag — image identity is report metadata, not the divergence assertion.
     [ -n "$server_image" ] || server_image="$image"
     # Record ALL A/B read shapes over a small, structurally-complete dataset (offline).
     cargo run --quiet --bin benchmark -- synthetic record --graph verify --repo-reads full \
@@ -333,14 +341,13 @@ synthetic-verify:
     # little cost. The per-query timeouts are generous (server 40s / client 60s vs the 5s/6s
     # defaults) purely so a benign capture timeout on a slow runner can never red-flag an identical
     # result set — again, the gate asserts divergence, not latency.
-    cargo run --quiet --bin benchmark -- synthetic run --recording recordings/_verify \
+    # Identical settings for both runs — shared so the two halves of the determinism oracle can never
+    # drift; only --no-load and --out differ. run-a loads the graph; run-b reuses the same server.
+    run_common=(synthetic run --recording recordings/_verify \
         --endpoint "$endpoint" --concurrency "$sweep" --cache uncached --samples 20 --warmup 10 \
-        --server-timeout-ms 40000 --client-deadline-ms 60000 \
-        --server-image "$server_image" --out recordings/_verify/run-a.json
-    cargo run --quiet --bin benchmark -- synthetic run --recording recordings/_verify \
-        --endpoint "$endpoint" --no-load --concurrency "$sweep" --cache uncached --samples 20 --warmup 10 \
-        --server-timeout-ms 40000 --client-deadline-ms 60000 \
-        --server-image "$server_image" --out recordings/_verify/run-b.json
+        --server-timeout-ms 40000 --client-deadline-ms 60000 --server-image "$server_image")
+    cargo run --quiet --bin benchmark -- "${run_common[@]}" --out recordings/_verify/run-a.json
+    cargo run --quiet --bin benchmark -- "${run_common[@]}" --no-load --out recordings/_verify/run-b.json
     # FAIL on divergence: report --diff aborts (non-zero) if the workload_hash or any per-op result
     # digest differs between the two runs.
     cargo run --quiet --bin benchmark -- synthetic report --diff \

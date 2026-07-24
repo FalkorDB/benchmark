@@ -260,8 +260,9 @@ is a pure function of the seed + tool build. `just synthetic-verify` — the **`
 non-divergence` CI gate** — records every A/B read shape (`--repo-reads full`), then runs the
 recorded bundle **twice** against the same server across `--concurrency 1,8 --cache uncached`; the
 final `report --diff` fails non-zero if the `workload_hash` or **any** per-op result digest differs
-between the two runs. Because it compares deterministic result digests (not latency), it is **not**
-flaky.
+between the two runs. Because it compares deterministic result digests (not latency), it is **not
+latency-sensitive** — it still **fails closed** on environmental faults (Docker startup failure,
+query/client timeouts, or a missing `workload_hash`/per-op digest), which is intended.
 
 **What you get:**
 
