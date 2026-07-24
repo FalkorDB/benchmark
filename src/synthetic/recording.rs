@@ -74,6 +74,24 @@ fn default_op_kind() -> QueryType {
     QueryType::Read
 }
 
+/// Reject an op name that isn't a safe single-path-component slug.
+///
+/// A recorded op's name becomes a file stem (`commands/<name>.jsonl`), so a string-keyed name
+/// containing a path separator or `..` could otherwise escape the bundle directory on record **or**
+/// on [`load`] (from a crafted manifest). Names are restricted to `[A-Za-z0-9_-]+`, which every
+/// built-in [`OpName`] already satisfies, so this only constrains dynamic string-keyed ops.
+fn validate_op_name(name: &str) -> BenchmarkResult<()> {
+    if !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    {
+        Ok(())
+    } else {
+        Err(OtherError(format!(
+            "unsafe operation name {name:?}: names must be non-empty and contain only \
+             ASCII letters, digits, '_' or '-'"
+        )))
+    }
+}
+
 /// The bundle manifest (`manifest.json`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Manifest {
@@ -281,17 +299,22 @@ pub fn record_rendered(
     if batch_size == 0 {
         return Err(OtherError("record batch_size must be greater than 0".to_string()));
     }
+    // Reject writes on the *original* ops (before dedup) so a duplicate-name write can't be dropped
+    // by dedup and slip through, and validate every name up-front (a name becomes a file stem).
+    for op in ops {
+        validate_op_name(op.key.name())?;
+        if op.key.kind() == QueryType::Write {
+            return Err(OtherError(format!(
+                "recording write op '{}' is not supported yet (v1 records read ops only)",
+                op.key.name()
+            )));
+        }
+    }
     let ops = dedup_recorded(ops);
     if ops.is_empty() {
         return Err(OtherError(
             "no operations to record — pass at least one read --op".to_string(),
         ));
-    }
-    if let Some(op) = ops.iter().find(|op| op.key.kind() == QueryType::Write) {
-        return Err(OtherError(format!(
-            "recording write op '{}' is not supported yet (v1 records read ops only)",
-            op.key.name()
-        )));
     }
 
     let knobs = DatasetKnobs {
@@ -417,6 +440,9 @@ pub fn load(dir: &Path) -> BenchmarkResult<Bundle> {
     // commands/<op>.jsonl for each op named in the manifest, in order.
     let mut commands = Vec::with_capacity(manifest.ops.len());
     for entry in &manifest.ops {
+        // Reject an unsafe name before it becomes a file path — a crafted manifest name with a path
+        // separator or `..` must not read outside the bundle's `commands/` directory.
+        validate_op_name(&entry.name)?;
         // Rebuild the op identity from its name + kind. `OpKey::dynamic` canonicalizes a built-in
         // name back to its `OpName` (keeping the built-in salt/kind); a name with no `OpName`
         // becomes a string-keyed dynamic op. Either way the bundle round-trips by name.
@@ -766,6 +792,83 @@ mod tests {
         assert_eq!(manifest.ops.len(), 1);
         let bundle = load(&dir).unwrap();
         assert_eq!(bundle.commands[0].1, vec!["CYPHER  RETURN 1".to_string()]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn validate_op_name_accepts_slugs_and_rejects_traversal() {
+        for ok in ["match_by_index", "expand_1hop", "shape-42", "A_b-9"] {
+            assert!(validate_op_name(ok).is_ok(), "{ok} should be accepted");
+        }
+        for bad in ["", "../evil", "a/b", "a\\b", "a.b", "..", "with space", "emoji_🚀"] {
+            assert!(validate_op_name(bad).is_err(), "{bad:?} should be rejected");
+        }
+    }
+
+    #[test]
+    fn record_rendered_rejects_unsafe_names() {
+        let dir = temp_bundle_dir("synthrec-unsafe");
+        let spec = DatasetSpec {
+            seed: 1,
+            nodes: 10,
+            edges: 20,
+        };
+        let ops = vec![RecordedOp {
+            key: OpKey::dynamic("../escape", QueryType::Read),
+            commands: vec!["CYPHER  RETURN 1".to_string()],
+        }];
+        let err = record_rendered(&spec, "g", &ops, 1, 8, &dir).unwrap_err();
+        assert!(format!("{err}").contains("unsafe operation name"), "got: {err}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn record_rendered_rejects_a_write_hidden_behind_a_duplicate_read() {
+        // The write check runs on the original ops (before dedup), so a later same-named write is
+        // caught rather than dropped by first-occurrence dedup.
+        let dir = temp_bundle_dir("synthrec-dupwrite");
+        let spec = DatasetSpec {
+            seed: 1,
+            nodes: 10,
+            edges: 20,
+        };
+        let ops = vec![
+            RecordedOp {
+                key: OpKey::dynamic("dup", QueryType::Read),
+                commands: vec!["CYPHER  RETURN 1".to_string()],
+            },
+            RecordedOp {
+                key: OpKey::dynamic("dup", QueryType::Write),
+                commands: vec!["CYPHER  CREATE (n)".to_string()],
+            },
+        ];
+        let err = record_rendered(&spec, "g", &ops, 1, 8, &dir).unwrap_err();
+        assert!(format!("{err}").contains("write op"), "got: {err}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_rejects_unsafe_manifest_names() {
+        // A crafted manifest whose op name contains a path separator must be rejected on load,
+        // before the name is turned into a `commands/<name>.jsonl` path.
+        let dir = temp_bundle_dir("synthrec-loadunsafe");
+        let spec = DatasetSpec {
+            seed: 2,
+            nodes: 20,
+            edges: 60,
+        };
+        let ops = vec![RecordedOp {
+            key: OpKey::dynamic("safe_read", QueryType::Read),
+            commands: vec!["CYPHER  RETURN 1".to_string()],
+        }];
+        record_rendered(&spec, "g", &ops, 1, 8, &dir).unwrap();
+        let manifest_path = dir.join("manifest.json");
+        let doctored = std::fs::read_to_string(&manifest_path)
+            .unwrap()
+            .replace("safe_read", "../evil");
+        std::fs::write(&manifest_path, doctored).unwrap();
+        let err = load(&dir).unwrap_err();
+        assert!(format!("{err}").contains("unsafe operation name"), "got: {err}");
         std::fs::remove_dir_all(&dir).ok();
     }
 
