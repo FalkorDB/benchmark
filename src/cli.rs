@@ -537,7 +537,7 @@ pub enum SyntheticCommands {
             long = "repo-reads",
             value_enum,
             conflicts_with_all = ["ops", "all_reads", "tier"],
-            help = "record the A/B benchmark's baseline NON-ALGORITHM READ shapes from queries_repository at a coverage tier: `core` (small per-PR subset) or `full` (all ~46 reads). Auto-discovered + annotated; deterministic (record-once/replay-verbatim). Mutually exclusive with --op/--all-reads/--tier."
+            help = "record the A/B benchmark's NON-ALGORITHM READ shapes from queries_repository at a coverage tier: `core` (small per-PR subset) or `full` (all 47 reads — 46 baseline + the ExtendedCore temporal/spatial roundtrip). Auto-discovered + annotated; deterministic (record-once/replay-verbatim). Mutually exclusive with --op/--all-reads/--tier."
         )]
         repo_reads: Option<Tier>,
         #[arg(

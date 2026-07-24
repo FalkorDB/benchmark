@@ -450,9 +450,11 @@ just synthetic-compare-versions demo falkor://127.0.0.1:6379 falkor://127.0.0.1:
   over the graph *and* the commands (so any later edit is detected on load). It is **offline** — a
   pure function of the seed + knobs — and reads `synthetic-bench.toml` for defaults. Select ops with
   `--op <names>`, or **`--op all`** (or `--op '*'`) for every read operation. Alternatively,
-  **`--repo-reads <core|full>`** records the A/B benchmark's baseline non-algorithm **read shapes**
-  straight from `queries_repository` (auto-discovered, then annotated with a coverage tier +
-  result policy): `core` is the small per-PR subset, `full` is all ~46 reads. Each shape's corpus is
+  **`--repo-reads <core|full>`** records the A/B benchmark's non-algorithm **read shapes**
+  straight from `queries_repository` (auto-discovered, then annotated with a coverage profile + tier +
+  result policy): `core` is the small per-PR subset, `full` is all 47 reads — the 46 baseline reads
+  plus the ExtendedCore `temporal_spatial_roundtrip` (which round-trips deterministic temporal/spatial
+  values). Each shape's corpus is
   rendered **once** here from the seed and recorded verbatim (record-once → replay-verbatim), so the
   bundle stays byte-identical across runs; shapes whose result set isn't byte-stable (e.g. a `LIMIT`
   without `ORDER BY`) are still recorded + timed but marked **result-N/A** so replay never gates

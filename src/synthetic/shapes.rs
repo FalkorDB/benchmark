@@ -1,11 +1,12 @@
-//! Bridge the A/B benchmark's `queries_repository` **baseline read shapes** into the synthetic
-//! record/replay pipeline (design §3.4 / Phase 3).
+//! Bridge the A/B benchmark's `queries_repository` **read shapes** into the synthetic
+//! record/replay pipeline (design §3.4 / Phases 3–4).
 //!
 //! The synthetic check historically probes a small, hand-curated catalog ([`catalog`]). This module
-//! lets it also record the **baseline non-algorithm read shapes** the A/B benchmark measures — the
-//! op *set* is **auto-discovered** from [`queries_repository`] (proven by the drift-guard test), and
-//! this module adds the explicit synthetic metadata each shape carries (coverage tier + result
-//! policy — the *derive-with-annotation* model, Decision 3).
+//! lets it also record the A/B benchmark's **non-algorithm read shapes** — the `Baseline` reads
+//! (Phase 3) plus the `ExtendedCore` `temporal_spatial_roundtrip` (Phase 4). The op *set* is
+//! **auto-discovered** from [`queries_repository`] (proven by the drift-guard tests), and this module
+//! adds the explicit synthetic metadata each shape carries (coverage profile + tier + result policy —
+//! the *derive-with-annotation* model, Decision 3).
 //!
 //! ## Determinism (record-once → replay-verbatim)
 //! Each shape's corpus is rendered **once at record time** from a fixed per-shape seed
@@ -54,18 +55,22 @@ impl ResultPolicy {
     }
 }
 
-/// One baseline read shape's synthetic metadata: its stable [`queries_repository`] name, coverage
-/// tier (Decision 1), and result policy (Decision 4).
+/// One repo read shape's synthetic metadata: its stable [`queries_repository`] name, coverage
+/// **profile** (Baseline / ExtendedCore), coverage **tier** (Decision 1), and result policy
+/// (Decision 4).
 ///
-/// Kind is always `Read` and profile always `Baseline` for this table; **capability** (fulltext/
-/// vector) and per-op **budget** are deferred to their phases (Phase 5 / Phase 6) — see the module
-/// docs.
+/// Kind is always `Read` for this table; **capability** (fulltext/vector) and per-op **budget** are
+/// deferred to their phases (Phase 5 / Phase 6). Temporal/spatial (the sole ExtendedCore read) is
+/// engine-supported on the FalkorDB record path, so it needs no capability gate — see the module docs.
 ///
 /// [`queries_repository`]: crate::queries_repository
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ShapeSpec {
     /// The shape's stable `queries_repository` read name (also the recorded op's key).
     pub name: &'static str,
+    /// Coverage profile the shape belongs to: [`QueryCoverageProfile::Baseline`] (Phase 3) or
+    /// [`QueryCoverageProfile::ExtendedCore`] (Phase 4).
+    pub profile: QueryCoverageProfile,
     /// Coverage tier: [`Tier::Core`] gates every PR; [`Tier::Full`] runs nightly/on-demand.
     pub tier: Tier,
     /// Whether replay gates this shape's result digest ([`ResultPolicy`]).
@@ -87,7 +92,7 @@ pub struct ShapeSpec {
 pub fn baseline_read_shapes() -> Vec<ShapeSpec> {
     use ResultPolicy::{Gated, NotApplicable};
     use Tier::{Core, Full};
-    // `s(name, tier, policy)` keeps the table dense and readable.
+    // `s(name, tier, policy)` keeps the table dense and readable — every row is a `Baseline` read.
     fn s(
         name: &'static str,
         tier: Tier,
@@ -95,6 +100,7 @@ pub fn baseline_read_shapes() -> Vec<ShapeSpec> {
     ) -> ShapeSpec {
         ShapeSpec {
             name,
+            profile: QueryCoverageProfile::Baseline,
             tier,
             result_policy,
         }
@@ -153,6 +159,37 @@ pub fn baseline_read_shapes() -> Vec<ShapeSpec> {
     ]
 }
 
+/// The curated annotation for the **ExtendedCore** read shapes (design §3.4 / Phase 4): today just
+/// `temporal_spatial_roundtrip`, which round-trips deterministic temporal (`date`/`localtime`/
+/// `duration`) and spatial (`point`/`distance`) values.
+///
+/// It binds **no random params**, so every render is byte-identical; its result canonicalizes stably
+/// ([`op_runner`] handles `Date`/`Time`/`Duration`/`Point` and bit-patterns floats), so it is
+/// result-**gated**. The `ExtendedCore` profile is unavailable on Memgraph, but the synthetic record
+/// path is FalkorDB-only, so the shape is always present there (no capability gate needed).
+///
+/// Auto-discovered like the baseline set: the drift-guard test asserts these names are **exactly** the
+/// reads the `ExtendedCore` profile adds over `Baseline`.
+///
+/// [`op_runner`]: crate::synthetic::op_runner
+pub fn extended_core_read_shapes() -> Vec<ShapeSpec> {
+    vec![ShapeSpec {
+        name: "temporal_spatial_roundtrip",
+        profile: QueryCoverageProfile::ExtendedCore,
+        tier: Tier::Core,
+        result_policy: ResultPolicy::Gated,
+    }]
+}
+
+/// Every repo read shape the synthetic check records: the [`baseline_read_shapes`] (Phase 3) followed
+/// by the [`extended_core_read_shapes`] (Phase 4), in `queries_repository` definition order (the
+/// record order that feeds `workload_hash`).
+pub fn repo_read_shapes() -> Vec<ShapeSpec> {
+    let mut shapes = baseline_read_shapes();
+    shapes.extend(extended_core_read_shapes());
+    shapes
+}
+
 /// The algorithm selection the baseline-read source uses: **none**. Algorithm reads are opt-in and
 /// capability-gated (Phase 6), so they're excluded from the auto-discovered baseline read set.
 fn no_algorithms() -> AlgorithmQuerySelection {
@@ -164,37 +201,34 @@ fn no_algorithms() -> AlgorithmQuerySelection {
     }
 }
 
-/// Build the `queries_repository` handle the baseline read shapes render from: `FalkorDB` flavour,
-/// no algorithms, `Baseline` coverage profile. `vertices` must match the recorded graph's `:User`
-/// count (ids `1..=vertices`) so each shape's random params address real nodes.
-fn baseline_repository(
+/// Build the `queries_repository` handle the read shapes render from: `FalkorDB` flavour, no
+/// algorithms, at the given coverage `profile`. `vertices` must match the recorded graph's `:User`
+/// count (ids `1..=vertices`) so each shape's random params address real nodes. `ExtendedCore` is a
+/// superset of `Baseline` for non-algorithm reads (the baseline shapes render identically under it),
+/// so the record path builds one `ExtendedCore` repository to render both phases' shapes.
+fn read_shapes_repository(
+    profile: QueryCoverageProfile,
     vertices: i32,
     edges: i32,
 ) -> UsersQueriesRepository {
-    UsersQueriesRepository::new(
-        vertices,
-        edges,
-        Flavour::FalkorDB,
-        no_algorithms(),
-        QueryCoverageProfile::Baseline,
-    )
+    UsersQueriesRepository::new(vertices, edges, Flavour::FalkorDB, no_algorithms(), profile)
 }
 
-/// Render the selected `tier`'s baseline read shapes into [`RecordedOp`]s, ready for
+/// Render the selected `tier`'s repo read shapes into [`RecordedOp`]s, ready for
 /// [`record_rendered`](crate::synthetic::recording::record_rendered) — **offline**, no server.
 ///
 /// Each shape's corpus is [`CORPUS_SIZE`] renders drawn from a fixed per-shape seed
 /// (`corpus_seed ^ salt`, the op's [`OpKey::salt`]), so a given seed yields a byte-identical corpus
-/// (record-once → replay-verbatim). [`Tier::Full`] selects every baseline read; [`Tier::Core`]
-/// selects only the core subset. Returns an error if the annotation table names a shape that isn't
-/// an auto-discovered `queries_repository` baseline read (annotation drift).
+/// (record-once → replay-verbatim). [`Tier::Full`] selects every repo read; [`Tier::Core`] selects
+/// only the core subset. Returns an error if the annotation table names a shape that isn't an
+/// auto-discovered `queries_repository` read (annotation drift).
 pub fn record_repo_reads(
     tier: Tier,
     vertices: i32,
     edges: i32,
     corpus_seed: u64,
 ) -> BenchmarkResult<Vec<RecordedOp>> {
-    let selected: Vec<ShapeSpec> = baseline_read_shapes()
+    let selected: Vec<ShapeSpec> = repo_read_shapes()
         .into_iter()
         // `Tier::Full` records everything; `Tier::Core` records only the core subset.
         .filter(|shape| tier.includes(shape.tier))
@@ -202,7 +236,7 @@ pub fn record_repo_reads(
     record_selected_shapes(&selected, vertices, edges, corpus_seed)
 }
 
-/// Render the given `shapes` into [`RecordedOp`]s against a fresh baseline repository. Split out of
+/// Render the given `shapes` into [`RecordedOp`]s against a fresh repository. Split out of
 /// [`record_repo_reads`] so the annotation-drift guard is unit-testable with a bogus shape.
 fn record_selected_shapes(
     shapes: &[ShapeSpec],
@@ -210,7 +244,9 @@ fn record_selected_shapes(
     edges: i32,
     corpus_seed: u64,
 ) -> BenchmarkResult<Vec<RecordedOp>> {
-    let repo = baseline_repository(vertices, edges);
+    // `ExtendedCore` covers every recordable read (Baseline shapes render identically under it), so a
+    // single repository renders both phases' shapes.
+    let repo = read_shapes_repository(QueryCoverageProfile::ExtendedCore, vertices, edges);
     let available: BTreeSet<&str> = repo
         .non_algorithm_read_names()
         .iter()
@@ -221,7 +257,7 @@ fn record_selected_shapes(
     for shape in shapes {
         if !available.contains(shape.name) {
             return Err(OtherError(format!(
-                "baseline read shape '{}' is annotated but not a queries_repository baseline read \
+                "repo read shape '{}' is annotated but not a queries_repository read \
                  (annotation drift — update src/synthetic/shapes.rs)",
                 shape.name
             )));
@@ -231,7 +267,7 @@ fn record_selected_shapes(
         let mut commands = Vec::with_capacity(CORPUS_SIZE);
         for _ in 0..CORPUS_SIZE {
             let prepared = repo.render_read_with_rng(shape.name, &mut rng).ok_or_else(|| {
-                OtherError(format!("baseline read shape '{}' failed to render", shape.name))
+                OtherError(format!("repo read shape '{}' failed to render", shape.name))
             })?;
             commands.push(prepared.cypher);
         }
@@ -260,7 +296,7 @@ mod tests {
         // no fewer, no reordering. Order matters: it's the record order, which feeds `workload_hash`
         // (recording.rs). If `queries_repository` gains, drops, or reorders a baseline read, this
         // fails until `baseline_read_shapes()` is realigned.
-        let repo = baseline_repository(1000, 5000);
+        let repo = read_shapes_repository(QueryCoverageProfile::Baseline, 1000, 5000);
         let discovered: Vec<&str> =
             repo.non_algorithm_read_names().iter().map(String::as_str).collect();
         let annotated: Vec<&str> = baseline_read_shapes().iter().map(|s| s.name).collect();
@@ -278,6 +314,39 @@ mod tests {
     }
 
     #[test]
+    fn extended_core_adds_exactly_temporal_spatial_roundtrip_over_baseline() {
+        // Derive-with-annotation for Phase 4: the reads the `ExtendedCore` profile adds over
+        // `Baseline` must be EXACTLY the annotated extended-core shapes (today just
+        // `temporal_spatial_roundtrip`). If `queries_repository` adds another ExtendedCore read, this
+        // fails until `extended_core_read_shapes()` is updated.
+        let baseline_repo = read_shapes_repository(QueryCoverageProfile::Baseline, 1000, 5000);
+        let extended_repo = read_shapes_repository(QueryCoverageProfile::ExtendedCore, 1000, 5000);
+        let baseline: BTreeSet<&str> =
+            baseline_repo.non_algorithm_read_names().iter().map(String::as_str).collect();
+        let extended: BTreeSet<&str> =
+            extended_repo.non_algorithm_read_names().iter().map(String::as_str).collect();
+        let added: BTreeSet<&str> = extended.difference(&baseline).copied().collect();
+        let annotated: BTreeSet<&str> =
+            extended_core_read_shapes().iter().map(|s| s.name).collect();
+        assert_eq!(added, annotated, "ExtendedCore adds exactly the annotated extended-core reads");
+        assert!(added.contains("temporal_spatial_roundtrip"));
+        for shape in extended_core_read_shapes() {
+            assert_eq!(shape.profile, QueryCoverageProfile::ExtendedCore);
+        }
+    }
+
+    #[test]
+    fn repo_read_shapes_match_the_extended_core_discovery_in_order() {
+        // The combined annotation (baseline ++ extended-core) must equal the ExtendedCore-profile
+        // discovery, in definition order — the record order that feeds `workload_hash`.
+        let repo = read_shapes_repository(QueryCoverageProfile::ExtendedCore, 1000, 5000);
+        let discovered: Vec<&str> =
+            repo.non_algorithm_read_names().iter().map(String::as_str).collect();
+        let annotated: Vec<&str> = repo_read_shapes().iter().map(|s| s.name).collect();
+        assert_eq!(annotated, discovered, "repo read shapes drifted from ExtendedCore discovery");
+    }
+
+    #[test]
     fn there_are_forty_six_baseline_reads_with_a_nonempty_core_subset() {
         let shapes = baseline_read_shapes();
         assert_eq!(shapes.len(), 46, "expected the 46 baseline reads (design §3.4)");
@@ -288,10 +357,30 @@ mod tests {
     }
 
     #[test]
+    fn repo_read_shapes_are_forty_seven_including_one_extended_core() {
+        // Baseline (46) + ExtendedCore (1) = 47 unique reads across profiles.
+        let shapes = repo_read_shapes();
+        assert_eq!(shapes.len(), 47, "46 baseline + 1 extended-core read");
+        let names: BTreeSet<&str> = shapes.iter().map(|s| s.name).collect();
+        assert_eq!(names.len(), 47, "shape names must be unique across profiles");
+        assert_eq!(
+            shapes.iter().filter(|s| s.profile == QueryCoverageProfile::ExtendedCore).count(),
+            1,
+            "exactly one extended-core read"
+        );
+        // `temporal_spatial_roundtrip` is ExtendedCore, Core-tier, and result-gated.
+        let ts = shapes.iter().find(|s| s.name == "temporal_spatial_roundtrip").unwrap();
+        assert_eq!(ts.profile, QueryCoverageProfile::ExtendedCore);
+        assert_eq!(ts.tier, Tier::Core);
+        assert!(ts.result_policy.is_gated());
+    }
+
+    #[test]
     fn exactly_the_limit_without_order_shape_is_result_na() {
-        // Only `entity_path_introspection` (LIMIT 1 without ORDER BY) is result-N/A among the
-        // baseline reads; every other baseline read is result-gated (Decision 4).
-        for shape in baseline_read_shapes() {
+        // Only `entity_path_introspection` (LIMIT 1 without ORDER BY) is result-N/A among all repo
+        // reads; every other read — including `temporal_spatial_roundtrip` — is result-gated
+        // (Decision 4).
+        for shape in repo_read_shapes() {
             let expected_gated = shape.name != "entity_path_introspection";
             assert_eq!(
                 shape.result_policy.is_gated(),
@@ -303,10 +392,11 @@ mod tests {
     }
 
     #[test]
-    fn record_repo_reads_full_covers_every_baseline_read() {
+    fn record_repo_reads_full_covers_every_repo_read() {
         let ops = record_repo_reads(Tier::Full, 1000, 5000, 42).unwrap();
         let names: BTreeSet<&str> = ops.iter().map(|o| o.key.name()).collect();
-        assert_eq!(names, annotated_names(), "Full must record every baseline read");
+        let expected: BTreeSet<&str> = repo_read_shapes().iter().map(|s| s.name).collect();
+        assert_eq!(names, expected, "Full must record every repo read");
         // Every op renders a full corpus and is keyed by the shape name as a read.
         for op in &ops {
             assert_eq!(op.commands.len(), CORPUS_SIZE, "op '{}' short corpus", op.key.name());
@@ -314,7 +404,7 @@ mod tests {
         }
         // `shortest_path` shares its name with a built-in `OpName`, so `OpKey::dynamic`
         // canonicalizes it to that built-in (by design — same name/kind/salt across every run);
-        // every other baseline read is a genuinely dynamic string-keyed op.
+        // every other repo read (incl. `temporal_spatial_roundtrip`) is a genuinely dynamic op.
         for op in &ops {
             if op.key.name() == "shortest_path" {
                 assert!(op.key.is_named(), "shortest_path canonicalizes to the built-in OpName");
@@ -322,12 +412,15 @@ mod tests {
                 assert!(!op.key.is_named(), "'{}' should be a dynamic read", op.key.name());
             }
         }
-        // The result-N/A shape is recorded but not gated; the rest are gated.
+        // The ExtendedCore shape is recorded and result-gated…
+        let ts = ops.iter().find(|o| o.key.name() == "temporal_spatial_roundtrip").unwrap();
+        assert!(ts.result_gated, "temporal_spatial_roundtrip is result-gated");
+        // …and the result-N/A shape is recorded but not gated; it's the only one.
         let na = ops.iter().find(|o| o.key.name() == "entity_path_introspection").unwrap();
         assert!(!na.result_gated, "the LIMIT-without-ORDER shape is result-N/A");
         assert!(
             ops.iter().filter(|o| !o.result_gated).count() == 1,
-            "exactly one baseline read is result-N/A"
+            "exactly one repo read is result-N/A"
         );
     }
 
@@ -378,6 +471,7 @@ mod tests {
         // safety net behind the derive-with-annotation model.
         let bogus = [ShapeSpec {
             name: "__not_a_repo_read__",
+            profile: QueryCoverageProfile::Baseline,
             tier: Tier::Full,
             result_policy: ResultPolicy::Gated,
         }];
