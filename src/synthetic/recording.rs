@@ -325,7 +325,9 @@ pub fn record_rendered(
 /// [`Manifest::workload_hash`]. Used when a recording includes the FixtureDependent read shapes so
 /// every engine replays the identical fulltext/vector fixture (record-once → replay-verbatim). A
 /// bundle written this way stays byte-identical across engines; the fixture statements are constant
-/// and idempotent (design §3.4).
+/// (no `spec`/seed-derived values). The seed `SET`s are inherently idempotent; the index DDL
+/// (`CREATE FULLTEXT/VECTOR INDEX …`) assumes a **fresh load** — which replay guarantees by dropping
+/// and reloading the graph before executing `graph.jsonl` (design §3.4).
 pub fn record_rendered_with_fixture(
     dataset: &DatasetSpec,
     graph: &str,

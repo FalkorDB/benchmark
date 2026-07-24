@@ -62,8 +62,12 @@ impl ResultPolicy {
 }
 
 /// The engine capability a fixture-dependent read requires beyond plain Cypher (design §3.4). The
-/// fulltext/vector smoke reads name the specific index procedure they exercise so the runtime can
-/// gate them (record-and-skip-as-N/A on an engine lacking the capability); non-fixture reads need
+/// fulltext/vector smoke reads name the specific index procedure they exercise.
+///
+/// Today this is **annotation only** — a stable, machine-readable label carried on the [`ShapeSpec`]
+/// so a future capability-gating pass (record-and-skip-as-N/A on an engine that lacks the capability)
+/// can key off it without a bundle-format change. It is not yet consulted at record or replay time
+/// (the per-PR A/B images are modern FalkorDB with all three capabilities). Non-fixture reads need
 /// nothing (`capability = None`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShapeCapability {
@@ -215,9 +219,9 @@ pub fn extended_core_read_shapes() -> Vec<ShapeSpec> {
 /// (record-once → replay-verbatim: every engine replays the identical fixture). They bind **no random
 /// params** (byte-identical renders), but their result set is **top-k** (ties/ordering are
 /// non-deterministic), so all three are result-**N/A** ([`ResultPolicy::NotApplicable`], Decision 4) —
-/// we do not add `ORDER BY` to force determinism. Each carries the [`ShapeCapability`] it exercises so
-/// an engine that lacks it can record-and-skip-as-N/A. All are [`Tier::Full`]: capability-gated shapes
-/// stay out of the always-on core subset.
+/// we do not add `ORDER BY` to force determinism. Each is annotated with the [`ShapeCapability`] it
+/// exercises (metadata for a future capability-gating pass — see [`ShapeCapability`]). All are
+/// [`Tier::Full`]: capability-gated shapes stay out of the always-on core subset.
 ///
 /// Auto-discovered like the other sets: the drift-guard test asserts these names are **exactly** the
 /// reads the `FixtureDependent` profile adds over `ExtendedCore`.

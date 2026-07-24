@@ -280,7 +280,8 @@ const INDEX_STMTS: [&str; 2] = [
 /// (`FalkorDriver::ensure_post_phase1_fixtures_ready`, design §3.4): two fulltext indexes and one
 /// vector index, then two idempotent `SET`s that seed the `ft_text` / `embedding` properties on a
 /// deterministic id slice (`id % 97 == 0`). Every statement is **constant** — no `spec`-derived
-/// values — so it records and replays byte-identically; `SET` is idempotent so a re-run is a no-op.
+/// values — so it records and replays byte-identically. The `SET`s are inherently idempotent; the
+/// index DDL assumes a **fresh load** (which replay guarantees by dropping + reloading the graph).
 /// A graph with fewer than 97 users seeds no rows (the queries still run, just over empty results),
 /// which is fine because these shapes are result-N/A (top-k is non-deterministic).
 const FIXTURE_STMTS: [&str; 5] = [
