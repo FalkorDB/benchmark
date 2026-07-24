@@ -27,7 +27,7 @@ use crate::error::BenchmarkResult;
 use crate::queries_repository::QueryType;
 use crate::synthetic::catalog::spec;
 use crate::synthetic::dataset::{load_statements, DatasetSpec, LoadPhase, GENERATOR_VERSION};
-use crate::synthetic::OpName;
+use crate::synthetic::{OpKey, OpName};
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 use serde::{Deserialize, Serialize};
@@ -61,7 +61,35 @@ impl DatasetKnobs {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpEntry {
     pub name: String,
+    /// The op's read/write kind, so [`load`] can rebuild its [`OpKey`] — a built-in [`OpName`] or a
+    /// string-keyed dynamic op. Defaults to `Read` for bundles written before this field existed
+    /// (v1 records reads only), and is **not** folded into the [`Manifest::workload_hash`].
+    #[serde(default = "default_op_kind")]
+    pub kind: QueryType,
     pub count: usize,
+}
+
+/// The read/write kind an [`OpEntry`] without an explicit `kind` deserializes to (v1 read bundles).
+fn default_op_kind() -> QueryType {
+    QueryType::Read
+}
+
+/// Reject an op name that isn't a safe single-path-component slug.
+///
+/// A recorded op's name becomes a file stem (`commands/<name>.jsonl`), so a string-keyed name
+/// containing a path separator or `..` could otherwise escape the bundle directory on record **or**
+/// on [`load`] (from a crafted manifest). Names are restricted to `[A-Za-z0-9_-]+`, which every
+/// built-in [`OpName`] already satisfies, so this only constrains dynamic string-keyed ops.
+fn validate_op_name(name: &str) -> BenchmarkResult<()> {
+    if !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    {
+        Ok(())
+    } else {
+        Err(OtherError(format!(
+            "unsafe operation name {name:?}: names must be non-empty and contain only \
+             ASCII letters, digits, '_' or '-'"
+        )))
+    }
 }
 
 /// The bundle manifest (`manifest.json`).
@@ -112,8 +140,9 @@ pub struct Bundle {
     pub manifest: Manifest,
     /// The ordered load statements (`graph.jsonl`).
     pub graph_statements: Vec<(LoadPhase, String)>,
-    /// Each recorded op's ordered commands, in the manifest's op order.
-    pub commands: Vec<(OpName, Vec<String>)>,
+    /// Each recorded op's ordered commands, in the manifest's op order. The [`OpKey`] carries the
+    /// op's stable name + kind (a built-in [`OpName`] or a string-keyed dynamic op).
+    pub commands: Vec<(OpKey, Vec<String>)>,
 }
 
 /// Length-framed workload hasher. Every part is prefixed with its byte length (u64 LE) before the
@@ -188,12 +217,23 @@ impl WorkloadHasher {
     }
 }
 
-/// De-duplicate ops preserving first-occurrence order (matching how a run executes them).
-fn dedup_ops(ops: &[OpName]) -> Vec<OpName> {
+/// One operation to record, with its already-rendered measured command corpus. Lets callers record
+/// ops that have **no catalog `OperationSpec`** — string-keyed `queries_repository` shapes — by
+/// supplying the rendered commands directly, while built-in ops are rendered by [`record`] via
+/// [`render_commands`]. `key` carries the op's stable name and read/write kind.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordedOp {
+    pub key: OpKey,
+    pub commands: Vec<String>,
+}
+
+/// De-duplicate recorded ops preserving first-occurrence order (matching how a run executes them),
+/// keyed on the stable op name.
+fn dedup_recorded(ops: &[RecordedOp]) -> Vec<RecordedOp> {
     let mut seen = std::collections::BTreeSet::new();
     ops.iter()
-        .copied()
-        .filter(|op| seen.insert(op.as_str()))
+        .filter(|op| seen.insert(op.key.name().to_string()))
+        .cloned()
         .collect()
 }
 
@@ -211,11 +251,9 @@ pub fn render_commands(
     Ok(corpus.iter().map(|q| q.to_cypher()).collect())
 }
 
-/// Record a workload bundle to `out_dir` (created if absent). **Offline** — no server is contacted.
-///
-/// Writes `graph.jsonl` (the [`load_statements`] for `dataset`), `commands/<op>.jsonl` for each op,
-/// and `manifest.json` with the [`Manifest::workload_hash`]. `ops` are de-duplicated (first
-/// occurrence wins); **write ops are rejected** (v1 records read ops only). Returns the manifest.
+/// Record a workload bundle to `out_dir` (created if absent) for the given built-in catalog read
+/// `ops`. **Offline** — no server is contacted. Renders each op's corpus via [`render_commands`]
+/// then delegates to [`record_rendered`]; **write ops are rejected** (v1 records read ops only).
 pub fn record(
     dataset: &DatasetSpec,
     graph: &str,
@@ -224,21 +262,59 @@ pub fn record(
     batch_size: usize,
     out_dir: &Path,
 ) -> BenchmarkResult<Manifest> {
-    dataset.validate()?;
-    if batch_size == 0 {
-        return Err(OtherError("record batch_size must be greater than 0".to_string()));
-    }
-    let ops = dedup_ops(ops);
-    if ops.is_empty() {
-        return Err(OtherError(
-            "no operations to record — pass at least one read --op".to_string(),
-        ));
-    }
+    // Reject writes up-front — before rendering — so we never build a write op's corpus (v1 records
+    // reads only). [`record_rendered`] re-checks by kind for string-keyed callers.
     if let Some(op) = ops.iter().find(|op| spec(**op).kind == QueryType::Write) {
         return Err(OtherError(format!(
             "recording write op '{}' is not supported yet (v1 records read ops only)",
             op.as_str()
         )));
+    }
+    let mut recorded = Vec::with_capacity(ops.len());
+    for &op in ops {
+        recorded.push(RecordedOp {
+            key: OpKey::from(op),
+            commands: render_commands(op, dataset, corpus_seed)?,
+        });
+    }
+    record_rendered(dataset, graph, &recorded, corpus_seed, batch_size, out_dir)
+}
+
+/// Record a workload bundle from **already-rendered** ops — the general form behind [`record`], used
+/// for string-keyed shapes that have no catalog `OperationSpec`. **Offline** — no server is
+/// contacted.
+///
+/// Writes `graph.jsonl` (the [`load_statements`] for `dataset`), `commands/<op>.jsonl` for each op,
+/// and `manifest.json` with the [`Manifest::workload_hash`]. `ops` are de-duplicated by name (first
+/// occurrence wins); **write ops are rejected** (v1 records read ops only). Returns the manifest.
+pub fn record_rendered(
+    dataset: &DatasetSpec,
+    graph: &str,
+    ops: &[RecordedOp],
+    corpus_seed: u64,
+    batch_size: usize,
+    out_dir: &Path,
+) -> BenchmarkResult<Manifest> {
+    dataset.validate()?;
+    if batch_size == 0 {
+        return Err(OtherError("record batch_size must be greater than 0".to_string()));
+    }
+    // Reject writes on the *original* ops (before dedup) so a duplicate-name write can't be dropped
+    // by dedup and slip through, and validate every name up-front (a name becomes a file stem).
+    for op in ops {
+        validate_op_name(op.key.name())?;
+        if op.key.kind() == QueryType::Write {
+            return Err(OtherError(format!(
+                "recording write op '{}' is not supported yet (v1 records read ops only)",
+                op.key.name()
+            )));
+        }
+    }
+    let ops = dedup_recorded(ops);
+    if ops.is_empty() {
+        return Err(OtherError(
+            "no operations to record — pass at least one read --op".to_string(),
+        ));
     }
 
     let knobs = DatasetKnobs {
@@ -278,9 +354,13 @@ pub fn record(
     // commands/<op>.jsonl.
     let mut op_entries = Vec::with_capacity(ops.len());
     for op in &ops {
-        let cyphers = render_commands(*op, dataset, corpus_seed)?;
-        hasher.op_header(op.as_str(), cyphers.len());
-        let path = commands_dir.join(format!("{}.jsonl", op.as_str()));
+        let name = op.key.name();
+        let cyphers = &op.commands;
+        if cyphers.is_empty() {
+            return Err(OtherError(format!("operation '{}' produced an empty corpus", name)));
+        }
+        hasher.op_header(name, cyphers.len());
+        let path = commands_dir.join(format!("{}.jsonl", name));
         let mut w = BufWriter::new(create_file(&path)?);
         for (seq, cypher) in cyphers.iter().enumerate() {
             hasher.command(cypher);
@@ -294,7 +374,8 @@ pub fn record(
         w.flush()
             .map_err(|e| OtherError(format!("flushing {}: {}", path.display(), e)))?;
         op_entries.push(OpEntry {
-            name: op.as_str().to_string(),
+            name: name.to_string(),
+            kind: op.key.kind(),
             count: cyphers.len(),
         });
     }
@@ -358,9 +439,24 @@ pub fn load(dir: &Path) -> BenchmarkResult<Bundle> {
 
     // commands/<op>.jsonl for each op named in the manifest, in order.
     let mut commands = Vec::with_capacity(manifest.ops.len());
+    let mut seen_names = std::collections::BTreeSet::new();
     for entry in &manifest.ops {
-        let op = OpName::from_tag(&entry.name)
-            .ok_or_else(|| OtherError(format!("manifest names unknown op '{}'", entry.name)))?;
+        // Reject an unsafe name before it becomes a file path — a crafted manifest name with a path
+        // separator or `..` must not read outside the bundle's `commands/` directory.
+        validate_op_name(&entry.name)?;
+        // Reject duplicate op names: op names key `commands/<name>.jsonl` and the replay report's
+        // per-op map, so a duplicate would double-run or silently overwrite a result. A recorded
+        // bundle is deduped at record time, so a duplicate here means a crafted/corrupt manifest.
+        if !seen_names.insert(entry.name.as_str()) {
+            return Err(OtherError(format!(
+                "manifest lists duplicate op name '{}'",
+                entry.name
+            )));
+        }
+        // Rebuild the op identity from its name + kind. `OpKey::dynamic` canonicalizes a built-in
+        // name back to its `OpName` (keeping the built-in salt/kind); a name with no `OpName`
+        // becomes a string-keyed dynamic op. Either way the bundle round-trips by name.
+        let op = OpKey::dynamic(entry.name.clone(), entry.kind);
         let path = dir.join("commands").join(format!("{}.jsonl", entry.name));
         let recs: Vec<CommandRecord> = read_jsonl(&path)?;
         if recs.len() != entry.count {
@@ -492,7 +588,8 @@ mod tests {
         assert_eq!(bundle.graph_statements, want);
         // commands equal what a run would derive for each op.
         for (op, cyphers) in &bundle.commands {
-            assert_eq!(*cyphers, render_commands(*op, &spec, manifest.corpus_seed).unwrap());
+            let name = OpName::from_tag(op.name()).expect("built-in op name");
+            assert_eq!(*cyphers, render_commands(name, &spec, manifest.corpus_seed).unwrap());
             assert!(!cyphers.is_empty());
         }
         std::fs::remove_dir_all(&dir).ok();
@@ -591,6 +688,224 @@ mod tests {
 
         let dir2 = temp_bundle_dir("synthrec-empty");
         assert!(record(&spec, "g", &[], 1, 8, &dir2).is_err());
+    }
+
+    #[test]
+    fn op_entry_kind_defaults_to_read_when_absent() {
+        // A v1 bundle (written before `kind` existed) recorded reads only — a kind-less entry must
+        // deserialize to `Read` via `default_op_kind`, and an explicit kind round-trips.
+        let legacy: OpEntry = serde_json::from_str(r#"{"name":"match_by_index","count":3}"#).unwrap();
+        assert_eq!(legacy.kind, QueryType::Read);
+        assert_eq!(legacy.count, 3);
+        let explicit: OpEntry =
+            serde_json::from_str(r#"{"name":"w","kind":"Write","count":1}"#).unwrap();
+        assert_eq!(explicit.kind, QueryType::Write);
+    }
+
+    #[test]
+    fn record_rendered_round_trips_a_dynamic_op() {
+        // A string-keyed op with no built-in `OpName`, recorded from hand-supplied commands (the
+        // path a `queries_repository` shape will use), survives `load` with the integrity gate.
+        let dir = temp_bundle_dir("synthrec-dyn");
+        let spec = DatasetSpec {
+            seed: 3,
+            nodes: 50,
+            edges: 150,
+        };
+        let ops = vec![RecordedOp {
+            key: OpKey::dynamic("single_vertex_read", QueryType::Read),
+            commands: vec![
+                "CYPHER id=1 MATCH (n:User {id:$id}) RETURN n".to_string(),
+                "CYPHER id=2 MATCH (n:User {id:$id}) RETURN n".to_string(),
+            ],
+        }];
+        let manifest = record_rendered(&spec, "gdyn", &ops, 9, 32, &dir).unwrap();
+        assert_eq!(manifest.ops.len(), 1);
+        assert_eq!(manifest.ops[0].name, "single_vertex_read");
+        assert_eq!(manifest.ops[0].kind, QueryType::Read);
+        assert_eq!(manifest.ops[0].count, 2);
+
+        let bundle = load(&dir).unwrap();
+        assert_eq!(bundle.manifest, manifest);
+        assert_eq!(bundle.commands.len(), 1);
+        let (key, cmds) = &bundle.commands[0];
+        assert_eq!(key.name(), "single_vertex_read");
+        assert!(!key.is_named(), "an unknown name loads back as a dynamic op");
+        assert_eq!(key.kind(), QueryType::Read);
+        assert_eq!(cmds, &ops[0].commands);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_canonicalizes_builtin_names_to_named_ops() {
+        // Built-in read ops recorded via `record` load back as `Named` keys (canonicalized by name),
+        // so the built-in salt/kind is preserved across a record→load round-trip.
+        let (dir, _man) = record_to_temp(11);
+        let bundle = load(&dir).unwrap();
+        assert!(bundle.commands.iter().all(|(k, _)| k.is_named()));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn record_rendered_rejects_write_kind_ops() {
+        let dir = temp_bundle_dir("synthrec-dynwrite");
+        let spec = DatasetSpec {
+            seed: 1,
+            nodes: 10,
+            edges: 20,
+        };
+        let ops = vec![RecordedOp {
+            key: OpKey::dynamic("bulk_insert", QueryType::Write),
+            commands: vec!["CYPHER x=1 CREATE (n:User {id:$x})".to_string()],
+        }];
+        let err = record_rendered(&spec, "g", &ops, 1, 8, &dir).unwrap_err();
+        assert!(format!("{}", err).contains("write op"), "got: {err}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn record_rendered_rejects_an_empty_corpus() {
+        let dir = temp_bundle_dir("synthrec-dynempty");
+        let spec = DatasetSpec {
+            seed: 1,
+            nodes: 10,
+            edges: 20,
+        };
+        let ops = vec![RecordedOp {
+            key: OpKey::dynamic("empty_shape", QueryType::Read),
+            commands: vec![],
+        }];
+        let err = record_rendered(&spec, "g", &ops, 1, 8, &dir).unwrap_err();
+        assert!(format!("{}", err).contains("empty corpus"), "got: {err}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn record_rendered_dedups_by_name_keeping_first() {
+        let dir = temp_bundle_dir("synthrec-dyndedup");
+        let spec = DatasetSpec {
+            seed: 1,
+            nodes: 10,
+            edges: 20,
+        };
+        let ops = vec![
+            RecordedOp {
+                key: OpKey::dynamic("a_read", QueryType::Read),
+                commands: vec!["CYPHER  RETURN 1".to_string()],
+            },
+            RecordedOp {
+                key: OpKey::dynamic("a_read", QueryType::Read),
+                commands: vec!["CYPHER  RETURN 2".to_string()],
+            },
+        ];
+        let manifest = record_rendered(&spec, "g", &ops, 1, 8, &dir).unwrap();
+        assert_eq!(manifest.ops.len(), 1);
+        let bundle = load(&dir).unwrap();
+        assert_eq!(bundle.commands[0].1, vec!["CYPHER  RETURN 1".to_string()]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn validate_op_name_accepts_slugs_and_rejects_traversal() {
+        for ok in ["match_by_index", "expand_1hop", "shape-42", "A_b-9"] {
+            assert!(validate_op_name(ok).is_ok(), "{ok} should be accepted");
+        }
+        for bad in ["", "../evil", "a/b", "a\\b", "a.b", "..", "with space", "emoji_🚀"] {
+            assert!(validate_op_name(bad).is_err(), "{bad:?} should be rejected");
+        }
+    }
+
+    #[test]
+    fn record_rendered_rejects_unsafe_names() {
+        let dir = temp_bundle_dir("synthrec-unsafe");
+        let spec = DatasetSpec {
+            seed: 1,
+            nodes: 10,
+            edges: 20,
+        };
+        let ops = vec![RecordedOp {
+            key: OpKey::dynamic("../escape", QueryType::Read),
+            commands: vec!["CYPHER  RETURN 1".to_string()],
+        }];
+        let err = record_rendered(&spec, "g", &ops, 1, 8, &dir).unwrap_err();
+        assert!(format!("{err}").contains("unsafe operation name"), "got: {err}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn record_rendered_rejects_a_write_hidden_behind_a_duplicate_read() {
+        // The write check runs on the original ops (before dedup), so a later same-named write is
+        // caught rather than dropped by first-occurrence dedup.
+        let dir = temp_bundle_dir("synthrec-dupwrite");
+        let spec = DatasetSpec {
+            seed: 1,
+            nodes: 10,
+            edges: 20,
+        };
+        let ops = vec![
+            RecordedOp {
+                key: OpKey::dynamic("dup", QueryType::Read),
+                commands: vec!["CYPHER  RETURN 1".to_string()],
+            },
+            RecordedOp {
+                key: OpKey::dynamic("dup", QueryType::Write),
+                commands: vec!["CYPHER  CREATE (n)".to_string()],
+            },
+        ];
+        let err = record_rendered(&spec, "g", &ops, 1, 8, &dir).unwrap_err();
+        assert!(format!("{err}").contains("write op"), "got: {err}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_rejects_unsafe_manifest_names() {
+        // A crafted manifest whose op name contains a path separator must be rejected on load,
+        // before the name is turned into a `commands/<name>.jsonl` path.
+        let dir = temp_bundle_dir("synthrec-loadunsafe");
+        let spec = DatasetSpec {
+            seed: 2,
+            nodes: 20,
+            edges: 60,
+        };
+        let ops = vec![RecordedOp {
+            key: OpKey::dynamic("safe_read", QueryType::Read),
+            commands: vec!["CYPHER  RETURN 1".to_string()],
+        }];
+        record_rendered(&spec, "g", &ops, 1, 8, &dir).unwrap();
+        let manifest_path = dir.join("manifest.json");
+        let doctored = std::fs::read_to_string(&manifest_path)
+            .unwrap()
+            .replace("safe_read", "../evil");
+        std::fs::write(&manifest_path, doctored).unwrap();
+        let err = load(&dir).unwrap_err();
+        assert!(format!("{err}").contains("unsafe operation name"), "got: {err}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_rejects_duplicate_manifest_op_names() {
+        // A recorded bundle is deduped at record time; a manifest with two entries sharing a name
+        // is crafted/corrupt and must be rejected so replay can't double-run or overwrite by name.
+        let dir = temp_bundle_dir("synthrec-dupload");
+        let spec = DatasetSpec {
+            seed: 2,
+            nodes: 20,
+            edges: 60,
+        };
+        let ops = vec![RecordedOp {
+            key: OpKey::dynamic("safe_read", QueryType::Read),
+            commands: vec!["CYPHER  RETURN 1".to_string()],
+        }];
+        record_rendered(&spec, "g", &ops, 1, 8, &dir).unwrap();
+        let manifest_path = dir.join("manifest.json");
+        let mut v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
+        let dup = v["ops"][0].clone();
+        v["ops"].as_array_mut().unwrap().push(dup);
+        std::fs::write(&manifest_path, serde_json::to_string_pretty(&v).unwrap()).unwrap();
+        let err = load(&dir).unwrap_err();
+        assert!(format!("{err}").contains("duplicate op name"), "got: {err}");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

@@ -18,14 +18,14 @@ use crate::error::BenchmarkError::OtherError;
 use crate::error::BenchmarkResult;
 use crate::falkor::falkor_endpoint_to_redis_url;
 use crate::queries_repository::QueryType;
-use crate::synthetic::catalog::{spec, DEFAULT_RESET_EVERY};
+use crate::synthetic::catalog::DEFAULT_RESET_EVERY;
 use crate::synthetic::dataset::{self, DatasetSpec};
 use crate::synthetic::op_runner::{capture_result, ResultShape};
 use crate::synthetic::recording::{self, Bundle};
 use crate::synthetic::report::{DatasetInfo, Meta, Report, ServerInfo, SCHEMA_VERSION};
 use crate::synthetic::{
     measure_op, normalize_concurrency, open_graph, provenance, redact_endpoint, write_report,
-    CacheSelection, Config, OpName,
+    CacheSelection, Config, MeasureTarget, OpKey,
 };
 use falkordb::AsyncGraph;
 use sha2::{Digest, Sha256};
@@ -81,12 +81,12 @@ pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
     if let Some((op, _)) = bundle
         .commands
         .iter()
-        .find(|(op, _)| spec(*op).kind == QueryType::Write)
+        .find(|(op, _)| op.kind() == QueryType::Write)
     {
         return Err(OtherError(format!(
             "recorded op '{}' is a write op — replaying writes is not supported (v1 records reads \
              only)",
-            op.as_str()
+            op.name()
         )));
     }
     let dataset_spec = bundle.spec();
@@ -134,21 +134,21 @@ pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
     // shape (cardinality + order-independent value digest). This is the correctness oracle and also
     // primes the plan cache. Reads return scalars, so a single connection is safe.
     let st = config.server_timeout_ms;
-    let mut reference: Vec<(OpName, Arc<Vec<String>>, Vec<ResultShape>)> =
+    let mut reference: Vec<(OpKey, Arc<Vec<String>>, Vec<ResultShape>)> =
         Vec::with_capacity(bundle.commands.len());
     for (op, cyphers) in &bundle.commands {
         if cyphers.is_empty() {
-            return Err(OtherError(format!("op '{}' has no recorded commands", op.as_str())));
+            return Err(OtherError(format!("op '{}' has no recorded commands", op.name())));
         }
         let mut shapes = Vec::with_capacity(cyphers.len());
         for c in cyphers {
             shapes.push(
                 capture_result(&mut graph, c, st, client_deadline)
                     .await
-                    .map_err(|e| OtherError(format!("capturing '{}': {}", op.as_str(), e)))?,
+                    .map_err(|e| OtherError(format!("capturing '{}': {}", op.name(), e)))?,
             );
         }
-        reference.push((*op, Arc::new(cyphers.clone()), shapes));
+        reference.push((op.clone(), Arc::new(cyphers.clone()), shapes));
     }
     // Setup connection done; drop it so it isn't an idle extra connection during the sweep.
     drop(graph);
@@ -157,7 +157,10 @@ pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
     let engine_config = Config {
         endpoint: config.endpoint.clone(),
         graph: graph_name.clone(),
-        ops: reference.iter().map(|(op, _, _)| *op).collect(),
+        // `ops` is unused by the measurement path (`measure_op` replays the passed-in corpus, not
+        // the config's op list) — leave it empty rather than lossily mapping string-keyed `OpKey`s
+        // back to the `OpName` enum this field holds.
+        ops: Vec::new(),
         samples: config.samples,
         warmup: config.warmup,
         concurrency: concurrency.clone(),
@@ -193,7 +196,7 @@ pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
             .map_err(|e| {
                 OtherError(format!(
                     "op '{}' returned different results at concurrency {}: {}",
-                    op.as_str(),
+                    op.name(),
                     max_c,
                     e
                 ))
@@ -202,15 +205,15 @@ pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
         let mut op_report = measure_op(
             &engine_config,
             &concurrency,
-            &spec(*op),
+            MeasureTarget::read(),
             Arc::clone(corpus),
             run_token,
             &uid_alloc,
             client_deadline,
         )
         .await?;
-        op_report.result_digest = Some(op_result_digest(*op, shapes));
-        operations.insert(op.as_str().to_string(), op_report);
+        op_report.result_digest = Some(op_result_digest(op.name(), shapes));
+        operations.insert(op.name().to_string(), op_report);
     }
 
     // The corpus size is what the bundle actually recorded per op (not the compile-time constant).
@@ -338,11 +341,11 @@ async fn verify_concurrent(
 /// length-framed so it can't alias a different op's digest. Two versions returning different results
 /// for the same recorded command produce different digests.
 fn op_result_digest(
-    op: OpName,
+    name: &str,
     shapes: &[ResultShape],
 ) -> String {
     let mut h = Sha256::new();
-    let name = op.as_str().as_bytes();
+    let name = name.as_bytes();
     h.update((name.len() as u64).to_le_bytes());
     h.update(name);
     h.update((shapes.len() as u64).to_le_bytes());
@@ -369,14 +372,14 @@ mod tests {
     #[test]
     fn op_result_digest_is_deterministic_and_sensitive() {
         let base = vec![shape(1, "aa"), shape(3, "bb")];
-        let a = op_result_digest(OpName::MatchByIndex, &base);
-        assert_eq!(a, op_result_digest(OpName::MatchByIndex, &base));
+        let a = op_result_digest("match_by_index", &base);
+        assert_eq!(a, op_result_digest("match_by_index", &base));
         // A different value digest changes it (even at the same cardinality).
-        assert_ne!(a, op_result_digest(OpName::MatchByIndex, &[shape(1, "aa"), shape(3, "cc")]));
+        assert_ne!(a, op_result_digest("match_by_index", &[shape(1, "aa"), shape(3, "cc")]));
         // A different cardinality changes it.
-        assert_ne!(a, op_result_digest(OpName::MatchByIndex, &[shape(2, "aa"), shape(3, "bb")]));
+        assert_ne!(a, op_result_digest("match_by_index", &[shape(2, "aa"), shape(3, "bb")]));
         // The op name is part of the digest.
-        assert_ne!(a, op_result_digest(OpName::Expand1Hop, &base));
+        assert_ne!(a, op_result_digest("expand_1hop", &base));
         assert!(a.starts_with("sha256:"));
     }
 
