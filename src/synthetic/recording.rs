@@ -396,7 +396,11 @@ fn record_rendered_impl(
     let graph_path = out_dir.join("graph.jsonl");
     {
         let mut w = BufWriter::new(create_file(&graph_path)?);
-        let fixture = fixture_statements().take(if include_fixture { usize::MAX } else { 0 });
+        // Append the fixture statements only when requested; `None` contributes nothing to the stream.
+        let fixture = include_fixture
+            .then(fixture_statements)
+            .into_iter()
+            .flatten();
         let stmts = load_statements(dataset, batch_size).chain(fixture);
         for (seq, (phase, stmt)) in stmts.enumerate() {
             hasher.graph_record(phase.tag(), &stmt);
