@@ -1135,7 +1135,7 @@ async fn record_repo_reads_then_replay_roundtrips_byte_identically() {
         "fulltext_query_nodes_smoke",
         "fulltext_query_relationships_smoke",
     ] {
-        let op = a.operations.get(name).unwrap_or_else(|| panic!("{name} present"));
+        let op = a.operations.get(name).unwrap_or_else(|| panic!("{name} missing from report"));
         assert!(op.result_digest.is_none(), "{name} is result-N/A (top-k)");
     }
 
