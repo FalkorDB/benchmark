@@ -1041,6 +1041,72 @@ async fn record_then_replay_roundtrips_and_guard_proceeds() {
     drop_graph(graph).await;
 }
 
+/// Phase 3 B2: record the queries_repository baseline READ shapes (`--repo-reads full`) OFFLINE,
+/// then replay --load → --no-load. The workload identity (workload_hash) is byte-identical across
+/// replays, every result-gated shape yields matching digests, and the one LIMIT-without-ORDER shape
+/// (`entity_path_introspection`) is recorded + timed but result-N/A (digest `None`) in both replays.
+///
+/// Uses a multi-thread runtime: the baseline reads return nodes/relations/paths, and the FalkorDB
+/// client decodes those via `block_in_place` (as the production `#[tokio::main]` runtime does).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires a running FalkorDB server"]
+async fn record_repo_reads_then_replay_roundtrips_byte_identically() {
+    use benchmark::synthetic::{shapes, Tier};
+
+    let graph = "syn_it_repo_reads";
+    drop_graph(graph).await;
+    let dir = temp_bundle_dir("syn-it-repo-reads");
+    let spec = DatasetSpec {
+        seed: 9,
+        nodes: 500,
+        edges: 1500,
+    };
+    // Render every baseline read shape's corpus ONCE from the fixed seed, then record verbatim.
+    let recorded = shapes::record_repo_reads(Tier::Full, spec.nodes as i32, spec.edges as i32, spec.seed)
+        .expect("render repo reads");
+    assert_eq!(recorded.len(), 46, "Full records every baseline read shape");
+    recording::record_rendered(&spec, graph, &recorded, spec.seed, 256, &dir).expect("record");
+
+    // Replay #1 loads the recorded graph; #2 reuses it (no-load), count-verifying first.
+    let ref_out = dir.join("ref.json").to_string_lossy().into_owned();
+    let cand_out = dir.join("cand.json").to_string_lossy().into_owned();
+    let a = replay::run(&replay_config(&dir, graph, &ref_out, true))
+        .await
+        .expect("replay --load");
+    let b = replay::run(&replay_config(&dir, graph, &cand_out, false))
+        .await
+        .expect("replay --no-load");
+
+    // Same workload identity across replays (record-once → replay-verbatim).
+    let ha = a.meta.dataset.as_ref().expect("dataset a").workload_hash.clone();
+    let hb = b.meta.dataset.as_ref().expect("dataset b").workload_hash.clone();
+    assert_eq!(ha, hb, "workload_hash must match across replays");
+    assert_eq!(a.operations.len(), 46);
+
+    // Every result-gated shape has a digest that matches across the two replays; the
+    // LIMIT-without-ORDER shape is result-N/A (digest absent) in both.
+    for (name, op_a) in &a.operations {
+        let op_b = b.operations.get(name).expect("op present in both replays");
+        if name == "entity_path_introspection" {
+            assert!(op_a.result_digest.is_none(), "{name} must be result-N/A");
+            assert!(op_b.result_digest.is_none(), "{name} must be result-N/A");
+        } else {
+            let da = op_a.result_digest.as_ref().unwrap_or_else(|| panic!("digest a for {name}"));
+            let db = op_b.result_digest.as_ref().unwrap_or_else(|| panic!("digest b for {name}"));
+            assert_eq!(da, db, "result digest for {name} must match across replays");
+        }
+    }
+
+    // The guard proceeds (same workload + matching gated digests).
+    match guard(&BaselineKey::from_report(&a), &BaselineKey::from_report(&b)) {
+        GuardOutcome::Proceed { .. } => {}
+        GuardOutcome::Abort { reason } => panic!("guard aborted unexpectedly: {reason}"),
+    }
+
+    std::fs::remove_dir_all(&dir).ok();
+    drop_graph(graph).await;
+}
+
 /// replay --no-load against a graph that doesn't hold the recorded dataset fails closed (the
 /// count-verify rejects it) rather than silently measuring the wrong graph.
 #[tokio::test]
@@ -1091,6 +1157,7 @@ async fn record_and_replay_via_run_command() {
         ],
         all_reads: false,
         tier: None,
+        repo_reads: None,
         seed: Some(11),
         nodes: Some(400),
         edges: Some(1200),
