@@ -498,12 +498,13 @@ just synthetic-compare-versions demo falkor://127.0.0.1:6379 falkor://127.0.0.1:
   identical `workload_hash` — deterministic recording), then `run --recording` at C=1,4 + `report
   --diff` (incl. the C>1 result verification) against a throwaway Docker FalkorDB. Latency is not
   asserted (it is environment-dependent noise — see the tutorial).
-- **`just synthetic-verify`** is the CI **non-divergence gate**: it records **all** read ops
-  (`--op all`, medium dataset) and runs `run --recording` **twice** against the same throwaway
-  FalkorDB across the full concurrency sweep + both cache modes, failing if `report --diff` finds a
-  different `workload_hash` or any per-op result digest — i.e. the two runs on one machine must not
-  diverge. Latency is not asserted. The CI job publishes the A/B report to the job summary and
-  upserts it as a **sticky PR comment** so the diff is viewable inline in the PR.
+- **`just synthetic-verify`** is the CI **non-divergence gate**: it records **all** A/B read shapes
+  (`--repo-reads full`, on a small determinism-oracle graph) and runs `run --recording` **twice**
+  against the same throwaway FalkorDB at concurrency 1 & 8, uncached (mirroring the per-PR CI
+  matrix), failing if `report --diff` finds a different `workload_hash` or any per-op result digest
+  — i.e. the two runs on one machine must not diverge. Latency is not asserted. The CI job publishes
+  the A/B report to the job summary and upserts it as a **sticky PR comment** so the diff is
+  viewable inline in the PR.
 - `recordings/` is git-ignored (regenerable bundles).
 
 #### Version-comparison baselines (Criterion, C=1)

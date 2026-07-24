@@ -246,9 +246,9 @@ benchmark synthetic record --op all --nodes 1000 --edges 5000 --seed 7 --out-dir
 benchmark synthetic record --op all --nodes 1000 --edges 5000 --seed 7 --out-dir rec_again
 # → both print the SAME `workload_hash sha256:b74e5a1d…7c1e70`
 
-# (b) Non-divergence (the CI gate): record all ops, run twice against ONE FalkorDB across the full
-#     sweep + both cache modes, and fail if any result digest differs. Spins its own throwaway
-#     Docker FalkorDB and tears it down.
+# (b) Non-divergence (the CI gate): record all A/B read shapes (--repo-reads full), run twice against
+#     ONE FalkorDB at concurrency 1,8 uncached, and fail if any result digest differs. Spins its own
+#     throwaway Docker FalkorDB and tears it down.
 just synthetic-verify
 
 # A lighter, faster self-check (records twice + a C=1,4 diff):
@@ -257,10 +257,12 @@ just synthetic-sanity
 
 **What each step does.** The two `record`s producing an identical `workload_hash` proves the bundle
 is a pure function of the seed + tool build. `just synthetic-verify` — the **`Synthetic
-non-divergence` CI gate** — records every read op, then runs the recorded bundle **twice** against
-the same server across `--concurrency 1,2,4,8,16,32 --cache both`; the final `report --diff` fails
-non-zero if the `workload_hash` or **any** per-op result digest differs between the two runs.
-Because it compares deterministic result digests (not latency), it is **not** flaky.
+non-divergence` CI gate** — records every A/B read shape (`--repo-reads full`), then runs the
+recorded bundle **twice** against the same server across `--concurrency 1,8 --cache uncached`; the
+final `report --diff` fails non-zero if the `workload_hash` or **any** per-op result digest differs
+between the two runs. Because it compares deterministic result digests (not latency), it is **not
+latency-sensitive** — it still **fails closed** on environmental faults (Docker startup failure,
+query/client timeouts, or a missing `workload_hash`/per-op digest), which is intended.
 
 **What you get:**
 
@@ -269,7 +271,7 @@ first : sha256:b74e5a1d…7c1e70
 again : sha256:b74e5a1d…7c1e70      ← identical ⇒ deterministic
 
 # …and the final line from `just synthetic-verify`:
-synthetic-verify OK — no divergence across all ops × concurrency 1,2,4,8,16,32 × cached/uncached
+synthetic-verify OK — no divergence across --repo-reads full × concurrency 1,8 × uncached
 ```
 
 ---

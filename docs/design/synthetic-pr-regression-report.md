@@ -26,7 +26,7 @@ at a glance (🟢 good / 🔴 regressed). It never fails the PR.
 | Threshold config | **TOML file in `falkordb-rs-next-gen`** (tool ships built-in defaults). |
 | Result divergence | **Non-fatal**: mark diverged ops 🔴 with `⚠ results differ`, keep going. |
 | Coloring | 🟢 / 🔴 emoji per cell in the Markdown table. |
-| Sweep | full concurrency `1,2,4,8,16,32` × both cache modes (matches merged `synthetic-verify`). |
+| Sweep | full concurrency `1,2,4,8,16,32` × both cache modes. |
 | Verdict rule | 🟢 if PR is **faster** *or* **slower within budget**; 🔴 if slower beyond budget **and** the absolute p50 delta exceeds a noise floor; diverged op → correctness-🔴, perf verdict **N/A**. |
 | Metric definition | `p50` = the **total-latency median** (`total_ms` p50) of a cell. |
 | Tool ref | a **separate** `SYNTHETIC_BENCHMARK_REF` **pinned to an immutable commit SHA** (tagged for reference) — the A/B's `BENCHMARK_REF=v2.2` is left untouched. |
@@ -173,7 +173,7 @@ comment. (A combined multi-baseline subcommand is a possible future consolidatio
 - `.github/synthetic-workload.toml` — a pinned, versioned workload (`seed`, `graph`, `nodes`,
   `edges`) plus `samples`/`warmup`, so `record` is reproducible and the query volume is bounded
   (recording needs `--nodes/--edges` — the tool errors without them). Start modest (e.g. medium
-  10k/50k, `--samples 200 --warmup 50`, matching `synthetic-verify`) and tune for VM runtime.
+  10k/50k, `--samples 200 --warmup 50`) and tune for VM runtime.
 
 ### B2. A new "synthetic A/B" job in the benchmark pipeline
 
