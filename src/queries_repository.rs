@@ -288,7 +288,7 @@ impl QueriesRepository {
         rng: &mut dyn Rng,
     ) -> Option<PreparedQuery> {
         let generator = self.read_queries.get(name)?;
-        let q_id = *self.name_to_id.get(name).unwrap_or(&0);
+        let q_id = *self.name_to_id.get(name)?;
         Some(PreparedQuery::new(
             q_id,
             name.to_string(),

@@ -197,7 +197,7 @@ pub fn record_repo_reads(
     let selected: Vec<ShapeSpec> = baseline_read_shapes()
         .into_iter()
         // `Tier::Full` records everything; `Tier::Core` records only the core subset.
-        .filter(|shape| tier == Tier::Full || shape.tier == Tier::Core)
+        .filter(|shape| tier.includes(shape.tier))
         .collect();
     record_selected_shapes(&selected, vertices, edges, corpus_seed)
 }
@@ -256,18 +256,25 @@ mod tests {
     #[test]
     fn baseline_shapes_match_the_auto_discovered_repository_reads() {
         // Derive-with-annotation (Decision 3): the annotation table must name EXACTLY the
-        // auto-discovered baseline (non-algorithm) reads — no more, no fewer. If `queries_repository`
-        // gains or drops a baseline read, this fails until `baseline_read_shapes()` is updated.
+        // auto-discovered baseline (non-algorithm) reads, IN THE SAME definition order — no more,
+        // no fewer, no reordering. Order matters: it's the record order, which feeds `workload_hash`
+        // (recording.rs). If `queries_repository` gains, drops, or reorders a baseline read, this
+        // fails until `baseline_read_shapes()` is realigned.
         let repo = baseline_repository(1000, 5000);
-        let discovered: BTreeSet<&str> =
+        let discovered: Vec<&str> =
             repo.non_algorithm_read_names().iter().map(String::as_str).collect();
-        let annotated = annotated_names();
+        let annotated: Vec<&str> = baseline_read_shapes().iter().map(|s| s.name).collect();
+        // Set diff first for the common "added/removed a shape" case (clearer than a raw seq diff)…
+        let annotated_set: BTreeSet<&str> = annotated.iter().copied().collect();
+        let discovered_set: BTreeSet<&str> = discovered.iter().copied().collect();
         assert_eq!(
-            annotated, discovered,
+            annotated_set, discovered_set,
             "annotation drift — annotated-only: {:?}; discovered-only: {:?}",
-            annotated.difference(&discovered).collect::<Vec<_>>(),
-            discovered.difference(&annotated).collect::<Vec<_>>()
+            annotated_set.difference(&discovered_set).collect::<Vec<_>>(),
+            discovered_set.difference(&annotated_set).collect::<Vec<_>>()
         );
+        // …then exact definition-order equality (the record order that determines `workload_hash`).
+        assert_eq!(annotated, discovered, "baseline read shapes are out of definition order");
     }
 
     #[test]
