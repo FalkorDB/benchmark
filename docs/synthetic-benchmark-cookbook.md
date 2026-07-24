@@ -136,7 +136,7 @@ execution + compilation) modes, and derives the per-level **compilation cost** f
 synthetic benchmark — endpoint falkor://127.0.0.1:6381  graph falkor  samples 100  warmup 50  concurrency [1,2,4,8,16,32]  seed 7  connection pool(size=1) per worker
 server — falkordb module ver 4.20.1  redis 8.6.3  CACHE_SIZE 25
 client host — bench-host · macOS · Apple M1 Pro (10c/10t) · 16.0 GiB · arm64
-dataset — seed 7  nodes 1000  edges 5000  workload_hash sha256:7be5c44c…3058e2
+dataset — seed 7  nodes 1000  edges 5000  workload_hash sha256:b74e5a1d…7c1e70
 
 aggregate_count
   [cached — plan reused, execution only]
@@ -179,7 +179,7 @@ seed and the knobs, it is fully offline and reproducible.
 **What you get:**
 
 ```text
-recorded 9 op(s) into rec (workload_hash sha256:7be5c44c…3058e2)
+recorded 9 op(s) into rec (workload_hash sha256:b74e5a1d…7c1e70)
 rec: commands  graph.jsonl  manifest.json
 rec/commands: aggregate_count.jsonl aggregate_group.jsonl expand_1_hop.jsonl
   expand_hops_5.jsonl match_by_index.jsonl match_by_label_scan.jsonl
@@ -191,10 +191,10 @@ rec/commands: aggregate_count.jsonl aggregate_group.jsonl expand_1_hop.jsonl
 ```json
 {
   "format_version": 1,
-  "generator_version": "synthbench/v3",
+  "generator_version": "synthbench/v4",
   "dataset": { "seed": 7, "nodes": 1000, "edges": 5000 },
   "ops": [ { "name": "return_const", "count": 256 }, { "name": "match_by_index", "count": 256 } ],
-  "workload_hash": "sha256:7be5c44c…3058e2"
+  "workload_hash": "sha256:b74e5a1d…7c1e70"
 }
 ```
 
@@ -244,7 +244,7 @@ and (b) two runs of the same workload against the same FalkorDB **do not diverge
 # (a) Determinism: record the same workload twice, compare the workload_hash — must be identical.
 benchmark synthetic record --op all --nodes 1000 --edges 5000 --seed 7 --out-dir rec
 benchmark synthetic record --op all --nodes 1000 --edges 5000 --seed 7 --out-dir rec_again
-# → both print the SAME `workload_hash sha256:7be5c44c…3058e2`
+# → both print the SAME `workload_hash sha256:b74e5a1d…7c1e70`
 
 # (b) Non-divergence (the CI gate): record all ops, run twice against ONE FalkorDB across the full
 #     sweep + both cache modes, and fail if any result digest differs. Spins its own throwaway
@@ -265,8 +265,8 @@ Because it compares deterministic result digests (not latency), it is **not** fl
 **What you get:**
 
 ```text
-first : sha256:7be5c44c…3058e2
-again : sha256:7be5c44c…3058e2      ← identical ⇒ deterministic
+first : sha256:b74e5a1d…7c1e70
+again : sha256:b74e5a1d…7c1e70      ← identical ⇒ deterministic
 
 # …and the final line from `just synthetic-verify`:
 synthetic-verify OK — no divergence across all ops × concurrency 1,2,4,8,16,32 × cached/uncached

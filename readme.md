@@ -215,7 +215,8 @@ sweep never mutates a graph unless you ask. `--tier core` selects a small, cheap
 subset gated on every PR; `--tier full` selects every read op (same as `--all-reads`, run
 nightly/on-demand). `--tier` is mutually exclusive with `--op`/`--all-reads`, and only ever selects
 reads (write ops are `full`-tier but stay opt-in). All read ops except `return_const` target the benchmark's
-`:User {id, age}` / `(:User)-[:Friend]->(:User)` schema (with an index on `:User(id)`). Most draw
+`:User {id, age}` / `(:User)-[:Friend {bench_capacity}]->(:User)` schema (with indexes on both
+`:User(id)` and `:User(age)`, mirroring the A/B baseline fixture). Most draw
 their parameters from `:User` ids sampled out of
 `--graph` (`shortest_path` needs two, `match_by_index`/`expand_*`/`aggregate_*`/`property_projection`
 one); `return_const` and `match_by_label_scan` need no seed ids (they vary a constant / a scan

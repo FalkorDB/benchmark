@@ -1,6 +1,6 @@
 {
   "format_version": 1,
-  "generator_version": "synthbench/v3",
+  "generator_version": "synthbench/v4",
   "tool_version": "0.1.0",
   "dataset": {
     "seed": 42,
@@ -24,6 +24,6 @@
       "count": 256
     }
   ],
-  "workload_hash": "sha256:57ec47dffa81b5be2d39fba9b634ea93e79020e2a0ba9f578692d72b351c7606",
+  "workload_hash": "sha256:eeaff0294bcda9a9f36b79c910a47163854eba4a075e3954dcc84997e993af45",
   "created_at_epoch_secs": 1784720696
 }

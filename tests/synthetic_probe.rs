@@ -501,6 +501,32 @@ async fn generated_dataset_has_exact_counts_index_and_hash() {
     .await;
     assert!(operational >= 1, "expected an OPERATIONAL :User index");
 
+    // ...as does the :User(age) index (fixture parity with the A/B baseline — design §3.4), so age
+    // is indexed alongside id.
+    let age_indexed = scalar_i64(
+        &mut g,
+        "CALL db.indexes() YIELD label, properties, status \
+         WHERE label = 'User' AND status = 'OPERATIONAL' AND 'age' IN properties RETURN count(*)",
+    )
+    .await;
+    assert!(age_indexed >= 1, "expected an OPERATIONAL :User(age) index");
+
+    // Every :Friend edge carries a deterministic bench_capacity in [1, 20] (no NULLs), so
+    // capacity-filtered shapes exercise a real predicate rather than always matching zero rows.
+    let missing_capacity = scalar_i64(
+        &mut g,
+        "MATCH (:User)-[r:Friend]->(:User) WHERE r.bench_capacity IS NULL RETURN count(r)",
+    )
+    .await;
+    assert_eq!(missing_capacity, 0, "every :Friend edge must have bench_capacity");
+    let out_of_range = scalar_i64(
+        &mut g,
+        "MATCH (:User)-[r:Friend]->(:User) WHERE r.bench_capacity < 1 OR r.bench_capacity > 20 \
+         RETURN count(r)",
+    )
+    .await;
+    assert_eq!(out_of_range, 0, "bench_capacity must stay within [1, 20]");
+
     // ...and the point-lookup op uses it (Node By Index Scan in the plan).
     let plan = explain(&mut g, "MATCH (n:User {id: 7}) RETURN n.id").await;
     assert!(
