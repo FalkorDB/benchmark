@@ -178,11 +178,25 @@ pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
     let uid_alloc = AtomicU64::new(0);
     let max_c = concurrency.iter().copied().max().unwrap_or(1);
 
+    // Per-op result-gating policy from the recorded manifest (keyed by the op's unique name). A
+    // result-N/A op — a shape whose result set isn't byte-stable (LIMIT-without-ORDER, top-k,
+    // float scores — design §3.2 / Decision 4) — is still loaded, replayed, and timed, but its
+    // result is neither cross-concurrency-verified nor digested, so a benign result difference
+    // never fails the A/B non-divergence gate. Unknown names default to gated (the safe default).
+    let result_gated: std::collections::HashMap<&str, bool> = bundle
+        .manifest
+        .ops
+        .iter()
+        .map(|e| (e.name.as_str(), e.result_gated))
+        .collect();
+
     let mut operations = BTreeMap::new();
     for (op, corpus, shapes) in &reference {
+        let is_gated = result_gated.get(op.name()).copied().unwrap_or(true);
         // Verify results are IDENTICAL at the highest concurrency (untimed) before trusting the
-        // measured latencies — a concurrent path that returns different/wrong results is a hard fail.
-        if max_c > 1 {
+        // measured latencies — a concurrent path that returns different/wrong results is a hard
+        // fail. Skipped for result-N/A ops, whose results aren't required to be stable.
+        if max_c > 1 && is_gated {
             verify_concurrent(
                 &config.endpoint,
                 &graph_name,
@@ -212,7 +226,10 @@ pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
             client_deadline,
         )
         .await?;
-        op_report.result_digest = Some(op_result_digest(op.name(), shapes));
+        // Gate the result only for byte-stable shapes; a result-N/A op reports `None` so the diff
+        // guard renders it N/A instead of comparing a non-deterministic digest.
+        op_report.result_digest =
+            is_gated.then(|| op_result_digest(op.name(), shapes));
         operations.insert(op.name().to_string(), op_report);
     }
 

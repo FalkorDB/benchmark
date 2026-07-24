@@ -271,6 +271,32 @@ impl QueriesRepository {
         self.catalog.clone()
     }
 
+    /// The non-algorithm read shape names, in definition order — the baseline read shapes the
+    /// synthetic check records (design §3.4). Excludes algorithm reads (opt-in, capability-gated)
+    /// and writes.
+    pub fn non_algorithm_read_names(&self) -> &[String] {
+        &self.non_algorithm_read_query_names
+    }
+
+    /// Render the read shape `name` from a caller-supplied RNG, so a fixed seed yields a
+    /// byte-identical Cypher+params corpus (design §4.1 — the seedable entry the record-once /
+    /// replay-verbatim synthetic path renders each shape's corpus with). Returns `None` if `name`
+    /// is not a known read shape.
+    pub fn render_read_with_rng(
+        &self,
+        name: &str,
+        rng: &mut dyn Rng,
+    ) -> Option<PreparedQuery> {
+        let generator = self.read_queries.get(name)?;
+        let q_id = *self.name_to_id.get(name).unwrap_or(&0);
+        Some(PreparedQuery::new(
+            q_id,
+            name.to_string(),
+            generator.query_type,
+            generator.generate_with_rng(rng),
+        ))
+    }
+
     fn random_query_from_pool(
         &self,
         queries: &HashMap<String, QueryGenerator>,
@@ -341,6 +367,22 @@ pub struct UsersQueriesRepository {
 impl UsersQueriesRepository {
     pub fn catalog(&self) -> Vec<QueryCatalogEntry> {
         self.queries_repository.catalog()
+    }
+
+    /// The baseline read shape names (non-algorithm reads), in definition order — the shapes the
+    /// synthetic check records via [`Self::render_read_with_rng`] (design §3.4).
+    pub fn non_algorithm_read_names(&self) -> &[String] {
+        self.queries_repository.non_algorithm_read_names()
+    }
+
+    /// Render the read shape `name` from a caller-supplied RNG (record-once determinism, §4.1).
+    /// Returns `None` if `name` is not a known read shape.
+    pub fn render_read_with_rng(
+        &self,
+        name: &str,
+        rng: &mut dyn Rng,
+    ) -> Option<PreparedQuery> {
+        self.queries_repository.render_read_with_rng(name, rng)
     }
 
     pub fn random_queries(
@@ -1325,5 +1367,83 @@ mod tests {
             repository.queries_repository.algorithm_read_query_count(),
             1
         );
+    }
+
+    #[test]
+    fn non_algorithm_read_names_are_the_baseline_reads() {
+        let repo = UsersQueriesRepository::new(
+            100,
+            1000,
+            Flavour::FalkorDB,
+            AlgorithmQuerySelection::default(),
+            QueryCoverageProfile::Baseline,
+        );
+        let names: Vec<&str> = repo.non_algorithm_read_names().iter().map(String::as_str).collect();
+
+        // Representative baseline reads are present…
+        for expected in ["single_vertex_read", "id_range_scan", "entity_path_introspection"] {
+            assert!(names.contains(&expected), "expected baseline read '{expected}'");
+        }
+        // …algorithms, writes, and out-of-profile shapes are excluded.
+        for excluded in [
+            "algo_pagerank_summary",         // algorithm read (opt-in)
+            "single_vertex_write",           // write
+            "temporal_spatial_roundtrip",    // ExtendedCore (not in Baseline)
+            "vector_query_nodes_smoke",      // FixtureDependent (not in Baseline)
+        ] {
+            assert!(!names.contains(&excluded), "'{excluded}' must not be a baseline read");
+        }
+        // Every name resolves to a Read shape.
+        for name in &names {
+            assert!(
+                repo.render_read_with_rng(name, &mut rand::rng()).is_some(),
+                "baseline read '{name}' must be renderable"
+            );
+        }
+    }
+
+    #[test]
+    fn render_read_with_rng_is_byte_identical_for_a_fixed_seed() {
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
+
+        let repo = UsersQueriesRepository::new(
+            1_000_000,
+            1_000_000,
+            Flavour::FalkorDB,
+            AlgorithmQuerySelection::default(),
+            QueryCoverageProfile::Baseline,
+        );
+
+        // Render a whole corpus (many draws) for a randomised shape from a fixed seed, twice: the
+        // rendered Cypher+params stream must be byte-identical — the record-once / replay-verbatim
+        // determinism the A/B non-divergence gate depends on.
+        let corpus = |seed: u64| -> Vec<String> {
+            let mut rng = StdRng::seed_from_u64(seed);
+            (0..64)
+                .map(|_| {
+                    repo.render_read_with_rng("shortest_path", &mut rng)
+                        .expect("shape present")
+                        .cypher
+                })
+                .collect()
+        };
+        assert_eq!(corpus(0xA11CE), corpus(0xA11CE));
+        // A different seed yields a different stream (the shape is genuinely seed-sensitive).
+        assert_ne!(corpus(0xA11CE), corpus(0xB0B));
+    }
+
+    #[test]
+    fn render_read_with_rng_rejects_unknown_and_non_read_shapes() {
+        let repo = UsersQueriesRepository::new(
+            100,
+            1000,
+            Flavour::FalkorDB,
+            AlgorithmQuerySelection::default(),
+            QueryCoverageProfile::Baseline,
+        );
+        assert!(repo.render_read_with_rng("no_such_shape", &mut rand::rng()).is_none());
+        // A write shape is not a read and must not render through the read seam.
+        assert!(repo.render_read_with_rng("single_vertex_write", &mut rand::rng()).is_none());
     }
 }

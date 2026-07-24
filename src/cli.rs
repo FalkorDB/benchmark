@@ -534,6 +534,13 @@ pub enum SyntheticCommands {
         )]
         tier: Option<Tier>,
         #[arg(
+            long = "repo-reads",
+            value_enum,
+            conflicts_with_all = ["ops", "all_reads", "tier"],
+            help = "record the A/B benchmark's baseline NON-ALGORITHM READ shapes from queries_repository at a coverage tier: `core` (small per-PR subset) or `full` (all ~46 reads). Auto-discovered + annotated; deterministic (record-once/replay-verbatim). Mutually exclusive with --op/--all-reads/--tier."
+        )]
+        repo_reads: Option<Tier>,
+        #[arg(
             long,
             help = "seed for the dataset and the per-operation corpora (same seed + same tool build ⇒ identical bundle; default 0)"
         )]
@@ -778,6 +785,45 @@ mod tests {
         .is_err());
         assert!(Cli::try_parse_from([
             "benchmark", "synthetic", "run", "--tier", "core", "--all-reads",
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn cli_repo_reads_flag_parses_and_conflicts_with_op_selection() {
+        use clap::Parser;
+        // `--repo-reads core|full` parses on `record`.
+        assert!(Cli::try_parse_from([
+            "benchmark", "synthetic", "record", "--repo-reads", "core", "--out-dir", "rec-out",
+        ])
+        .is_ok());
+        assert!(Cli::try_parse_from([
+            "benchmark", "synthetic", "record", "--repo-reads", "full", "--out-dir", "rec-out",
+        ])
+        .is_ok());
+        // An unknown tier is rejected.
+        assert!(Cli::try_parse_from([
+            "benchmark", "synthetic", "record", "--repo-reads", "nope", "--out-dir", "rec-out",
+        ])
+        .is_err());
+        // `--repo-reads` is mutually exclusive with `--op`, `--all-reads` and `--tier`.
+        for conflicting in [
+            vec!["--op", "match_by_index"],
+            vec!["--all-reads"],
+            vec!["--tier", "core"],
+        ] {
+            let mut argv = vec![
+                "benchmark", "synthetic", "record", "--repo-reads", "core", "--out-dir", "rec-out",
+            ];
+            argv.extend(conflicting);
+            assert!(
+                Cli::try_parse_from(argv.clone()).is_err(),
+                "expected conflict for {argv:?}"
+            );
+        }
+        // `--repo-reads` is record-only (not a `run` flag).
+        assert!(Cli::try_parse_from([
+            "benchmark", "synthetic", "run", "--repo-reads", "core",
         ])
         .is_err());
     }

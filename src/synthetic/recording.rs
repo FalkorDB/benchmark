@@ -66,12 +66,27 @@ pub struct OpEntry {
     /// (v1 records reads only), and is **not** folded into the [`Manifest::workload_hash`].
     #[serde(default = "default_op_kind")]
     pub kind: QueryType,
+    /// Whether this op's result is compared across the A/B (record-once / replay-verbatim) gate.
+    /// `true` (the default, and the value for every built-in catalog op) means replay computes and
+    /// gates a `result_digest`; `false` marks the op **result-N/A** — still recorded and timed, but
+    /// its result is *not* gated, for shapes whose result set isn't byte-stable (LIMIT-without-
+    /// ORDER, top-k, float scores — design §3.2 / Decision 4). Like [`Self::kind`] it is **not**
+    /// folded into the [`Manifest::workload_hash`] (it's replay-gating policy, not workload content)
+    /// and defaults to `true` for bundles written before this field existed.
+    #[serde(default = "default_result_gated")]
+    pub result_gated: bool,
     pub count: usize,
 }
 
 /// The read/write kind an [`OpEntry`] without an explicit `kind` deserializes to (v1 read bundles).
 fn default_op_kind() -> QueryType {
     QueryType::Read
+}
+
+/// The result-gating an [`OpEntry`] without an explicit `result_gated` deserializes to: gated
+/// (every op recorded before the field existed had its result digest compared).
+fn default_result_gated() -> bool {
+    true
 }
 
 /// Reject an op name that isn't a safe single-path-component slug.
@@ -224,6 +239,9 @@ impl WorkloadHasher {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordedOp {
     pub key: OpKey,
+    /// Whether replay gates this op's result digest — see [`OpEntry::result_gated`]. `true` for
+    /// every built-in catalog op and byte-stable shape; `false` marks a result-N/A shape.
+    pub result_gated: bool,
     pub commands: Vec<String>,
 }
 
@@ -274,6 +292,8 @@ pub fn record(
     for &op in ops {
         recorded.push(RecordedOp {
             key: OpKey::from(op),
+            // Every built-in catalog op projects byte-stable scalars, so its result is gated.
+            result_gated: true,
             commands: render_commands(op, dataset, corpus_seed)?,
         });
     }
@@ -376,6 +396,7 @@ pub fn record_rendered(
         op_entries.push(OpEntry {
             name: name.to_string(),
             kind: op.key.kind(),
+            result_gated: op.result_gated,
             count: cyphers.len(),
         });
     }
@@ -714,6 +735,7 @@ mod tests {
         };
         let ops = vec![RecordedOp {
             key: OpKey::dynamic("single_vertex_read", QueryType::Read),
+            result_gated: true,
             commands: vec![
                 "CYPHER id=1 MATCH (n:User {id:$id}) RETURN n".to_string(),
                 "CYPHER id=2 MATCH (n:User {id:$id}) RETURN n".to_string(),
@@ -756,6 +778,7 @@ mod tests {
         };
         let ops = vec![RecordedOp {
             key: OpKey::dynamic("bulk_insert", QueryType::Write),
+            result_gated: true,
             commands: vec!["CYPHER x=1 CREATE (n:User {id:$x})".to_string()],
         }];
         let err = record_rendered(&spec, "g", &ops, 1, 8, &dir).unwrap_err();
@@ -773,6 +796,7 @@ mod tests {
         };
         let ops = vec![RecordedOp {
             key: OpKey::dynamic("empty_shape", QueryType::Read),
+            result_gated: true,
             commands: vec![],
         }];
         let err = record_rendered(&spec, "g", &ops, 1, 8, &dir).unwrap_err();
@@ -791,10 +815,12 @@ mod tests {
         let ops = vec![
             RecordedOp {
                 key: OpKey::dynamic("a_read", QueryType::Read),
+                result_gated: true,
                 commands: vec!["CYPHER  RETURN 1".to_string()],
             },
             RecordedOp {
                 key: OpKey::dynamic("a_read", QueryType::Read),
+                result_gated: true,
                 commands: vec!["CYPHER  RETURN 2".to_string()],
             },
         ];
@@ -825,6 +851,7 @@ mod tests {
         };
         let ops = vec![RecordedOp {
             key: OpKey::dynamic("../escape", QueryType::Read),
+            result_gated: true,
             commands: vec!["CYPHER  RETURN 1".to_string()],
         }];
         let err = record_rendered(&spec, "g", &ops, 1, 8, &dir).unwrap_err();
@@ -845,10 +872,12 @@ mod tests {
         let ops = vec![
             RecordedOp {
                 key: OpKey::dynamic("dup", QueryType::Read),
+                result_gated: true,
                 commands: vec!["CYPHER  RETURN 1".to_string()],
             },
             RecordedOp {
                 key: OpKey::dynamic("dup", QueryType::Write),
+                result_gated: true,
                 commands: vec!["CYPHER  CREATE (n)".to_string()],
             },
         ];
@@ -869,6 +898,7 @@ mod tests {
         };
         let ops = vec![RecordedOp {
             key: OpKey::dynamic("safe_read", QueryType::Read),
+            result_gated: true,
             commands: vec!["CYPHER  RETURN 1".to_string()],
         }];
         record_rendered(&spec, "g", &ops, 1, 8, &dir).unwrap();
@@ -894,6 +924,7 @@ mod tests {
         };
         let ops = vec![RecordedOp {
             key: OpKey::dynamic("safe_read", QueryType::Read),
+            result_gated: true,
             commands: vec!["CYPHER  RETURN 1".to_string()],
         }];
         record_rendered(&spec, "g", &ops, 1, 8, &dir).unwrap();
@@ -906,6 +937,71 @@ mod tests {
         let err = load(&dir).unwrap_err();
         assert!(format!("{err}").contains("duplicate op name"), "got: {err}");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn record_rendered_persists_result_gated_and_load_round_trips_it() {
+        // A bundle can mix a gated op and a result-N/A op; `load` round-trips each op's
+        // `result_gated` so replay knows which results to gate (design §3.2 / Decision 4).
+        let dir = temp_bundle_dir("synthrec-gated");
+        let spec = DatasetSpec {
+            seed: 4,
+            nodes: 20,
+            edges: 60,
+        };
+        let ops = vec![
+            RecordedOp {
+                key: OpKey::dynamic("gated_read", QueryType::Read),
+                result_gated: true,
+                commands: vec!["CYPHER  RETURN 1".to_string()],
+            },
+            RecordedOp {
+                key: OpKey::dynamic("na_read", QueryType::Read),
+                result_gated: false,
+                commands: vec!["CYPHER  MATCH (n) RETURN n LIMIT 1".to_string()],
+            },
+        ];
+        let manifest = record_rendered(&spec, "g", &ops, 1, 8, &dir).unwrap();
+        assert!(manifest.ops[0].result_gated, "first op stays gated");
+        assert!(!manifest.ops[1].result_gated, "second op is result-N/A");
+
+        let bundle = load(&dir).unwrap();
+        assert!(bundle.manifest.ops[0].result_gated);
+        assert!(!bundle.manifest.ops[1].result_gated);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn result_gated_is_not_folded_into_the_workload_hash() {
+        // `result_gated` is replay-gating policy, not workload content: two bundles that differ
+        // ONLY in it must share a `workload_hash` (so it never perturbs the A/B comparability gate).
+        let spec = DatasetSpec {
+            seed: 5,
+            nodes: 20,
+            edges: 60,
+        };
+        let make = |gated: bool| {
+            let dir = temp_bundle_dir(if gated { "synthrec-hg" } else { "synthrec-hn" });
+            let ops = vec![RecordedOp {
+                key: OpKey::dynamic("shape", QueryType::Read),
+                result_gated: gated,
+                commands: vec!["CYPHER  RETURN 1".to_string()],
+            }];
+            let m = record_rendered(&spec, "g", &ops, 1, 8, &dir).unwrap();
+            std::fs::remove_dir_all(&dir).ok();
+            m.workload_hash
+        };
+        assert_eq!(make(true), make(false));
+    }
+
+    #[test]
+    fn op_entry_defaults_result_gated_true_for_pre_field_bundles() {
+        // An `OpEntry` serialized before `result_gated` existed (no such key) deserializes to
+        // gated — preserving the pre-field behaviour where every op's result was compared.
+        let entry: OpEntry =
+            serde_json::from_str(r#"{"name":"legacy_op","count":3}"#).unwrap();
+        assert_eq!(entry.kind, QueryType::Read);
+        assert!(entry.result_gated, "a pre-field op defaults to gated");
     }
 
     #[test]

@@ -27,6 +27,7 @@ pub mod provenance;
 pub mod recording;
 pub mod replay;
 pub mod report;
+pub mod shapes;
 pub mod stats;
 pub mod thresholds;
 pub mod writes;
@@ -1426,6 +1427,7 @@ pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkRes
             ops,
             all_reads,
             tier,
+            repo_reads,
             seed,
             nodes,
             edges,
@@ -1435,11 +1437,13 @@ pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkRes
             let ops = crate::cli::expand_op_selectors(&ops);
             // Reuse the run-config resolution (with generate=true) to validate + resolve the
             // dataset knobs, graph and read-op selection, then record OFFLINE (no server).
+            // `--repo-reads` selects the baseline read SHAPES implicitly (not catalog ops), so it
+            // forces `all_reads` only to satisfy op resolution; the resolved ops are ignored below.
             let overrides = config::CliOverrides {
                 endpoint: None,
                 graph,
                 ops,
-                all_reads,
+                all_reads: all_reads || repo_reads.is_some(),
                 tier,
                 samples: None,
                 warmup: None,
@@ -1461,14 +1465,35 @@ pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkRes
             let spec = resolved.dataset.ok_or_else(|| {
                 OtherError("record requires --nodes/--edges (or a config) to generate a dataset".to_string())
             })?;
-            let manifest = recording::record(
-                &spec,
-                &resolved.graph,
-                &resolved.ops,
-                resolved.seed,
-                DATASET_LOAD_BATCH,
-                std::path::Path::new(&out_dir),
-            )?;
+            let manifest = if let Some(tier) = repo_reads {
+                // Phase 3 B2: record the queries_repository baseline read shapes. Each shape's
+                // corpus is rendered ONCE here from `resolved.seed ^ salt` (record-once →
+                // replay-verbatim), then `record_rendered` writes the identical bundle format the
+                // catalog path produces (so `workload_hash` stays byte-identical across engines).
+                let recorded = crate::synthetic::shapes::record_repo_reads(
+                    tier,
+                    spec.nodes as i32,
+                    spec.edges as i32,
+                    resolved.seed,
+                )?;
+                recording::record_rendered(
+                    &spec,
+                    &resolved.graph,
+                    &recorded,
+                    resolved.seed,
+                    DATASET_LOAD_BATCH,
+                    std::path::Path::new(&out_dir),
+                )?
+            } else {
+                recording::record(
+                    &spec,
+                    &resolved.graph,
+                    &resolved.ops,
+                    resolved.seed,
+                    DATASET_LOAD_BATCH,
+                    std::path::Path::new(&out_dir),
+                )?
+            };
             println!(
                 "recorded {} op(s) into {} (workload_hash {})",
                 manifest.ops.len(),
@@ -2115,6 +2140,7 @@ mod tests {
             ops: vec![],
             all_reads: false,
             tier: Some(Tier::Core),
+            repo_reads: None,
             seed: Some(3),
             nodes: Some(200),
             edges: Some(600),
@@ -2129,6 +2155,54 @@ mod tests {
         }
         // …and a full-only op (shortest_path) is not.
         assert!(!commands.join("shortest_path.jsonl").exists());
+        std::fs::remove_dir_all(&out_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn run_command_record_offline_records_repo_read_shapes() {
+        // `synthetic record --repo-reads core` runs OFFLINE (no server): it writes a bundle
+        // containing exactly the CORE baseline read SHAPES from queries_repository (Phase 3 B2),
+        // and a full-only shape is absent. Exercises the Record handler's `repo_reads` plumbing
+        // end-to-end (shapes::record_repo_reads → record_rendered).
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let out_dir = std::env::temp_dir().join(format!(
+            "syn-rec-reporeads-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let command = crate::cli::SyntheticCommands::Record {
+            config: None,
+            graph: Some("greporeads".to_string()),
+            ops: vec![],
+            all_reads: false,
+            tier: None,
+            repo_reads: Some(Tier::Core),
+            seed: Some(5),
+            nodes: Some(300),
+            edges: Some(900),
+            out_dir: out_dir.to_string_lossy().into_owned(),
+        };
+        run_command(command)
+            .await
+            .expect("offline repo-reads record succeeds without a server");
+        assert!(out_dir.join("manifest.json").exists());
+        let commands = out_dir.join("commands");
+        // Every core baseline read shape is recorded…
+        let core: Vec<_> = crate::synthetic::shapes::baseline_read_shapes()
+            .into_iter()
+            .filter(|s| s.tier == Tier::Core)
+            .collect();
+        assert!(!core.is_empty(), "core tier must select at least one shape");
+        for shape in &core {
+            assert!(
+                commands.join(format!("{}.jsonl", shape.name)).exists(),
+                "missing core shape {}",
+                shape.name
+            );
+        }
+        // …and a full-only shape (aggregate_expansion_2) is not.
+        assert!(!commands.join("aggregate_expansion_2.jsonl").exists());
         std::fs::remove_dir_all(&out_dir).ok();
     }
 
