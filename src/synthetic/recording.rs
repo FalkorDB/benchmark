@@ -439,10 +439,20 @@ pub fn load(dir: &Path) -> BenchmarkResult<Bundle> {
 
     // commands/<op>.jsonl for each op named in the manifest, in order.
     let mut commands = Vec::with_capacity(manifest.ops.len());
+    let mut seen_names = std::collections::BTreeSet::new();
     for entry in &manifest.ops {
         // Reject an unsafe name before it becomes a file path — a crafted manifest name with a path
         // separator or `..` must not read outside the bundle's `commands/` directory.
         validate_op_name(&entry.name)?;
+        // Reject duplicate op names: op names key `commands/<name>.jsonl` and the replay report's
+        // per-op map, so a duplicate would double-run or silently overwrite a result. A recorded
+        // bundle is deduped at record time, so a duplicate here means a crafted/corrupt manifest.
+        if !seen_names.insert(entry.name.as_str()) {
+            return Err(OtherError(format!(
+                "manifest lists duplicate op name '{}'",
+                entry.name
+            )));
+        }
         // Rebuild the op identity from its name + kind. `OpKey::dynamic` canonicalizes a built-in
         // name back to its `OpName` (keeping the built-in salt/kind); a name with no `OpName`
         // becomes a string-keyed dynamic op. Either way the bundle round-trips by name.
@@ -869,6 +879,32 @@ mod tests {
         std::fs::write(&manifest_path, doctored).unwrap();
         let err = load(&dir).unwrap_err();
         assert!(format!("{err}").contains("unsafe operation name"), "got: {err}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_rejects_duplicate_manifest_op_names() {
+        // A recorded bundle is deduped at record time; a manifest with two entries sharing a name
+        // is crafted/corrupt and must be rejected so replay can't double-run or overwrite by name.
+        let dir = temp_bundle_dir("synthrec-dupload");
+        let spec = DatasetSpec {
+            seed: 2,
+            nodes: 20,
+            edges: 60,
+        };
+        let ops = vec![RecordedOp {
+            key: OpKey::dynamic("safe_read", QueryType::Read),
+            commands: vec!["CYPHER  RETURN 1".to_string()],
+        }];
+        record_rendered(&spec, "g", &ops, 1, 8, &dir).unwrap();
+        let manifest_path = dir.join("manifest.json");
+        let mut v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
+        let dup = v["ops"][0].clone();
+        v["ops"].as_array_mut().unwrap().push(dup);
+        std::fs::write(&manifest_path, serde_json::to_string_pretty(&v).unwrap()).unwrap();
+        let err = load(&dir).unwrap_err();
+        assert!(format!("{err}").contains("duplicate op name"), "got: {err}");
         std::fs::remove_dir_all(&dir).ok();
     }
 
