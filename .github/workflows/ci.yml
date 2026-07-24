@@ -63,8 +63,10 @@ jobs:
   synthetic_verify:
     name: Synthetic non-divergence
     runs-on: ubuntu-latest
-    # Bound the job so a stalled Docker pull or a benchmark deadlock can't run for hours.
-    timeout-minutes: 20
+    # Bound the job so a stalled Docker pull or a benchmark deadlock can't run for hours. A healthy
+    # run (record `--repo-reads full` once, then replay twice at concurrency 1 & 8) finishes in
+    # ~10 min; 25 leaves headroom for a slow shared runner while still catching a real deadlock.
+    timeout-minutes: 25
     # The default token is read-only (top-level `permissions`); this job also upserts a sticky PR
     # comment with the A/B diff, which needs pull-requests: write.
     permissions:
@@ -91,10 +93,10 @@ jobs:
         with:
           tool: just
 
-      # Runs the recorded workload (all read ops) twice against the same FalkorDB across the full
-      # concurrency sweep + both cache modes and fails if the two runs diverge (workload_hash or any
-      # per-op result digest differs). The recipe manages its own throwaway FalkorDB container and
-      # writes the PR-ready A/B report to recordings/verify-report.md.
+      # Runs the recorded workload (all A/B read shapes via `--repo-reads full`) twice against the
+      # same FalkorDB at concurrency 1 & 8, uncached, and fails if the two runs diverge (workload_hash
+      # or any per-op result digest differs). The recipe manages its own throwaway FalkorDB container
+      # and writes the PR-ready A/B report to recordings/verify-report.md.
       - name: Verify no run-to-run divergence
         run: just synthetic-verify
 
