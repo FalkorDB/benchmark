@@ -460,7 +460,9 @@ just synthetic-compare-versions demo falkor://127.0.0.1:6379 falkor://127.0.0.1:
   without `ORDER BY`, or the fulltext/vector **top-k** reads) are still recorded + timed but marked
   **result-N/A** so replay never gates their digest. The FixtureDependent reads additionally need a
   fulltext/vector **fixture** (index DDL + seed data); when a `full` selection includes them the tool
-  bakes that fixture into the recorded graph **once**, so every engine replays the identical fixture.
+  bakes that fixture into the recorded graph **once**, so every replay endpoint gets the identical
+  fixture. (That fixture uses FalkorDB-specific DDL/procedures, so these shapes are for the
+  FalkorDB-vs-FalkorDB A/B — two FalkorDB versions — not cross-database runs.)
   `--repo-reads` is mutually exclusive with `--op`/`--all-reads`/`--tier`.
 - **`benchmark synthetic run --recording <dir> [--concurrency … --cache …]`** drops + loads +
   **count-verifies** the recorded graph, then measures the recorded commands across the concurrency

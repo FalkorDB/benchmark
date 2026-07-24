@@ -14,11 +14,13 @@
 //! (`corpus_seed ^ salt`, mirroring how [`catalog`] ops seed) via the seedable
 //! [`UsersQueriesRepository::render_read_with_rng`] entry (design §4.1), and the concrete Cypher is
 //! recorded verbatim. Replay never touches the RNG — it replays the recorded strings — so the
-//! `workload_hash` is byte-identical across engines and the A/B non-divergence gate stays meaningful.
+//! `workload_hash` is byte-identical across replay endpoints (the A/B compares two FalkorDB
+//! versions/images, not different databases) and the non-divergence gate stays meaningful.
 //! The FixtureDependent reads additionally need a fulltext/vector **fixture** (index DDL + seed data)
 //! in the graph; it is baked into the recorded bundle **once** (design §3.4 /
 //! [`fixture_statements`](crate::synthetic::dataset::fixture_statements)) and replayed verbatim into
-//! every engine, so the fixture never diverges either.
+//! every endpoint, so the fixture never diverges either. (The fixture DDL/queries are
+//! FalkorDB-specific, so these shapes are for FalkorDB-vs-FalkorDB A/B, not cross-database runs.)
 //!
 //! ## Result policy (Decision 4)
 //! Most baseline reads project byte-stable results and are result-**gated**. Shapes whose result set
