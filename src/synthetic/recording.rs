@@ -323,11 +323,12 @@ pub fn record_rendered(
 /// Like [`record_rendered`], but also appends the post-load [`fixture_statements`] (the fulltext +
 /// vector index DDL and their deterministic seed data) to `graph.jsonl`, folded into the
 /// [`Manifest::workload_hash`]. Used when a recording includes the FixtureDependent read shapes so
-/// every engine replays the identical fulltext/vector fixture (record-once → replay-verbatim). A
-/// bundle written this way stays byte-identical across engines; the fixture statements are constant
+/// every replay endpoint gets the identical fulltext/vector fixture (record-once → replay-verbatim).
+/// A bundle written this way stays byte-identical across replays; the fixture statements are constant
 /// (no `spec`/seed-derived values). The seed `SET`s are inherently idempotent; the index DDL
 /// (`CREATE FULLTEXT/VECTOR INDEX …`) assumes a **fresh load** — which replay guarantees by dropping
-/// and reloading the graph before executing `graph.jsonl` (design §3.4).
+/// and reloading the graph before executing `graph.jsonl` (design §3.4). The fixture DDL is
+/// FalkorDB-specific, so these shapes are for FalkorDB-vs-FalkorDB A/B, not cross-database runs.
 pub fn record_rendered_with_fixture(
     dataset: &DatasetSpec,
     graph: &str,

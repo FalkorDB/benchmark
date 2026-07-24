@@ -45,7 +45,7 @@ use rand::rngs::StdRng;
 use rand::SeedableRng;
 use std::collections::BTreeSet;
 
-/// Whether a shape's result set is byte-stable across runs/engines, and so whether replay gates its
+/// Whether a shape's result set is byte-stable across runs/replays, and so whether replay gates its
 /// result digest (design §3.2 / Decision 4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResultPolicy {
@@ -218,7 +218,7 @@ pub fn extended_core_read_shapes() -> Vec<ShapeSpec> {
 /// Each requires the post-load fixture ([`fixture_statements`](crate::synthetic::dataset::fixture_statements))
 /// — the fulltext/vector index DDL and seed data — baked into the recorded graph, so the record path
 /// records them via [`record_rendered_with_fixture`](crate::synthetic::recording::record_rendered_with_fixture)
-/// (record-once → replay-verbatim: every engine replays the identical fixture). They bind **no random
+/// (record-once → replay-verbatim: every replay endpoint gets the identical fixture). They bind **no random
 /// params** (byte-identical renders), but their result set is **top-k** (ties/ordering are
 /// non-deterministic), so all three are result-**N/A** ([`ResultPolicy::NotApplicable`], Decision 4) —
 /// we do not add `ORDER BY` to force determinism. Each is annotated with the [`ShapeCapability`] it

@@ -1471,9 +1471,11 @@ pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkRes
                 // reads). Each shape's corpus is rendered ONCE here from `resolved.seed ^ salt`
                 // (record-once → replay-verbatim), then `record_rendered[_with_fixture]` writes the
                 // identical bundle format the catalog path produces (so `workload_hash` stays
-                // byte-identical across engines). When the selected tier includes any
-                // FixtureDependent shape, the fulltext/vector fixture is baked into the recorded
-                // graph (once), so every engine replays the identical fixture.
+                // byte-identical across replay endpoints — the A/B compares two FalkorDB versions).
+                // When the selected tier includes any FixtureDependent shape, the fulltext/vector
+                // fixture is baked into the recorded graph (once), so every replay gets the identical
+                // fixture (that fixture DDL is FalkorDB-specific — FalkorDB-vs-FalkorDB, not
+                // cross-database).
                 let recorded = crate::synthetic::shapes::record_repo_reads(
                     tier,
                     spec.nodes as i32,
