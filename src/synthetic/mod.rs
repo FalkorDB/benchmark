@@ -695,7 +695,7 @@ pub async fn run(config: &Config) -> BenchmarkResult<Report> {
         let op_report = measure_op(
             &op_config,
             &op_concurrency,
-            &op_spec,
+            MeasureTarget::from_spec(&op_spec),
             rendered,
             run_token,
             &uid_alloc,
@@ -992,13 +992,41 @@ impl OpInvoker for GraphWorker {
     }
 }
 
+/// The minimal per-operation facts the measurement engine needs, decoupled from the catalog's
+/// [`OperationSpec`] so a recorded **string-keyed** op — which has no `OperationSpec` (see
+/// [`OpKey`]) — can be measured the same way: its read/write [`QueryType`] (selects `RO_QUERY` vs
+/// `QUERY`) and, for writes, the [`WritePlan`] whose setup/reset/cleanup hooks frame the measured
+/// window. Reads carry `write: None`.
+#[derive(Clone, Copy)]
+pub(crate) struct MeasureTarget {
+    pub kind: QueryType,
+    pub write: Option<WritePlan>,
+}
+
+impl MeasureTarget {
+    /// The measurement target for a built-in catalog operation.
+    pub(crate) fn from_spec(op_spec: &OperationSpec) -> Self {
+        Self {
+            kind: op_spec.kind,
+            write: op_spec.write,
+        }
+    }
+
+    /// A read-only measurement target (no write hooks) — used by the reads-only replay path.
+    pub(crate) fn read() -> Self {
+        Self {
+            kind: QueryType::Read,
+            write: None,
+        }
+    }
+}
+
 /// Measure one operation across the concurrency sweep, under every requested cache mode, and derive
 /// its per-level compilation cost.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn measure_op(
     config: &Config,
     concurrency: &[usize],
-    op_spec: &OperationSpec,
+    target: MeasureTarget,
     corpus: Arc<Vec<String>>,
     run_token: u64,
     uid_alloc: &AtomicU64,
@@ -1012,7 +1040,7 @@ pub(crate) async fn measure_op(
             let metrics = measure_level(
                 config,
                 c,
-                op_spec,
+                target,
                 &corpus,
                 mode,
                 run_token,
@@ -1091,7 +1119,7 @@ async fn run_scratch_cleanup(
 async fn measure_level(
     config: &Config,
     concurrency: usize,
-    op_spec: &OperationSpec,
+    target: MeasureTarget,
     corpus: &Arc<Vec<String>>,
     mode: CacheMode,
     run_token: u64,
@@ -1121,7 +1149,7 @@ async fn measure_level(
     // For a write op, capture the cleanup handle up-front — *before* any worker's setup mutates the
     // graph — so a mid-loop connection/setup failure still drops whatever scratch earlier workers
     // created. The run label is shared, so worker 0's scratch cleans the whole run.
-    let write_cleanup: Option<(WritePlan, WriteScratch)> = match &op_spec.write {
+    let write_cleanup: Option<(WritePlan, WriteScratch)> = match &target.write {
         Some(plan) => Some((*plan, WriteScratch::new(run_token, 0, config.reset_every)?)),
         None => None,
     };
@@ -1134,7 +1162,7 @@ async fn measure_level(
         for w in 0..concurrency {
             let mut graph = open_graph(&config.endpoint, &config.graph).await?;
             let uid_base = uid_alloc.fetch_add(block, Ordering::Relaxed);
-            let source = match &op_spec.write {
+            let source = match &target.write {
                 Some(plan) => {
                     let scratch = WriteScratch::new(run_token, w, config.reset_every)?;
                     // Untimed setup on this worker's own connection before the measurement window.
@@ -1157,7 +1185,7 @@ async fn measure_level(
             };
             workers.push(GraphWorker {
                 graph,
-                kind: op_spec.kind,
+                kind: target.kind,
                 mode,
                 run_token,
                 uid_base,
