@@ -1,12 +1,13 @@
 //! Bridge the A/B benchmark's `queries_repository` **read shapes** into the synthetic
-//! record/replay pipeline (design §3.4 / Phases 3–4).
+//! record/replay pipeline (design §3.4 / Phases 3–5).
 //!
 //! The synthetic check historically probes a small, hand-curated catalog ([`catalog`]). This module
 //! lets it also record the A/B benchmark's **non-algorithm read shapes** — the `Baseline` reads
-//! (Phase 3) plus the `ExtendedCore` `temporal_spatial_roundtrip` (Phase 4). The op *set* is
-//! **auto-discovered** from [`queries_repository`] (proven by the drift-guard tests), and this module
-//! adds the explicit synthetic metadata each shape carries (coverage profile + tier + result policy —
-//! the *derive-with-annotation* model, Decision 3).
+//! (Phase 3), the `ExtendedCore` `temporal_spatial_roundtrip` (Phase 4), and the `FixtureDependent`
+//! fulltext/vector reads (Phase 5). The op *set* is **auto-discovered** from [`queries_repository`]
+//! (proven by the drift-guard tests), and this module adds the explicit synthetic metadata each shape
+//! carries (coverage profile + tier + result policy + capability — the *derive-with-annotation*
+//! model, Decision 3).
 //!
 //! ## Determinism (record-once → replay-verbatim)
 //! Each shape's corpus is rendered **once at record time** from a fixed per-shape seed
@@ -14,12 +15,17 @@
 //! [`UsersQueriesRepository::render_read_with_rng`] entry (design §4.1), and the concrete Cypher is
 //! recorded verbatim. Replay never touches the RNG — it replays the recorded strings — so the
 //! `workload_hash` is byte-identical across engines and the A/B non-divergence gate stays meaningful.
+//! The FixtureDependent reads additionally need a fulltext/vector **fixture** (index DDL + seed data)
+//! in the graph; it is baked into the recorded bundle **once** (design §3.4 /
+//! [`fixture_statements`](crate::synthetic::dataset::fixture_statements)) and replayed verbatim into
+//! every engine, so the fixture never diverges either.
 //!
 //! ## Result policy (Decision 4)
-//! Most baseline reads project byte-stable results and are result-**gated**. A few shapes whose
-//! result set isn't byte-stable (e.g. `LIMIT` without `ORDER BY`) are recorded and timed but marked
-//! result-**N/A** ([`ResultPolicy::NotApplicable`]) so a benign result difference never fails the
-//! gate — we do **not** add `ORDER BY` to the shared repo queries (that would change the shape).
+//! Most baseline reads project byte-stable results and are result-**gated**. Shapes whose result set
+//! isn't byte-stable — `LIMIT` without `ORDER BY`, or the fulltext/vector **top-k** reads (ties and
+//! ordering are non-deterministic) — are recorded and timed but marked result-**N/A**
+//! ([`ResultPolicy::NotApplicable`]) so a benign result difference never fails the gate. We do **not**
+//! add `ORDER BY` to the shared repo queries (that would change the shape).
 //!
 //! [`catalog`]: crate::synthetic::catalog
 //! [`queries_repository`]: crate::queries_repository
@@ -55,26 +61,43 @@ impl ResultPolicy {
     }
 }
 
+/// The engine capability a fixture-dependent read requires beyond plain Cypher (design §3.4). The
+/// fulltext/vector smoke reads name the specific index procedure they exercise so the runtime can
+/// gate them (record-and-skip-as-N/A on an engine lacking the capability); non-fixture reads need
+/// nothing (`capability = None`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShapeCapability {
+    /// `db.idx.vector.queryNodes` — a vector index over `:User(embedding)`.
+    VectorQueryNodes,
+    /// `db.idx.fulltext.queryNodes` — a fulltext index over `:User(ft_text)`.
+    FulltextQueryNodes,
+    /// `db.idx.fulltext.queryRelationships` — a fulltext index over `:Friend(ft_text)`.
+    FulltextQueryRelationships,
+}
+
 /// One repo read shape's synthetic metadata: its stable [`queries_repository`] name, coverage
-/// **profile** (Baseline / ExtendedCore), coverage **tier** (Decision 1), and result policy
-/// (Decision 4).
+/// **profile** (Baseline / ExtendedCore / FixtureDependent), coverage **tier** (Decision 1), result
+/// policy (Decision 4), and optional **capability** (Phase 5 fulltext/vector).
 ///
-/// Kind is always `Read` for this table; **capability** (fulltext/vector) and per-op **budget** are
-/// deferred to their phases (Phase 5 / Phase 6). Temporal/spatial (the sole ExtendedCore read) is
-/// engine-supported on the FalkorDB record path, so it needs no capability gate — see the module docs.
+/// Kind is always `Read` for this table; per-op **budget** is deferred to its phase. The Baseline and
+/// ExtendedCore reads need no capability (`capability = None`); the FixtureDependent fulltext/vector
+/// reads carry the [`ShapeCapability`] they exercise — see the module docs.
 ///
 /// [`queries_repository`]: crate::queries_repository
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ShapeSpec {
     /// The shape's stable `queries_repository` read name (also the recorded op's key).
     pub name: &'static str,
-    /// Coverage profile the shape belongs to: [`QueryCoverageProfile::Baseline`] (Phase 3) or
-    /// [`QueryCoverageProfile::ExtendedCore`] (Phase 4).
+    /// Coverage profile the shape belongs to: [`QueryCoverageProfile::Baseline`] (Phase 3),
+    /// [`QueryCoverageProfile::ExtendedCore`] (Phase 4), or [`QueryCoverageProfile::FixtureDependent`]
+    /// (Phase 5).
     pub profile: QueryCoverageProfile,
     /// Coverage tier: [`Tier::Core`] gates every PR; [`Tier::Full`] runs nightly/on-demand.
     pub tier: Tier,
     /// Whether replay gates this shape's result digest ([`ResultPolicy`]).
     pub result_policy: ResultPolicy,
+    /// The engine capability this shape requires, or `None` for plain-Cypher reads ([`ShapeCapability`]).
+    pub capability: Option<ShapeCapability>,
 }
 
 /// The curated annotation for the **46 baseline non-algorithm read shapes** (design §3.4).
@@ -103,6 +126,7 @@ pub fn baseline_read_shapes() -> Vec<ShapeSpec> {
             profile: QueryCoverageProfile::Baseline,
             tier,
             result_policy,
+            capability: None,
         }
     }
     vec![
@@ -178,16 +202,78 @@ pub fn extended_core_read_shapes() -> Vec<ShapeSpec> {
         profile: QueryCoverageProfile::ExtendedCore,
         tier: Tier::Core,
         result_policy: ResultPolicy::Gated,
+        capability: None,
     }]
 }
 
-/// Every repo read shape the synthetic check records: the [`baseline_read_shapes`] (Phase 3) followed
-/// by the [`extended_core_read_shapes`] (Phase 4), in `queries_repository` definition order (the
-/// record order that feeds `workload_hash`).
+/// The curated annotation for the **FixtureDependent** fulltext/vector read shapes (design §3.4 /
+/// Phase 5): the vector smoke read plus the two fulltext (node + relationship) smoke reads.
+///
+/// Each requires the post-load fixture ([`fixture_statements`](crate::synthetic::dataset::fixture_statements))
+/// — the fulltext/vector index DDL and seed data — baked into the recorded graph, so the record path
+/// records them via [`record_rendered_with_fixture`](crate::synthetic::recording::record_rendered_with_fixture)
+/// (record-once → replay-verbatim: every engine replays the identical fixture). They bind **no random
+/// params** (byte-identical renders), but their result set is **top-k** (ties/ordering are
+/// non-deterministic), so all three are result-**N/A** ([`ResultPolicy::NotApplicable`], Decision 4) —
+/// we do not add `ORDER BY` to force determinism. Each carries the [`ShapeCapability`] it exercises so
+/// an engine that lacks it can record-and-skip-as-N/A. All are [`Tier::Full`]: capability-gated shapes
+/// stay out of the always-on core subset.
+///
+/// Auto-discovered like the other sets: the drift-guard test asserts these names are **exactly** the
+/// reads the `FixtureDependent` profile adds over `ExtendedCore`.
+pub fn fixture_dependent_read_shapes() -> Vec<ShapeSpec> {
+    use ShapeCapability::{FulltextQueryNodes, FulltextQueryRelationships, VectorQueryNodes};
+    // Every row is a FixtureDependent, Full-tier, result-N/A read; only the name + capability differ.
+    fn s(
+        name: &'static str,
+        capability: ShapeCapability,
+    ) -> ShapeSpec {
+        ShapeSpec {
+            name,
+            profile: QueryCoverageProfile::FixtureDependent,
+            tier: Tier::Full,
+            result_policy: ResultPolicy::NotApplicable(
+                "vector/fulltext top-k ordering is non-deterministic",
+            ),
+            capability: Some(capability),
+        }
+    }
+    vec![
+        s("vector_query_nodes_smoke", VectorQueryNodes),
+        s("fulltext_query_nodes_smoke", FulltextQueryNodes),
+        s("fulltext_query_relationships_smoke", FulltextQueryRelationships),
+    ]
+}
+
+/// Every repo read shape the synthetic check records: the [`baseline_read_shapes`] (Phase 3), then
+/// the [`extended_core_read_shapes`] (Phase 4), then the [`fixture_dependent_read_shapes`] (Phase 5),
+/// in `queries_repository` definition order (the record order that feeds `workload_hash`).
 pub fn repo_read_shapes() -> Vec<ShapeSpec> {
     let mut shapes = baseline_read_shapes();
     shapes.extend(extended_core_read_shapes());
+    shapes.extend(fixture_dependent_read_shapes());
     shapes
+}
+
+/// The repo read shapes the given `tier` selects, in record order: [`Tier::Full`] selects every repo
+/// read; [`Tier::Core`] selects only the core subset. Shared by [`record_repo_reads`] and
+/// [`repo_reads_need_fixture`] so the two agree on what a tier records.
+fn selected_shapes(tier: Tier) -> Vec<ShapeSpec> {
+    repo_read_shapes()
+        .into_iter()
+        .filter(|shape| tier.includes(shape.tier))
+        .collect()
+}
+
+/// Whether the `tier`'s selection includes any [`QueryCoverageProfile::FixtureDependent`] shape, so
+/// the record path must bake the fulltext/vector fixture into the recorded graph
+/// ([`record_rendered_with_fixture`](crate::synthetic::recording::record_rendered_with_fixture))
+/// instead of the plain [`record_rendered`](crate::synthetic::recording::record_rendered). The
+/// fixture shapes are all [`Tier::Full`], so `Tier::Core` never needs the fixture.
+pub fn repo_reads_need_fixture(tier: Tier) -> bool {
+    selected_shapes(tier)
+        .iter()
+        .any(|shape| shape.profile == QueryCoverageProfile::FixtureDependent)
 }
 
 /// The algorithm selection the baseline-read source uses: **none**. Algorithm reads are opt-in and
@@ -203,9 +289,10 @@ fn no_algorithms() -> AlgorithmQuerySelection {
 
 /// Build the `queries_repository` handle the read shapes render from: `FalkorDB` flavour, no
 /// algorithms, at the given coverage `profile`. `vertices` must match the recorded graph's `:User`
-/// count (ids `1..=vertices`) so each shape's random params address real nodes. `ExtendedCore` is a
-/// superset of `Baseline` for non-algorithm reads (the baseline shapes render identically under it),
-/// so the record path builds one `ExtendedCore` repository to render both phases' shapes.
+/// count (ids `1..=vertices`) so each shape's random params address real nodes. `FixtureDependent`
+/// is a superset of `ExtendedCore` (itself a superset of `Baseline`) for non-algorithm reads — the
+/// lower-profile shapes render identically under it — so the record path builds one
+/// `FixtureDependent` repository to render every phase's shapes.
 fn read_shapes_repository(
     profile: QueryCoverageProfile,
     vertices: i32,
@@ -228,12 +315,7 @@ pub fn record_repo_reads(
     edges: i32,
     corpus_seed: u64,
 ) -> BenchmarkResult<Vec<RecordedOp>> {
-    let selected: Vec<ShapeSpec> = repo_read_shapes()
-        .into_iter()
-        // `Tier::Full` records everything; `Tier::Core` records only the core subset.
-        .filter(|shape| tier.includes(shape.tier))
-        .collect();
-    record_selected_shapes(&selected, vertices, edges, corpus_seed)
+    record_selected_shapes(&selected_shapes(tier), vertices, edges, corpus_seed)
 }
 
 /// Render the given `shapes` into [`RecordedOp`]s against a fresh repository. Split out of
@@ -244,9 +326,9 @@ fn record_selected_shapes(
     edges: i32,
     corpus_seed: u64,
 ) -> BenchmarkResult<Vec<RecordedOp>> {
-    // `ExtendedCore` covers every recordable read (Baseline shapes render identically under it), so a
-    // single repository renders both phases' shapes.
-    let repo = read_shapes_repository(QueryCoverageProfile::ExtendedCore, vertices, edges);
+    // `FixtureDependent` covers every recordable read (the Baseline/ExtendedCore shapes render
+    // identically under it), so a single repository renders every phase's shapes.
+    let repo = read_shapes_repository(QueryCoverageProfile::FixtureDependent, vertices, edges);
     let available: BTreeSet<&str> = repo
         .non_algorithm_read_names()
         .iter()
@@ -336,14 +418,59 @@ mod tests {
     }
 
     #[test]
-    fn repo_read_shapes_match_the_extended_core_discovery_in_order() {
-        // The combined annotation (baseline ++ extended-core) must equal the ExtendedCore-profile
-        // discovery, in definition order — the record order that feeds `workload_hash`.
-        let repo = read_shapes_repository(QueryCoverageProfile::ExtendedCore, 1000, 5000);
+    fn fixture_dependent_adds_exactly_the_three_reads_over_extended_core() {
+        // Derive-with-annotation for Phase 5: the reads the `FixtureDependent` profile adds over
+        // `ExtendedCore` must be EXACTLY the annotated fixture-dependent shapes (the vector +
+        // two fulltext smoke reads). If `queries_repository` adds another FixtureDependent read, this
+        // fails until `fixture_dependent_read_shapes()` is updated.
+        let extended_repo = read_shapes_repository(QueryCoverageProfile::ExtendedCore, 1000, 5000);
+        let fixture_repo = read_shapes_repository(QueryCoverageProfile::FixtureDependent, 1000, 5000);
+        let extended: BTreeSet<&str> =
+            extended_repo.non_algorithm_read_names().iter().map(String::as_str).collect();
+        let fixture: BTreeSet<&str> =
+            fixture_repo.non_algorithm_read_names().iter().map(String::as_str).collect();
+        let added: BTreeSet<&str> = fixture.difference(&extended).copied().collect();
+        let annotated: BTreeSet<&str> =
+            fixture_dependent_read_shapes().iter().map(|s| s.name).collect();
+        assert_eq!(added, annotated, "FixtureDependent adds exactly the annotated fixture reads");
+        assert_eq!(
+            added,
+            BTreeSet::from([
+                "vector_query_nodes_smoke",
+                "fulltext_query_nodes_smoke",
+                "fulltext_query_relationships_smoke",
+            ])
+        );
+        // Every fixture shape is FixtureDependent, Full-tier, result-N/A, and carries a capability.
+        for shape in fixture_dependent_read_shapes() {
+            assert_eq!(shape.profile, QueryCoverageProfile::FixtureDependent);
+            assert_eq!(shape.tier, Tier::Full);
+            assert!(!shape.result_policy.is_gated(), "top-k reads are result-N/A");
+            assert!(shape.capability.is_some(), "fixture reads carry a capability");
+        }
+        // The capabilities map 1:1 to the three index procedures.
+        let caps: Vec<Option<ShapeCapability>> =
+            fixture_dependent_read_shapes().iter().map(|s| s.capability).collect();
+        assert_eq!(
+            caps,
+            vec![
+                Some(ShapeCapability::VectorQueryNodes),
+                Some(ShapeCapability::FulltextQueryNodes),
+                Some(ShapeCapability::FulltextQueryRelationships),
+            ]
+        );
+    }
+
+    #[test]
+    fn repo_read_shapes_match_the_fixture_dependent_discovery_in_order() {
+        // The combined annotation (baseline ++ extended-core ++ fixture-dependent) must equal the
+        // FixtureDependent-profile discovery, in definition order — the record order that feeds
+        // `workload_hash`.
+        let repo = read_shapes_repository(QueryCoverageProfile::FixtureDependent, 1000, 5000);
         let discovered: Vec<&str> =
             repo.non_algorithm_read_names().iter().map(String::as_str).collect();
         let annotated: Vec<&str> = repo_read_shapes().iter().map(|s| s.name).collect();
-        assert_eq!(annotated, discovered, "repo read shapes drifted from ExtendedCore discovery");
+        assert_eq!(annotated, discovered, "repo read shapes drifted from FixtureDependent discovery");
     }
 
     #[test]
@@ -357,38 +484,61 @@ mod tests {
     }
 
     #[test]
-    fn repo_read_shapes_are_forty_seven_including_one_extended_core() {
-        // Baseline (46) + ExtendedCore (1) = 47 unique reads across profiles.
+    fn repo_read_shapes_are_fifty_across_the_three_profiles() {
+        // Baseline (46) + ExtendedCore (1) + FixtureDependent (3) = 50 unique reads across profiles.
         let shapes = repo_read_shapes();
-        assert_eq!(shapes.len(), 47, "46 baseline + 1 extended-core read");
+        assert_eq!(shapes.len(), 50, "46 baseline + 1 extended-core + 3 fixture-dependent reads");
         let names: BTreeSet<&str> = shapes.iter().map(|s| s.name).collect();
-        assert_eq!(names.len(), 47, "shape names must be unique across profiles");
+        assert_eq!(names.len(), 50, "shape names must be unique across profiles");
         assert_eq!(
             shapes.iter().filter(|s| s.profile == QueryCoverageProfile::ExtendedCore).count(),
             1,
             "exactly one extended-core read"
+        );
+        assert_eq!(
+            shapes.iter().filter(|s| s.profile == QueryCoverageProfile::FixtureDependent).count(),
+            3,
+            "exactly three fixture-dependent reads"
         );
         // `temporal_spatial_roundtrip` is ExtendedCore, Core-tier, and result-gated.
         let ts = shapes.iter().find(|s| s.name == "temporal_spatial_roundtrip").unwrap();
         assert_eq!(ts.profile, QueryCoverageProfile::ExtendedCore);
         assert_eq!(ts.tier, Tier::Core);
         assert!(ts.result_policy.is_gated());
+        assert_eq!(ts.capability, None);
+        // The fixture reads are FixtureDependent, Full-tier, result-N/A, with a capability.
+        for name in [
+            "vector_query_nodes_smoke",
+            "fulltext_query_nodes_smoke",
+            "fulltext_query_relationships_smoke",
+        ] {
+            let s = shapes.iter().find(|s| s.name == name).unwrap();
+            assert_eq!(s.profile, QueryCoverageProfile::FixtureDependent);
+            assert_eq!(s.tier, Tier::Full);
+            assert!(!s.result_policy.is_gated());
+            assert!(s.capability.is_some());
+        }
     }
 
     #[test]
-    fn exactly_the_limit_without_order_shape_is_result_na() {
-        // Only `entity_path_introspection` (LIMIT 1 without ORDER BY) is result-N/A among all repo
-        // reads; every other read — including `temporal_spatial_roundtrip` — is result-gated
-        // (Decision 4).
-        for shape in repo_read_shapes() {
-            let expected_gated = shape.name != "entity_path_introspection";
-            assert_eq!(
-                shape.result_policy.is_gated(),
-                expected_gated,
-                "unexpected result policy for '{}'",
-                shape.name
-            );
-        }
+    fn only_the_top_k_and_limit_shapes_are_result_na() {
+        // The result-N/A reads are exactly `entity_path_introspection` (LIMIT without ORDER BY) and
+        // the three fulltext/vector top-k reads; every other read is result-gated (Decision 4).
+        let na: BTreeSet<&str> = repo_read_shapes()
+            .iter()
+            .filter(|s| !s.result_policy.is_gated())
+            .map(|s| s.name)
+            .collect();
+        assert_eq!(
+            na,
+            BTreeSet::from([
+                "entity_path_introspection",
+                "vector_query_nodes_smoke",
+                "fulltext_query_nodes_smoke",
+                "fulltext_query_relationships_smoke",
+            ]),
+            "unexpected result-N/A set"
+        );
     }
 
     #[test]
@@ -415,13 +565,53 @@ mod tests {
         // The ExtendedCore shape is recorded and result-gated…
         let ts = ops.iter().find(|o| o.key.name() == "temporal_spatial_roundtrip").unwrap();
         assert!(ts.result_gated, "temporal_spatial_roundtrip is result-gated");
-        // …and the result-N/A shape is recorded but not gated; it's the only one.
-        let na = ops.iter().find(|o| o.key.name() == "entity_path_introspection").unwrap();
-        assert!(!na.result_gated, "the LIMIT-without-ORDER shape is result-N/A");
-        assert!(
-            ops.iter().filter(|o| !o.result_gated).count() == 1,
-            "exactly one repo read is result-N/A"
+        // …and the result-N/A reads are recorded but not gated: the LIMIT-without-ORDER shape plus
+        // the three fulltext/vector top-k reads.
+        let na: BTreeSet<&str> =
+            ops.iter().filter(|o| !o.result_gated).map(|o| o.key.name()).collect();
+        assert_eq!(
+            na,
+            BTreeSet::from([
+                "entity_path_introspection",
+                "vector_query_nodes_smoke",
+                "fulltext_query_nodes_smoke",
+                "fulltext_query_relationships_smoke",
+            ]),
+            "exactly the LIMIT-without-ORDER and top-k reads are result-N/A"
         );
+    }
+
+    #[test]
+    fn full_records_the_fixture_dependent_reads_and_needs_the_fixture() {
+        // The three fulltext/vector reads are recorded under Full as dynamic, result-N/A reads, and
+        // the selection reports it needs the baked-in fixture (so the record path uses
+        // `record_rendered_with_fixture`). Core omits them and needs no fixture.
+        let full = record_repo_reads(Tier::Full, 1000, 5000, 42).unwrap();
+        let full_names: BTreeSet<&str> = full.iter().map(|o| o.key.name()).collect();
+        for name in [
+            "vector_query_nodes_smoke",
+            "fulltext_query_nodes_smoke",
+            "fulltext_query_relationships_smoke",
+        ] {
+            assert!(full_names.contains(name), "Full must record '{name}'");
+            let op = full.iter().find(|o| o.key.name() == name).unwrap();
+            assert!(!op.key.is_named(), "'{name}' is a dynamic read");
+            assert_eq!(op.key.kind(), QueryType::Read);
+            assert!(!op.result_gated, "'{name}' is result-N/A (top-k)");
+            assert_eq!(op.commands.len(), CORPUS_SIZE, "'{name}' short corpus");
+        }
+        assert!(repo_reads_need_fixture(Tier::Full), "Full selects fixture-dependent reads");
+
+        let core = record_repo_reads(Tier::Core, 1000, 5000, 42).unwrap();
+        let core_names: BTreeSet<&str> = core.iter().map(|o| o.key.name()).collect();
+        for name in [
+            "vector_query_nodes_smoke",
+            "fulltext_query_nodes_smoke",
+            "fulltext_query_relationships_smoke",
+        ] {
+            assert!(!core_names.contains(name), "Core must omit '{name}'");
+        }
+        assert!(!repo_reads_need_fixture(Tier::Core), "Core needs no fixture");
     }
 
     #[test]
@@ -474,6 +664,7 @@ mod tests {
             profile: QueryCoverageProfile::Baseline,
             tier: Tier::Full,
             result_policy: ResultPolicy::Gated,
+            capability: None,
         }];
         let err = record_selected_shapes(&bogus, 1000, 5000, 1).unwrap_err();
         assert!(

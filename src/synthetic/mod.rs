@@ -1466,25 +1466,39 @@ pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkRes
                 OtherError("record requires --nodes/--edges (or a config) to generate a dataset".to_string())
             })?;
             let manifest = if let Some(tier) = repo_reads {
-                // Phase 3/4: record the queries_repository read shapes (Baseline reads +
-                // ExtendedCore `temporal_spatial_roundtrip`). Each shape's corpus is rendered ONCE
-                // here from `resolved.seed ^ salt` (record-once → replay-verbatim), then
-                // `record_rendered` writes the identical bundle format the catalog path produces (so
-                // `workload_hash` stays byte-identical across engines).
+                // Phase 3/4/5: record the queries_repository read shapes (Baseline reads +
+                // ExtendedCore `temporal_spatial_roundtrip` + the FixtureDependent fulltext/vector
+                // reads). Each shape's corpus is rendered ONCE here from `resolved.seed ^ salt`
+                // (record-once → replay-verbatim), then `record_rendered[_with_fixture]` writes the
+                // identical bundle format the catalog path produces (so `workload_hash` stays
+                // byte-identical across engines). When the selected tier includes any
+                // FixtureDependent shape, the fulltext/vector fixture is baked into the recorded
+                // graph (once), so every engine replays the identical fixture.
                 let recorded = crate::synthetic::shapes::record_repo_reads(
                     tier,
                     spec.nodes as i32,
                     spec.edges as i32,
                     resolved.seed,
                 )?;
-                recording::record_rendered(
-                    &spec,
-                    &resolved.graph,
-                    &recorded,
-                    resolved.seed,
-                    DATASET_LOAD_BATCH,
-                    std::path::Path::new(&out_dir),
-                )?
+                if crate::synthetic::shapes::repo_reads_need_fixture(tier) {
+                    recording::record_rendered_with_fixture(
+                        &spec,
+                        &resolved.graph,
+                        &recorded,
+                        resolved.seed,
+                        DATASET_LOAD_BATCH,
+                        std::path::Path::new(&out_dir),
+                    )?
+                } else {
+                    recording::record_rendered(
+                        &spec,
+                        &resolved.graph,
+                        &recorded,
+                        resolved.seed,
+                        DATASET_LOAD_BATCH,
+                        std::path::Path::new(&out_dir),
+                    )?
+                }
             } else {
                 recording::record(
                     &spec,
@@ -2209,6 +2223,81 @@ mod tests {
         }
         // …and a full-only shape (aggregate_expansion_2) is not.
         assert!(!commands.join("aggregate_expansion_2.jsonl").exists());
+        // Core selects no FixtureDependent shape, so the bundle bakes NO fixture into its graph.
+        let bundle = recording::load(&out_dir).expect("core bundle loads");
+        assert!(
+            !bundle
+                .graph_statements
+                .iter()
+                .any(|(phase, _)| *phase == crate::synthetic::dataset::LoadPhase::Fixture),
+            "core bundle must not contain the fulltext/vector fixture"
+        );
+        assert!(
+            !commands.join("vector_query_nodes_smoke.jsonl").exists(),
+            "the FixtureDependent reads are Full-only"
+        );
+        std::fs::remove_dir_all(&out_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn run_command_record_offline_repo_reads_full_bakes_the_fixture() {
+        // `synthetic record --repo-reads full` runs OFFLINE: it records the FixtureDependent
+        // fulltext/vector reads (Phase 5) as non-gated (result-N/A) ops AND bakes the fulltext/vector
+        // fixture into the recorded graph exactly once (record-once → replay-verbatim). Exercises the
+        // Record handler's `repo_reads_need_fixture` → `record_rendered_with_fixture` plumbing.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let out_dir = std::env::temp_dir().join(format!(
+            "syn-rec-reporeads-full-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let command = crate::cli::SyntheticCommands::Record {
+            config: None,
+            graph: Some("greporeadsfull".to_string()),
+            ops: vec![],
+            all_reads: false,
+            tier: None,
+            repo_reads: Some(Tier::Full),
+            seed: Some(5),
+            nodes: Some(300),
+            edges: Some(900),
+            out_dir: out_dir.to_string_lossy().into_owned(),
+        };
+        run_command(command)
+            .await
+            .expect("offline full repo-reads record succeeds without a server");
+        let commands = out_dir.join("commands");
+        // The three FixtureDependent reads are recorded…
+        for name in [
+            "vector_query_nodes_smoke",
+            "fulltext_query_nodes_smoke",
+            "fulltext_query_relationships_smoke",
+        ] {
+            assert!(commands.join(format!("{name}.jsonl")).exists(), "missing fixture read {name}");
+        }
+        // …the fixture (5 statements) is baked into the graph, in the Fixture phase, after the base
+        // load statements…
+        let bundle = recording::load(&out_dir).expect("full bundle loads + passes the integrity gate");
+        let fixture_stmts: Vec<&str> = bundle
+            .graph_statements
+            .iter()
+            .filter(|(phase, _)| *phase == crate::synthetic::dataset::LoadPhase::Fixture)
+            .map(|(_, s)| s.as_str())
+            .collect();
+        assert_eq!(fixture_stmts.len(), 5, "the fixture is 3 index DDL + 2 seed SETs");
+        assert!(fixture_stmts.iter().any(|s| s.contains("VECTOR INDEX")));
+        assert!(fixture_stmts.iter().any(|s| s.contains("FULLTEXT INDEX")));
+        assert!(fixture_stmts.iter().any(|s| s.contains("fixture_alice")));
+        // …and the fixture reads are recorded as non-gated (result-N/A) ops.
+        for name in [
+            "vector_query_nodes_smoke",
+            "fulltext_query_nodes_smoke",
+            "fulltext_query_relationships_smoke",
+        ] {
+            let entry = bundle.manifest.ops.iter().find(|o| o.name == name).unwrap();
+            assert!(!entry.result_gated, "{name} must be result-N/A (top-k)");
+        }
         std::fs::remove_dir_all(&out_dir).ok();
     }
 

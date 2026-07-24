@@ -452,13 +452,16 @@ just synthetic-compare-versions demo falkor://127.0.0.1:6379 falkor://127.0.0.1:
   `--op <names>`, or **`--op all`** (or `--op '*'`) for every read operation. Alternatively,
   **`--repo-reads <core|full>`** records the A/B benchmark's non-algorithm **read shapes**
   straight from `queries_repository` (auto-discovered, then annotated with a coverage profile + tier +
-  result policy): `core` is the small per-PR subset, `full` is all 47 reads — the 46 baseline reads
-  plus the ExtendedCore `temporal_spatial_roundtrip` (which round-trips deterministic temporal/spatial
-  values). Each shape's corpus is
+  result policy + capability): `core` is the small per-PR subset, `full` is all 50 reads — the 46
+  baseline reads, the ExtendedCore `temporal_spatial_roundtrip` (which round-trips deterministic
+  temporal/spatial values), and the 3 FixtureDependent fulltext/vector reads. Each shape's corpus is
   rendered **once** here from the seed and recorded verbatim (record-once → replay-verbatim), so the
-  bundle stays byte-identical across runs; shapes whose result set isn't byte-stable (e.g. a `LIMIT`
-  without `ORDER BY`) are still recorded + timed but marked **result-N/A** so replay never gates
-  their digest. `--repo-reads` is mutually exclusive with `--op`/`--all-reads`/`--tier`.
+  bundle stays byte-identical across runs; shapes whose result set isn't byte-stable (a `LIMIT`
+  without `ORDER BY`, or the fulltext/vector **top-k** reads) are still recorded + timed but marked
+  **result-N/A** so replay never gates their digest. The FixtureDependent reads additionally need a
+  fulltext/vector **fixture** (index DDL + seed data); when a `full` selection includes them the tool
+  bakes that fixture into the recorded graph **once**, so every engine replays the identical fixture.
+  `--repo-reads` is mutually exclusive with `--op`/`--all-reads`/`--tier`.
 - **`benchmark synthetic run --recording <dir> [--concurrency … --cache …]`** drops + loads +
   **count-verifies** the recorded graph, then measures the recorded commands across the concurrency
   sweep + cache modes, writing a report plus a per-op **`result_digest`** (a hash of the result

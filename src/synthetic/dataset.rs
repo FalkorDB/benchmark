@@ -230,13 +230,18 @@ pub fn corpus_hash(
 }
 
 /// The phase a load statement belongs to, so a recorded bundle can label statements and a loader
-/// can report which phase failed. All three run identically (execute + drain), but the ordering
-/// (index first, then nodes, then edges) matters and is preserved by [`load_statements`].
+/// can report which phase failed. All phases run identically (execute + drain), but the ordering
+/// (index first, then nodes, then edges, then the optional fixture) matters and is preserved by
+/// [`load_statements`] / [`fixture_statements`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoadPhase {
     Index,
     Nodes,
     Edges,
+    /// The optional post-load fixture (fulltext + vector indexes and their seed data) required by
+    /// the FixtureDependent read shapes. Emitted only when a recording includes those shapes; see
+    /// [`fixture_statements`].
+    Fixture,
 }
 
 impl LoadPhase {
@@ -246,6 +251,7 @@ impl LoadPhase {
             LoadPhase::Index => "index",
             LoadPhase::Nodes => "nodes",
             LoadPhase::Edges => "edges",
+            LoadPhase::Fixture => "fixture",
         }
     }
 
@@ -255,6 +261,7 @@ impl LoadPhase {
             "index" => Some(LoadPhase::Index),
             "nodes" => Some(LoadPhase::Nodes),
             "edges" => Some(LoadPhase::Edges),
+            "fixture" => Some(LoadPhase::Fixture),
             _ => None,
         }
     }
@@ -266,6 +273,22 @@ impl LoadPhase {
 const INDEX_STMTS: [&str; 2] = [
     "CREATE INDEX FOR (u:User) ON (u.id)",
     "CREATE INDEX FOR (u:User) ON (u.age)",
+];
+
+/// The optional post-load fixture DDL + seed data required by the FixtureDependent read shapes
+/// (the fulltext/vector smoke queries). Mirrors the A/B benchmark's post-phase-1 fixture
+/// (`FalkorDriver::ensure_post_phase1_fixtures_ready`, design §3.4): two fulltext indexes and one
+/// vector index, then two idempotent `SET`s that seed the `ft_text` / `embedding` properties on a
+/// deterministic id slice (`id % 97 == 0`). Every statement is **constant** — no `spec`-derived
+/// values — so it records and replays byte-identically; `SET` is idempotent so a re-run is a no-op.
+/// A graph with fewer than 97 users seeds no rows (the queries still run, just over empty results),
+/// which is fine because these shapes are result-N/A (top-k is non-deterministic).
+const FIXTURE_STMTS: [&str; 5] = [
+    "CREATE FULLTEXT INDEX FOR (l:User) ON (l.ft_text)",
+    "CREATE FULLTEXT INDEX FOR ()-[l:Friend]->() ON (l.ft_text)",
+    "CREATE VECTOR INDEX FOR (l:User) ON (l.embedding) OPTIONS { dimension: 3, similarityFunction: 'cosine' }",
+    "MATCH (u:User) WHERE u.id % 97 = 0 SET u.ft_text = 'fixture_alice user_' + toString(u.id), u.embedding = vecf32([toFloat((u.id % 10) + 1) / 10.0, toFloat(((u.id + 3) % 10) + 1) / 10.0, toFloat(((u.id + 6) % 10) + 1) / 10.0])",
+    "MATCH (s:User)-[r:Friend]->(d:User) WHERE s.id % 97 = 0 SET r.ft_text = 'fixture_blue edge_' + toString(s.id) + '_' + toString(d.id)",
 ];
 
 /// One node `UNWIND` batch covering ids `lo..=hi` (inclusive, 1-based).
@@ -334,6 +357,18 @@ pub(crate) fn load_statements(
         (LoadPhase::Edges, edge_batch(spec, lo, hi))
     });
     index.chain(node_batches).chain(edge_batches)
+}
+
+/// The optional post-load fixture statements ([`FIXTURE_STMTS`]) tagged as [`LoadPhase::Fixture`],
+/// appended **after** [`load_statements`] when a recording includes the FixtureDependent read
+/// shapes. Kept separate from `load_statements` so the live loader and every existing recording
+/// stay byte-identical: only recordings that opt in (via `record_rendered_with_fixture`) carry
+/// these statements. The nodes/edges the seed `SET`s `MATCH` are created by `load_statements`, so
+/// this must run last.
+pub(crate) fn fixture_statements() -> impl Iterator<Item = (LoadPhase, String)> {
+    FIXTURE_STMTS
+        .iter()
+        .map(|stmt| (LoadPhase::Fixture, (*stmt).to_string()))
 }
 
 /// Generate the dataset described by `spec` and bulk-load it into `graph`, **replacing** whatever
@@ -597,6 +632,47 @@ mod tests {
         let stmts: Vec<_> = load_statements(&s, 1).collect();
         // 2 index stmts + 3 node batches + 3 edge batches.
         assert_eq!(stmts.len(), 2 + 3 + 3);
+    }
+
+    #[test]
+    fn load_phase_tag_round_trips_for_every_variant() {
+        for phase in [
+            LoadPhase::Index,
+            LoadPhase::Nodes,
+            LoadPhase::Edges,
+            LoadPhase::Fixture,
+        ] {
+            assert_eq!(LoadPhase::from_tag(phase.tag()), Some(phase));
+        }
+        assert_eq!(LoadPhase::from_tag("nope"), None);
+    }
+
+    #[test]
+    fn fixture_statements_are_constant_deterministic_and_tagged() {
+        let a: Vec<(LoadPhase, String)> = fixture_statements().collect();
+        let b: Vec<(LoadPhase, String)> = fixture_statements().collect();
+        // Byte-identical across calls (constant, no spec/seed input) — the record-once/replay
+        // guarantee for the fixture.
+        assert_eq!(a, b);
+        // Three index DDLs then two seed `SET`s, all under the Fixture phase.
+        assert_eq!(a.len(), 5);
+        assert!(a.iter().all(|(p, _)| *p == LoadPhase::Fixture));
+        assert!(a[0].1.starts_with("CREATE FULLTEXT INDEX FOR (l:User)"));
+        assert!(a[1].1.starts_with("CREATE FULLTEXT INDEX FOR ()-[l:Friend]->()"));
+        assert!(a[2].1.starts_with("CREATE VECTOR INDEX FOR (l:User)"));
+        assert!(a[3].1.starts_with("MATCH (u:User) WHERE u.id % 97 = 0 SET"));
+        assert!(a[3].1.contains("fixture_alice"));
+        assert!(a[3].1.contains("vecf32("));
+        assert!(a[4].1.starts_with("MATCH (s:User)-[r:Friend]->(d:User) WHERE s.id % 97 = 0 SET"));
+        assert!(a[4].1.contains("fixture_blue"));
+    }
+
+    #[test]
+    fn fixture_statements_do_not_leak_into_load_statements() {
+        // `load_statements` must stay byte-identical to pre-fixture recordings: no Fixture phase.
+        let s = spec(7, 200, 400);
+        let phases: Vec<LoadPhase> = load_statements(&s, 32).map(|(p, _)| p).collect();
+        assert!(!phases.contains(&LoadPhase::Fixture));
     }
 
     #[test]

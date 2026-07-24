@@ -1041,10 +1041,16 @@ async fn record_then_replay_roundtrips_and_guard_proceeds() {
     drop_graph(graph).await;
 }
 
-/// Phase 3 B2: record the queries_repository baseline READ shapes (`--repo-reads full`) OFFLINE,
-/// then replay --load → --no-load. The workload identity (workload_hash) is byte-identical across
-/// replays, every result-gated shape yields matching digests, and the one LIMIT-without-ORDER shape
-/// (`entity_path_introspection`) is recorded + timed but result-N/A (digest `None`) in both replays.
+/// Phase 3 B2 / Phase 4 / Phase 5: record the queries_repository READ shapes (`--repo-reads full`)
+/// OFFLINE, then replay --load → --no-load. The workload identity (workload_hash) is byte-identical
+/// across replays, every result-gated shape yields matching digests, and the result-N/A shapes (the
+/// LIMIT-without-ORDER `entity_path_introspection` and the three fulltext/vector top-k reads) are
+/// recorded + timed but carry no digest (`None`) in both replays.
+///
+/// Full includes the FixtureDependent fulltext/vector reads, so the bundle is recorded with
+/// [`recording::record_rendered_with_fixture`] — the fulltext/vector fixture (index DDL + seed data)
+/// is baked into the recorded graph ONCE and replayed verbatim, so both replays load the identical
+/// fixture and the three smoke queries run against real indexes.
 ///
 /// Uses a multi-thread runtime: the baseline reads return nodes/relations/paths, and the FalkorDB
 /// client decodes those via `block_in_place` (as the production `#[tokio::main]` runtime does).
@@ -1052,6 +1058,7 @@ async fn record_then_replay_roundtrips_and_guard_proceeds() {
 #[ignore = "requires a running FalkorDB server"]
 async fn record_repo_reads_then_replay_roundtrips_byte_identically() {
     use benchmark::synthetic::{shapes, Tier};
+    use std::collections::BTreeSet;
 
     let graph = "syn_it_repo_reads";
     drop_graph(graph).await;
@@ -1061,13 +1068,24 @@ async fn record_repo_reads_then_replay_roundtrips_byte_identically() {
         nodes: 500,
         edges: 1500,
     };
-    // Render every repo read shape's corpus ONCE from the fixed seed, then record verbatim.
+    // Render every repo read shape's corpus ONCE from the fixed seed, then record verbatim. Full
+    // selects the FixtureDependent reads, so the bundle bakes in the fulltext/vector fixture.
     let recorded = shapes::record_repo_reads(Tier::Full, spec.nodes as i32, spec.edges as i32, spec.seed)
         .expect("render repo reads");
-    assert_eq!(recorded.len(), 47, "Full records every repo read shape (46 baseline + 1 ExtendedCore)");
-    recording::record_rendered(&spec, graph, &recorded, spec.seed, 256, &dir).expect("record");
+    assert_eq!(
+        recorded.len(),
+        50,
+        "Full records every repo read shape (46 baseline + 1 ExtendedCore + 3 FixtureDependent)"
+    );
+    assert!(
+        shapes::repo_reads_need_fixture(Tier::Full),
+        "Full needs the fulltext/vector fixture"
+    );
+    recording::record_rendered_with_fixture(&spec, graph, &recorded, spec.seed, 256, &dir)
+        .expect("record");
 
-    // Replay #1 loads the recorded graph; #2 reuses it (no-load), count-verifying first.
+    // Replay #1 loads the recorded graph (incl. the fixture); #2 reuses it (no-load), count-verifying
+    // first.
     let ref_out = dir.join("ref.json").to_string_lossy().into_owned();
     let cand_out = dir.join("cand.json").to_string_lossy().into_owned();
     let a = replay::run(&replay_config(&dir, graph, &ref_out, true))
@@ -1081,13 +1099,23 @@ async fn record_repo_reads_then_replay_roundtrips_byte_identically() {
     let ha = a.meta.dataset.as_ref().expect("dataset a").workload_hash.clone();
     let hb = b.meta.dataset.as_ref().expect("dataset b").workload_hash.clone();
     assert_eq!(ha, hb, "workload_hash must match across replays");
-    assert_eq!(a.operations.len(), 47);
+    assert_eq!(a.operations.len(), 50);
 
-    // Every result-gated shape has a digest that matches across the two replays; the
-    // LIMIT-without-ORDER shape is result-N/A (digest absent) in both.
+    // The result-N/A shapes: the LIMIT-without-ORDER read plus the three fulltext/vector top-k reads.
+    let result_na: BTreeSet<&str> = [
+        "entity_path_introspection",
+        "vector_query_nodes_smoke",
+        "fulltext_query_nodes_smoke",
+        "fulltext_query_relationships_smoke",
+    ]
+    .into_iter()
+    .collect();
+
+    // Every result-gated shape has a digest that matches across the two replays; each result-N/A
+    // shape is timed but carries no digest in both replays.
     for (name, op_a) in &a.operations {
         let op_b = b.operations.get(name).expect("op present in both replays");
-        if name == "entity_path_introspection" {
+        if result_na.contains(name.as_str()) {
             assert!(op_a.result_digest.is_none(), "{name} must be result-N/A");
             assert!(op_b.result_digest.is_none(), "{name} must be result-N/A");
         } else {
@@ -1100,6 +1128,16 @@ async fn record_repo_reads_then_replay_roundtrips_byte_identically() {
     // float distance canonicalize deterministically).
     let ts = a.operations.get("temporal_spatial_roundtrip").expect("temporal_spatial_roundtrip present");
     assert!(ts.result_digest.is_some(), "temporal_spatial_roundtrip must be result-gated (digest present)");
+    // The Phase 5 FixtureDependent shapes are recorded, timed, and present in both replays (their
+    // fulltext/vector fixture loaded and the smoke queries ran against real indexes).
+    for name in [
+        "vector_query_nodes_smoke",
+        "fulltext_query_nodes_smoke",
+        "fulltext_query_relationships_smoke",
+    ] {
+        let op = a.operations.get(name).unwrap_or_else(|| panic!("{name} present"));
+        assert!(op.result_digest.is_none(), "{name} is result-N/A (top-k)");
+    }
 
     // The guard proceeds (same workload + matching gated digests).
     match guard(&BaselineKey::from_report(&a), &BaselineKey::from_report(&b)) {
