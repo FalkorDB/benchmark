@@ -1061,10 +1061,10 @@ async fn record_repo_reads_then_replay_roundtrips_byte_identically() {
         nodes: 500,
         edges: 1500,
     };
-    // Render every baseline read shape's corpus ONCE from the fixed seed, then record verbatim.
+    // Render every repo read shape's corpus ONCE from the fixed seed, then record verbatim.
     let recorded = shapes::record_repo_reads(Tier::Full, spec.nodes as i32, spec.edges as i32, spec.seed)
         .expect("render repo reads");
-    assert_eq!(recorded.len(), 46, "Full records every baseline read shape");
+    assert_eq!(recorded.len(), 47, "Full records every repo read shape (46 baseline + 1 ExtendedCore)");
     recording::record_rendered(&spec, graph, &recorded, spec.seed, 256, &dir).expect("record");
 
     // Replay #1 loads the recorded graph; #2 reuses it (no-load), count-verifying first.
@@ -1081,7 +1081,7 @@ async fn record_repo_reads_then_replay_roundtrips_byte_identically() {
     let ha = a.meta.dataset.as_ref().expect("dataset a").workload_hash.clone();
     let hb = b.meta.dataset.as_ref().expect("dataset b").workload_hash.clone();
     assert_eq!(ha, hb, "workload_hash must match across replays");
-    assert_eq!(a.operations.len(), 46);
+    assert_eq!(a.operations.len(), 47);
 
     // Every result-gated shape has a digest that matches across the two replays; the
     // LIMIT-without-ORDER shape is result-N/A (digest absent) in both.
@@ -1096,6 +1096,10 @@ async fn record_repo_reads_then_replay_roundtrips_byte_identically() {
             assert_eq!(da, db, "result digest for {name} must match across replays");
         }
     }
+    // The Phase 4 ExtendedCore shape round-trips a byte-stable, gated digest (temporal + spatial +
+    // float distance canonicalize deterministically).
+    let ts = a.operations.get("temporal_spatial_roundtrip").expect("temporal_spatial_roundtrip present");
+    assert!(ts.result_digest.is_some(), "temporal_spatial_roundtrip must be result-gated (digest present)");
 
     // The guard proceeds (same workload + matching gated digests).
     match guard(&BaselineKey::from_report(&a), &BaselineKey::from_report(&b)) {
