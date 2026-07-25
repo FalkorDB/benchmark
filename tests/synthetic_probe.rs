@@ -1546,16 +1546,18 @@ async fn record_and_replay_algorithm_shapes_end_to_end() {
     // Digest gating per the §6 determinism table: the deterministic pair is gated, the float
     // shapes are N/A.
     for name in ["algo_max_flow_single_pair", "algo_msf_summary"] {
-        assert!(
-            report.operations[name].result_digest.is_some(),
-            "{name} is digest-gated (design §6/§7.5)"
-        );
+        let op = report
+            .operations
+            .get(name)
+            .unwrap_or_else(|| panic!("{name} missing from the replay report"));
+        assert!(op.result_digest.is_some(), "{name} is digest-gated (design §6/§7.5)");
     }
     for name in ["algo_pagerank_summary", "algo_harmonic_summary"] {
-        assert!(
-            report.operations[name].result_digest.is_none(),
-            "{name} stays result-N/A (design §6)"
-        );
+        let op = report
+            .operations
+            .get(name)
+            .unwrap_or_else(|| panic!("{name} missing from the replay report"));
+        assert!(op.result_digest.is_none(), "{name} stays result-N/A (design §6)");
     }
 
     // §7.5 byte-stability, verified continuously: an independent second replay of the same bundle
@@ -1577,8 +1579,12 @@ async fn record_and_replay_algorithm_shapes_end_to_end() {
             .result_digest
             .as_ref()
             .unwrap_or_else(|| panic!("{name} must stay digest-gated on the second replay"));
+        let first = report
+            .operations
+            .get(name)
+            .unwrap_or_else(|| panic!("{name} missing from the first replay report"));
         assert_eq!(
-            report.operations[name].result_digest.as_ref(),
+            first.result_digest.as_ref(),
             Some(d2),
             "{name} digest must be byte-stable across independent replays"
         );
