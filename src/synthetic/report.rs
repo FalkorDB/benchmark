@@ -434,13 +434,21 @@ impl Report {
         for (name, op) in &self.operations {
             out.push_str(&format!("\n## `{}`\n", name));
             if let Some(reason) = &op.skipped {
-                out.push_str(&format!("\n_⏭ skipped — {}_\n", md_cell(reason)));
+                out.push_str(&format!("\n_⏭ skipped — {}_\n", md_cell(&html_escape(reason))));
                 continue;
             }
             render_op_levels_markdown(&mut out, op);
         }
         out
     }
+}
+
+/// Escape a string for safe embedding as **HTML text** (e.g. inside a `<code>`/`<summary>` or a
+/// report line): a crafted report or manifest could carry an op key or skip reason with `<`, `>`
+/// or `&` that would otherwise break the `<details>` markup or inject HTML into the PR comment.
+/// Order matters — `&` first.
+pub(crate) fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
 /// Escape a value for a GitHub-flavoured Markdown **table cell**: an unescaped `|` ends the cell
@@ -1117,5 +1125,20 @@ mod tests {
         let legacy: OperationReport = serde_json::from_str(r#"{"levels": []}"#).unwrap();
         assert_eq!(legacy.skipped, None);
         assert!(!sample_report().to_console().contains("skipped —"));
+    }
+
+    #[test]
+    fn skip_reason_is_html_escaped_in_the_markdown_report() {
+        // Skip reasons flow from manifest content — HTML-special chars must not inject markup.
+        let mut report = sample_report();
+        {
+            let op = report.operations.get_mut("return_const").unwrap();
+            op.levels = vec![];
+            op.result_digest = None;
+            op.skipped = Some("needs <engine&co> v2".to_string());
+        }
+        let md = report.to_markdown();
+        assert!(md.contains("_⏭ skipped — needs &lt;engine&amp;co&gt; v2_"), "{md}");
+        assert!(!md.contains("needs <engine&co> v2"), "raw HTML leaked: {md}");
     }
 }

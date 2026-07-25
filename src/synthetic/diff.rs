@@ -12,7 +12,7 @@ use crate::synthetic::analysis::{
     OpAnalysis, OpOutcome, OutcomeCounts, OverallVerdict, RegressionAnalysis,
 };
 use crate::synthetic::provenance::decode_module_version;
-use crate::synthetic::report::{md_cell, LevelMetrics, LevelReport, Report};
+use crate::synthetic::report::{html_escape, md_cell, LevelMetrics, LevelReport, Report};
 use crate::synthetic::thresholds::{BudgetProfile, Verdict};
 use crate::synthetic::Tier;
 use serde::{Deserialize, Serialize};
@@ -206,13 +206,6 @@ fn latency_cell(
     }
 }
 
-/// Escape a string for safe embedding as **HTML text** (e.g. inside a `<code>`/`<summary>`): a
-/// crafted report could carry an op key with `<`, `>` or `&` that would otherwise break the
-/// `<details>` markup or inject HTML into the PR comment. Order matters — `&` first.
-fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
-}
-
 /// `100·(b−a)/a`, formatted with a sign; `n/a` when `a == 0`.
 fn pct(
     a: f64,
@@ -354,7 +347,7 @@ pub fn regression_markdown(analysis: &RegressionAnalysis) -> String {
         // the totals still tally them when they diverged (gate → regressed, advisory → diverged).
         let skip_note = skip_note(oa, la, lb);
         if let Some(note) = &skip_note {
-            op_body.push_str(&format!("\n_{}_\n", md_cell(note)));
+            op_body.push_str(&format!("\n_{}_\n", md_cell(&html_escape(note))));
         }
         if op_body.trim().is_empty() {
             continue;
@@ -1984,6 +1977,27 @@ mod tests {
             ),
             "{md}"
         );
+    }
+
+    #[test]
+    fn skip_reasons_are_html_escaped_in_the_regression_markdown() {
+        // Skip reasons flow from manifest/probe content — HTML-special chars must not break the
+        // <details> markup or inject markup into the PR comment.
+        let a = rpt(
+            "main",
+            42001,
+            &[("match_by_index", 1.0, "d1"), ("algo_max_flow_single_pair", 1.0, "d2")],
+        );
+        let mut b = rpt(
+            "pr",
+            42002,
+            &[("match_by_index", 1.0, "d1"), ("algo_max_flow_single_pair", 1.0, "d2")],
+        );
+        skip_op(&mut b, "algo_max_flow_single_pair", "needs <engine&co> v2");
+        let g = regression_guard(&a, &b);
+        let md = regression_markdown(&analyze_gate(&a, &b, &g, &Thresholds::builtin()));
+        assert!(md.contains("needs &lt;engine&amp;co&gt; v2"), "{md}");
+        assert!(!md.contains("needs <engine&co> v2"), "raw HTML leaked: {md}");
     }
 
     #[test]
