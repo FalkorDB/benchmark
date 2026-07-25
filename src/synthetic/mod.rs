@@ -2612,6 +2612,97 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn report_regression_writes_cells_json_and_honors_advisory_policy() {
+        // Hermetic: same divergent pair as above, but with `--cells` + `--divergence-policy
+        // advisory`: the command writes the full analysis model and the verdict caps at Advisory.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir();
+        let write = |label: &str, digest: &str| -> String {
+            let p = dir.join(format!(
+                "cells-{}-{}.json",
+                std::process::id(),
+                SEQ.fetch_add(1, Ordering::Relaxed)
+            ));
+            let json = format!(
+                r#"{{"meta":{{"tool_version":"0.1.0","endpoint":"x","samples":1,"warmup":0,"concurrency":[1],"server_timeout_ms":5000,"client_deadline_ms":6000,"connection":"c","started_at_epoch_secs":0,"server":{{"module_graph_ver":42001}},"dataset":{{"seed":1,"nodes":10,"edges":20,"corpus_hash":"sha256:same"}},"label":"{label}"}},"operations":{{"match_by_index":{{"levels":[],"result_digest":"{digest}"}}}}}}"#
+            );
+            std::fs::write(&p, json).unwrap();
+            p.to_string_lossy().into_owned()
+        };
+        let a = write("main", "sha256:aa");
+        let b = write("pr", "sha256:bb"); // diverged result
+        let out = dir
+            .join(format!("cells-out-{}.md", std::process::id()))
+            .to_string_lossy()
+            .into_owned();
+        let cells = dir
+            .join(format!("cells-model-{}.json", std::process::id()))
+            .to_string_lossy()
+            .into_owned();
+        assert!(run_command(crate::cli::SyntheticCommands::Report {
+            input: None,
+            regression: true,
+            thresholds: None,
+            diff: vec![a.clone(), b.clone()],
+            out: Some(out.clone()),
+            elapsed_secs: Some(1.5),
+            summary: None,
+            cells: Some(cells.clone()),
+            budget_profile: None,
+            divergence_policy: Some("advisory".to_string()),
+        })
+        .await
+        .is_ok());
+        let model: analysis::RegressionAnalysis =
+            serde_json::from_str(&std::fs::read_to_string(&cells).unwrap()).unwrap();
+        assert_eq!(model.verdict, analysis::OverallVerdict::Advisory);
+        assert_eq!(model.divergence_policy, analysis::DivergencePolicy::Advisory);
+        assert_eq!(model.elapsed_secs, Some(1.5));
+        assert_eq!(
+            model.ops["match_by_index"].op_outcome,
+            analysis::OpOutcome::DivergedAdvisory
+        );
+        let md = std::fs::read_to_string(&out).unwrap();
+        assert!(md.contains("advisory"), "{md}");
+        for p in [a, b, out, cells] {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+
+    #[tokio::test]
+    async fn report_regression_rejects_cross_engine_profile_without_thresholds_file() {
+        // `--budget-profile cross-engine` without a TOML that defines the profile is a hard,
+        // actionable error — never a silent fallback to the strict budgets (design §A4).
+        let dir = std::env::temp_dir();
+        let p = dir
+            .join(format!("bp-{}.json", std::process::id()))
+            .to_string_lossy()
+            .into_owned();
+        let json = r#"{"meta":{"tool_version":"0.1.0","endpoint":"x","samples":1,"warmup":0,"concurrency":[1],"server_timeout_ms":5000,"client_deadline_ms":6000,"connection":"c","started_at_epoch_secs":0,"server":{},"dataset":{"seed":1,"nodes":10,"edges":20,"corpus_hash":"sha256:same"}},"operations":{}}"#;
+        std::fs::write(&p, json).unwrap();
+        let err = run_command(crate::cli::SyntheticCommands::Report {
+            input: None,
+            regression: true,
+            thresholds: None,
+            diff: vec![p.clone(), p.clone()],
+            out: None,
+            elapsed_secs: None,
+            summary: None,
+            cells: None,
+            budget_profile: Some("cross-engine".to_string()),
+            divergence_policy: None,
+        })
+        .await
+        .expect_err("cross-engine without --thresholds must fail");
+        assert!(
+            format!("{err}").contains("requires --thresholds"),
+            "got: {err}"
+        );
+        let _ = std::fs::remove_file(&p);
+    }
+
     #[test]
     fn markdown_path_swaps_json_suffix_or_appends() {
         assert_eq!(markdown_path("synthetic-report.json"), "synthetic-report.md");
