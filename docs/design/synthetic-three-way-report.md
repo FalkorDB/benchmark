@@ -410,15 +410,17 @@ the per-PR group runs).
 ## 7. Deliverables & order
 
 1. **benchmark PR 1 (A0)** — dynamic-op budgets/tiers bug fix. Small, independently valuable,
-   no schema change (safe under #745's pin). **Status: implemented — PR
+   no schema change (safe under #745's pin). **Status: merged — PR
    [#255](https://github.com/FalkorDB/benchmark/pull/255).**
 2. **benchmark PR 2 (A1–A7)** — analysis model, `--cells`, profiles, divergence policy,
-   summary v2, sanity-recipe + docs; then tag post-v2.2. **Status: implemented — PR
-   [#256](https://github.com/FalkorDB/benchmark/pull/256) (stacked on #255); release tag
-   follows merge.**
+   summary v2, sanity-recipe + docs; then tag post-v2.2. **Status: merged — PR
+   [#257](https://github.com/FalkorDB/benchmark/pull/257) (supersedes
+   [#256](https://github.com/FalkorDB/benchmark/pull/256), auto-closed when its stacked base
+   merged); released as
+   [v2.3](https://github.com/FalkorDB/benchmark/releases/tag/v2.3).**
 3. **next-gen PR (B1–B5)** — stacked on #745, pinned to the new tag. **Status: implemented —
    PR [falkordb-rs-next-gen#748](https://github.com/FalkorDB/falkordb-rs-next-gen/pull/748)
-   (pins `SYNTHETIC_BENCHMARK_REF` to the #256 head; re-pin to the release tag after merge).**
+   (pins `SYNTHETIC_BENCHMARK_REF` to `v2.3`); awaiting human review.**
 
 Each PR: design-first (this doc), ≥90% patch coverage on Rust changes, `just ci` +
 `just coverage` green locally, docs synced. Next-gen PRs await human review (no self-merge).
