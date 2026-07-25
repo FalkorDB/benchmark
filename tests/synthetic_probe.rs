@@ -1609,7 +1609,7 @@ async fn record_and_replay_write_shapes_end_to_end() {
     use benchmark::cli::SyntheticCommands;
     use benchmark::synthetic::run_command;
 
-    let graph = "syn_it_writes";
+    let graph = "syn_it_repo_writes";
     drop_graph(graph).await;
     let dir = temp_bundle_dir("syn-it-writes");
     let out_dir = dir.to_string_lossy().into_owned();
