@@ -1340,10 +1340,12 @@ async fn max_flow_runs_on_the_generated_simple_graph() {
     run(&cfg).await.expect("generate + load the oracle dataset");
 
     let mut g = open_graph(&endpoint(), graph).await.expect("open loaded graph");
-    // No parallel edges made it into the store.
+    // No parallel edges made it into the store. The relationship variable MUST be bound
+    // (`[r:Friend]`, `count(r)`): an unnamed `[:Friend]` pattern collapses tensor multi-edges
+    // and returns 0 even on a known multigraph (verified live on falkordb/falkordb:edge).
     let mut dup = g
         .ro_query(
-            "MATCH (a:User)-[:Friend]->(b:User) WITH a, b, count(*) AS c WHERE c > 1 \
+            "MATCH (a:User)-[r:Friend]->(b:User) WITH a, b, count(r) AS c WHERE c > 1 \
              RETURN count(*)",
         )
         .execute()

@@ -774,6 +774,47 @@ mod tests {
     }
 
     #[test]
+    fn oracle_fixture_v5_changes_exactly_the_eight_duplicate_slots() {
+        // Pins the v4→v5 generator delta on the seed=7 1000/5000 CI oracle fixture. The
+        // historical (v4) formula — recomputed inline below, independent of `edge_candidate` —
+        // must agree with the v5 generator on the full (src, dst, bench_capacity) tuple
+        // everywhere EXCEPT the 8 second occurrences of duplicated pairs, which re-probe.
+        // A generated run's corpus_hash does not cover edge content, so this test is the guard
+        // against the re-probe logic silently reshuffling edges.
+        let s = spec(7, 1000, 5000);
+        let v4 = |e: usize| -> (i32, i32) {
+            // The synthbench/v4 edge formula, verbatim (ring backbone, then seeded-random).
+            let n = s.nodes as u64;
+            if (e as u64) < n {
+                let src = e as u64 + 1;
+                (src as i32, ((src % n) + 1) as i32)
+            } else {
+                let src0 = mix(s.seed, DOMAIN_EDGE_SRC, e as u64) % n;
+                let offset = 1 + (mix(s.seed, DOMAIN_EDGE_OFF, e as u64) % (n - 1));
+                ((src0 + 1) as i32, (((src0 + offset) % n) + 1) as i32)
+            }
+        };
+        let tuple = |(src, dst): (i32, i32)| (src, dst, bench_capacity(src as u64, dst as u64));
+        let v5: Vec<(i32, i32)> = s.edge_pairs().collect();
+        let changed: Vec<usize> =
+            (0..s.edges).filter(|&e| tuple(v5[e]) != tuple(v4(e))).collect();
+        assert_eq!(
+            changed,
+            vec![2553, 2635, 3353, 3751, 3953, 4464, 4556, 4979],
+            "the v4→v5 delta must be exactly the 8 known duplicate slots"
+        );
+        // Each changed slot's v4 candidate duplicates an earlier emitted pair (that is WHY it
+        // re-probed), so the delta is explained, not arbitrary.
+        for &e in &changed {
+            let dup = v4(e);
+            assert!(
+                v5[..e].contains(&dup),
+                "slot {e}'s v4 candidate {dup:?} must duplicate an earlier pair"
+            );
+        }
+    }
+
+    #[test]
     fn edges_can_saturate_the_full_simple_graph_capacity() {
         // Forcing every pair to be emitted exercises the re-probe sweep (offset walk + source
         // fallback) and proves it terminates at exactly the simple-graph capacity.
