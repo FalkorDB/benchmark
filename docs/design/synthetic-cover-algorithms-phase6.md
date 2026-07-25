@@ -43,7 +43,7 @@ variants are out of scope — only FalkorDB's `algo.*` procedures matter.
 - **`bench_capacity`** is written deterministically on **every** generated `:Friend` edge
   (`src/synthetic/dataset.rs:311-330`), exactly what `algo.maxFlow` (`capacityProperty`) and
   `algo.MSF` (`weightAttribute`) read — so **pageRank / Harmonic / MSF need no new fixture**. `maxFlow`
-  is the exception (§3.3).
+  is the exception (§3.1).
 
 ## 3. The gap (five blockers, verified)
 
