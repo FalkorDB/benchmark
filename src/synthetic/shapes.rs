@@ -557,14 +557,14 @@ fn render_shapes(
     for shape in shapes {
         if !available.contains(shape.name) {
             return Err(OtherError(format!(
-                "repo read shape '{}' is annotated but not a queries_repository {kind} \
+                "shape '{}' is annotated but not a queries_repository {kind} \
                  (annotation drift — update src/synthetic/shapes.rs)",
                 shape.name
             )));
         }
         if shape.corpus_size == 0 {
             return Err(OtherError(format!(
-                "repo read shape '{}' has corpus_size 0 — every shape must render at least one \
+                "shape '{}' has corpus_size 0 — every shape must render at least one \
                  command (fix its ShapeSpec in src/synthetic/shapes.rs)",
                 shape.name
             )));
@@ -574,7 +574,7 @@ fn render_shapes(
         let mut commands = Vec::with_capacity(shape.corpus_size);
         for _ in 0..shape.corpus_size {
             let prepared = repo.render_read_with_rng(shape.name, &mut rng).ok_or_else(|| {
-                OtherError(format!("repo read shape '{}' failed to render", shape.name))
+                OtherError(format!("shape '{}' failed to render", shape.name))
             })?;
             commands.push(prepared.cypher);
         }
