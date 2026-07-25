@@ -349,7 +349,7 @@ only (the gating signal), and one link to the interactive page. Markers
   must run for one PR); serialization is added at the **job level** — both arch `synthetic-publish`
   jobs and the cleanup job share one per-PR concurrency group (`synthetic-pages-pr-<N>`,
   `cancel-in-progress: false`, **`queue: max`**). `queue: max` keeps every queued job pending
-  (FIFO by wait-start, up to 100) instead of the default single-pending-slot behaviour where a
+  (FIFO by wait-start, up to 100) instead of the default single-pending-slot behavior where a
   newer queued job cancels and replaces an older pending one — so x86/arm publishers (different
   leaves; "newest wins" would not hold across arches) and cleanup are all guaranteed to run, in
   order. Each publisher additionally re-checks PR state (`gh pr view --json state`) inside the
