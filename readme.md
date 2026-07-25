@@ -479,8 +479,14 @@ just synthetic-compare-versions demo falkor://127.0.0.1:6379 falkor://127.0.0.1:
   (1 command for the parameterless shapes; a small seeded set of distinct `(source, target)` pairs for maxFlow).
   All four start **result-N/A** (their values aren't verified byte-stable yet — `max_flow`/`msf`
   are gating candidates pending that verification), so they add latency/trend coverage without
-  joining the divergence gate. The selector is **orthogonal** to `--repo-reads` (combinable with it
-  or usable alone; also mutually exclusive with `--op`/`--all-reads`/`--tier`): algorithm shapes are
+  joining the divergence gate. Each shape also records its required procedure (`capability` in the
+  manifest — replay policy like `budget`, not folded into the `workload_hash`): at replay a single
+  `CALL dbms.procedures()` probe **skips** any op whose procedure the engine lacks (reported, never
+  executed) instead of failing the run. Only algorithm shapes carry a capability — read shapes
+  (including the fulltext/vector fixture reads, whose index DDL loads with the graph before any
+  probe) stay capability-free, so a `--repo-reads` replay never probes. The selector is
+  **orthogonal** to `--repo-reads` (combinable with it or usable alone; also mutually exclusive
+  with `--op`/`--all-reads`/`--tier`): algorithm shapes are
   **never** part of `--repo-reads full` nor the per-PR `synthetic-verify` gate. They need no extra
   fixture — every generated graph is **simple** (no parallel `:Friend` edges, which `algo.maxFlow`
   rejects) and every `:Friend` edge carries the `bench_capacity` property the flow/MSF shapes use.
@@ -496,7 +502,12 @@ just synthetic-compare-versions demo falkor://127.0.0.1:6379 falkor://127.0.0.1:
   guard **refuse per-op** to compare runs that measured the same workload under different per-op
   conditions (budgets are outside the `workload_hash`, so this is what guards them).
   **Result-N/A** ops skip the full untimed reference capture — only
-  their first command is probed (fail-fast) — since no digest is ever gated on them. `--no-load`
+  their first command is probed (fail-fast) — since no digest is ever gated on them. Ops whose
+  manifest entry carries a **`capability`** (a required procedure name) are checked against the
+  engine's `dbms.procedures()` registry up front (one probe per run, case-insensitive): a missing
+  procedure **skips** the op entirely — never executed, reported with `skipped: <reason>` and no
+  levels/digest/policy — so a recording with algorithm shapes still replays cleanly on an engine
+  without them. `--no-load`
   skips the reload
   for a load-once / run-many flow (still count-verifying first). `just synthetic-replay <name>
   <endpoint>` wraps this. Pass **`--label <name>`** (e.g. `pr`/`main`) to name the run — the label
@@ -532,15 +543,22 @@ just synthetic-compare-versions demo falkor://127.0.0.1:6379 falkor://127.0.0.1:
   counts) ▸ **regressed** (≥1 cell over budget, or a divergence under the `gate` policy) ▸
   **advisory** (⚠ — a divergence under the `advisory` policy, or **zero comparable cells**, which is
   never a green pass) ▸ **pass** (≥1 comparable cell, nothing wrong). Version/image mismatches are
-  advisory *warnings*, never comparability guards. Optional flags (all with `--regression`):
-  - **`--summary <file>`** writes a compact machine-usable JSON summary (schema **v2**:
-    `overall_verdict`, headline, per-tier 🟢/🔴/⚠/N-A `totals` incl. the `diverged` bucket, worst
+  advisory *warnings*, never comparability guards. An op **skipped** on either side (capability
+  probe — the engine lacks its required procedure) is **neither a pass nor a divergence** under
+  both policies: its perf cells are N/A, it never gates or caps the verdict, it is tallied in its
+  own **`skipped`** bucket (⏭ in the reports) and exempt from the per-op policy/digest guards —
+  though all-skipped still lands in the zero-comparable-cells advisory, never a green pass.
+  Optional flags (all with `--regression`):
+  - **`--summary <file>`** writes a compact machine-usable JSON summary (schema **v3**:
+    `overall_verdict`, headline, per-tier 🟢/🔴/⚠/⏭/N-A `totals` incl. the `diverged` and `skipped`
+    buckets, worst
     offenders, `budget_profile`, `divergence_policy`, `gated_metric`, `elapsed_secs`, and a stable
     `slug` for linking the externally-hosted full report) — small enough for a PR comment.
-  - **`--cells <file>`** writes the **full analysis model** as JSON (schema v1): the meta block
+  - **`--cells <file>`** writes the **full analysis model** as JSON (schema v2): the meta block
     (labels, module versions, images, `workload_hash`, samples/warmup, thresholds echo) plus every
     op × cache-mode × concurrency cell with baseline/candidate p50, `delta_pct`/`delta_ms`, the
     resolved budget and the per-cell verdict — source material for an interactive report page.
+    Skipped ops carry their reason in `skipped_baseline`/`skipped_candidate` (omitted otherwise).
   - **`--divergence-policy <gate|advisory>`** (default `gate`) sets how a result divergence lands:
     under `gate` a diverged op is 🔴 and fails the comparison; under `advisory` (for cross-engine
     runs, where different engines can legitimately return different results) it is ⚠, counts in the

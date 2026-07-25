@@ -1190,12 +1190,14 @@ async fn replay_honors_per_op_budgets_and_result_na_skips_reference_capture() {
             key: OpKey::dynamic("budgeted_op", QueryType::Read),
             result_gated: true,
             budget: tight.clone(),
+            capability: None,
             commands: vec!["MATCH (u:User {id: 1}) RETURN u.id".to_string()],
         },
         RecordedOp {
             key: OpKey::dynamic("global_op", QueryType::Read),
             result_gated: true,
             budget: RecordedBudget::default(),
+            capability: None,
             commands: vec![
                 "MATCH (u:User {id: 2}) RETURN u.id".to_string(),
                 "MATCH (u:User {id: 3}) RETURN u.id".to_string(),
@@ -1205,6 +1207,7 @@ async fn replay_honors_per_op_budgets_and_result_na_skips_reference_capture() {
             key: OpKey::dynamic("na_probe_op", QueryType::Read),
             result_gated: false,
             budget: tight.clone(),
+            capability: None,
             commands: vec![
                 "MATCH (u:User {id: 4}) RETURN u.id".to_string(),
                 "MATCH (u:User {id: 5}) RETURN u.id".to_string(),
@@ -1271,6 +1274,88 @@ async fn replay_honors_per_op_budgets_and_result_na_skips_reference_capture() {
     // The report's meta echoes the run's global knobs (budgets are per-op policy).
     assert_eq!(report.meta.concurrency, vec![1, 2]);
     assert_eq!(report.meta.samples, 3);
+
+    std::fs::remove_dir_all(&dir).ok();
+    drop_graph(graph).await;
+}
+
+/// Capability probe-before-capture (design Phase 6 §3.5): an op whose recorded `capability`
+/// procedure is absent from the engine's `dbms.procedures()` registry is **skipped** — never
+/// executed (its deliberately invalid command would fail the result-gated reference capture),
+/// reported with `skipped: Some(reason)` and no levels/digest/policy — while the capability-free
+/// op in the same bundle measures normally.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires a running FalkorDB server"]
+async fn replay_skips_ops_whose_capability_procedure_is_missing() {
+    use benchmark::synthetic::catalog::RecordedBudget;
+    use benchmark::synthetic::recording::RecordedOp;
+    use benchmark::synthetic::OpKey;
+
+    let graph = "syn_it_capskip";
+    drop_graph(graph).await;
+    let dir = temp_bundle_dir("syn-it-capskip");
+    let spec = DatasetSpec {
+        seed: 9,
+        nodes: 200,
+        edges: 400,
+    };
+    let ops = vec![
+        RecordedOp {
+            key: OpKey::dynamic("measured_op", QueryType::Read),
+            result_gated: true,
+            budget: RecordedBudget::default(),
+            capability: None,
+            commands: vec!["MATCH (u:User {id: 1}) RETURN u.id".to_string()],
+        },
+        RecordedOp {
+            key: OpKey::dynamic("phantom_op", QueryType::Read),
+            result_gated: true,
+            budget: RecordedBudget::default(),
+            capability: Some("algo.noSuchProcedureBench".to_string()),
+            // Invalid on purpose: result-gated ops get a full reference capture, so replay can
+            // only succeed by never executing this op at all.
+            commands: vec!["CALL algo.noSuchProcedureBench( RETURN oops".to_string()],
+        },
+    ];
+    recording::record_rendered(&spec, graph, &ops, spec.seed, 256, &dir).expect("record");
+
+    let out = dir.join("r.json").to_string_lossy().into_owned();
+    let mut config = replay_config(&dir, graph, &out, true);
+    config.samples = 3;
+    config.warmup = 1;
+    let report = replay::run(&config)
+        .await
+        .expect("replay must skip the phantom op");
+
+    let phantom = &report.operations["phantom_op"];
+    let reason = phantom
+        .skipped
+        .as_deref()
+        .expect("phantom_op must be marked skipped");
+    assert!(
+        reason.contains("algo.noSuchProcedureBench"),
+        "skip reason names the missing procedure: {reason}"
+    );
+    assert!(
+        phantom.levels.is_empty(),
+        "a skipped op has no measured levels"
+    );
+    assert!(
+        phantom.result_digest.is_none(),
+        "a skipped op has no digest"
+    );
+    assert!(
+        phantom.policy.is_none(),
+        "a skipped op has no resolved policy"
+    );
+
+    let measured = &report.operations["measured_op"];
+    assert!(
+        measured.skipped.is_none(),
+        "the capability-free op measures normally"
+    );
+    assert!(!measured.levels.is_empty());
+    assert!(measured.result_digest.is_some());
 
     std::fs::remove_dir_all(&dir).ok();
     drop_graph(graph).await;
@@ -1407,6 +1492,25 @@ async fn record_and_replay_algorithm_shapes_end_to_end() {
     .await
     .expect("record --repo-algorithms via run_command");
 
+    // The bundle's manifest annotates every algorithm op with its required procedure (§3.5).
+    let bundle = recording::load(&dir).expect("load the recorded bundle");
+    let caps: Vec<Option<&str>> = bundle
+        .manifest
+        .ops
+        .iter()
+        .map(|op| op.capability.as_deref())
+        .collect();
+    assert_eq!(
+        caps,
+        vec![
+            Some("algo.pageRank"),
+            Some("algo.maxFlow"),
+            Some("algo.MSF"),
+            Some("algo.HarmonicCentrality"),
+        ],
+        "recorded manifest must carry the per-procedure capabilities"
+    );
+
     let out = dir.join("algos.json").to_string_lossy().into_owned();
     let mut config = replay_config(&dir, graph, &out, true);
     // Global knobs the per-op budgets must override (sweep + cache) or inherit (nothing: the
@@ -1427,6 +1531,7 @@ async fn record_and_replay_algorithm_shapes_end_to_end() {
             .operations
             .get(name)
             .unwrap_or_else(|| panic!("{name} missing from the replay report"));
+        assert!(op.skipped.is_none(), "{name} must pass the capability probe on this server");
         let levels: Vec<usize> = op.levels.iter().map(|l| l.concurrency).collect();
         assert_eq!(levels, vec![1], "{name} must measure only its budgeted C=1 sweep");
         assert!(op.levels[0].cached.is_some(), "{name} measures cached");

@@ -247,7 +247,7 @@ synthetic-compare-versions name endpoint_a endpoint_b:
 # recording), then REPLAY it (load) and re-replay (no-load) and GUARD (workload_hash + result
 # digests must match), then exercise the REGRESSION artifacts end-to-end: `report --regression`
 # with a `[cross-engine]` budget profile, `--divergence-policy advisory`, and the machine outputs
-# (`--summary` schema v2 + `--cells` analysis model). Passes iff recording is deterministic and
+# (`--summary` schema v3 + `--cells` analysis model). Passes iff recording is deterministic and
 # the replay + report pipelines complete + guard clean; latency is NOT asserted (environment
 # noise). Tears the server down afterwards.
 synthetic-sanity:
@@ -283,7 +283,7 @@ synthetic-sanity:
     cargo run --quiet --bin benchmark -- synthetic report \
         --diff recordings/_sanity_a/ref.json recordings/_sanity_a/cand.json --out recordings/_sanity_a/diff.md
     # Regression flavor end-to-end: a [cross-engine] budget profile + advisory divergence policy +
-    # the machine artifacts (--summary schema v2, --cells analysis model). The two runs measured
+    # the machine artifacts (--summary schema v3, --cells analysis model). The two runs measured
     # identical work on one server, so this checks the plumbing, never latency.
     cat > recordings/_sanity_a/thresholds.toml <<'TOML'
     [default]
@@ -304,7 +304,8 @@ synthetic-sanity:
         --out recordings/_sanity_a/regression.md \
         --summary recordings/_sanity_a/summary.json \
         --cells recordings/_sanity_a/cells.json
-    grep -q '"schema_version": 2' recordings/_sanity_a/summary.json || { echo "SANITY FAIL: summary is not schema v2"; exit 1; }
+    grep -q '"schema_version": 3' recordings/_sanity_a/summary.json || { echo "SANITY FAIL: summary is not schema v3"; exit 1; }
+    grep -q '"schema_version": 2' recordings/_sanity_a/cells.json || { echo "SANITY FAIL: cells JSON is not schema v2"; exit 1; }
     grep -q '"budget_profile": "cross-engine"' recordings/_sanity_a/summary.json || { echo "SANITY FAIL: summary lacks the cross-engine profile"; exit 1; }
     grep -q '"divergence_policy": "advisory"' recordings/_sanity_a/summary.json || { echo "SANITY FAIL: summary lacks the advisory policy"; exit 1; }
     grep -q '"overall_verdict"' recordings/_sanity_a/summary.json || { echo "SANITY FAIL: summary lacks overall_verdict"; exit 1; }

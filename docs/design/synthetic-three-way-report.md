@@ -92,6 +92,9 @@ A **latent bug fix** independent of the three-way feature, delivered first as it
 Build the comparison **once** into a serializable `RegressionAnalysis` and render everything
 from it. Sketch (field names final at implementation; serde snake_case):
 
+_The `schema_version: 1` sketch below is the original Part A contract; benchmark PR
+[#262](https://github.com/FalkorDB/benchmark/pull/262) amends it to v2 (see §9)._
+
 ```text
 RegressionAnalysis {
   schema_version: 1,
@@ -204,6 +207,9 @@ budget_pct = 40.0
 fallback). Existing built-in defaults (10% / 0.5 ms) are unchanged.
 
 ### A5. Summary schema v2 (G7)
+
+_Amended: benchmark PR [#262](https://github.com/FalkorDB/benchmark/pull/262) bumps the summary
+to v3 (see §9)._
 
 `SyntheticSummary` bumps `schema_version` to 2, adding `budget_profile`, `divergence_policy`,
 `gated_metric`, `elapsed_secs: Option<f64>`, and a `diverged` count in `OutcomeCounts` (+ the
@@ -337,7 +343,9 @@ v2 summaries; ⚠ diverged counts shown for cross-engine lines; `not_comparable_
 unavailable ones), the total wall-clock from `run-meta.json`, worst offenders for `main-pr`
 only (the gating signal), and one link to the interactive page. Markers
 (`<!-- synthetic-benchmark -->` / `-arm`) unchanged. The renderer hard-checks
-`schema_version == 2` per summary and warns-and-skips otherwise (existing behavior).
+`schema_version == 2` per summary and warns-and-skips otherwise (existing behavior). _Amended:
+once the pinned benchmark ref carries Phase 6 (summary v3, §9) the renderer must accept v3;
+that renderer update is tracked in falkordb-rs-next-gen, not this repo._
 
 ### B5. Workflow wiring (`_benchmark.yml` / `benchmark.yml`)
 
@@ -431,3 +439,41 @@ Each PR: design-first (this doc), ≥90% patch coverage on Rust changes, `just c
   trend storage for synthetic results; comparing more than the three fixed images; fork-PR
   support; per-cache-mode op rollups in the cells schema (future rev); changing the A/B
   (non-synthetic) benchmark.
+
+## 9. Amendments
+
+### 9.1 Phase 6 (capability skips): cells v2, summary v3 — benchmark PR [#262](https://github.com/FalkorDB/benchmark/pull/262)
+
+The algorithm-coverage work
+([`synthetic-cover-algorithms-phase6.md`](synthetic-cover-algorithms-phase6.md)) introduced
+**capability-skipped ops**: before capture/measure, the replayer probes the engine for each
+op's required procedure (algorithm shapes only) and records ops the engine cannot run as
+*skipped* instead of failing. A skip is **neither a pass nor a divergence** and is never an
+offender. This extends the two machine schemas this document froze; the deltas below are the
+new contract (original sketches in §A1/§A5 left intact for history):
+
+**Cells / `RegressionAnalysis` v1 → v2** (`schema_version: 2`):
+
+- `OpAnalysis.op_outcome` gains a `"skipped"` variant (rendered ⏭).
+- New per-op fields `skipped_baseline` / `skipped_candidate`: `Option<String>` skip reasons
+  (omitted when absent, e.g. `engine lacks procedure 'algo.maxFlow'`).
+- A skipped op carries `correctness: "not_gated"` and its cells make no gated claim — skipped
+  on ≥1 side means that side never ran; skips are exempt from the per-op measurement-policy
+  guard and can never gate or count as diverged. Skipped on **both** sides ⇒ `cells: []`;
+  skipped on **one** side ⇒ the measured side's cells are retained (per-side p50/context only —
+  no deltas, and every cell's `perf_verdict` is forced `not_applicable`).
+- `totals` (the per-comparison `OutcomeCounts`) gains a `skipped` count — ops capability-skipped
+  on ≥1 side, under both divergence policies (a skip is never a regression or a divergence).
+- `tier` now also resolves for algorithm-family ops (`"full"`); previously only catalog/repo
+  reads had a tier.
+
+**Summary v2 → v3** (`schema_version: 3`):
+
+- `OutcomeCounts` gains a `skipped` bucket (in `totals` and each `per_tier[].counts`).
+- Per-op outcomes may be `"skipped"`; the tier table gains a ⏭ column.
+- The headline gains `; N op(s) skipped (engine lacks their required procedure)` when N > 0.
+
+**Verdict semantics**: skips never affect `Pass`/`Regressed`; the §A1 rule "zero comparable
+perf cells anywhere is never green" still applies, so an everything-skipped comparison caps at
+`Advisory`. The §B4 renderer must accept summary v3 when the pinned ref carries Phase 6 (that
+update lives in falkordb-rs-next-gen).

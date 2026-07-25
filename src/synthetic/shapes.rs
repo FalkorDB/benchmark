@@ -63,22 +63,19 @@ impl ResultPolicy {
     }
 }
 
-/// The engine capability a fixture-dependent read requires beyond plain Cypher (design §3.4). The
-/// fulltext/vector smoke reads name the specific index procedure they exercise.
+/// The engine procedure an **algorithm shape** requires beyond plain Cypher (design §3.5): each
+/// names its `algo.*` procedure. Read shapes — including the fulltext/vector fixture reads — are
+/// capability-free: their fixture DDL runs at graph-load time, **before** any probe could skip
+/// them, so annotating them would break the per-PR `--repo-reads full` gate on engines lacking the
+/// indexes rather than skip cleanly (capability-aware *loading* is future work, not built here).
 ///
-/// Today this is **annotation only** — a stable, machine-readable label carried on the [`ShapeSpec`]
-/// so a future capability-gating pass (record-and-skip-as-N/A on an engine that lacks the capability)
-/// can key off it without a bundle-format change. It is not yet consulted at record or replay time
-/// (the per-PR A/B images are modern FalkorDB with all three capabilities). Non-fixture reads need
-/// nothing (`capability = None`).
+/// Recording persists [`Self::procedure`] on each shape's manifest entry
+/// ([`crate::synthetic::recording::OpEntry::capability`]), and replay probes the engine's
+/// procedure registry **before** the reference capture (design §3.5): an op whose required
+/// procedure is absent is *skipped* — reported, but never executed — instead of failing the whole
+/// replay. Capability-free shapes need nothing (`capability = None`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShapeCapability {
-    /// `db.idx.vector.queryNodes` — a vector index over `:User(embedding)`.
-    VectorQueryNodes,
-    /// `db.idx.fulltext.queryNodes` — a fulltext index over `:User(ft_text)`.
-    FulltextQueryNodes,
-    /// `db.idx.fulltext.queryRelationships` — a fulltext index over `:Friend(ft_text)`.
-    FulltextQueryRelationships,
     /// `algo.pageRank` — whole-graph PageRank (Phase 6, per-procedure per design §3.5).
     AlgoPageRank,
     /// `algo.maxFlow` — single-pair max flow over `bench_capacity` (Phase 6).
@@ -87,6 +84,20 @@ pub enum ShapeCapability {
     AlgoMsf,
     /// `algo.HarmonicCentrality` — whole-graph harmonic centrality (Phase 6).
     AlgoHarmonic,
+}
+
+impl ShapeCapability {
+    /// The procedure name this capability requires, exactly as the engine's `dbms.procedures()`
+    /// registry spells it (matching is case-insensitive at probe time). Recorded on the shape's
+    /// manifest entry so replay can probe-and-skip on an engine that lacks the procedure.
+    pub fn procedure(self) -> &'static str {
+        match self {
+            ShapeCapability::AlgoPageRank => "algo.pageRank",
+            ShapeCapability::AlgoMaxFlow => "algo.maxFlow",
+            ShapeCapability::AlgoMsf => "algo.MSF",
+            ShapeCapability::AlgoHarmonic => "algo.HarmonicCentrality",
+        }
+    }
 }
 
 /// The **synthetic-only** coverage family a shape belongs to (design Phase 6 §3.3): which curated
@@ -265,20 +276,17 @@ pub fn extended_core_read_shapes() -> Vec<ShapeSpec> {
 /// (record-once → replay-verbatim: every replay endpoint gets the identical fixture). They bind **no random
 /// params** (byte-identical renders), but their result set is **top-k** (ties/ordering are
 /// non-deterministic), so all three are result-**N/A** ([`ResultPolicy::NotApplicable`], Decision 4) —
-/// we do not add `ORDER BY` to force determinism. Each is annotated with the [`ShapeCapability`] it
-/// exercises (metadata for a future capability-gating pass — see [`ShapeCapability`]). All are
-/// [`Tier::Full`]: capability-gated shapes stay out of the always-on core subset.
+/// we do not add `ORDER BY` to force determinism. All are **capability-free** (`capability = None`,
+/// like every read shape — see [`ShapeCapability`]): their index DDL is part of the graph load,
+/// which runs before any probe, so the per-PR `--repo-reads full` gate must never probe. All are
+/// [`Tier::Full`]: fixture-dependent shapes stay out of the always-on core subset.
 ///
 /// Auto-discovered like the other sets: the drift-guard test asserts these names are **exactly** the
 /// reads the `FixtureDependent` profile adds over `ExtendedCore`.
 pub fn fixture_dependent_read_shapes() -> Vec<ShapeSpec> {
-    use ShapeCapability::{FulltextQueryNodes, FulltextQueryRelationships, VectorQueryNodes};
-    // Every row is a FixtureDependent, Full-tier, result-N/A read with a full corpus and an
-    // inherited (global) runtime budget; only the name + capability differ.
-    fn s(
-        name: &'static str,
-        capability: ShapeCapability,
-    ) -> ShapeSpec {
+    // Every row is a FixtureDependent, Full-tier, result-N/A, capability-free read with a full
+    // corpus and an inherited (global) runtime budget; only the name differs.
+    fn s(name: &'static str) -> ShapeSpec {
         ShapeSpec {
             name,
             family: CoverageFamily::Reads(QueryCoverageProfile::FixtureDependent),
@@ -286,15 +294,15 @@ pub fn fixture_dependent_read_shapes() -> Vec<ShapeSpec> {
             result_policy: ResultPolicy::NotApplicable(
                 "vector/fulltext top-k ordering is non-deterministic",
             ),
-            capability: Some(capability),
+            capability: None,
             corpus_size: CORPUS_SIZE,
             budget: OpBudget::INHERIT,
         }
     }
     vec![
-        s("vector_query_nodes_smoke", VectorQueryNodes),
-        s("fulltext_query_nodes_smoke", FulltextQueryNodes),
-        s("fulltext_query_relationships_smoke", FulltextQueryRelationships),
+        s("vector_query_nodes_smoke"),
+        s("fulltext_query_nodes_smoke"),
+        s("fulltext_query_relationships_smoke"),
     ]
 }
 
@@ -638,6 +646,7 @@ fn render_shapes(
             key,
             result_gated: shape.result_policy.is_gated(),
             budget: shape.budget.into(),
+            capability: shape.capability.map(|c| c.procedure().to_string()),
             commands,
         });
     }
@@ -743,7 +752,9 @@ mod tests {
                 "fulltext_query_relationships_smoke",
             ])
         );
-        // Every fixture shape is FixtureDependent, Full-tier, result-N/A, and carries a capability.
+        // Every fixture shape is FixtureDependent, Full-tier, result-N/A, and capability-free —
+        // its index DDL loads with the graph, before any probe could skip it, so the per-PR
+        // `--repo-reads full` gate must never probe (see ShapeCapability).
         for shape in fixture_dependent_read_shapes() {
             assert_eq!(
                 shape.family,
@@ -751,19 +762,8 @@ mod tests {
             );
             assert_eq!(shape.tier, Tier::Full);
             assert!(!shape.result_policy.is_gated(), "top-k reads are result-N/A");
-            assert!(shape.capability.is_some(), "fixture reads carry a capability");
+            assert!(shape.capability.is_none(), "read shapes are capability-free");
         }
-        // The capabilities map 1:1 to the three index procedures.
-        let caps: Vec<Option<ShapeCapability>> =
-            fixture_dependent_read_shapes().iter().map(|s| s.capability).collect();
-        assert_eq!(
-            caps,
-            vec![
-                Some(ShapeCapability::VectorQueryNodes),
-                Some(ShapeCapability::FulltextQueryNodes),
-                Some(ShapeCapability::FulltextQueryRelationships),
-            ]
-        );
     }
 
     #[test]
@@ -833,6 +833,21 @@ mod tests {
     }
 
     #[test]
+    fn capability_procedures_are_pinned() {
+        // The exact procedure names replay probes for (via `dbms.procedures()`). Renaming one
+        // changes which engines skip the shape — deliberate, so pin the full mapping.
+        let expected: &[(ShapeCapability, &str)] = &[
+            (ShapeCapability::AlgoPageRank, "algo.pageRank"),
+            (ShapeCapability::AlgoMaxFlow, "algo.maxFlow"),
+            (ShapeCapability::AlgoMsf, "algo.MSF"),
+            (ShapeCapability::AlgoHarmonic, "algo.HarmonicCentrality"),
+        ];
+        for (cap, procedure) in expected {
+            assert_eq!(cap.procedure(), *procedure);
+        }
+    }
+
+    #[test]
     fn repo_read_shapes_exclude_algorithms_and_stay_exactly_todays_50_reads() {
         // Design §3.2: `repo_read_shapes()` / `--repo-reads full` remain EXACTLY today's 50
         // non-algorithm reads — algorithms are selected only by the orthogonal --repo-algorithms
@@ -879,6 +894,19 @@ mod tests {
                 op.key.name()
             );
         }
+        // Each op records its per-procedure capability string (design §3.5), so replay can
+        // probe-and-skip on an engine that lacks the procedure.
+        let capabilities: Vec<Option<&str>> =
+            ops.iter().map(|op| op.capability.as_deref()).collect();
+        assert_eq!(
+            capabilities,
+            vec![
+                Some("algo.pageRank"),
+                Some("algo.maxFlow"),
+                Some("algo.MSF"),
+                Some("algo.HarmonicCentrality"),
+            ]
+        );
         let corpora: Vec<usize> = ops.iter().map(|op| op.commands.len()).collect();
         assert_eq!(corpora, vec![1, MAX_FLOW_CORPUS_SIZE, 1, 1]);
         // The rendered Cypher exercises the real procedures…
@@ -1025,7 +1053,7 @@ mod tests {
             );
             assert_eq!(s.tier, Tier::Full);
             assert!(!s.result_policy.is_gated());
-            assert!(s.capability.is_some());
+            assert!(s.capability.is_none());
         }
     }
 
@@ -1087,6 +1115,36 @@ mod tests {
                 "fulltext_query_relationships_smoke",
             ]),
             "exactly the LIMIT-without-ORDER and top-k reads are result-N/A"
+        );
+    }
+
+    #[test]
+    fn repo_reads_replay_never_probes_because_no_read_records_a_capability() {
+        // The per-PR gate replays `--repo-reads full` bundles, and replay issues its one
+        // `dbms.procedures()` probe **only** when ≥1 recorded op carries a capability. Fixture
+        // (fulltext/vector) DDL loads with the graph, before any probe could skip its reads, so a
+        // capability there would fail the load on an engine lacking the index instead of skipping
+        // cleanly — reads must stay capability-free end-to-end (zero probes on the gate path).
+        for tier in [Tier::Core, Tier::Full] {
+            let ops = record_repo_reads(tier, 1000, 5000, 42).unwrap();
+            for op in &ops {
+                assert_eq!(
+                    op.capability,
+                    None,
+                    "read '{}' records a capability — the --repo-reads {tier:?} replay would probe",
+                    op.key.name()
+                );
+            }
+        }
+        // Drift guard for the annotation source: no read ShapeSpec carries a capability; the
+        // algorithm family (opt-in, never on the gate path) is the only annotated one.
+        assert!(
+            repo_read_shapes().iter().all(|s| s.capability.is_none()),
+            "read shapes must be capability-free"
+        );
+        assert!(
+            algorithm_read_shapes().iter().all(|s| s.capability.is_some()),
+            "algorithm shapes each name their procedure"
         );
     }
 

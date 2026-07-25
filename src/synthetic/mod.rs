@@ -1115,6 +1115,7 @@ pub(crate) async fn measure_op(
         levels,
         result_digest: None,
         policy: None,
+        skipped: None,
     })
 }
 

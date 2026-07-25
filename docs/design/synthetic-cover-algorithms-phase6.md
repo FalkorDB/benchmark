@@ -171,7 +171,23 @@ digests across ≥2 runs on the per-PR image (the reads' bar). Never add a synth
    deterministic **and total**: bounded seeded draws byte-compatible with the original rejection
    loop, then an exhaustive walk of the ordered-pair space, so it succeeds whenever the space
    suffices and the too-small error is proven, never draw luck.)*
-4. **Per-procedure capability** (§3.5) — probe-before-capture + skipped-op reporting.
+4. **Per-procedure capability** (§3.5) — probe-before-capture + skipped-op reporting. ✅
+   implemented: `ShapeCapability::procedure()` maps each variant to its exact registry name;
+   `RecordedOp`/`OpEntry` carry an optional `capability` string (omitted when absent; **not**
+   folded into the `workload_hash` — replay policy, not workload content); replay issues **one**
+   `CALL dbms.procedures()` probe per run (only when ≥1 op is annotated, case-insensitive
+   matching) and **skips** annotated ops whose procedure is missing — never executed, reported as
+   `OperationReport::skipped: Some(reason)` with no levels/digest/policy. Skip semantics (§8.5):
+   a skipped op is **neither a pass nor a divergence** under both divergence policies — exempt
+   from the per-op policy guard and the asymmetric-digest divergence rule, perf cells N/A,
+   correctness `not_gated`, tallied in its own `skipped` bucket (analysis schema v2, summary
+   schema v3, `OpOutcome::Skipped` ⏭), never an offender, never caps the verdict below what the
+   measured ops earn (all-skipped ⇒ the existing zero-comparable-cells ⇒ Advisory rule).
+   Capabilities stay **algorithm-only**: the fulltext/vector fixture reads are capability-free
+   because their index DDL is part of the graph load, which runs before any probe could skip
+   them — annotating them would fail the per-PR `--repo-reads full` gate at load on an engine
+   lacking the indexes instead of skipping cleanly. Capability-aware *loading* (fixture DDL gated
+   on a pre-load probe) is future work if a later phase needs fixture reads to skip.
 5. **Promote deterministic shapes:** flip `max_flow`/`msf` to `Gated` once verified byte-stable.
 6. **Docs:** cookbook + readme.
 
@@ -185,7 +201,8 @@ digests across ≥2 runs on the per-PR image (the reads' bar). Never add a synth
 4. **Budget/corpus plumbing is real work (§3.4)**, not annotation — it is a prerequisite, and it also
    benefits any future heavy read.
 5. **Skipped-op semantics (§3.5)** — how a capability-absent op appears in `report --diff` needs
-   defining so it neither reads as a pass nor a divergence.
+   defining so it neither reads as a pass nor a divergence. *(Resolved with step 4: a dedicated
+   `skipped` outcome — see the step-4 note in §7.)*
 
 ## 9. Acceptance
 Opt-in record + replay of the 4 algorithm shapes end-to-end on the FalkorDB per-PR image against the

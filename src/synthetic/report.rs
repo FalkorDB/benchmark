@@ -229,6 +229,12 @@ pub struct OperationReport {
     /// the diff/regression/baseline guards.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy: Option<OpPolicy>,
+    /// Why this op was **skipped** — recorded but never executed — or `None` for a measured op.
+    /// Set by the replay capability probe (design Phase 6 §3.5) when the engine lacks the
+    /// procedure the op's manifest entry requires. A skipped op has no levels, no digest and no
+    /// policy; the diff/regression guards treat it as **neither a pass nor a divergence**.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skipped: Option<String>,
 }
 
 impl OperationReport {
@@ -351,6 +357,10 @@ impl Report {
         }
         for (name, op) in &self.operations {
             out.push_str(&format!("\n{}\n", name));
+            if let Some(reason) = &op.skipped {
+                out.push_str(&format!("  skipped — {}\n", reason));
+                continue;
+            }
             render_op_levels(&mut out, op);
         }
         out
@@ -423,10 +433,25 @@ impl Report {
 
         for (name, op) in &self.operations {
             out.push_str(&format!("\n## `{}`\n", name));
+            if let Some(reason) = &op.skipped {
+                out.push_str(&format!(
+                    "\n_⏭ skipped — {}_\n",
+                    md_cell(&md_inline(&html_escape(reason)))
+                ));
+                continue;
+            }
             render_op_levels_markdown(&mut out, op);
         }
         out
     }
+}
+
+/// Escape a string for safe embedding as **HTML text** (e.g. inside a `<code>`/`<summary>` or a
+/// report line): a crafted report or manifest could carry an op key or skip reason with `<`, `>`
+/// or `&` that would otherwise break the `<details>` markup or inject HTML into the PR comment.
+/// Order matters — `&` first.
+pub(crate) fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
 /// Escape a value for a GitHub-flavoured Markdown **table cell**: an unescaped `|` ends the cell
@@ -434,6 +459,20 @@ impl Report {
 /// to `<br>`. `\r` is dropped so a CRLF doesn't yield a doubled break.
 pub(crate) fn md_cell(s: &str) -> String {
     s.replace('|', "\\|").replace('\r', "").replace('\n', "<br>")
+}
+
+/// Escape Markdown inline-special characters so operator-supplied text (e.g. a skip reason from a
+/// manifest) can sit inside an emphasis span without terminating it or injecting inline syntax
+/// (emphasis, code spans, links). Backslash first so later escapes aren't doubled.
+pub(crate) fn md_inline(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if matches!(c, '\\' | '`' | '*' | '_' | '[' | ']') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// A one-line client-host summary (` · `-joined, skipping unknown fields). With `with_hostname`,
@@ -685,6 +724,7 @@ mod tests {
                 ],
                 result_digest: None,
                 policy: None,
+                skipped: None,
             },
         );
         Report {
@@ -980,6 +1020,7 @@ mod tests {
                 ],
                 result_digest: None,
                 policy: None,
+                skipped: None,
             },
         );
         ops.insert(
@@ -993,6 +1034,7 @@ mod tests {
                 }],
                 result_digest: None,
                 policy: None,
+                skipped: None,
             },
         );
         ops.insert(
@@ -1015,6 +1057,7 @@ mod tests {
                 ],
                 result_digest: None,
                 policy: None,
+                skipped: None,
             },
         );
         r.operations = ops;
@@ -1058,5 +1101,79 @@ mod tests {
     #[test]
     fn non_placeholder_version_not_flagged() {
         assert!(!sample_report().meta.server.is_placeholder());
+    }
+
+    #[test]
+    fn skipped_op_round_trips_renders_and_defaults_to_none() {
+        // A capability-skipped op (design Phase 6 §3.5) carries its reason through JSON…
+        let mut report = sample_report();
+        {
+            let op = report.operations.get_mut("return_const").unwrap();
+            op.levels = vec![];
+            op.result_digest = None;
+            op.skipped =
+                Some("engine lacks procedure 'algo.maxFlow' (capability probe)".to_string());
+        }
+        let json = report.to_json().unwrap();
+        assert!(json.contains("\"skipped\""));
+        let back: Report = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            back.operations
+                .get("return_const")
+                .unwrap()
+                .skipped
+                .as_deref(),
+            Some("engine lacks procedure 'algo.maxFlow' (capability probe)")
+        );
+        // …renders in both the console and Markdown outputs…
+        let console = report.to_console();
+        assert!(
+            console.contains("skipped — engine lacks procedure 'algo.maxFlow'"),
+            "{console}"
+        );
+        let md = report.to_markdown();
+        assert!(
+            md.contains("_⏭ skipped — engine lacks procedure 'algo.maxFlow'"),
+            "{md}"
+        );
+        // …while a measured op (and any pre-Phase-6 report) omits the field and reads back None.
+        let plain = sample_report().to_json().unwrap();
+        assert!(!plain.contains("\"skipped\""));
+        let legacy: OperationReport = serde_json::from_str(r#"{"levels": []}"#).unwrap();
+        assert_eq!(legacy.skipped, None);
+        assert!(!sample_report().to_console().contains("skipped —"));
+    }
+
+    #[test]
+    fn skip_reason_is_html_escaped_in_the_markdown_report() {
+        // Skip reasons flow from manifest content — HTML-special chars must not inject markup,
+        // and Markdown inline syntax must not terminate the `_…_` emphasis span or open a code
+        // span / link.
+        let mut report = sample_report();
+        {
+            let op = report.operations.get_mut("return_const").unwrap();
+            op.levels = vec![];
+            op.result_digest = None;
+            op.skipped = Some("needs <engine&co> v2".to_string());
+        }
+        let md = report.to_markdown();
+        assert!(md.contains("_⏭ skipped — needs &lt;engine&amp;co&gt; v2_"), "{md}");
+        assert!(!md.contains("needs <engine&co> v2"), "raw HTML leaked: {md}");
+        report.operations.get_mut("return_const").unwrap().skipped =
+            Some("lacks `algo_x` (see [docs]) *and* _algo_y_".to_string());
+        let md = report.to_markdown();
+        assert!(
+            md.contains(
+                "_⏭ skipped — lacks \\`algo\\_x\\` (see \\[docs\\]) \\*and\\* \\_algo\\_y\\__"
+            ),
+            "markdown specials not escaped: {md}"
+        );
+    }
+
+    #[test]
+    fn md_inline_escapes_every_inline_special_and_backslash_first() {
+        assert_eq!(md_inline(r"a\_b"), r"a\\\_b");
+        assert_eq!(md_inline("`*_[]"), r"\`\*\_\[\]");
+        assert_eq!(md_inline("plain text, no specials!"), "plain text, no specials!");
     }
 }
