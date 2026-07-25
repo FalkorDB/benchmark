@@ -187,7 +187,7 @@ fn percentiles(m: &LevelMetrics) -> String {
     format!("{:.3} / {:.3} / {:.3} / {:.3}", s.median, s.p90, s.p95, s.p99)
 }
 
-/// A regression-table latency cell: the gated **p50** on the primary line, with p90/p99 and
+/// A regression-table latency cell: the gated **p50** on the primary line, with p90/p95/p99 and
 /// throughput folded onto a smaller `context:` line (informational, never gated). `—` when the
 /// side is absent. Values are fixed-precision measurements, so no operator-supplied text is
 /// interpolated (no `md_cell` escaping needed).
@@ -197,8 +197,8 @@ fn latency_cell(
 ) -> String {
     match (p50, ctx) {
         (Some(p50), Some(c)) => format!(
-            "{:.3}<br><sub>context: p90 {:.3} · p99 {:.3} · {:.0} op/s</sub>",
-            p50, c.p90_ms, c.p99_ms, c.throughput_ops_per_sec
+            "{:.3}<br><sub>context: p90 {:.3} · p95 {:.3} · p99 {:.3} · {:.0} op/s</sub>",
+            p50, c.p90_ms, c.p95_ms, c.p99_ms, c.throughput_ops_per_sec
         ),
         _ => "—".to_string(),
     }
@@ -389,13 +389,13 @@ pub fn regression_markdown(analysis: &RegressionAnalysis) -> String {
     out.push_str(match analysis.divergence_policy {
         DivergencePolicy::Gate => {
             "\n🟢 = faster or within budget · 🔴 = slower than budget **or** results differ · \
-             N/A = no perf verdict. Only **p50** is gated — the `context:` line (p90/p99 · throughput) \
+             N/A = no perf verdict. Only **p50** is gated — the `context:` line (p90/p95/p99 · throughput) \
              and `Δms` are informational, never part of the verdict. Non-blocking.\n"
         }
         DivergencePolicy::Advisory => {
             "\n🟢 = faster or within budget · 🔴 = slower than budget · ⚠ = results differ \
              (advisory — the engines did different work, so perf is N/A) · N/A = no perf verdict. \
-             Only **p50** is gated — the `context:` line (p90/p99 · throughput) and `Δms` are \
+             Only **p50** is gated — the `context:` line (p90/p95/p99 · throughput) and `Δms` are \
              informational, never part of the verdict. Non-blocking.\n"
         }
     });
@@ -983,6 +983,7 @@ mod tests {
             .as_mut()
             .unwrap();
         m.metrics.total_ms.p90 = p90;
+        m.metrics.total_ms.p95 = (p90 + p99) / 2.0;
         m.metrics.total_ms.p99 = p99;
     }
 
@@ -1024,7 +1025,7 @@ mod tests {
         // …the op's collapsed summary is 🟢 (its p50 didn't regress)…
         assert!(md.contains("🟢 <code>match_by_index</code></summary>"), "{md}");
         // …and the blown-up tail is still shown, as context.
-        assert!(md.contains("context: p90 50.000 · p99 500.000"), "{md}");
+        assert!(md.contains("context: p90 50.000 · p95 275.000 · p99 500.000"), "{md}");
     }
 
     #[test]
