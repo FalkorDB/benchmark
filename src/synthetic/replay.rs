@@ -198,16 +198,13 @@ pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
     // entry names a required procedure, ask the engine's registry once and **skip** every op whose
     // procedure is absent — recorded in the report with the reason, but never executed (a missing
     // procedure would otherwise fail the whole replay). Ops without a capability never probe.
-    let required: BTreeSet<&str> = bundle
-        .commands
-        .iter()
-        .filter_map(|(op, _)| entry_for(op.name()).capability.as_deref())
-        .collect();
-    let available = if required.is_empty() {
-        None
-    } else {
+    let any_capability =
+        bundle.commands.iter().any(|(op, _)| entry_for(op.name()).capability.is_some());
+    let available = if any_capability {
         // `probe_procedures` errors already name the capability probe — bubble them up as-is.
         Some(probe_procedures(&mut graph, config.server_timeout_ms, client_deadline).await?)
+    } else {
+        None
     };
     let skip_reason = |name: &str| -> Option<String> {
         let procedure = entry_for(name).capability.as_deref()?;
