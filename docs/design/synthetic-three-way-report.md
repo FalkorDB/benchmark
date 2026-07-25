@@ -1,6 +1,6 @@
 # Design: three-way synthetic PR report — PR vs main vs C engine, with an interactive page
 
-**Status: draft (v5, after four rubber-duck review rounds)**
+**Status:** draft (v5, after four rubber-duck review rounds)
 **Extends:** [`synthetic-pr-regression-report.md`](synthetic-pr-regression-report.md) (approved; Part A merged in this repo, Part B is falkordb-rs-next-gen PR #745).
 
 ## 1. Goal
@@ -27,7 +27,7 @@ the report header** (tool support already merged: `report --elapsed-secs`).
 
 | Decision | Choice | Rationale |
 |---|---|---|
-| C-engine image | `falkordb/falkordb:edge` **run with `--env BROWSER=0`** | User picked the bundle image deliberately. Its entrypoint starts a Node browser server in-container when `BROWSER == 1` (the default; verified in FalkorDB/FalkorDB `build/docker/run.sh:3-7`), so the C leg hardcodes `--env BROWSER=0` in the `docker run` line — no pass-through env var (shell-fragile, per review) — to keep the measured container server-only. |
+| C-engine image | `falkordb/falkordb:edge` **run with `--env BROWSER=0`** | User picked the bundle image deliberately. Its entrypoint starts a Node browser server in-container when `${BROWSER:-1}` evaluates to `1` (i.e. by default; verified in FalkorDB/FalkorDB `build/docker/run.sh:3-7`), so the C leg hardcodes `--env BROWSER=0` in the `docker run` line — no pass-through env var (shell-fragile, per review) — to keep the measured container server-only. |
 | Where the new next-gen work lands | Stacked PR on `barakb/synthetic-pr-regression` (#745's branch) | #745 is unmerged; stacking avoids conflicts and reviews only the delta. |
 | Cross-engine budgets | New `[cross-engine]` profile in the thresholds TOML, mirroring the existing `[default]`/`[op.*]` syntax | Engines legitimately differ; strict same-engine budgets would drown the report in red. |
 | Verdict computation | The Rust tool emits per-cell **and per-op and overall** verdicts as JSON (`report --cells`); page JS only renders, never computes | Single source of truth; no drift between Markdown, summary, and page. |
@@ -272,7 +272,7 @@ trap-surviving `SUMMARY_DIR` pattern, renamed `SYNTHETIC_OUT`):
 profile/policy per comparison, PR number, head SHA), and **`data.json`** — the page's single
 input, assembled by the measure job:
 
-```json
+```text
 { "schema_version": 1,
   "meta": { …run-meta fields… },
   "comparisons": {
@@ -415,7 +415,7 @@ the per-PR group runs).
 3. **next-gen PR (B1–B5)** — stacked on #745, pinned to the new tag.
 
 Each PR: design-first (this doc), ≥90% patch coverage on Rust changes, `just ci` +
-`just coverage` green locally, docs synced. next-gen PRs await human review (no self-merge).
+`just coverage` green locally, docs synced. Next-gen PRs await human review (no self-merge).
 
 ## 8. Out of scope
 
