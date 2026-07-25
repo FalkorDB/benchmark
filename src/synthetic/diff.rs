@@ -347,7 +347,8 @@ pub fn regression_markdown(analysis: &RegressionAnalysis) -> String {
         for mode in [CacheMode::Cached, CacheMode::Uncached] {
             render_regression_mode(&mut op_body, oa, mode, analysis.divergence_policy, la, lb);
         }
-        // Ops with no measured cell get no section (mirrored by the totals, which skip them too).
+        // Ops with no measured cell get no report section; the totals still tally them when
+        // they diverged (gate → regressed, advisory → diverged).
         if op_body.trim().is_empty() {
             continue;
         }

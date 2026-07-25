@@ -537,7 +537,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("{emoji} {headline}");
     for (op, analysis) in &cells.ops {
         for cell in &analysis.cells {
-            // `delta_pct` is present exactly when the cell has a real verdict (🟢/🔴).
+            // `delta_pct` is present whenever both p50s are measurable — including diverged
+            // cells whose verdict is N/A (the delta stays visible for diagnosis).
             if let Some(delta) = cell.delta_pct {
                 println!(
                     "{op} C={} ({:?}): {delta:+.1}% of a {}% budget",
