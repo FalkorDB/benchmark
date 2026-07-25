@@ -138,18 +138,28 @@ pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
     // set isn't byte-stable (LIMIT-without-ORDER, top-k, float scores — design §3.2 / Decision 4)
     // — is still loaded, replayed, and timed, but its result is neither captured in full, nor
     // cross-concurrency-verified, nor digested, so a benign result difference never fails the A/B
-    // non-divergence gate. `load()` builds `bundle.commands` from `manifest.ops`, so every replayed
-    // name has an entry by construction — a miss is bundle corruption and must fail loudly.
+    // non-divergence gate.
     let op_entries: std::collections::HashMap<&str, &recording::OpEntry> = bundle
         .manifest
         .ops
         .iter()
         .map(|e| (e.name.as_str(), e))
         .collect();
+    // `load()` builds `bundle.commands` from `manifest.ops`, so every replayed name has an entry
+    // by construction — verify anyway so a future load-path change fails gracefully, not deep in
+    // the measurement loops.
+    for (op, _) in &bundle.commands {
+        if !op_entries.contains_key(op.name()) {
+            return Err(OtherError(format!(
+                "op '{}' replayed without a manifest entry (corrupt bundle)",
+                op.name()
+            )));
+        }
+    }
     let entry_for = |name: &str| {
         *op_entries
             .get(name)
-            .unwrap_or_else(|| panic!("op '{name}' replayed without a manifest entry (corrupt bundle)"))
+            .expect("every replayed op name was validated against the manifest above")
     };
 
     // Engine config for the recorded workload (writes/reset are irrelevant — recorded ops are reads).

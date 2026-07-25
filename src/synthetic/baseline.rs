@@ -80,7 +80,7 @@ fn op_policy_mismatch(
         let c = candidate.get(op);
         if b != c {
             let render = |p: Option<&OpPolicy>| {
-                p.map_or_else(|| "inherits the global knobs".to_string(), OpPolicy::to_string)
+                p.map_or_else(|| "inherits the global knobs".to_string(), |p| p.to_string())
             };
             return Some(format!(
                 "per-op measurement policy differs for '{op}' — baseline: {}; candidate: {}. The \
