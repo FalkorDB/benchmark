@@ -154,6 +154,36 @@ pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
         .collect();
     let entry_for = |name: &str| *op_entries.get(name).unwrap_or(&&inherit_budget);
 
+    // Engine config for the recorded workload (writes/reset are irrelevant — recorded ops are reads).
+    let engine_config = Config {
+        endpoint: config.endpoint.clone(),
+        graph: graph_name.clone(),
+        // `ops` is unused by the measurement path (`measure_op` replays the passed-in corpus, not
+        // the config's op list) — leave it empty rather than lossily mapping string-keyed `OpKey`s
+        // back to the `OpName` enum this field holds.
+        ops: Vec::new(),
+        samples: config.samples,
+        warmup: config.warmup,
+        concurrency: concurrency.clone(),
+        reset_every: DEFAULT_RESET_EVERY,
+        seed: bundle.manifest.corpus_seed,
+        server_timeout_ms: config.server_timeout_ms,
+        client_deadline_ms: config.client_deadline_ms,
+        cache: config.cache,
+        out: config.out.clone(),
+        server_image: config.server_image.clone(),
+        label: config.label.clone(),
+        dataset: None,
+    };
+
+    // Validate every op's resolved budget overlay up front — before the reference pass uses its
+    // timeouts — so a malformed manifest (zeroed samples, a non-positive timeout, an empty sweep)
+    // fails closed with an error naming the op instead of a confusing driver error mid-capture.
+    for (op, _) in &bundle.commands {
+        let op_config = engine_config.with_recorded_budget(&entry_for(op.name()).budget);
+        validate_op_config(op.name(), &op_config)?;
+    }
+
     // Reference pass (untimed, single-flight): capture each result's shape (cardinality +
     // order-independent value digest) for every **result-gated** command — the correctness oracle,
     // which also primes the plan cache. A result-N/A op's shapes are never verified or digested, so
@@ -192,27 +222,6 @@ pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
     // Setup connection done; drop it so it isn't an idle extra connection during the sweep.
     drop(graph);
 
-    // Engine config for the recorded workload (writes/reset are irrelevant — recorded ops are reads).
-    let engine_config = Config {
-        endpoint: config.endpoint.clone(),
-        graph: graph_name.clone(),
-        // `ops` is unused by the measurement path (`measure_op` replays the passed-in corpus, not
-        // the config's op list) — leave it empty rather than lossily mapping string-keyed `OpKey`s
-        // back to the `OpName` enum this field holds.
-        ops: Vec::new(),
-        samples: config.samples,
-        warmup: config.warmup,
-        concurrency: concurrency.clone(),
-        reset_every: DEFAULT_RESET_EVERY,
-        seed: bundle.manifest.corpus_seed,
-        server_timeout_ms: config.server_timeout_ms,
-        client_deadline_ms: config.client_deadline_ms,
-        cache: config.cache,
-        out: config.out.clone(),
-        server_image: config.server_image.clone(),
-        label: config.label.clone(),
-        dataset: None,
-    };
     let run_token = rand::random_range(0..=u64::MAX);
     let uid_alloc = AtomicU64::new(0);
 
@@ -221,10 +230,9 @@ pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
         let entry = entry_for(op.name());
         let is_gated = entry.result_gated;
         // Overlay this op's recorded budget on the run's global config (the same per-op overlay a
-        // generated run applies from the catalog spec), validating the resolved knobs up front so
-        // a hand-tuned bundle with a zeroed budget fails with an error naming the op.
+        // generated run applies from the catalog spec) — already validated before the reference
+        // pass, so the resolved knobs are known-good here.
         let op_config = engine_config.with_recorded_budget(&entry.budget);
-        validate_op_config(op.name(), &op_config)?;
         let op_concurrency = normalize_concurrency(&op_config.concurrency)?;
         let op_deadline = Duration::from_millis(op_config.client_deadline_ms);
         let op_max_c = op_concurrency.iter().copied().max().unwrap_or(1);

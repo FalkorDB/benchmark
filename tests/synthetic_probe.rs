@@ -1161,7 +1161,9 @@ async fn record_repo_reads_then_replay_roundtrips_byte_identically() {
 ///   capture (only its first command is probed) and its 1-sample C=1 cached measured loop (one
 ///   untimed prime + one sample) never cycles past `corpus[1]`. Before the skip, the reference
 ///   pass captured every command and this bundle failed hard.
-#[tokio::test]
+///
+/// Multi-thread runtime: FalkorDB entity decoding uses `block_in_place`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires a running FalkorDB server"]
 async fn replay_honors_per_op_budgets_and_result_na_skips_reference_capture() {
     use benchmark::synthetic::catalog::RecordedBudget;
