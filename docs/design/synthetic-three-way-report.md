@@ -413,7 +413,9 @@ the per-PR group runs).
    no schema change (safe under #745's pin). **Status: implemented — PR
    [#255](https://github.com/FalkorDB/benchmark/pull/255).**
 2. **benchmark PR 2 (A1–A7)** — analysis model, `--cells`, profiles, divergence policy,
-   summary v2, sanity-recipe + docs; then tag post-v2.2.
+   summary v2, sanity-recipe + docs; then tag post-v2.2. **Status: implemented — PR
+   [#256](https://github.com/FalkorDB/benchmark/pull/256) (stacked on #255); release tag
+   follows merge.**
 3. **next-gen PR (B1–B5)** — stacked on #745, pinned to the new tag.
 
 Each PR: design-first (this doc), ≥90% patch coverage on Rust changes, `just ci` +
