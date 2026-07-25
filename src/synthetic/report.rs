@@ -434,7 +434,10 @@ impl Report {
         for (name, op) in &self.operations {
             out.push_str(&format!("\n## `{}`\n", name));
             if let Some(reason) = &op.skipped {
-                out.push_str(&format!("\n_⏭ skipped — {}_\n", md_cell(&html_escape(reason))));
+                out.push_str(&format!(
+                    "\n_⏭ skipped — {}_\n",
+                    md_cell(&md_inline(&html_escape(reason)))
+                ));
                 continue;
             }
             render_op_levels_markdown(&mut out, op);
@@ -456,6 +459,20 @@ pub(crate) fn html_escape(s: &str) -> String {
 /// to `<br>`. `\r` is dropped so a CRLF doesn't yield a doubled break.
 pub(crate) fn md_cell(s: &str) -> String {
     s.replace('|', "\\|").replace('\r', "").replace('\n', "<br>")
+}
+
+/// Escape Markdown inline-special characters so operator-supplied text (e.g. a skip reason from a
+/// manifest) can sit inside an emphasis span without terminating it or injecting inline syntax
+/// (emphasis, code spans, links). Backslash first so later escapes aren't doubled.
+pub(crate) fn md_inline(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if matches!(c, '\\' | '`' | '*' | '_' | '[' | ']') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// A one-line client-host summary (` · `-joined, skipping unknown fields). With `with_hostname`,
@@ -1129,7 +1146,9 @@ mod tests {
 
     #[test]
     fn skip_reason_is_html_escaped_in_the_markdown_report() {
-        // Skip reasons flow from manifest content — HTML-special chars must not inject markup.
+        // Skip reasons flow from manifest content — HTML-special chars must not inject markup,
+        // and Markdown inline syntax must not terminate the `_…_` emphasis span or open a code
+        // span / link.
         let mut report = sample_report();
         {
             let op = report.operations.get_mut("return_const").unwrap();
@@ -1140,5 +1159,21 @@ mod tests {
         let md = report.to_markdown();
         assert!(md.contains("_⏭ skipped — needs &lt;engine&amp;co&gt; v2_"), "{md}");
         assert!(!md.contains("needs <engine&co> v2"), "raw HTML leaked: {md}");
+        report.operations.get_mut("return_const").unwrap().skipped =
+            Some("lacks `algo_x` (see [docs]) *and* _algo_y_".to_string());
+        let md = report.to_markdown();
+        assert!(
+            md.contains(
+                "_⏭ skipped — lacks \\`algo\\_x\\` (see \\[docs\\]) \\*and\\* \\_algo\\_y\\__"
+            ),
+            "markdown specials not escaped: {md}"
+        );
+    }
+
+    #[test]
+    fn md_inline_escapes_every_inline_special_and_backslash_first() {
+        assert_eq!(md_inline(r"a\_b"), r"a\\\_b");
+        assert_eq!(md_inline("`*_[]"), r"\`\*\_\[\]");
+        assert_eq!(md_inline("plain text, no specials!"), "plain text, no specials!");
     }
 }

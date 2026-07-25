@@ -12,7 +12,7 @@ use crate::synthetic::analysis::{
     OpAnalysis, OpOutcome, OutcomeCounts, OverallVerdict, RegressionAnalysis,
 };
 use crate::synthetic::provenance::decode_module_version;
-use crate::synthetic::report::{html_escape, md_cell, LevelMetrics, LevelReport, Report};
+use crate::synthetic::report::{html_escape, md_cell, md_inline, LevelMetrics, LevelReport, Report};
 use crate::synthetic::thresholds::{BudgetProfile, Verdict};
 use crate::synthetic::Tier;
 use serde::{Deserialize, Serialize};
@@ -106,7 +106,7 @@ pub fn diff_markdown(
         // A capability-skipped op has no levels, so its tables render empty — say why instead
         // (design Phase 6 §3.5), per side; reasons are manifest content, hence HTML-escaped.
         if let Some(note) = diff_skip_note(baseline, candidate, op, &la, &lb) {
-            out.push_str(&format!("\n_{}_\n", md_cell(&html_escape(&note))));
+            out.push_str(&format!("\n_{}_\n", md_cell(&md_inline(&html_escape(&note)))));
         }
         for mode in [Mode::Cached, Mode::Uncached] {
             render_mode(&mut out, baseline, candidate, op, mode);
@@ -374,7 +374,7 @@ pub fn regression_markdown(analysis: &RegressionAnalysis) -> String {
         // the totals still tally them when they diverged (gate → regressed, advisory → diverged).
         let skip_note = skip_note(oa, la, lb);
         if let Some(note) = &skip_note {
-            op_body.push_str(&format!("\n_{}_\n", md_cell(&html_escape(note))));
+            op_body.push_str(&format!("\n_{}_\n", md_cell(&md_inline(&html_escape(note)))));
         }
         if op_body.trim().is_empty() {
             continue;
@@ -977,6 +977,11 @@ mod tests {
             ),
             "{md}"
         );
+        // Markdown inline syntax in a reason must not terminate the note's `_…_` emphasis span.
+        b2.operations.get_mut("match_by_index").unwrap().skipped =
+            Some("lacks `algo_x` *v2*".to_string());
+        let md = diff_markdown(&a2, &b2, &[]);
+        assert!(md.contains(r"lacks \`algo\_x\` \*v2\*"), "markdown specials not escaped: {md}");
     }
 
     #[test]
@@ -2093,6 +2098,11 @@ mod tests {
         let md = regression_markdown(&analyze_gate(&a, &b, &g, &Thresholds::builtin()));
         assert!(md.contains("needs &lt;engine&amp;co&gt; v2"), "{md}");
         assert!(!md.contains("needs <engine&co> v2"), "raw HTML leaked: {md}");
+        // Markdown inline syntax in a reason must not terminate the note's `_…_` emphasis span.
+        skip_op(&mut b, "algo_max_flow_single_pair", "lacks `algo_x` *v2*");
+        let g = regression_guard(&a, &b);
+        let md = regression_markdown(&analyze_gate(&a, &b, &g, &Thresholds::builtin()));
+        assert!(md.contains(r"lacks \`algo\_x\` \*v2\*"), "markdown specials not escaped: {md}");
     }
 
     #[test]
