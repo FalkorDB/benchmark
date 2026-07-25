@@ -76,13 +76,15 @@ at `cli.rs:205-208,264-271`) — so a `QueryCoverageProfile::Algorithm` would ex
 `--query-profile algorithm` on the A/B benchmark **and still wouldn't enable algorithms** (that's
 `AlgorithmQuerySelection`). **Fix:** a **synthetic-only** shape family (not `QueryCoverageProfile`), a
 separate `record_algorithm_reads()` that builds an **all-algorithms-enabled** repository with its
-**own** drift-guard, and a new `algorithm_read_names()` accessor on both the inner repo
-(`queries_repository.rs:274-279`) and the wrapper (`:372-376`).
+**own** drift-guard, and a new `algorithm_read_names()` accessor added alongside
+`non_algorithm_read_names()` on both the inner repo (`queries_repository.rs:274-279`) and the
+wrapper (`:372-376`).
 
 ### 3.4 Per-op budget + corpus size are not wired for **recorded** (dynamic) shapes
 `OpBudget` is applied only to catalog `OpName`s (`src/synthetic/mod.rs:671-705`); `ShapeSpec`,
 `RecordedOp`, and `OpEntry` carry **no** budget (`shapes.rs`, `recording.rs`), and replay applies one
-global config and **captures all `CORPUS_SIZE` (256) commands before checking `result_policy`**
+global config and **captures all `CORPUS_SIZE` (256) commands — `result_policy` is never
+consulted**
 (`replay.rs:133-151`). Whole-graph algorithms are ~40–80 ms/call locally, so a 256-command reference
 pass is ~11–20 s **per op** — untenable. **Fix (prerequisite):** wire a per-shape **budget + corpus
 size** into the recorded-shape path (1 command for the parameterless pageRank/Harmonic/MSF; a small
