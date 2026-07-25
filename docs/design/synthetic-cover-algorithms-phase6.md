@@ -102,6 +102,10 @@ implemented: `ShapeSpec` carries `corpus_size` + `budget`, `RecordedOp`/`OpEntry
 serde `RecordedBudget` (omitted from the manifest when fully inherited; **not** folded into the
 `workload_hash` — replay policy, not workload content), and replay overlays each op's budget
 (validated like the global config) and probes only the **first** command of a result-N/A op.
+Because budgets are outside the `workload_hash`, each budgeted op's **resolved effective policy**
+is persisted on its report entry (`OperationReport::policy`) and the diff/regression/baseline
+guards compare it **per-op**, refusing (like a workload mismatch) to compare runs that measured
+the same workload under different per-op conditions.
 
 ### 3.5 One coarse capability is wrong, and N/A does not skip execution
 FalkorDB capabilities are detected **per procedure** (`src/falkor/falkor_driver.rs:520-550`), and

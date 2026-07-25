@@ -480,7 +480,11 @@ just synthetic-compare-versions demo falkor://127.0.0.1:6379 falkor://127.0.0.1:
   concurrent pass) so a wrong result under concurrency is a hard fail. Ops whose manifest entry
   carries a **`budget`** are measured under that budget (their own sweep/cache/samples/timeouts —
   validated like the global config) while every other op uses the run's global knobs; the report's
-  `meta` echoes the global knobs. **Result-N/A** ops skip the full untimed reference capture — only
+  `meta` echoes the global knobs, and each budgeted op's **resolved effective policy** is persisted
+  on its report entry (`policy`), so `report --diff`/`--regression` and the Criterion baseline
+  guard **refuse per-op** to compare runs that measured the same workload under different per-op
+  conditions (budgets are outside the `workload_hash`, so this is what guards them).
+  **Result-N/A** ops skip the full untimed reference capture — only
   their first command is probed (fail-fast) — since no digest is ever gated on them. `--no-load`
   skips the reload
   for a load-once / run-many flow (still count-verifying first). `just synthetic-replay <name>

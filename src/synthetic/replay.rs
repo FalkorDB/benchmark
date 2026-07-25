@@ -273,6 +273,12 @@ pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
         // guard renders it N/A instead of comparing a non-deterministic digest.
         op_report.result_digest =
             is_gated.then(|| op_result_digest(op.name(), shapes));
+        // Persist the op's effective measurement policy when its recorded budget overrode any
+        // global knob (design §3.4): budgets are deliberately outside the workload_hash, so this
+        // block is what lets the diff/regression/baseline guards refuse to compare two runs that
+        // measured the same workload under different per-op conditions.
+        op_report.policy =
+            (!entry.budget.is_inherit()).then(|| op_config.resolved_policy(&op_concurrency));
         operations.insert(op.name().to_string(), op_report);
     }
 

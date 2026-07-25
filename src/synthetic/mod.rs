@@ -45,7 +45,7 @@ use crate::synthetic::dataset::DatasetSpec;
 use crate::synthetic::engine::{run_closed_loop, OpInvoker};
 use crate::synthetic::op_runner::{run_and_drain, OpSample};
 use crate::synthetic::report::{
-    DatasetInfo, LevelMetrics, LevelReport, Meta, OperationReport, Report,
+    DatasetInfo, LevelMetrics, LevelReport, Meta, OperationReport, OpPolicy, Report,
 };
 use crate::synthetic::thresholds::BudgetProfile;
 use crate::synthetic::writes::{verify_mutation, WritePlan, WriteScratch};
@@ -505,6 +505,23 @@ impl Config {
         }
         cfg
     }
+
+    /// The fully resolved per-op measurement policy this config describes, with `sweep` as the
+    /// op's normalized concurrency levels — persisted on [`OperationReport::policy`] for ops whose
+    /// budget overrode any global knob, so the diff/regression/baseline guards can compare it.
+    pub(crate) fn resolved_policy(
+        &self,
+        sweep: &[usize],
+    ) -> OpPolicy {
+        OpPolicy {
+            samples: self.samples,
+            warmup: self.warmup,
+            concurrency: sweep.to_vec(),
+            cache: self.cache,
+            server_timeout_ms: self.server_timeout_ms,
+            client_deadline_ms: self.client_deadline_ms,
+        }
+    }
 }
 
 /// Print the available operations (for `synthetic list-ops`).
@@ -702,7 +719,7 @@ pub async fn run(config: &Config) -> BenchmarkResult<Report> {
         // render per-invocation, so this is unused for them). This is the same string a recorded
         // bundle stores, so a generated run and a `--recording` run measure identically.
         let rendered: Arc<Vec<String>> = Arc::new(corpus.iter().map(|q| q.to_cypher()).collect());
-        let op_report = measure_op(
+        let mut op_report = measure_op(
             &op_config,
             &op_concurrency,
             MeasureTarget::from_spec(&op_spec),
@@ -712,6 +729,10 @@ pub async fn run(config: &Config) -> BenchmarkResult<Report> {
             op_client_deadline,
         )
         .await?;
+        // Persist the op's effective measurement policy when its catalog budget overrode any
+        // global knob (all-INHERIT today), so a cross-run comparison can guard it per-op.
+        op_report.policy =
+            (op_spec.budget != OpBudget::INHERIT).then(|| op_config.resolved_policy(&op_concurrency));
         operations.insert(op.as_str().to_string(), op_report);
     }
 
@@ -1093,6 +1114,7 @@ pub(crate) async fn measure_op(
     Ok(OperationReport {
         levels,
         result_digest: None,
+        policy: None,
     })
 }
 
@@ -2454,6 +2476,45 @@ mod tests {
             let entry = bundle.manifest.ops.iter().find(|o| o.name == name).unwrap();
             assert!(!entry.result_gated, "{name} must be result-N/A (top-k)");
         }
+        std::fs::remove_dir_all(&out_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn repo_reads_full_workload_hash_golden_is_pinned() {
+        // GOLDEN: `synthetic record --graph verify --repo-reads full --seed 7 --nodes 1000
+        // --edges 5000` must keep producing this exact workload_hash. The hash is a length-framed
+        // SHA-256 over the recording header, every graph load statement (fixture included) and
+        // every rendered command — so this single value pins the complete `--repo-reads full`
+        // command stream byte-for-byte, proving the "recorded bundles are byte-identical across
+        // code changes" claim (design §3.4) rather than spot-checking defaults. If this test
+        // fails, a code change altered the recorded workload: bump the recording
+        // `GENERATOR_VERSION`, regenerate any saved bundles, and update this golden deliberately.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let out_dir = std::env::temp_dir().join(format!(
+            "syn-rec-golden-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let command = crate::cli::SyntheticCommands::Record {
+            config: None,
+            graph: Some("verify".to_string()),
+            ops: vec![],
+            all_reads: false,
+            tier: None,
+            repo_reads: Some(Tier::Full),
+            seed: Some(7),
+            nodes: Some(1000),
+            edges: Some(5000),
+            out_dir: out_dir.to_string_lossy().into_owned(),
+        };
+        run_command(command).await.expect("offline full repo-reads record succeeds");
+        let bundle = recording::load(&out_dir).expect("golden bundle loads");
+        assert_eq!(
+            bundle.manifest.workload_hash,
+            "sha256:830faf23b57ed61be8e1728a2ec73f09cf3d6fe2d24f0d70b6f8c11ed00c8de4",
+            "the --repo-reads full command stream changed byte-wise"
+        );
         std::fs::remove_dir_all(&out_dir).ok();
     }
 

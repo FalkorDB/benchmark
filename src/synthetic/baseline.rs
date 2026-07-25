@@ -8,7 +8,7 @@
 //! latency comparison would be meaningless. Keeping this logic in the library (rather than the
 //! Criterion bench harness) makes it unit-testable.
 
-use crate::synthetic::report::{Report, ServerInfo};
+use crate::synthetic::report::{OpPolicy, Report, ServerInfo};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -27,6 +27,13 @@ pub struct BaselineKey {
     /// two versions must agree, or a wrong/empty-but-faster result could look like a win.
     #[serde(default)]
     pub result_digests: BTreeMap<String, String>,
+    /// Per-op **effective measurement policy** for ops whose budget overrode the global knobs
+    /// (design §3.4). Budgets are outside the `workload_hash`, so this map is compared op-by-op:
+    /// two runs that measured the same workload under different per-op sampling/cache/sweep/
+    /// timeout conditions must not have their latencies compared. Empty for pre-budget reports
+    /// and for runs where every op inherited the global knobs.
+    #[serde(default)]
+    pub op_policies: BTreeMap<String, OpPolicy>,
 }
 
 impl BaselineKey {
@@ -41,6 +48,11 @@ impl BaselineKey {
                 .iter()
                 .filter_map(|(name, op)| op.result_digest.clone().map(|d| (name.clone(), d)))
                 .collect(),
+            op_policies: report
+                .operations
+                .iter()
+                .filter_map(|(name, op)| op.policy.clone().map(|p| (name.clone(), p)))
+                .collect(),
         }
     }
 }
@@ -52,6 +64,33 @@ pub enum GuardOutcome {
     Proceed { warnings: Vec<String> },
     /// Must **not** compare (workload mismatch or unfingerprintable workload).
     Abort { reason: String },
+}
+
+/// The first per-op **effective-policy** mismatch between two runs, as a human-readable refusal
+/// reason (`None` when every op's policy matches). Compared over the union of budgeted ops: a
+/// policy present on one side only is a mismatch too — that op was measured under different
+/// conditions (e.g. one run's bundle carried a budget the other's didn't).
+fn op_policy_mismatch(
+    baseline: &BTreeMap<String, OpPolicy>,
+    candidate: &BTreeMap<String, OpPolicy>,
+) -> Option<String> {
+    let all: BTreeSet<&String> = baseline.keys().chain(candidate.keys()).collect();
+    for op in all {
+        let b = baseline.get(op);
+        let c = candidate.get(op);
+        if b != c {
+            let render = |p: Option<&OpPolicy>| {
+                p.map_or_else(|| "inherits the global knobs".to_string(), OpPolicy::to_string)
+            };
+            return Some(format!(
+                "per-op measurement policy differs for '{op}' — baseline: {}; candidate: {}. The \
+                 recorded budgets changed between the runs, so their latencies are not comparable",
+                render(b),
+                render(c)
+            ));
+        }
+    }
+    None
 }
 
 /// Guard a `candidate` run against a saved `baseline` before comparing their latencies.
@@ -81,6 +120,14 @@ pub fn guard(
                     .to_string(),
             };
         }
+    }
+
+    // Per-op measurement-policy gate: budgets are deliberately outside the workload_hash (replay
+    // policy, not workload content — design §3.4), so two runs of "the same workload" can still
+    // have measured an op under different sampling/cache/sweep/timeout conditions. Such latencies
+    // are not comparable — refuse, exactly like a workload mismatch.
+    if let Some(reason) = op_policy_mismatch(&baseline.op_policies, &candidate.op_policies) {
+        return GuardOutcome::Abort { reason };
     }
 
     // Result-correctness gate: for every op the baseline recorded a result digest for, the
@@ -228,6 +275,19 @@ pub fn regression_guard(
             };
         }
     }
+    // Per-op effective measurement policy (design §3.4): budgets are outside the workload_hash,
+    // so a matching hash does not prove each op was measured under the same conditions. A per-op
+    // policy mismatch is a *config* mismatch — the whole pair is NotComparable, exactly like the
+    // global sampling/sweep checks above.
+    let policies = |r: &Report| -> BTreeMap<String, OpPolicy> {
+        r.operations
+            .iter()
+            .filter_map(|(name, op)| op.policy.clone().map(|p| (name.clone(), p)))
+            .collect()
+    };
+    if let Some(reason) = op_policy_mismatch(&policies(baseline), &policies(candidate)) {
+        return RegressionGuard::NotComparable { reason };
+    }
 
     // 2. Per-op result divergence — reported, never fatal. Over the *union* of ops: two present
     //    digests that differ, or an asymmetric one-side-only digest, is diverged (we can't verify
@@ -324,6 +384,7 @@ mod tests {
             module_graph_ver: ver,
             server_image: None,
             result_digests: BTreeMap::new(),
+            op_policies: BTreeMap::new(),
         }
     }
 
@@ -339,6 +400,7 @@ mod tests {
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
+            op_policies: BTreeMap::new(),
         }
     }
 
@@ -353,6 +415,69 @@ mod tests {
             }
             other => panic!("expected Abort, got {other:?}"),
         }
+    }
+
+    fn policy(samples: usize) -> OpPolicy {
+        OpPolicy {
+            samples,
+            warmup: 0,
+            concurrency: vec![1],
+            cache: crate::synthetic::CacheSelection::Cached,
+            server_timeout_ms: 5000,
+            client_deadline_ms: 6000,
+        }
+    }
+
+    fn key_with_policies(policies: &[(&str, OpPolicy)]) -> BaselineKey {
+        BaselineKey {
+            workload_hash: Some("sha256:abc".to_string()),
+            module_graph_ver: Some(42001),
+            server_image: None,
+            result_digests: BTreeMap::new(),
+            op_policies: policies
+                .iter()
+                .map(|(k, p)| (k.to_string(), p.clone()))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn aborts_on_op_policy_mismatch() {
+        // Same workload, but the op's recorded budget (samples here) changed between the runs.
+        let base = key_with_policies(&[("algo_max_flow", policy(1))]);
+        let cand = key_with_policies(&[("algo_max_flow", policy(3))]);
+        match guard(&base, &cand) {
+            GuardOutcome::Abort { reason } => {
+                assert!(
+                    reason.contains("measurement policy differs for 'algo_max_flow'"),
+                    "got: {reason}"
+                );
+                assert!(reason.contains("samples=1"), "got: {reason}");
+                assert!(reason.contains("samples=3"), "got: {reason}");
+            }
+            other => panic!("expected Abort, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn aborts_when_op_policy_is_one_sided() {
+        // One run's bundle carried a budget the other's didn't: also not comparable.
+        let base = key_with_policies(&[("algo_max_flow", policy(1))]);
+        let cand = key_with_policies(&[]);
+        match guard(&base, &cand) {
+            GuardOutcome::Abort { reason } => {
+                assert!(reason.contains("'algo_max_flow'"), "got: {reason}");
+                assert!(reason.contains("inherits the global knobs"), "got: {reason}");
+            }
+            other => panic!("expected Abort, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn proceeds_when_op_policies_match() {
+        let base = key_with_policies(&[("algo_max_flow", policy(1))]);
+        let cand = key_with_policies(&[("algo_max_flow", policy(1))]);
+        assert!(matches!(guard(&base, &cand), GuardOutcome::Proceed { .. }));
     }
 
     #[test]
@@ -471,12 +596,14 @@ mod tests {
             module_graph_ver: Some(42001),
             server_image: Some("falkordb@sha256:aaa".to_string()),
             result_digests: BTreeMap::new(),
+            op_policies: BTreeMap::new(),
         };
         let cand = BaselineKey {
             workload_hash: Some("sha256:abc".to_string()),
             module_graph_ver: Some(42002),
             server_image: Some("falkordb@sha256:bbb".to_string()),
             result_digests: BTreeMap::new(),
+            op_policies: BTreeMap::new(),
         };
         match guard(&base, &cand) {
             GuardOutcome::Proceed { warnings } => {
@@ -511,6 +638,7 @@ mod regression_guard_tests {
                 OperationReport {
                     levels: vec![],
                     result_digest: dig.map(|s| s.to_string()),
+                    policy: None,
                 },
             );
         }
@@ -683,5 +811,59 @@ mod regression_guard_tests {
             }
             other => panic!("expected Comparable, got {other:?}"),
         }
+    }
+
+    fn policy(samples: usize) -> OpPolicy {
+        OpPolicy {
+            samples,
+            warmup: 0,
+            concurrency: vec![1],
+            cache: crate::synthetic::CacheSelection::Cached,
+            server_timeout_ms: 5000,
+            client_deadline_ms: 6000,
+        }
+    }
+
+    #[test]
+    fn per_op_policy_mismatch_is_not_comparable() {
+        // Same workload_hash and global knobs, but one op was measured under a different
+        // recorded budget — the pair must be refused like any other config mismatch.
+        let mut a = rep("h", 100, 50, vec![1], None, None, &[("algo_max_flow", None)]);
+        let mut b = rep("h", 100, 50, vec![1], None, None, &[("algo_max_flow", None)]);
+        a.operations.get_mut("algo_max_flow").unwrap().policy = Some(policy(1));
+        b.operations.get_mut("algo_max_flow").unwrap().policy = Some(policy(3));
+        match regression_guard(&a, &b) {
+            RegressionGuard::NotComparable { reason } => {
+                assert!(
+                    reason.contains("measurement policy differs for 'algo_max_flow'"),
+                    "got: {reason}"
+                );
+            }
+            other => panic!("expected NotComparable, got {other:?}"),
+        }
+        // One-sided policy (e.g. an old-tool report vs a budget-carrying rerun): also refused —
+        // the policy-less run really did measure that op under the global knobs.
+        b.operations.get_mut("algo_max_flow").unwrap().policy = None;
+        assert!(matches!(regression_guard(&a, &b), RegressionGuard::NotComparable { .. }));
+    }
+
+    #[test]
+    fn matching_per_op_policies_are_comparable() {
+        let mut a = rep("h", 100, 50, vec![1], None, None, &[("algo_max_flow", None)]);
+        let mut b = rep("h", 100, 50, vec![1], None, None, &[("algo_max_flow", None)]);
+        a.operations.get_mut("algo_max_flow").unwrap().policy = Some(policy(1));
+        b.operations.get_mut("algo_max_flow").unwrap().policy = Some(policy(1));
+        assert!(matches!(regression_guard(&a, &b), RegressionGuard::Comparable { .. }));
+    }
+
+    #[test]
+    fn baseline_key_collects_per_op_policies_from_a_report() {
+        let mut r =
+            rep("h", 100, 50, vec![1], None, None, &[("algo_max_flow", None), ("scan", None)]);
+        r.operations.get_mut("algo_max_flow").unwrap().policy = Some(policy(1));
+        let key = BaselineKey::from_report(&r);
+        // Only the budgeted op lands in the key; inherit-everything ops stay absent.
+        assert_eq!(key.op_policies.len(), 1);
+        assert_eq!(key.op_policies.get("algo_max_flow"), Some(&policy(1)));
     }
 }

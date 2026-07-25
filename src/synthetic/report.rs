@@ -173,6 +173,42 @@ pub struct LevelReport {
     pub compilation_ms_median: Option<f64>,
 }
 
+/// The **effective measurement policy** an operation was measured under when a per-op budget
+/// (design §3.4) overrode any of the run's global knobs — the fully resolved values, not the
+/// overlay. Absent (`None` on [`OperationReport::policy`]) for an op that inherits every global
+/// knob: the [`Meta`] block already describes those, and every report written before budgets
+/// existed reads as all-inherit. Budgets are replay *policy*, deliberately excluded from the
+/// bundle's `workload_hash` — so this block is what lets the diff/baseline guards refuse to
+/// compare two runs that measured the same workload under different per-op conditions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpPolicy {
+    pub samples: usize,
+    pub warmup: usize,
+    /// The op's own (normalized) concurrency sweep.
+    pub concurrency: Vec<usize>,
+    pub cache: crate::synthetic::CacheSelection,
+    pub server_timeout_ms: i64,
+    pub client_deadline_ms: u64,
+}
+
+impl std::fmt::Display for OpPolicy {
+    fn fmt(
+        &self,
+        f: &mut std::fmt::Formatter<'_>,
+    ) -> std::fmt::Result {
+        write!(
+            f,
+            "samples={} warmup={} concurrency={:?} cache={:?} server_timeout_ms={} client_deadline_ms={}",
+            self.samples,
+            self.warmup,
+            self.concurrency,
+            self.cache,
+            self.server_timeout_ms,
+            self.client_deadline_ms
+        )
+    }
+}
+
 /// Stats for one operation across the whole concurrency sweep.
 ///
 /// Each entry of `levels` is the same operation measured at one concurrency `C`; together they
@@ -188,6 +224,11 @@ pub struct OperationReport {
     /// masquerade as an improvement. `None` for a plain `synthetic run`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result_digest: Option<String>,
+    /// The effective per-op measurement policy ([`OpPolicy`]) when this op's recorded/catalog
+    /// budget overrode the global knobs; `None` when it inherited them all. Compared per-op by
+    /// the diff/regression/baseline guards.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<OpPolicy>,
 }
 
 impl OperationReport {
@@ -643,6 +684,7 @@ mod tests {
                     },
                 ],
                 result_digest: None,
+                policy: None,
             },
         );
         Report {
@@ -704,6 +746,34 @@ mod tests {
         let _ = l0.cached.as_ref().unwrap().metrics.server_ms.p95;
         assert_eq!(back.meta.server.module_graph_ver, Some(42001));
         assert_eq!(back.meta.server.cache_size, Some(25));
+    }
+
+    #[test]
+    fn op_policy_round_trips_and_defaults_to_none() {
+        // An op measured under a per-op budget carries its resolved policy through JSON…
+        let mut report = sample_report();
+        let pol = OpPolicy {
+            samples: 1,
+            warmup: 0,
+            concurrency: vec![1],
+            cache: crate::synthetic::CacheSelection::Cached,
+            server_timeout_ms: 60_000,
+            client_deadline_ms: 61_000,
+        };
+        report.operations.get_mut("return_const").unwrap().policy = Some(pol.clone());
+        let json = report.to_json().unwrap();
+        assert!(json.contains("\"policy\""));
+        let back: Report = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.operations.get("return_const").unwrap().policy, Some(pol.clone()));
+        // …while an inherit-everything op (and any pre-budget report) reads back as None, and
+        // its serialized form omits the field entirely.
+        let plain = sample_report().to_json().unwrap();
+        assert!(!plain.contains("\"policy\""));
+        let legacy: OperationReport = serde_json::from_str(r#"{"levels": []}"#).unwrap();
+        assert_eq!(legacy.policy, None);
+        // Display renders every knob (used verbatim in guard refusal messages).
+        let shown = pol.to_string();
+        assert!(shown.contains("samples=1") && shown.contains("client_deadline_ms=61000"));
     }
 
     #[test]
@@ -909,6 +979,7 @@ mod tests {
                     },
                 ],
                 result_digest: None,
+                policy: None,
             },
         );
         ops.insert(
@@ -921,6 +992,7 @@ mod tests {
                     compilation_ms_median: None,
                 }],
                 result_digest: None,
+                policy: None,
             },
         );
         ops.insert(
@@ -942,6 +1014,7 @@ mod tests {
                     },
                 ],
                 result_digest: None,
+                policy: None,
             },
         );
         r.operations = ops;

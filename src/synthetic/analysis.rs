@@ -770,6 +770,7 @@ mod tests {
                         compilation_ms_median: None,
                     }],
                     result_digest: digest.map(str::to_string),
+                    policy: None,
                 },
             );
         }

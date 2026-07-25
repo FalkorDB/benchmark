@@ -1230,6 +1230,21 @@ async fn replay_honors_per_op_budgets_and_result_na_skips_reference_capture() {
     assert!(budgeted.levels[0].cached.is_some(), "budgeted_op measures cached");
     assert!(budgeted.levels[0].uncached.is_none(), "budgeted_op skips uncached (budget)");
     assert!(budgeted.result_digest.is_some(), "budgeted_op stays result-gated");
+    // Its effective (resolved) measurement policy is persisted so the diff/baseline guards can
+    // refuse a comparison against a run that measured it under different conditions.
+    let expected_policy = benchmark::synthetic::report::OpPolicy {
+        samples: 1,
+        warmup: 0,
+        concurrency: vec![1],
+        cache: benchmark::synthetic::CacheSelection::Cached,
+        server_timeout_ms: 5_000, // inherited from the run's global knobs
+        client_deadline_ms: 6_000,
+    };
+    assert_eq!(
+        budgeted.policy.as_ref(),
+        Some(&expected_policy),
+        "budgeted_op persists its resolved per-op policy"
+    );
 
     // global_op: the full global sweep, both cache modes, result-gated.
     let global = &report.operations["global_op"];
@@ -1240,12 +1255,18 @@ async fn replay_honors_per_op_budgets_and_result_na_skips_reference_capture() {
         assert!(level.uncached.is_some(), "global_op measures uncached");
     }
     assert!(global.result_digest.is_some(), "global_op stays result-gated");
+    assert!(global.policy.is_none(), "an inherit-everything op persists no per-op policy");
 
     // na_probe_op: replay succeeded despite the broken third command (capture skipped), no digest.
     let na = &report.operations["na_probe_op"];
     assert!(na.result_digest.is_none(), "na_probe_op is result-N/A");
     let levels: Vec<usize> = na.levels.iter().map(|l| l.concurrency).collect();
     assert_eq!(levels, vec![1], "na_probe_op must measure only its budgeted sweep");
+    assert_eq!(
+        na.policy.as_ref(),
+        Some(&expected_policy),
+        "the result-N/A op carries the same tight budget, so the same resolved policy"
+    );
 
     // The report's meta echoes the run's global knobs (budgets are per-op policy).
     assert_eq!(report.meta.concurrency, vec![1, 2]);
