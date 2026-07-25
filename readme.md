@@ -384,8 +384,11 @@ just synthetic-bench --graph bench --generate --nodes 100000 --edges 1000000 \
   never authorized by a config file alone). It creates the `:User(id)` index, then bulk-loads the
   nodes and edges via `UNWIND` batches.
 - The graph is generated deterministically from `--seed`: `edges` must be `≥ nodes` (a ring backbone
-  guarantees connectivity for expansions/shortest paths); `edges` counts relationships. The same
-  seed + knobs reproduce the exact same graph and the same operation corpora everywhere.
+  guarantees connectivity for expansions/shortest paths) and `≤ nodes × (nodes − 1)`; `edges` counts
+  relationships. The generated graph is always **simple** — no self-loops and no parallel
+  `(src, dst)` `:Friend` pairs — so whole-graph algorithms like `algo.maxFlow` (which rejects
+  multigraphs) run on it. The same seed + knobs reproduce the exact same graph and the same
+  operation corpora everywhere.
 - When a dataset is generated, the report's `meta.dataset` records `{seed, nodes, edges,
   workload_hash}`. **`workload_hash`** (`sha256:…`) is a stable fingerprint of the whole workload —
   the dataset knobs, the selected operations (in order) and their query bodies, and the sampled input

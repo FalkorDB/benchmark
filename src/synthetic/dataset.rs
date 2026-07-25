@@ -2,7 +2,10 @@
 //!
 //! Generates a deterministic `:User {id, age}` / `(:User)-[:Friend {bench_capacity}]->(:User)`
 //! graph from a [`DatasetSpec`] and bulk-loads it via `UNWIND` batches, so operation numbers are
-//! controlled and comparable across runs. To mirror the A/B benchmark's baseline fixture (design
+//! controlled and comparable across runs. The generated graph is always **simple** — no self-loops
+//! and no parallel `(src, dst)` `:Friend` pairs — because FalkorDB's `algo.maxFlow` rejects
+//! multigraphs ("relationship type must not contain multi-edges (tensors)"; design
+//! `synthetic-cover-algorithms-phase6` §3.1). To mirror the A/B benchmark's baseline fixture (design
 //! §3.4) it builds **both** the `:User(id)` and `:User(age)` indexes and stamps every `:Friend`
 //! edge with a deterministic [`bench_capacity`](crate::data_prep::bench_capacity), so shapes that
 //! filter on `age` or `r.bench_capacity` exercise the intended plan/predicate rather than a
@@ -21,13 +24,15 @@ use crate::synthetic::OpName;
 use falkordb::AsyncGraph;
 use futures::StreamExt;
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::fmt::Write as _;
 use std::time::Duration;
 
 /// Bumped whenever the generator algorithm or the operation catalog's query bodies change, so a
 /// [`corpus_hash`] from an older build never compares equal to a newer, differently-generated one.
-pub const GENERATOR_VERSION: &str = "synthbench/v4";
+/// v5: the edge generator guarantees a **simple** graph (no parallel `(src,dst)` `:Friend` pairs),
+/// re-probing duplicate draws deterministically (design `synthetic-cover-algorithms-phase6` §3.1).
+pub const GENERATOR_VERSION: &str = "synthbench/v5";
 
 /// Max distinct `:User` ids sampled into the [`DatasetHandle`] id pool.
 const POOL_IDS: usize = 4096;
@@ -101,6 +106,17 @@ impl DatasetSpec {
         if self.edges > i64::MAX as usize {
             return Err(OtherError(format!("dataset edges ({}) too large", self.edges)));
         }
+        // The generator guarantees a simple graph (no parallel `(src,dst)` pairs, no self-loops),
+        // so a directed graph on `nodes` vertices holds at most `nodes * (nodes - 1)` edges.
+        if self.edges as u64 > self.nodes as u64 * (self.nodes as u64 - 1) {
+            return Err(OtherError(format!(
+                "dataset edges ({}) exceeds the simple-graph capacity of {} nodes ({} distinct \
+                 ordered pairs)",
+                self.edges,
+                self.nodes,
+                self.nodes as u64 * (self.nodes as u64 - 1)
+            )));
+        }
         Ok(())
     }
 
@@ -112,12 +128,15 @@ impl DatasetSpec {
         18 + (mix(self.seed, DOMAIN_AGE, id as u64) % 60) as i32
     }
 
-    /// The `e`-th directed `:Friend` edge as `(src_id, dst_id)`.
+    /// The `e`-th **candidate** directed `:Friend` edge as `(src_id, dst_id)`.
     ///
-    /// The first `nodes` edges form a ring `i -> (i mod nodes) + 1` (a connected backbone that
-    /// guarantees every node is reachable and gives shortest-path/expansions structure). Any edges
-    /// beyond that are seeded-random with a non-zero offset, so `src != dst` without retry loops.
-    fn edge_at(
+    /// The first `nodes` candidates form a ring `i -> (i mod nodes) + 1` (a connected backbone
+    /// that guarantees every node is reachable and gives shortest-path/expansions structure —
+    /// and is duplicate-free by construction). Any candidates beyond that are seeded-random with
+    /// a non-zero offset, so `src != dst` without retry loops. Candidates may collide with an
+    /// earlier pair; [`edge_pairs`](Self::edge_pairs) resolves collisions deterministically so
+    /// the emitted edge list is always **simple** (no parallel edges).
+    fn edge_candidate(
         &self,
         e: usize,
     ) -> (i32, i32) {
@@ -132,6 +151,46 @@ impl DatasetSpec {
             let dst0 = (src0 + offset) % n;
             ((src0 + 1) as i32, (dst0 + 1) as i32)
         }
+    }
+
+    /// All `edges` directed `:Friend` edges, in load order, guaranteed **simple**: no self-loops
+    /// and no duplicate `(src, dst)` pairs (`algo.maxFlow` rejects multigraphs with a
+    /// "must not contain multi-edges (tensors)" error — design
+    /// `synthetic-cover-algorithms-phase6` §3.1). Each edge's first candidate is
+    /// [`edge_candidate`](Self::edge_candidate) — so a non-colliding draw is byte-identical to
+    /// the pre-v5 generator — and a colliding draw deterministically re-probes: it scans offsets
+    /// (then source nodes) in a fixed order until an unused pair is found. `validate()` caps
+    /// `edges` at `nodes * (nodes - 1)`, so a free pair always exists and the sweep terminates.
+    ///
+    /// Deterministic: same spec ⇒ same sequence. Sequential by design (each edge depends on the
+    /// set of earlier pairs); the tracking set costs `O(edges)` transient memory while a stream
+    /// of statements is generated.
+    pub(crate) fn edge_pairs(&self) -> impl Iterator<Item = (i32, i32)> + '_ {
+        let mut used: HashSet<(i32, i32)> = HashSet::with_capacity(self.edges);
+        (0..self.edges).map(move |e| {
+            let (src0, dst0) = self.edge_candidate(e);
+            if used.insert((src0, dst0)) {
+                return (src0, dst0);
+            }
+            let n = self.nodes as u64;
+            // Deterministic re-probe: keep the drawn source, walk the remaining offsets; if the
+            // source is saturated (all n-1 destinations used), advance to the next source. The
+            // 0-based candidate offset is recovered from the pair so the walk continues from it.
+            let s0 = (src0 - 1) as u64;
+            let off0 = ((dst0 - 1) as u64 + n - s0) % n; // 1..=n-1
+            for j in 0..n {
+                let src = (s0 + j) % n;
+                for k in 1..n {
+                    let off = 1 + ((off0 - 1 + k) % (n - 1));
+                    let dst = (src + off) % n;
+                    let pair = ((src + 1) as i32, (dst + 1) as i32);
+                    if used.insert(pair) {
+                        return pair;
+                    }
+                }
+            }
+            unreachable!("validate() caps edges at nodes*(nodes-1), so a free pair exists")
+        })
     }
 
     /// A deterministic, sorted sample of up to [`POOL_IDS`] distinct `:User` ids.
@@ -308,21 +367,16 @@ fn node_batch(
     format!("UNWIND [{}] AS row CREATE (u:User) SET u = row", maps)
 }
 
-/// One edge `UNWIND` batch covering edge indices `lo..hi` (half-open). Each `:Friend` edge carries
+/// One edge `UNWIND` batch covering the given `(src, dst)` pairs. Each `:Friend` edge carries
 /// a deterministic [`bench_capacity`] (same formula as the A/B fixture) so shapes that filter on
 /// `r.bench_capacity` exercise a real predicate instead of always matching zero rows (design §3.4).
-fn edge_batch(
-    spec: &DatasetSpec,
-    lo: usize,
-    hi: usize,
-) -> String {
+fn edge_batch(pairs: &[(i32, i32)]) -> String {
     let mut maps = String::new();
-    for e in lo..hi {
-        if e != lo {
+    for (i, (src, dst)) in pairs.iter().enumerate() {
+        if i != 0 {
             maps.push(',');
         }
-        let (src, dst) = spec.edge_at(e);
-        let capacity = bench_capacity(src as u64, dst as u64);
+        let capacity = bench_capacity(*src as u64, *dst as u64);
         let _ = write!(maps, "{{src:{},dst:{},capacity:{}}}", src, dst, capacity);
     }
     format!(
@@ -334,17 +388,17 @@ fn edge_batch(
 /// The exact ordered sequence of load statements that builds `spec`'s dataset: the index DDL (both
 /// the `:User(id)` and `:User(age)` indexes), then `batch_size`-sized node `UNWIND` batches, then
 /// edge batches. **Lazy** — each batch string is built on demand as the iterator advances, so only
-/// one batch is materialized at a time (no full-script `Vec`). Shared by the live loader
-/// ([`generate_and_load`]) and the offline recorder so a replay loads a byte-identical graph to
-/// what a `--generate` run would. Callers must pass a validated `spec` (`spec.validate()`) and
-/// `batch_size >= 1`.
+/// one batch is materialized at a time (no full-script `Vec`; the simple-graph guarantee keeps an
+/// `O(edges)` pair set while edges stream — see [`DatasetSpec::edge_pairs`]). Shared by the live
+/// loader ([`generate_and_load`]) and the offline recorder so a replay loads a byte-identical
+/// graph to what a `--generate` run would. Callers must pass a validated `spec`
+/// (`spec.validate()`) and `batch_size >= 1`.
 pub(crate) fn load_statements(
     spec: &DatasetSpec,
     batch_size: usize,
 ) -> impl Iterator<Item = (LoadPhase, String)> + '_ {
     debug_assert!(batch_size >= 1, "batch_size must be >= 1");
     let nodes = spec.nodes as i32;
-    let edges = spec.edges;
     let index = INDEX_STMTS
         .iter()
         .map(|stmt| (LoadPhase::Index, (*stmt).to_string()));
@@ -353,10 +407,13 @@ pub(crate) fn load_statements(
         let hi = ((lo as i64) + (batch_size as i64) - 1).min(nodes as i64) as i32;
         (LoadPhase::Nodes, node_batch(spec, lo, hi))
     });
-    let edge_batches = (0..edges).step_by(batch_size).map(move |lo| {
-        let hi = (lo + batch_size).min(edges);
-        (LoadPhase::Edges, edge_batch(spec, lo, hi))
-    });
+    let edge_batches = {
+        let mut pairs = spec.edge_pairs();
+        std::iter::from_fn(move || {
+            let batch: Vec<(i32, i32)> = pairs.by_ref().take(batch_size).collect();
+            (!batch.is_empty()).then(|| (LoadPhase::Edges, edge_batch(&batch)))
+        })
+    };
     index.chain(node_batches).chain(edge_batches)
 }
 
@@ -555,7 +612,8 @@ mod tests {
         assert!(spec(1, 1, 5).validate().is_err()); // < 2 nodes
         assert!(spec(1, 10, 9).validate().is_err()); // edges < nodes
         assert!(spec(1, 10, 10).validate().is_ok());
-        assert!(spec(1, 10, 100).validate().is_ok());
+        assert!(spec(1, 10, 90).validate().is_ok()); // exactly the simple-graph capacity
+        assert!(spec(1, 10, 91).validate().is_err()); // beyond nodes*(nodes-1) distinct pairs
         // nodes beyond the i32 id range are rejected.
         assert!(spec(1, i32::MAX as usize + 1, i32::MAX as usize + 1)
             .validate()
@@ -601,10 +659,10 @@ mod tests {
                 s.node_age(5)
             )
         );
-        // First edge batch covers edge indices 0,1 (the ring backbone start), each stamped with its
-        // deterministic bench_capacity.
-        let (e0s, e0d) = s.edge_at(0);
-        let (e1s, e1d) = s.edge_at(1);
+        // First edge batch covers the first two emitted pairs (the ring backbone start), each
+        // stamped with its deterministic bench_capacity.
+        let pairs: Vec<(i32, i32)> = s.edge_pairs().take(2).collect();
+        let ((e0s, e0d), (e1s, e1d)) = (pairs[0], pairs[1]);
         let e0c = bench_capacity(e0s as u64, e0d as u64);
         let e1c = bench_capacity(e1s as u64, e1d as u64);
         assert_eq!(
@@ -679,22 +737,71 @@ mod tests {
     #[test]
     fn edges_are_deterministic_and_never_self_loops() {
         let s = spec(42, 50, 400);
-        for e in 0..s.edges {
-            let (a, b) = s.edge_at(e);
+        let pairs: Vec<(i32, i32)> = s.edge_pairs().collect();
+        assert_eq!(pairs.len(), s.edges);
+        for (e, &(a, b)) in pairs.iter().enumerate() {
             assert_ne!(a, b, "edge {e} is a self-loop");
             assert!((1..=50).contains(&a) && (1..=50).contains(&b));
-            // Deterministic: same spec, same edge.
-            assert_eq!(s.edge_at(e), spec(42, 50, 400).edge_at(e));
         }
+        // Deterministic: same spec, same sequence.
+        assert_eq!(pairs, spec(42, 50, 400).edge_pairs().collect::<Vec<_>>());
         // The first `nodes` edges are the ring backbone.
-        assert_eq!(s.edge_at(0), (1, 2));
-        assert_eq!(s.edge_at(49), (50, 1));
+        assert_eq!(pairs[0], (1, 2));
+        assert_eq!(pairs[49], (50, 1));
+    }
+
+    #[test]
+    fn edges_never_contain_parallel_pairs() {
+        // The simple-graph guarantee (design synthetic-cover-algorithms-phase6 §3.1): every
+        // emitted `(src, dst)` pair is distinct, so `algo.maxFlow` never sees a multigraph. The
+        // seed=7 1000/5000 spec is the CI oracle fixture (Justfile synthetic-verify/sanity): the
+        // pre-v5 generator emitted 8 duplicate pairs there (empirically measured — 4992 distinct
+        // pairs out of 5000), which made `algo.maxFlow` fail with "relationship type must not
+        // contain multi-edges (tensors)".
+        for s in [spec(7, 1000, 5000), spec(42, 50, 400), spec(0, 100, 2000)] {
+            let pairs: Vec<(i32, i32)> = s.edge_pairs().collect();
+            let distinct: HashSet<(i32, i32)> = pairs.iter().copied().collect();
+            assert_eq!(
+                distinct.len(),
+                pairs.len(),
+                "seed={} nodes={} edges={} emitted parallel edges",
+                s.seed,
+                s.nodes,
+                s.edges
+            );
+            assert_eq!(pairs.len(), s.edges);
+        }
+    }
+
+    #[test]
+    fn edges_can_saturate_the_full_simple_graph_capacity() {
+        // Forcing every pair to be emitted exercises the re-probe sweep (offset walk + source
+        // fallback) and proves it terminates at exactly the simple-graph capacity.
+        let s = spec(1, 3, 6);
+        assert!(s.validate().is_ok());
+        let pairs: HashSet<(i32, i32)> = s.edge_pairs().collect();
+        let all: HashSet<(i32, i32)> =
+            [(1, 2), (1, 3), (2, 1), (2, 3), (3, 1), (3, 2)].into_iter().collect();
+        assert_eq!(pairs, all);
+        // The 2-node graph has exactly two ordered pairs.
+        let two: HashSet<(i32, i32)> = spec(9, 2, 2).edge_pairs().collect();
+        assert_eq!(two, [(1, 2), (2, 1)].into_iter().collect::<HashSet<_>>());
+    }
+
+    #[test]
+    fn validate_rejects_edges_beyond_simple_graph_capacity() {
+        // 3 nodes hold at most 3*2 = 6 distinct ordered pairs.
+        let err = spec(1, 3, 7).validate().expect_err("7 edges must not fit 3 nodes");
+        assert!(
+            format!("{err}").contains("simple-graph capacity"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
     fn different_seed_changes_edges() {
-        let a: Vec<_> = (0..400).map(|e| spec(1, 50, 400).edge_at(e)).collect();
-        let b: Vec<_> = (0..400).map(|e| spec(2, 50, 400).edge_at(e)).collect();
+        let a: Vec<_> = spec(1, 50, 400).edge_pairs().collect();
+        let b: Vec<_> = spec(2, 50, 400).edge_pairs().collect();
         assert_ne!(a, b);
     }
 
@@ -812,6 +919,8 @@ mod tests {
         // A fixed config must always hash to the same value, on any machine/toolchain — this is the
         // cross-process/version stability the comparability gate depends on. If this ever changes,
         // bump GENERATOR_VERSION deliberately (it invalidates prior comparisons).
+        // Repinned for synthbench/v5 (the simple-graph edge generator, design
+        // synthetic-cover-algorithms-phase6 §3.1).
         let s = DatasetSpec {
             seed: 42,
             nodes: 1000,
@@ -823,7 +932,7 @@ mod tests {
         )];
         assert_eq!(
             corpus_hash(&s, 0, 256, &bodies, &s.handle()),
-            "sha256:9be33d3926a50d91f3ec80d5c0a0abb3256e5700945ab3a1fd202950e8f7e450"
+            "sha256:736029cfbe68758fc986e2cbc7ad82435bde059bf05dc29438d2be5ed870be37"
         );
     }
 }

@@ -1310,3 +1310,82 @@ async fn replay_concurrency_sweep_verifies_results_and_reports_levels() {
     std::fs::remove_dir_all(&dir).ok();
     drop_graph(graph).await;
 }
+
+#[tokio::test]
+#[ignore = "requires a running FalkorDB server"]
+async fn max_flow_runs_on_the_generated_simple_graph() {
+    // Design synthetic-cover-algorithms-phase6 §3.1: the pre-v5 generator emitted 8 parallel
+    // (src,dst) `:Friend` pairs in the seed=7 1000/5000 CI oracle fixture, and FalkorDB's
+    // `algo.maxFlow` rejects multigraphs ("relationship type must not contain multi-edges
+    // (tensors)"). The generator now guarantees a simple graph; prove it live by loading the exact
+    // oracle fixture through the production loader and running the repository's real maxFlow shape.
+    use benchmark::queries_repository::{
+        AlgorithmQuerySelection, Flavour, QueryCoverageProfile, UsersQueriesRepository,
+    };
+    use futures::StreamExt;
+    use rand::rngs::StdRng;
+    use rand::SeedableRng;
+
+    let graph = "syn_it_maxflow_simple";
+    drop_graph(graph).await;
+    let cfg = Config {
+        graph: graph.to_string(),
+        dataset: Some(DatasetSpec { seed: 7, nodes: 1000, edges: 5000 }),
+        ops: vec![OpName::ReturnConst],
+        samples: 1,
+        warmup: 0,
+        cache: CacheSelection::Cached,
+        ..base_config(graph)
+    };
+    run(&cfg).await.expect("generate + load the oracle dataset");
+
+    let mut g = open_graph(&endpoint(), graph).await.expect("open loaded graph");
+    // No parallel edges made it into the store.
+    let mut dup = g
+        .ro_query(
+            "MATCH (a:User)-[:Friend]->(b:User) WITH a, b, count(*) AS c WHERE c > 1 \
+             RETURN count(*)",
+        )
+        .execute()
+        .await
+        .expect("duplicate-pair count query");
+    let dups: i64 = dup
+        .data
+        .next()
+        .await
+        .expect("one count row")
+        .expect("count row decodes")
+        .try_get_at(0)
+        .expect("count is an integer");
+    assert_eq!(dups, 0, "the loaded graph contains {dups} parallel (src,dst) :Friend pairs");
+
+    // The repository's real maxFlow read runs without the tensors error and yields a positive
+    // flow (the ring backbone connects every seeded (source, target) pair; bench_capacity >= 1).
+    let repo = UsersQueriesRepository::new(
+        1000,
+        5000,
+        Flavour::FalkorDB,
+        AlgorithmQuerySelection::default(),
+        QueryCoverageProfile::Baseline,
+    );
+    let mut rng = StdRng::seed_from_u64(7);
+    let prepared = repo
+        .render_read_with_rng("algo_max_flow_single_pair", &mut rng)
+        .expect("render the maxFlow shape");
+    let mut res = g
+        .ro_query(&prepared.cypher)
+        .execute()
+        .await
+        .expect("algo.maxFlow must not hit the multigraph (tensors) error");
+    let flow: f64 = res
+        .data
+        .next()
+        .await
+        .expect("maxFlow yields one row")
+        .expect("maxFlow row decodes")
+        .try_get_at(0)
+        .expect("max_flow is a float");
+    assert!(flow > 0.0, "ring backbone connects every pair, got max_flow = {flow}");
+
+    drop_graph(graph).await;
+}
