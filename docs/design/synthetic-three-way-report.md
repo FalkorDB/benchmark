@@ -15,8 +15,10 @@ Every falkordb-rs-next-gen PR currently gets a synthetic per-op regression repor
 | `c-main` | C → main | how does Rust main stand vs the C engine? | `cross-engine` (looser) |
 
 The comparison IDs above are **stable identifiers** used in filenames, JSON, and the page's
-filter logic. Comparison `c-main` is intentionally included per user decision: the page must let
-us see the C engine compared against **both** the PR build and current Rust main.
+filter logic. Comparison `c-main` is intentionally included (user decision, re-confirmed
+2026-07-25): it is the **attribution baseline** for `c-pr` — when PR-vs-C is red it tells you
+whether main was already red vs C (pre-existing gap) or the PR introduced it, and it costs only
+one extra offline `report` invocation since C is measured once anyway.
 
 Also: an **interactive GitHub-Pages report** (metric selector like the
 [trend page](https://falkordb.github.io/falkordb-rs-next-gen/benchmark/trend/), per-comparison
