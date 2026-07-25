@@ -393,9 +393,10 @@ const ALGORITHM_BUDGET: OpBudget = OpBudget {
 /// Result policies follow the design's §6 determinism table: `max_flow`/`msf` are **Gated** —
 /// their values are unique (a max-flow of a fixed simple graph + capacities + seeded pair; an
 /// MSF's `edge_count`/minimum `total_weight`, which tie-breaking cannot change) and their digests
-/// verified byte-stable across ≥2 independent replays on the same image, including across a
-/// server restart (design §7.5; `record_and_replay_algorithm_shapes_end_to_end` re-verifies on
-/// every coverage run). `pagerank`/`harmonic` stay **N/A** — arbitrary/iterative float values.
+/// were verified byte-stable across 3 independent replays on the same image, including across a
+/// server restart (the design §7.5 evidence); `record_and_replay_algorithm_shapes_end_to_end`
+/// re-verifies two-replay digest stability (same server process) on every coverage run.
+/// `pagerank`/`harmonic` stay **N/A** — arbitrary/iterative float values.
 /// Never force determinism with a synthetic-only `ORDER BY`. Each shape carries the
 /// per-procedure [`ShapeCapability`] replay probes before capture (design §3.5).
 pub fn algorithm_read_shapes() -> Vec<ShapeSpec> {
