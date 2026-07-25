@@ -784,6 +784,17 @@ pub(crate) fn validate_op_config(op: &str, cfg: &Config) -> BenchmarkResult<()> 
             "operation '{op}' resolved to a per-op budget with samples = 0; samples must be greater than 0"
         )));
     }
+    if cfg.server_timeout_ms <= 0 {
+        return Err(OtherError(format!(
+            "operation '{op}' resolved to a per-op budget with server_timeout_ms = {}; the timeout must be positive",
+            cfg.server_timeout_ms
+        )));
+    }
+    if cfg.client_deadline_ms == 0 {
+        return Err(OtherError(format!(
+            "operation '{op}' resolved to a per-op budget with client_deadline_ms = 0; the deadline must be positive"
+        )));
+    }
     if let Err(e) = normalize_concurrency(&cfg.concurrency) {
         // Unwrap the inner message so the op-prefixed error isn't double-wrapped with "Other error:".
         let detail = match e {
@@ -2163,6 +2174,25 @@ mod tests {
             .to_string();
         assert!(msg.contains("match_by_index"), "{msg}");
         assert!(msg.contains(">= 1"), "{msg}");
+        // A non-positive server timeout — e.g. a manifest typo of -1 — fails fast, op-named.
+        let bad_timeout = base.with_budget(&OpBudget {
+            server_timeout_ms: Some(-1),
+            ..OpBudget::INHERIT
+        });
+        let msg = validate_op_config(OpName::ReturnConst.as_str(), &bad_timeout)
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("server_timeout_ms = -1"), "{msg}");
+        assert!(msg.contains("return_const"), "{msg}");
+        // A zero client deadline — the driver would otherwise time out every call confusingly.
+        let bad_deadline = base.with_budget(&OpBudget {
+            client_deadline_ms: Some(0),
+            ..OpBudget::INHERIT
+        });
+        let msg = validate_op_config(OpName::ReturnConst.as_str(), &bad_deadline)
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("client_deadline_ms = 0"), "{msg}");
         // A fully valid (inherited) config passes.
         validate_op_config(OpName::ReturnConst.as_str(), &base).unwrap();
     }
