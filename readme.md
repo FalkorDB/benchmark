@@ -497,9 +497,36 @@ just synthetic-compare-versions demo falkor://127.0.0.1:6379 falkor://127.0.0.1:
   clearly non-gated `context:` line — the verdict stays **p50-only**. Each op's tables are wrapped in
   a **collapsed `<details>`** (with the op's 🟢/🔴 verdict on the summary row) so the PR sticky
   comment stays compact — the reader expands only the ops they care about.
+- Every regression comparison is computed **once** into a single analysis model and rolled up into a
+  four-state **overall verdict**: **not comparable** (workload/config mismatch — nothing else
+  counts) ▸ **regressed** (≥1 cell over budget, or a divergence under the `gate` policy) ▸
+  **advisory** (⚠ — a divergence under the `advisory` policy, or **zero comparable cells**, which is
+  never a green pass) ▸ **pass** (≥1 comparable cell, nothing wrong). Version/image mismatches are
+  advisory *warnings*, never comparability guards. Optional flags (all with `--regression`):
+  - **`--summary <file>`** writes a compact machine-usable JSON summary (schema **v2**:
+    `overall_verdict`, headline, per-tier 🟢/🔴/⚠/N-A `totals` incl. the `diverged` bucket, worst
+    offenders, `budget_profile`, `divergence_policy`, `gated_metric`, `elapsed_secs`, and a stable
+    `slug` for linking the externally-hosted full report) — small enough for a PR comment.
+  - **`--cells <file>`** writes the **full analysis model** as JSON (schema v1): the meta block
+    (labels, module versions, images, `workload_hash`, samples/warmup, thresholds echo) plus every
+    op × cache-mode × concurrency cell with baseline/candidate p50, `delta_pct`/`delta_ms`, the
+    resolved budget and the per-cell verdict — source material for an interactive report page.
+  - **`--divergence-policy <gate|advisory>`** (default `gate`) sets how a result divergence lands:
+    under `gate` a diverged op is 🔴 and fails the comparison; under `advisory` (for cross-engine
+    runs, where different engines can legitimately return different results) it is ⚠, counts in the
+    `diverged` bucket and caps the overall verdict at *advisory*. Under **both** policies the
+    diverged op's perf cells stay **N/A** — different work makes a latency comparison meaningless —
+    while its raw medians/deltas remain visible for diagnosis.
+  - **`--budget-profile <strict|cross-engine>`** (default `strict`) selects which budget profile of
+    the thresholds TOML applies. `cross-engine` reads the optional `[cross-engine.default]` /
+    `[cross-engine.op.<name>]` sections (same shape as the top-level `[default]`/`[op.<name>]`,
+    typically looser for engine-vs-engine noise) and **errors** if the TOML doesn't define them —
+    there is no silent fallback to the strict budgets.
 - **`just synthetic-sanity`** self-checks the tool: it records the same workload twice (asserting an
   identical `workload_hash` — deterministic recording), then `run --recording` at C=1,4 + `report
-  --diff` (incl. the C>1 result verification) against a throwaway Docker FalkorDB. Latency is not
+  --diff` (incl. the C>1 result verification), then a `report --regression` pass exercising a
+  `[cross-engine]` budget profile, `--divergence-policy advisory` and the `--summary`/`--cells`
+  machine artifacts — all against a throwaway Docker FalkorDB. Latency is not
   asserted (it is environment-dependent noise — see the tutorial).
 - **`just synthetic-verify`** is the CI **non-divergence gate**: it records **all** A/B read shapes
   (`--repo-reads full`, on a small determinism-oracle graph) and runs `run --recording` **twice**
