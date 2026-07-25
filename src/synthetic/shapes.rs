@@ -63,9 +63,11 @@ impl ResultPolicy {
     }
 }
 
-/// The engine procedure a shape requires beyond plain Cypher (design §3.5): the fulltext/vector
-/// smoke reads name the index procedure they exercise, the algorithm shapes their `algo.*`
-/// procedure.
+/// The engine procedure an **algorithm shape** requires beyond plain Cypher (design §3.5): each
+/// names its `algo.*` procedure. Read shapes — including the fulltext/vector fixture reads — are
+/// capability-free: their fixture DDL runs at graph-load time, **before** any probe could skip
+/// them, so annotating them would break the per-PR `--repo-reads full` gate on engines lacking the
+/// indexes rather than skip cleanly (capability-aware *loading* is future work, not built here).
 ///
 /// Recording persists [`Self::procedure`] on each shape's manifest entry
 /// ([`crate::synthetic::recording::OpEntry::capability`]), and replay probes the engine's
@@ -74,12 +76,6 @@ impl ResultPolicy {
 /// replay. Capability-free shapes need nothing (`capability = None`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShapeCapability {
-    /// `db.idx.vector.queryNodes` — a vector index over `:User(embedding)`.
-    VectorQueryNodes,
-    /// `db.idx.fulltext.queryNodes` — a fulltext index over `:User(ft_text)`.
-    FulltextQueryNodes,
-    /// `db.idx.fulltext.queryRelationships` — a fulltext index over `:Friend(ft_text)`.
-    FulltextQueryRelationships,
     /// `algo.pageRank` — whole-graph PageRank (Phase 6, per-procedure per design §3.5).
     AlgoPageRank,
     /// `algo.maxFlow` — single-pair max flow over `bench_capacity` (Phase 6).
@@ -96,9 +92,6 @@ impl ShapeCapability {
     /// manifest entry so replay can probe-and-skip on an engine that lacks the procedure.
     pub fn procedure(self) -> &'static str {
         match self {
-            ShapeCapability::VectorQueryNodes => "db.idx.vector.queryNodes",
-            ShapeCapability::FulltextQueryNodes => "db.idx.fulltext.queryNodes",
-            ShapeCapability::FulltextQueryRelationships => "db.idx.fulltext.queryRelationships",
             ShapeCapability::AlgoPageRank => "algo.pageRank",
             ShapeCapability::AlgoMaxFlow => "algo.maxFlow",
             ShapeCapability::AlgoMsf => "algo.MSF",
@@ -283,20 +276,17 @@ pub fn extended_core_read_shapes() -> Vec<ShapeSpec> {
 /// (record-once → replay-verbatim: every replay endpoint gets the identical fixture). They bind **no random
 /// params** (byte-identical renders), but their result set is **top-k** (ties/ordering are
 /// non-deterministic), so all three are result-**N/A** ([`ResultPolicy::NotApplicable`], Decision 4) —
-/// we do not add `ORDER BY` to force determinism. Each is annotated with the [`ShapeCapability`] it
-/// exercises (metadata for a future capability-gating pass — see [`ShapeCapability`]). All are
-/// [`Tier::Full`]: capability-gated shapes stay out of the always-on core subset.
+/// we do not add `ORDER BY` to force determinism. All are **capability-free** (`capability = None`,
+/// like every read shape — see [`ShapeCapability`]): their index DDL is part of the graph load,
+/// which runs before any probe, so the per-PR `--repo-reads full` gate must never probe. All are
+/// [`Tier::Full`]: fixture-dependent shapes stay out of the always-on core subset.
 ///
 /// Auto-discovered like the other sets: the drift-guard test asserts these names are **exactly** the
 /// reads the `FixtureDependent` profile adds over `ExtendedCore`.
 pub fn fixture_dependent_read_shapes() -> Vec<ShapeSpec> {
-    use ShapeCapability::{FulltextQueryNodes, FulltextQueryRelationships, VectorQueryNodes};
-    // Every row is a FixtureDependent, Full-tier, result-N/A read with a full corpus and an
-    // inherited (global) runtime budget; only the name + capability differ.
-    fn s(
-        name: &'static str,
-        capability: ShapeCapability,
-    ) -> ShapeSpec {
+    // Every row is a FixtureDependent, Full-tier, result-N/A, capability-free read with a full
+    // corpus and an inherited (global) runtime budget; only the name differs.
+    fn s(name: &'static str) -> ShapeSpec {
         ShapeSpec {
             name,
             family: CoverageFamily::Reads(QueryCoverageProfile::FixtureDependent),
@@ -304,15 +294,15 @@ pub fn fixture_dependent_read_shapes() -> Vec<ShapeSpec> {
             result_policy: ResultPolicy::NotApplicable(
                 "vector/fulltext top-k ordering is non-deterministic",
             ),
-            capability: Some(capability),
+            capability: None,
             corpus_size: CORPUS_SIZE,
             budget: OpBudget::INHERIT,
         }
     }
     vec![
-        s("vector_query_nodes_smoke", VectorQueryNodes),
-        s("fulltext_query_nodes_smoke", FulltextQueryNodes),
-        s("fulltext_query_relationships_smoke", FulltextQueryRelationships),
+        s("vector_query_nodes_smoke"),
+        s("fulltext_query_nodes_smoke"),
+        s("fulltext_query_relationships_smoke"),
     ]
 }
 
@@ -762,7 +752,9 @@ mod tests {
                 "fulltext_query_relationships_smoke",
             ])
         );
-        // Every fixture shape is FixtureDependent, Full-tier, result-N/A, and carries a capability.
+        // Every fixture shape is FixtureDependent, Full-tier, result-N/A, and capability-free —
+        // its index DDL loads with the graph, before any probe could skip it, so the per-PR
+        // `--repo-reads full` gate must never probe (see ShapeCapability).
         for shape in fixture_dependent_read_shapes() {
             assert_eq!(
                 shape.family,
@@ -770,19 +762,8 @@ mod tests {
             );
             assert_eq!(shape.tier, Tier::Full);
             assert!(!shape.result_policy.is_gated(), "top-k reads are result-N/A");
-            assert!(shape.capability.is_some(), "fixture reads carry a capability");
+            assert!(shape.capability.is_none(), "read shapes are capability-free");
         }
-        // The capabilities map 1:1 to the three index procedures.
-        let caps: Vec<Option<ShapeCapability>> =
-            fixture_dependent_read_shapes().iter().map(|s| s.capability).collect();
-        assert_eq!(
-            caps,
-            vec![
-                Some(ShapeCapability::VectorQueryNodes),
-                Some(ShapeCapability::FulltextQueryNodes),
-                Some(ShapeCapability::FulltextQueryRelationships),
-            ]
-        );
     }
 
     #[test]
@@ -856,18 +837,6 @@ mod tests {
         // The exact procedure names replay probes for (via `dbms.procedures()`). Renaming one
         // changes which engines skip the shape — deliberate, so pin the full mapping.
         let expected: &[(ShapeCapability, &str)] = &[
-            (
-                ShapeCapability::VectorQueryNodes,
-                "db.idx.vector.queryNodes",
-            ),
-            (
-                ShapeCapability::FulltextQueryNodes,
-                "db.idx.fulltext.queryNodes",
-            ),
-            (
-                ShapeCapability::FulltextQueryRelationships,
-                "db.idx.fulltext.queryRelationships",
-            ),
             (ShapeCapability::AlgoPageRank, "algo.pageRank"),
             (ShapeCapability::AlgoMaxFlow, "algo.maxFlow"),
             (ShapeCapability::AlgoMsf, "algo.MSF"),
@@ -876,31 +845,6 @@ mod tests {
         for (cap, procedure) in expected {
             assert_eq!(cap.procedure(), *procedure);
         }
-    }
-
-    #[test]
-    fn fixture_dependent_reads_record_their_index_capabilities() {
-        // The fulltext/vector fixture reads carry `db.idx.*` capability strings too — on an
-        // engine without those procedures they skip instead of erroring at the reference pass.
-        let ops = record_repo_reads(Tier::Full, 1000, 5000, 7).expect("record full reads");
-        let by_name: std::collections::BTreeMap<&str, Option<&str>> = ops
-            .iter()
-            .map(|op| (op.key.name(), op.capability.as_deref()))
-            .collect();
-        assert_eq!(
-            by_name["fulltext_query_nodes_smoke"],
-            Some("db.idx.fulltext.queryNodes")
-        );
-        assert_eq!(
-            by_name["vector_query_nodes_smoke"],
-            Some("db.idx.vector.queryNodes")
-        );
-        assert_eq!(
-            by_name["fulltext_query_relationships_smoke"],
-            Some("db.idx.fulltext.queryRelationships")
-        );
-        // Plain reads carry none — replay never probes for them.
-        assert_eq!(by_name["single_vertex_read"], None);
     }
 
     #[test]
@@ -1109,7 +1053,7 @@ mod tests {
             );
             assert_eq!(s.tier, Tier::Full);
             assert!(!s.result_policy.is_gated());
-            assert!(s.capability.is_some());
+            assert!(s.capability.is_none());
         }
     }
 
@@ -1171,6 +1115,36 @@ mod tests {
                 "fulltext_query_relationships_smoke",
             ]),
             "exactly the LIMIT-without-ORDER and top-k reads are result-N/A"
+        );
+    }
+
+    #[test]
+    fn repo_reads_replay_never_probes_because_no_read_records_a_capability() {
+        // The per-PR gate replays `--repo-reads full` bundles, and replay issues its one
+        // `dbms.procedures()` probe **only** when ≥1 recorded op carries a capability. Fixture
+        // (fulltext/vector) DDL loads with the graph, before any probe could skip its reads, so a
+        // capability there would fail the load on an engine lacking the index instead of skipping
+        // cleanly — reads must stay capability-free end-to-end (zero probes on the gate path).
+        for tier in [Tier::Core, Tier::Full] {
+            let ops = record_repo_reads(tier, 1000, 5000, 42).unwrap();
+            for op in &ops {
+                assert_eq!(
+                    op.capability,
+                    None,
+                    "read '{}' records a capability — the --repo-reads {tier:?} replay would probe",
+                    op.key.name()
+                );
+            }
+        }
+        // Drift guard for the annotation source: no read ShapeSpec carries a capability; the
+        // algorithm family (opt-in, never on the gate path) is the only annotated one.
+        assert!(
+            repo_read_shapes().iter().all(|s| s.capability.is_none()),
+            "read shapes must be capability-free"
+        );
+        assert!(
+            algorithm_read_shapes().iter().all(|s| s.capability.is_some()),
+            "algorithm shapes each name their procedure"
         );
     }
 

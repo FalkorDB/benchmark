@@ -182,9 +182,12 @@ digests across ≥2 runs on the per-PR image (the reads' bar). Never add a synth
    from the per-op policy guard and the asymmetric-digest divergence rule, perf cells N/A,
    correctness `not_gated`, tallied in its own `skipped` bucket (analysis schema v2, summary
    schema v3, `OpOutcome::Skipped` ⏭), never an offender, never caps the verdict below what the
-   measured ops earn (all-skipped ⇒ the existing zero-comparable-cells ⇒ Advisory rule). The
-   fulltext/vector fixture reads carry their `db.idx.*` capabilities too, so they skip cleanly on
-   engines without those indexes.
+   measured ops earn (all-skipped ⇒ the existing zero-comparable-cells ⇒ Advisory rule).
+   Capabilities stay **algorithm-only**: the fulltext/vector fixture reads are capability-free
+   because their index DDL is part of the graph load, which runs before any probe could skip
+   them — annotating them would fail the per-PR `--repo-reads full` gate at load on an engine
+   lacking the indexes instead of skipping cleanly. Capability-aware *loading* (fixture DDL gated
+   on a pre-load probe) is future work if a later phase needs fixture reads to skip.
 5. **Promote deterministic shapes:** flip `max_flow`/`msf` to `Gated` once verified byte-stable.
 6. **Docs:** cookbook + readme.
 

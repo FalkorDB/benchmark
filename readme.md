@@ -482,9 +482,11 @@ just synthetic-compare-versions demo falkor://127.0.0.1:6379 falkor://127.0.0.1:
   joining the divergence gate. Each shape also records its required procedure (`capability` in the
   manifest — replay policy like `budget`, not folded into the `workload_hash`): at replay a single
   `CALL dbms.procedures()` probe **skips** any op whose procedure the engine lacks (reported, never
-  executed) instead of failing the run — the fulltext/vector fixture reads carry their `db.idx.*`
-  capabilities the same way. The selector is **orthogonal** to `--repo-reads` (combinable with it
-  or usable alone; also mutually exclusive with `--op`/`--all-reads`/`--tier`): algorithm shapes are
+  executed) instead of failing the run. Only algorithm shapes carry a capability — read shapes
+  (including the fulltext/vector fixture reads, whose index DDL loads with the graph before any
+  probe) stay capability-free, so a `--repo-reads` replay never probes. The selector is
+  **orthogonal** to `--repo-reads` (combinable with it or usable alone; also mutually exclusive
+  with `--op`/`--all-reads`/`--tier`): algorithm shapes are
   **never** part of `--repo-reads full` nor the per-PR `synthetic-verify` gate. They need no extra
   fixture — every generated graph is **simple** (no parallel `:Friend` edges, which `algo.maxFlow`
   rejects) and every `:Friend` edge carries the `bench_capacity` property the flow/MSF shapes use.
