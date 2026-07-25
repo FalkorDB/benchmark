@@ -212,7 +212,7 @@ bundle, alone or on top of `--repo-reads`:
 ```bash
 # The 50 A/B read shapes + the 4 algorithm shapes in one bundle (54 ops), or algorithms alone:
 benchmark synthetic record --repo-reads full --repo-algorithms \
-  --nodes 1000 --edges 5000 --seed 7 --out-dir rec-algos
+  --nodes 1000 --edges 5000 --seed 7 --out-dir rec-reads-plus-algos
 benchmark synthetic record --repo-algorithms --nodes 1000 --edges 5000 --seed 7 --out-dir rec-algos-only
 ```
 
