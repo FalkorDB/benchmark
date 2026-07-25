@@ -477,9 +477,11 @@ just synthetic-compare-versions demo falkor://127.0.0.1:6379 falkor://127.0.0.1:
   (`algo.pageRank` / `algo.maxFlow` / `algo.MSF` / `algo.HarmonicCentrality`), each with a tight
   per-op budget (25 samples, warm-up 2, C=1, cached-only, 60 s server timeout) and a reduced corpus
   (1 command for the parameterless shapes; a small seeded set of distinct `(source, target)` pairs for maxFlow).
-  All four start **result-N/A** (their values aren't verified byte-stable yet — `max_flow`/`msf`
-  are gating candidates pending that verification), so they add latency/trend coverage without
-  joining the divergence gate. Each shape also records its required procedure (`capability` in the
+  `algo_max_flow_single_pair` and `algo_msf_summary` are **digest-gated** — their values are unique
+  for the fixed graph and verified byte-stable across independent replays — while
+  `algo_pagerank_summary`/`algo_harmonic_summary` stay **result-N/A** (arbitrary/iterative floats),
+  adding latency/trend coverage without joining the divergence gate. Each shape also records its
+  required procedure (`capability` in the
   manifest — replay policy like `budget`, not folded into the `workload_hash`): at replay a single
   `CALL dbms.procedures()` probe **skips** any op whose procedure the engine lacks (reported, never
   executed) instead of failing the run. Only algorithm shapes carry a capability — read shapes

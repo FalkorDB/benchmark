@@ -143,15 +143,18 @@ curated metadata in `shapes.rs`), but on a **separate axis** from reads:
 Floats are digested by `f64::to_bits()` (exact), so the question is **value** stability run-to-run on
 the same image:
 
-| Shape | Proposed `result_policy` | Why |
+| Shape | `result_policy` (final) | Why |
 | --- | --- | --- |
 | `algo_pagerank_summary` | **N/A** | `RETURN score LIMIT 1` (no `ORDER BY`) — arbitrary single float. |
-| `algo_harmonic_summary` | **N/A** (pending) | `avg`/`max` over all nodes; iterative/aggregation value stability unproven. |
-| `algo_max_flow_single_pair` | **Gated (candidate)** | Max-flow of a fixed simple graph + capacities + seeded pair is a unique integral value coerced to exact `f64`. |
-| `algo_msf_summary` | **Gated (candidate)** | `edge_count` and MSF `total_weight` are unique (tie-breaking cannot change the minimum total). |
+| `algo_harmonic_summary` | **N/A** | `avg`/`max` over all nodes; iterative/aggregation value stability unproven. |
+| `algo_max_flow_single_pair` | **Gated** | Max-flow of a fixed simple graph + capacities + seeded pair is a unique integral value coerced to exact `f64`; digests verified byte-stable (§7 step 5). |
+| `algo_msf_summary` | **Gated** | `edge_count` and MSF `total_weight` are unique (tie-breaking cannot change the minimum total); digests verified byte-stable (§7 step 5). |
 
-Default **all four to N/A**; promote `max_flow`/`msf` to `Gated` **only after** confirming byte-stable
-digests across ≥2 runs on the per-PR image (the reads' bar). Never add a synthetic-only `ORDER BY`.
+All four defaulted to N/A until the promotion bar was met: promote `max_flow`/`msf` to `Gated`
+**only after** confirming byte-stable digests across ≥2 runs on the per-PR image (the reads' bar).
+Never add a synthetic-only `ORDER BY`.
+*(Resolved — see §7 step 5: verified byte-stable, `max_flow`/`msf` promoted; `pagerank`/`harmonic`
+stay N/A per this table.)*
 
 ## 7. Phasing (prerequisites first, each its own PR)
 1. ✅ **Simple-graph algorithm fixture** (§3.1) — deterministic, no parallel `:Friend` edges + tests.
@@ -188,14 +191,30 @@ digests across ≥2 runs on the per-PR image (the reads' bar). Never add a synth
    them — annotating them would fail the per-PR `--repo-reads full` gate at load on an engine
    lacking the indexes instead of skipping cleanly. Capability-aware *loading* (fixture DDL gated
    on a pre-load probe) is future work if a later phase needs fixture reads to skip.
-5. **Promote deterministic shapes:** flip `max_flow`/`msf` to `Gated` once verified byte-stable.
+5. **Promote deterministic shapes:** flip `max_flow`/`msf` to `Gated` once verified byte-stable. ✅
+   implemented: digests verified byte-identical across **3 independent replays** on the same
+   `falkordb/falkordb:edge` image (pinned:
+   `falkordb/falkordb@sha256:e47e0fb112ff29764965a1c25e2f983dd269de33367ca3f2fba61368b735f38c`) —
+   two from the same server process and one after a full server restart —
+   for all four shapes; per the §6 table only `max_flow`/`msf` are promoted (`pagerank`/`harmonic`
+   stay N/A — arbitrary/iterative floats even if empirically stable on the small fixture). Digest
+   *values* are engine-build- and workload-specific; the promotion claim is **stability on one
+   image**, not any particular bytes. The
+   algorithm e2e integration test now replays every bundle **twice** and asserts the gated digests
+   match, so byte-stability is re-verified continuously (including on the CI image/arch). A future
+   instability would surface as a loud divergence, and the shape can be demoted back to N/A.
 6. **Docs:** cookbook + readme.
 
 ## 8. Risks & open questions
 1. **maxFlow topology (§3.1)** — biggest: confirm the dup-pair count + tensors error, and that a
    deduped simple graph keeps `workload_hash`/digests deterministic.
 2. **Float/iteration value stability (§6)** — whether `max_flow`/`msf` digests are byte-stable
-   run-to-run; if not they stay N/A (latency-only), like `pagerank`/`harmonic`.
+   run-to-run; if not they stay N/A (latency-only), like `pagerank`/`harmonic`. ✅ resolved:
+   byte-stable across 3 independent replays (incl. a server restart) on `falkordb/falkordb:edge`
+   (pinned: `falkordb/falkordb@sha256:e47e0fb112ff29764965a1c25e2f983dd269de33367ca3f2fba61368b735f38c`);
+   digest values themselves are engine-build- and workload-specific (only stability is claimed); both
+   promoted to Gated, with the two-replay digest-equality assertion in the algorithm e2e test
+   guarding against future instability.
 3. **Value of N/A-only coverage** — N/A shapes add latency/trend coverage + exercise the `algo.*`
    paths but nothing to the divergence gate; acceptable because algorithms are opt-in, not per-PR.
 4. **Budget/corpus plumbing is real work (§3.4)**, not annotation — it is a prerequisite, and it also

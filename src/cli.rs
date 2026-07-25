@@ -543,7 +543,7 @@ pub enum SyntheticCommands {
         #[arg(
             long = "repo-algorithms",
             conflicts_with_all = ["ops", "all_reads", "tier"],
-            help = "additionally record the 4 opt-in whole-graph algorithm read shapes (algo.pageRank / algo.maxFlow / algo.MSF / algo.HarmonicCentrality) — all result-N/A, each with a tight per-op budget (C=1, cached, 25 samples) and a small corpus. Orthogonal to --repo-reads (combinable with it or usable alone); never part of --repo-reads or the per-PR gate. Mutually exclusive with --op/--all-reads/--tier."
+            help = "additionally record the 4 opt-in whole-graph algorithm read shapes (algo.pageRank / algo.maxFlow / algo.MSF / algo.HarmonicCentrality) — algo.maxFlow/algo.MSF result-gated (byte-stable digests), algo.pageRank/algo.HarmonicCentrality result-N/A (arbitrary/iterative floats, design §6); each with a tight per-op budget (C=1, cached, 25 samples) and a small corpus. Orthogonal to --repo-reads (combinable with it or usable alone); never part of --repo-reads or the per-PR gate. Mutually exclusive with --op/--all-reads/--tier."
         )]
         repo_algorithms: bool,
         #[arg(

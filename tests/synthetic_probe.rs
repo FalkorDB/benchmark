@@ -1463,8 +1463,10 @@ async fn record_and_replay_via_run_command() {
 /// Phase 6 §7.3 acceptance: `record --repo-algorithms` (offline, via the CLI arm) then a live
 /// replay measures all 4 whole-graph algorithm shapes end-to-end on the generated **simple** graph
 /// (synthbench/v5 — `algo.maxFlow` rejects parallel edges, so this passing proves the guarantee).
-/// Each op must obey its recorded per-op budget (C=1, cached-only), stay result-N/A (no digest),
-/// and persist its resolved effective policy.
+/// Each op must obey its recorded per-op budget (C=1, cached-only) and persist its resolved
+/// effective policy; the §6 determinism table gates `max_flow`/`msf` digests (byte-stability
+/// re-verified here across two independent replays — §7.5) while `pagerank`/`harmonic` stay
+/// result-N/A.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires a running FalkorDB server"]
 async fn record_and_replay_algorithm_shapes_end_to_end() {
@@ -1536,11 +1538,56 @@ async fn record_and_replay_algorithm_shapes_end_to_end() {
         assert_eq!(levels, vec![1], "{name} must measure only its budgeted C=1 sweep");
         assert!(op.levels[0].cached.is_some(), "{name} measures cached");
         assert!(op.levels[0].uncached.is_none(), "{name} skips uncached (budget)");
-        assert!(op.result_digest.is_none(), "{name} starts result-N/A (design §6)");
         let policy = op.policy.as_ref().unwrap_or_else(|| panic!("{name} must persist policy"));
         assert_eq!(policy.samples, 25, "{name} budgeted samples");
         assert_eq!(policy.concurrency, vec![1], "{name} budgeted sweep");
         assert_eq!(policy.server_timeout_ms, 60_000, "{name} budgeted server timeout");
+    }
+    // Digest gating per the §6 determinism table: the deterministic pair is gated, the float
+    // shapes are N/A.
+    for name in ["algo_max_flow_single_pair", "algo_msf_summary"] {
+        let op = report
+            .operations
+            .get(name)
+            .unwrap_or_else(|| panic!("{name} missing from the replay report"));
+        assert!(op.result_digest.is_some(), "{name} is digest-gated (design §6/§7.5)");
+    }
+    for name in ["algo_pagerank_summary", "algo_harmonic_summary"] {
+        let op = report
+            .operations
+            .get(name)
+            .unwrap_or_else(|| panic!("{name} missing from the replay report"));
+        assert!(op.result_digest.is_none(), "{name} stays result-N/A (design §6)");
+    }
+
+    // §7.5 byte-stability, verified continuously: an independent second replay of the same bundle
+    // must reproduce the gated digests byte-identically (this is what keeps max_flow/msf gated).
+    // The recorded per-op algorithm budget pins samples/warmup — the helper's globals are inert.
+    let out2 = dir.join("algos2.json").to_string_lossy().into_owned();
+    let config2 = replay_config(&dir, graph, &out2, true);
+    let report2 = replay::run(&config2).await.expect("second independent replay");
+    for name in ["algo_max_flow_single_pair", "algo_msf_summary"] {
+        let second = report2
+            .operations
+            .get(name)
+            .unwrap_or_else(|| panic!("{name} must be measured by the second replay"));
+        assert!(
+            second.skipped.is_none(),
+            "{name} must pass the capability probe on the second replay"
+        );
+        let d2 = second
+            .result_digest
+            .as_ref()
+            .unwrap_or_else(|| panic!("{name} must stay digest-gated on the second replay"));
+        let first = report
+            .operations
+            .get(name)
+            .unwrap_or_else(|| panic!("{name} missing from the first replay report"));
+        assert_eq!(
+            first.result_digest.as_ref(),
+            Some(d2),
+            "{name} digest must be byte-stable across independent replays"
+        );
     }
 
     std::fs::remove_dir_all(&dir).ok();
