@@ -19,7 +19,7 @@ online-recorded per-command outcome oracle — both **opt-in / nightly**, **neve
 
 ## 1. Scope: the **10** write shapes (corrected inventory)
 
-Every `QueryType::Write` in `queries_repository` (`src/queries_repository.rs:446-475,893-940`) — the
+Every `QueryType::Write` in `queries_repository` (`src/queries_repository.rs:446-472,893-942`) — the
 first draft listed 8 and mis-described several:
 
 | Shape | Cypher gist | Mutation | Determinism hazard |
@@ -41,7 +41,7 @@ The synthetic **live** path benchmarks *synthetic-owned* writes with isolation
 (`src/synthetic/writes.rs`, `src/synthetic/catalog.rs:272-370`), but the primitives **do not** transfer cleanly:
 
 - **`ExpectedMutation`** is **5 rigid unit variants** and **`MutationStats` has only 4 counters**
-  (`writes.rs:221-287`): `nodes_created`/`nodes_deleted`/`relationships_created`/`properties_set` —
+  (`src/synthetic/writes.rs:221-287`): `nodes_created`/`nodes_deleted`/`relationships_created`/`properties_set` —
   **no** `relationships_deleted`, `properties_removed`, or `labels_removed` (the client exposes them,
   `vendor/falkordb-rs/src/response/mod.rs:109-156`). So `detach_delete_user` and
   `remove_user_property_and_label` are **unrepresentable** today, and `NodeMatched` (which requires
@@ -59,11 +59,11 @@ The synthetic **live** path benchmarks *synthetic-owned* writes with isolation
 ## 3. The gap (five blockers)
 
 ### 3.1 Replay is read-only by construction
-Recording rejects any `QueryType::Write` (`recording.rs:285-289,359-365`); every recorded command is
-tagged `"kind":"read"` (`recording.rs:430-445`); replay renders scratch writes rather than replaying
-recorded commands (`mod.rs:947-989`), runs every reference command through `GRAPH.RO_QUERY`
-(`op_runner.rs:56,141`), fails closed on writes (`replay.rs:79`), and always measures with
-`MeasureTarget::read()` (`replay.rs:222`). **Fix:** a **recorded-write worker source**, a
+Recording rejects any `QueryType::Write` (`src/synthetic/recording.rs:285-289,359-365`); every recorded command is
+tagged `"kind":"read"` (`src/synthetic/recording.rs:430-445`); replay renders scratch writes rather than replaying
+recorded commands (`src/synthetic/mod.rs:947-989`), runs every reference command through `GRAPH.RO_QUERY`
+(`src/synthetic/op_runner.rs:56,141`), fails closed on writes (`src/synthetic/replay.rs:79`), and always measures with
+`MeasureTarget::read()` (`src/synthetic/replay.rs:222`). **Fix:** a **recorded-write worker source**, a
 `GRAPH.QUERY` write measurement path, and a **versioned bundle** carrying the write kind (currently op
 kind is *excluded* from `workload_hash`, `recording.rs:62-80,212-230`).
 
@@ -72,14 +72,14 @@ Per §2, a constant `ExpectedMutation` is wrong. Deterministic verification need
 per-invocation expected outcome** that accounts for accumulated state. That outcome is only knowable
 by **executing the exact command sequence from a known pristine base** — i.e. an **online-recorded
 oracle** (record captures each command's *actual* full mutation stats + result, in order). Recording
-is currently **offline** (`shapes.rs` renders without a server), so this is a real architectural add.
+is currently **offline** (`src/synthetic/shapes.rs` renders without a server), so this is a real architectural add.
 
 ### 3.3 Base-state isolation needs per-invocation (not per-window) pristine state
 Because outcomes accumulate (create-once-then-match, delete-then-no-op), a deterministic oracle needs
 the base restored **before each measured invocation** — reloading `graph.jsonl`
-(`replay.rs:281-312`, `dataset.rs:403-475`) or `GRAPH.COPY` (present on `falkordb/falkordb:latest`).
+(`src/synthetic/replay.rs:281-312`, `src/synthetic/dataset.rs:403-475`) or `GRAPH.COPY` (present on `falkordb/falkordb:latest`).
 That is **expensive** and, since resets run inside `invoke`, would land in **reported throughput but
-not sample latency** (`engine.rs:127-135`). **Fix:** per-invocation restore for the correctness tier
+not sample latency** (`src/synthetic/engine.rs:127-135`). **Fix:** per-invocation restore for the correctness tier
 (bounded, C=1); latency tier uses a cheaper periodic reset and asserts nothing.
 
 ### 3.4 Irreducible server non-determinism
@@ -90,7 +90,7 @@ non-reproducible values (though not always non-reproducible *counters*). **Fix:*
 verify only the reproducible parts of the outcome.
 
 ### 3.5 Restore safety & verification are load-bearing
-`--no-load` verifies only node/edge **counts** (`replay.rs`), missing property/label corruption; a
+`--no-load` verifies only node/edge **counts** (`src/synthetic/replay.rs`), missing property/label corruption; a
 failed write run must **restore on both success and failure**; `workload_hash` hashes bundle files,
 not live state. **Fix:** error-safe final restore, forbid `--no-load` for writes, and verify graph
 **content** (not just counts) after a write run so a later read recording is not silently polluted.
