@@ -457,9 +457,13 @@ new contract (original sketches in §A1/§A5 left intact for history):
 - `OpAnalysis.op_outcome` gains a `"skipped"` variant (rendered ⏭).
 - New per-op fields `skipped_baseline` / `skipped_candidate`: `Option<String>` skip reasons
   (omitted when absent, e.g. `engine lacks procedure 'algo.maxFlow'`).
-- A skipped op carries `cells: []` and `correctness: "not_gated"` — skipped on ≥1 side means
-  that side never ran, so no correctness or latency claim is made; skips are exempt from the
-  per-op measurement-policy guard and can never gate or count as diverged.
+- A skipped op carries `correctness: "not_gated"` and its cells make no gated claim — skipped
+  on ≥1 side means that side never ran; skips are exempt from the per-op measurement-policy
+  guard and can never gate or count as diverged. Skipped on **both** sides ⇒ `cells: []`;
+  skipped on **one** side ⇒ the measured side's cells are retained (per-side p50/context only —
+  no deltas, and every cell's `perf_verdict` is forced `not_applicable`).
+- `totals` (the per-comparison `OutcomeCounts`) gains a `skipped` count — ops capability-skipped
+  on ≥1 side, under both divergence policies (a skip is never a regression or a divergence).
 - `tier` now also resolves for algorithm-family ops (`"full"`); previously only catalog/repo
   reads had a tier.
 
