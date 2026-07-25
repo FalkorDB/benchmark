@@ -391,7 +391,7 @@ synthetic-verify:
     # sticky comment is compact. The workflow publishes recordings/verify-report.md to the job
     # summary AND upserts it as a sticky PR comment; the raw bundle is then dropped (on failure the
     # trap leaves it to inspect).
-    awk '/^## `/{p=1} {print > ("recordings/_verify/" (p ? "detail" : "hdr") ".md")}' recordings/_verify/diff.md
+    awk '/^## <code>/{p=1} {print > ("recordings/_verify/" (p ? "detail" : "hdr") ".md")}' recordings/_verify/diff.md
     {
         echo '<!-- synthetic-verify -->'
         echo "> 🔁 **Synthetic non-divergence — same-machine A/B.** The recorded workload (every A/B read shape via \`--repo-reads full\`) ran **twice** against the same FalkorDB, back-to-back on one machine, across concurrency \`$sweep\` × uncached. The gate fails only if a per-op result digest or the \`workload_hash\` differs — so the latency deltas below are same-machine noise, not a regression."

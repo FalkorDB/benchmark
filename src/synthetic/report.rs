@@ -432,7 +432,12 @@ impl Report {
         }
 
         for (name, op) in &self.operations {
-            out.push_str(&format!("\n## `{}`\n", name));
+            // Same escaping as the plain diff's op headings: names are report content and the
+            // heading is an inline-Markdown context, so backticks/newlines must render inert.
+            out.push_str(&format!(
+                "\n## <code>{}</code>\n",
+                md_cell(&md_inline(&html_escape(name)))
+            ));
             if let Some(reason) = &op.skipped {
                 out.push_str(&format!(
                     "\n_⏭ skipped — {}_\n",
@@ -881,7 +886,7 @@ mod tests {
             "hostname must stay out of the markdown"
         );
         // Per-op section, markdown table header, both cache modes, knee, and compilation table.
-        assert!(md.contains("## `return_const`"));
+        assert!(md.contains("## <code>return\\_const</code>"));
         assert!(md.contains("| C | throughput (ops/s) |"));
         assert!(md.contains("cached — plan reused"));
         assert!(md.contains("uncached — plan-cache miss"));
@@ -892,14 +897,16 @@ mod tests {
     #[test]
     fn markdown_and_console_agree_on_numbers() {
         // The shared row model means a level's throughput renders identically in both surfaces.
+        // Op names differ by design: the Markdown heading escapes inline specials (e.g. `_`), so
+        // it is asserted in its escaped form.
         let r = sample_report();
         let (console, md) = (r.to_console(), r.to_markdown());
-        for needle in ["2950", "return_const"] {
-            assert!(
-                console.contains(needle) && md.contains(needle),
-                "both surfaces must render {needle}"
-            );
-        }
+        assert!(
+            console.contains("2950") && md.contains("2950"),
+            "both surfaces must render 2950"
+        );
+        assert!(console.contains("return_const"), "console renders the raw op name");
+        assert!(md.contains("return\\_const"), "markdown renders the escaped op name");
     }
 
     #[test]
@@ -1142,6 +1149,18 @@ mod tests {
         let legacy: OperationReport = serde_json::from_str(r#"{"levels": []}"#).unwrap();
         assert_eq!(legacy.skipped, None);
         assert!(!sample_report().to_console().contains("skipped —"));
+    }
+
+    #[test]
+    fn op_headings_render_hostile_names_inert_in_the_markdown_report() {
+        // Op names are report content: a backtick or newline in a name must not terminate the
+        // heading's code styling or inject Markdown/HTML into the report.
+        let mut report = sample_report();
+        let op = report.operations.remove("return_const").unwrap();
+        report.operations.insert("evil`op\nx*<b>&y".to_string(), op);
+        let md = report.to_markdown();
+        assert!(md.contains("## <code>evil\\`op<br>x\\*&lt;b&gt;&amp;y</code>"), "{md}");
+        assert!(!md.contains("evil`op\nx*<b>&y"), "raw hostile name leaked: {md}");
     }
 
     #[test]

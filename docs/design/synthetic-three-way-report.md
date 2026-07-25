@@ -446,9 +446,11 @@ Each PR: design-first (this doc), ≥90% patch coverage on Rust changes, `just c
 
 The algorithm-coverage work
 ([`synthetic-cover-algorithms-phase6.md`](synthetic-cover-algorithms-phase6.md)) introduced
-**capability-skipped ops**: before capture/measure, the replayer probes the engine for each
-op's required procedure (algorithm shapes only) and records ops the engine cannot run as
-*skipped* instead of failing. A skip is **neither a pass nor a divergence** and is never an
+**capability-skipped ops**: before capture/measure, the replayer probes the engine's procedure
+registry **once per run** (`CALL dbms.procedures()`, and only when ≥1 manifest op names a
+required procedure — algorithm shapes only), then evaluates every op locally against that
+snapshot and records ops the engine cannot run as *skipped* instead of failing. A skip is
+**neither a pass nor a divergence** and is never an
 offender. This extends the two machine schemas this document froze; the deltas below are the
 new contract (original sketches in §A1/§A5 left intact for history):
 
