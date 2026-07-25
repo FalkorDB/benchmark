@@ -84,7 +84,8 @@ fn op_policy_mismatch(
             };
             return Some(format!(
                 "per-op measurement policy differs for '{op}' — baseline: {}; candidate: {}. The \
-                 recorded budgets changed between the runs, so their latencies are not comparable",
+                 op's effective measurement conditions (its recorded budget and/or the global \
+                 knobs it inherits) changed between the runs, so their latencies are not comparable",
                 render(b),
                 render(c)
             ));
@@ -261,6 +262,23 @@ pub fn regression_guard(
     if bc != cc {
         return RegressionGuard::NotComparable {
             reason: format!("concurrency sweep differs — baseline {bc:?} vs candidate {cc:?}"),
+        };
+    }
+    // Global timeouts are measurement config like samples/sweep: every op that inherits them (no
+    // per-op policy below) was measured under these values, so a known difference disqualifies the
+    // pair the same way. (Cache selection needs no guard here — cells are compared per cache mode,
+    // so a mode measured on one side only is simply absent, never mis-paired.)
+    if baseline.meta.server_timeout_ms != candidate.meta.server_timeout_ms
+        || baseline.meta.client_deadline_ms != candidate.meta.client_deadline_ms
+    {
+        return RegressionGuard::NotComparable {
+            reason: format!(
+                "timeouts differ — baseline {}/{} vs candidate {}/{} (server_timeout_ms/client_deadline_ms)",
+                baseline.meta.server_timeout_ms,
+                baseline.meta.client_deadline_ms,
+                candidate.meta.server_timeout_ms,
+                candidate.meta.client_deadline_ms
+            ),
         };
     }
     // Server settings that affect sustained throughput (recorded when readable). Only a *known*
@@ -811,6 +829,24 @@ mod regression_guard_tests {
             }
             other => panic!("expected Comparable, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn differing_global_timeouts_are_not_comparable() {
+        // Global timeouts are inherited by every op without a per-op policy, so a known
+        // difference is a config mismatch exactly like samples/sweep.
+        let a = rep("h", 100, 50, vec![1], None, None, &[]);
+        let mut b = rep("h", 100, 50, vec![1], None, None, &[]);
+        b.meta.server_timeout_ms = 30_000;
+        match regression_guard(&a, &b) {
+            RegressionGuard::NotComparable { reason } => {
+                assert!(reason.contains("timeouts differ"), "got: {reason}");
+            }
+            other => panic!("expected NotComparable, got {other:?}"),
+        }
+        let mut c = rep("h", 100, 50, vec![1], None, None, &[]);
+        c.meta.client_deadline_ms = 60_000;
+        assert!(matches!(regression_guard(&a, &c), RegressionGuard::NotComparable { .. }));
     }
 
     fn policy(samples: usize) -> OpPolicy {
