@@ -1,6 +1,6 @@
 # Design: three-way synthetic PR report — PR vs main vs C engine, with an interactive page
 
-**Status: draft (v4, after three rubber-duck review rounds)**
+**Status: draft (v5, after four rubber-duck review rounds)**
 **Extends:** [`synthetic-pr-regression-report.md`](synthetic-pr-regression-report.md) (approved; Part A merged in this repo, Part B is falkordb-rs-next-gen PR #745).
 
 ## 1. Goal
@@ -134,8 +134,10 @@ Notes locked by review rounds 2–3:
   replacing v1's three-state `SummaryVerdict`:
   - `NotComparable` — `status` is NotComparable (workload/config mismatch); nothing else counts.
   - `Regressed` (🔴) — ≥ 1 regressed perf cell, **or** (under `gate` policy) ≥ 1 diverged op.
-  - `PassWithDivergences` (⚠) — no regressed cell, but ≥ 1 diverged op under `advisory` policy
-    **or** zero comparable perf cells anywhere (all-N/A / all-diverged runs are never green).
+  - `Advisory` (⚠) — not regressed, but something needs a human look: ≥ 1 diverged op under
+    `advisory` policy, **or** zero comparable perf cells anywhere (all-N/A / all-diverged runs
+    are never green). The rendered annotation says which (e.g. `⚠ pass, 3 diverged` vs
+    `⚠ no comparable cells`).
   - `Pass` (🟢) — ≥ 1 comparable cell, no regression, no divergence.
 - `correctness` truth table matches **today's digest semantics** exactly: both digests present +
   equal = `Match`; present + different **or asymmetric** = `Diverged`; both absent = `NotGated`
@@ -170,9 +172,9 @@ New flag `--divergence-policy <gate|advisory>` (default `gate`, requires `--regr
 - **`advisory`** (cross-engine): diverged op ⇒ op ⚠ (`DivergedAdvisory`), perf cells **still
   N/A** — diverged results mean the engines did different work, so a latency comparison would
   be meaningless; raw measurements stay visible in `context` for diagnosis. Diverged ops count
-  in a new `diverged` bucket of `OutcomeCounts`, never in `regressed`; the overall verdict is
-  driven by perf cells, shown as ⚠-annotated (e.g. `🟢 (3 ⚠ diverged)`); a comparison whose
-  every op diverged is ⚠ overall, never green.
+  in a new `diverged` bucket of `OutcomeCounts`, never in `regressed`; perf cells decide
+  🔴-vs-not, and any divergence caps the overall verdict at `Advisory` (⚠, per the A1
+  aggregation — e.g. `⚠ pass, 3 diverged`; never 🟢).
 
 `OpOutcome` gains the `DivergedAdvisory` variant; summary schema bumps to v2 (§A5).
 
@@ -344,17 +346,18 @@ only (the gating signal), and one link to the interactive page. Markers
 - **Closed-PR race**: the workflow-level arch-split concurrency stays unchanged (both arches
   must run for one PR); serialization is added at the **job level** — both arch `synthetic-publish`
   jobs and the cleanup job share one per-PR concurrency group (`synthetic-pages-pr-<N>`,
-  `cancel-in-progress: false`), and each publisher re-checks PR state (`gh pr view --json state`)
-  inside that group, skipping fail-closed when closed. GitHub keeps a single *pending* slot per
-  group (a newer queued job replaces an older pending one): a replaced publisher is fine (newer
-  data wins; a publisher queued after cleanup fail-closes on the state check), and a cleanup
-  replaced while pending only delays leaf removal — cleanup is idempotent and re-runnable, and a
-  stale leaf is cosmetic, never corruption.
+  `cancel-in-progress: false`, **`queue: max`**). `queue: max` keeps every queued job pending
+  (FIFO by wait-start, up to 100) instead of the default single-pending-slot behaviour where a
+  newer queued job cancels and replaces an older pending one — so x86/arm publishers (different
+  leaves; "newest wins" would not hold across arches) and cleanup are all guaranteed to run, in
+  order. Each publisher additionally re-checks PR state (`gh pr view --json state`) inside the
+  group and skips fail-closed when closed, covering a publisher that queued before close but
+  runs after cleanup.
 - **Fork PRs**: same-repository PRs only (the existing prepare job already excludes fork
   heads — images aren't pushed for forks). Supporting forks would need a separate trusted
   workflow design; explicitly out of scope.
 
-## 6. What the rubber-duck reviews corrected (v1 → v2 → v3 → v4)
+## 6. What the rubber-duck reviews corrected (v1 → v2 → v3 → v4 → v5)
 
 Round 1 (17 findings) — folded into v2: dynamic-op budgets/tiers silently N/A (→ A0); no
 single verdict source (→ A1); divergence conflated with perf (→ A3); `docker.io/` digest
@@ -391,9 +394,16 @@ corrected to advisory warnings); the overall verdict enum/aggregation was undefi
 `OverallVerdict` four-state rule incl. all-diverged and zero-comparable-cells); `if c_leg`
 would disable `errexit` inside the guarded code (→ child script under `timeout`, B1); "as
 today" was inaccurate for the four non-gated repo-read shapes (→ A1 truth-table note); the
-shared concurrency group needed job-level scoping to avoid blocking both arches, plus the
-single-pending-slot caveat (→ B5); page test/data wording contradictions and the nonexistent
+shared concurrency group needed job-level scoping to avoid blocking both arches (→ B5); page
+test/data wording contradictions and the nonexistent
 Playwright infra (→ A2 source-material wording, B3 new-tooling setup).
+
+Round 4 (2 findings) — folded into v5: `PassWithDivergences` misnamed its zero-comparable
+case and contradicted A3's 🟢-annotated rendering (→ renamed `Advisory`, A3 aligned: any
+divergence caps the verdict at ⚠); the default single-pending-slot queue could silently
+replace a queued publisher/cleanup, unsafe because the two arches publish different leaves
+(→ B5 uses `queue: max` — real GA syntax since May 2026 — guaranteeing every queued job in
+the per-PR group runs).
 
 ## 7. Deliverables & order
 
