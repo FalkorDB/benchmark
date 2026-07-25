@@ -257,7 +257,7 @@ Stacked PR on `barakb/synthetic-pr-regression`. All scripts stay under
      cannot run a shell function — bounds the leg well below the job timeout so a hang cannot
      prevent the artifact upload;
   4. on C failure: write **two** stub summaries (`summary-c-pr.json`, `summary-c-main.json`,
-     `verdict: not_comparable`, `not_comparable_reason` = the failure stage) and mark both
+     `overall_verdict: not_comparable`, `not_comparable_reason` = the failure stage) and mark both
      comparisons `unavailable` in `data.json` (§B2) — the comment and page show *why* C is
      missing; the job itself stays green (the `main-pr` signal is intact);
   5. on success: produce `c-pr` and `c-main` reports/summaries/cells with
