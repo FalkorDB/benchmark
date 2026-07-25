@@ -2,8 +2,8 @@
 
 **Status:** the reads-scope implementation has already landed on `master` via separate merged PRs
 (#240–#250); the per-PR non-divergence gate now mirrors the CI matrix (#251, merged). **This PR carries the design-of-record + status doc itself** (doc-only) — the symbols it
-references (`OpKey`, `--tier`, `generate_with_rng`, `--repo-reads`, …) live in `master`, not in this
-one-file diff, so the doc intentionally lags the code it describes. **Writes (Phase 7)**
+references (`OpKey`, `--tier`, `generate_with_rng`, `--repo-reads`, …) live in `master`, not in
+this docs-only diff, so the doc intentionally lags the code it describes. **Writes (Phase 7)**
 and **algorithms (Phase 6)** are **deferred** by the reads-first decision. This is now a **living
 design + status record**, kept in sync as work lands — see the status table (§0) and the per-phase
 markers in §3/§7. §2/§3 describe the **pre-implementation baseline** that motivated the work; the

@@ -49,7 +49,7 @@ variants are out of scope — only FalkorDB's `algo.*` procedures matter.
 
 ### 3.1 `algo.maxFlow` needs a **simple** graph; the synthetic generator does not guarantee one
 The generator forbids self-loops but **not parallel edges** — `edges_are_deterministic_and_never_self_loops`
-(`src/synthetic/dataset.rs:680-684`) asserts only `a != b`, and `edge_at` (`:119-150`) can emit
+(`src/synthetic/dataset.rs:680-684`) asserts only `a != b`, and `edge_at` (`:120-135`) can emit
 duplicate `(src,dst)` pairs. On a multigraph FalkorDB's `algo.maxFlow` errors
 (`relationship type must not contain multi-edges (tensors)`), and the exact CI oracle fixture
 (`seed=7`, 1000/5000, `Justfile:322-324`) contains duplicate endpoint pairs. So "no new fixture" is
