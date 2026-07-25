@@ -63,7 +63,7 @@ impl ResultPolicy {
     }
 }
 
-/// The engine capability a fixture-dependent read requires beyond plain Cypher (design §3.4). The
+/// The engine capability a fixture-dependent read requires beyond plain Cypher (design §3.5). The
 /// fulltext/vector smoke reads name the specific index procedure they exercise.
 ///
 /// Recording persists [`Self::procedure`] on each shape's manifest entry
