@@ -31,8 +31,10 @@ use crate::synthetic::{
     validate_op_config, write_report, CacheSelection, Config, MeasureTarget, OpKey,
 };
 use falkordb::AsyncGraph;
+use futures::StreamExt;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
@@ -192,6 +194,38 @@ pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
         validate_op_config(op.name(), &op_config)?;
     }
 
+    // Capability probe (design Phase 6 §3.5), before the reference pass: when any op's manifest
+    // entry names a required procedure, ask the engine's registry once and **skip** every op whose
+    // procedure is absent — recorded in the report with the reason, but never executed (a missing
+    // procedure would otherwise fail the whole replay). Ops without a capability never probe.
+    let required: BTreeSet<&str> = bundle
+        .commands
+        .iter()
+        .filter_map(|(op, _)| entry_for(op.name()).capability.as_deref())
+        .collect();
+    let available = if required.is_empty() {
+        None
+    } else {
+        Some(
+            probe_procedures(&mut graph, config.server_timeout_ms, client_deadline)
+                .await
+                .map_err(|e| OtherError(format!("capability probe failed: {}", e)))?,
+        )
+    };
+    let skip_reason = |name: &str| -> Option<String> {
+        let procedure = entry_for(name).capability.as_deref()?;
+        let available = available.as_ref()?;
+        (!available.contains(&procedure.to_lowercase()))
+            .then(|| format!("engine lacks procedure '{}' (capability probe)", procedure))
+    };
+    let mut skipped: BTreeMap<String, String> = BTreeMap::new();
+    for (op, _) in &bundle.commands {
+        if let Some(reason) = skip_reason(op.name()) {
+            info!("skipping op '{}': {}", op.name(), reason);
+            skipped.insert(op.name().to_string(), reason);
+        }
+    }
+
     // Reference pass (untimed, single-flight): capture each result's shape (cardinality +
     // order-independent value digest) for every **result-gated** command — the correctness oracle,
     // which also primes the plan cache. A result-N/A op's shapes are never verified or digested, so
@@ -204,6 +238,9 @@ pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
     for (op, cyphers) in &bundle.commands {
         if cyphers.is_empty() {
             return Err(OtherError(format!("op '{}' has no recorded commands", op.name())));
+        }
+        if skipped.contains_key(op.name()) {
+            continue; // capability-skipped: never executed, not even the fail-fast probe
         }
         let entry = entry_for(op.name());
         let op_st = entry.budget.server_timeout_ms.unwrap_or(config.server_timeout_ms);
@@ -234,6 +271,19 @@ pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
     let uid_alloc = AtomicU64::new(0);
 
     let mut operations = BTreeMap::new();
+    // Skipped ops first: an empty-levels entry carrying the skip reason, so the report keeps the
+    // full recorded op set and the diff/regression guards can tell "skipped" from "not recorded".
+    for (name, reason) in skipped {
+        operations.insert(
+            name,
+            crate::synthetic::report::OperationReport {
+                levels: Vec::new(),
+                result_digest: None,
+                policy: None,
+                skipped: Some(reason),
+            },
+        );
+    }
     for (op, corpus, shapes) in &reference {
         let entry = entry_for(op.name());
         let is_gated = entry.result_gated;
@@ -290,10 +340,13 @@ pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
         operations.insert(op.name().to_string(), op_report);
     }
 
-    // The corpus size is what the bundle actually recorded per op (not the compile-time constant).
-    let corpus_size = reference
+    // The corpus size is what the bundle actually recorded per op (not the compile-time constant) —
+    // over every recorded op, including capability-skipped ones (it describes the bundle, not the
+    // subset this engine could execute).
+    let corpus_size = bundle
+        .commands
         .iter()
-        .map(|(_, corpus, _)| corpus.len())
+        .map(|(_, cyphers)| cyphers.len())
         .max()
         .unwrap_or(0);
 
@@ -336,6 +389,49 @@ pub async fn run_and_report(config: &ReplayConfig) -> BenchmarkResult<()> {
 }
 
 /// Drop `graph`, execute the bundle's recorded load statements, and verify the node/edge counts.
+/// Ask the engine which procedures it registers (`dbms.procedures()`), returning their
+/// **lowercased** names — the capability probe (design Phase 6 §3.5). One query per replay,
+/// mirroring the A/B driver's `detect_algorithm_capabilities` (matching is case-insensitive so a
+/// registry spelling change can't fake a missing capability).
+async fn probe_procedures(
+    graph: &mut AsyncGraph,
+    server_timeout_ms: i64,
+    client_deadline: Duration,
+) -> BenchmarkResult<BTreeSet<String>> {
+    let cypher = "CALL dbms.procedures() YIELD name RETURN name";
+    let fut = async {
+        let query_result = graph
+            .ro_query(cypher)
+            .with_timeout(server_timeout_ms)
+            .execute()
+            .await
+            .map_err(|e| OtherError(format!("procedure registry query failed: {:?}", e)))?;
+        let mut names = BTreeSet::new();
+        let mut data = query_result.data;
+        while let Some(row) = data.next().await {
+            let row = row
+                .map_err(|e| OtherError(format!("procedure registry row decode error: {:?}", e)))?;
+            let name: String = row.try_get_at(0).map_err(|e| {
+                OtherError(format!(
+                    "procedure registry returned a non-string name: {:?}",
+                    e
+                ))
+            })?;
+            names.insert(name.to_lowercase());
+        }
+        Ok::<BTreeSet<String>, crate::error::BenchmarkError>(names)
+    };
+    tokio::time::timeout(client_deadline, fut)
+        .await
+        .map_err(|e| {
+            OtherError(format!(
+                "client deadline ({} ms) exceeded probing procedures: {}",
+                client_deadline.as_millis(),
+                e
+            ))
+        })?
+}
+
 async fn load_recorded_graph(
     graph: &mut AsyncGraph,
     bundle: &Bundle,

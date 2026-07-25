@@ -66,11 +66,11 @@ impl ResultPolicy {
 /// The engine capability a fixture-dependent read requires beyond plain Cypher (design §3.4). The
 /// fulltext/vector smoke reads name the specific index procedure they exercise.
 ///
-/// Today this is **annotation only** — a stable, machine-readable label carried on the [`ShapeSpec`]
-/// so a future capability-gating pass (record-and-skip-as-N/A on an engine that lacks the capability)
-/// can key off it without a bundle-format change. It is not yet consulted at record or replay time
-/// (the per-PR A/B images are modern FalkorDB with all three capabilities). Non-fixture reads need
-/// nothing (`capability = None`).
+/// Recording persists [`Self::procedure`] on each shape's manifest entry
+/// ([`crate::synthetic::recording::OpEntry::capability`]), and replay probes the engine's
+/// procedure registry **before** the reference capture (design §3.5): an op whose required
+/// procedure is absent is *skipped* — reported, but never executed — instead of failing the whole
+/// replay. Non-fixture reads need nothing (`capability = None`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShapeCapability {
     /// `db.idx.vector.queryNodes` — a vector index over `:User(embedding)`.
@@ -87,6 +87,23 @@ pub enum ShapeCapability {
     AlgoMsf,
     /// `algo.HarmonicCentrality` — whole-graph harmonic centrality (Phase 6).
     AlgoHarmonic,
+}
+
+impl ShapeCapability {
+    /// The procedure name this capability requires, exactly as the engine's `dbms.procedures()`
+    /// registry spells it (matching is case-insensitive at probe time). Recorded on the shape's
+    /// manifest entry so replay can probe-and-skip on an engine that lacks the procedure.
+    pub fn procedure(self) -> &'static str {
+        match self {
+            ShapeCapability::VectorQueryNodes => "db.idx.vector.queryNodes",
+            ShapeCapability::FulltextQueryNodes => "db.idx.fulltext.queryNodes",
+            ShapeCapability::FulltextQueryRelationships => "db.idx.fulltext.queryRelationships",
+            ShapeCapability::AlgoPageRank => "algo.pageRank",
+            ShapeCapability::AlgoMaxFlow => "algo.maxFlow",
+            ShapeCapability::AlgoMsf => "algo.MSF",
+            ShapeCapability::AlgoHarmonic => "algo.HarmonicCentrality",
+        }
+    }
 }
 
 /// The **synthetic-only** coverage family a shape belongs to (design Phase 6 §3.3): which curated
@@ -638,6 +655,7 @@ fn render_shapes(
             key,
             result_gated: shape.result_policy.is_gated(),
             budget: shape.budget.into(),
+            capability: shape.capability.map(|c| c.procedure().to_string()),
             commands,
         });
     }
@@ -833,6 +851,58 @@ mod tests {
     }
 
     #[test]
+    fn capability_procedures_are_pinned() {
+        // The exact procedure names replay probes for (via `dbms.procedures()`). Renaming one
+        // changes which engines skip the shape — deliberate, so pin the full mapping.
+        let expected: &[(ShapeCapability, &str)] = &[
+            (
+                ShapeCapability::VectorQueryNodes,
+                "db.idx.vector.queryNodes",
+            ),
+            (
+                ShapeCapability::FulltextQueryNodes,
+                "db.idx.fulltext.queryNodes",
+            ),
+            (
+                ShapeCapability::FulltextQueryRelationships,
+                "db.idx.fulltext.queryRelationships",
+            ),
+            (ShapeCapability::AlgoPageRank, "algo.pageRank"),
+            (ShapeCapability::AlgoMaxFlow, "algo.maxFlow"),
+            (ShapeCapability::AlgoMsf, "algo.MSF"),
+            (ShapeCapability::AlgoHarmonic, "algo.HarmonicCentrality"),
+        ];
+        for (cap, procedure) in expected {
+            assert_eq!(cap.procedure(), *procedure);
+        }
+    }
+
+    #[test]
+    fn fixture_dependent_reads_record_their_index_capabilities() {
+        // The fulltext/vector fixture reads carry `db.idx.*` capability strings too — on an
+        // engine without those procedures they skip instead of erroring at the reference pass.
+        let ops = record_repo_reads(Tier::Full, 1000, 5000, 7).expect("record full reads");
+        let by_name: std::collections::BTreeMap<&str, Option<&str>> = ops
+            .iter()
+            .map(|op| (op.key.name(), op.capability.as_deref()))
+            .collect();
+        assert_eq!(
+            by_name["fulltext_query_nodes_smoke"],
+            Some("db.idx.fulltext.queryNodes")
+        );
+        assert_eq!(
+            by_name["vector_query_nodes_smoke"],
+            Some("db.idx.vector.queryNodes")
+        );
+        assert_eq!(
+            by_name["fulltext_query_relationships_smoke"],
+            Some("db.idx.fulltext.queryRelationships")
+        );
+        // Plain reads carry none — replay never probes for them.
+        assert_eq!(by_name["single_vertex_read"], None);
+    }
+
+    #[test]
     fn repo_read_shapes_exclude_algorithms_and_stay_exactly_todays_50_reads() {
         // Design §3.2: `repo_read_shapes()` / `--repo-reads full` remain EXACTLY today's 50
         // non-algorithm reads — algorithms are selected only by the orthogonal --repo-algorithms
@@ -879,6 +949,19 @@ mod tests {
                 op.key.name()
             );
         }
+        // Each op records its per-procedure capability string (design §3.5), so replay can
+        // probe-and-skip on an engine that lacks the procedure.
+        let capabilities: Vec<Option<&str>> =
+            ops.iter().map(|op| op.capability.as_deref()).collect();
+        assert_eq!(
+            capabilities,
+            vec![
+                Some("algo.pageRank"),
+                Some("algo.maxFlow"),
+                Some("algo.MSF"),
+                Some("algo.HarmonicCentrality"),
+            ]
+        );
         let corpora: Vec<usize> = ops.iter().map(|op| op.commands.len()).collect();
         assert_eq!(corpora, vec![1, MAX_FLOW_CORPUS_SIZE, 1, 1]);
         // The rendered Cypher exercises the real procedures…

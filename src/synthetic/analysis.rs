@@ -17,8 +17,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Schema version of the serialized [`RegressionAnalysis`] (`report --cells`), bumped on any
-/// breaking field change.
-pub const ANALYSIS_SCHEMA_VERSION: u32 = 1;
+/// breaking field change. v2 (design Phase 6 §3.5): adds the `skipped` [`OpOutcome`] value and
+/// [`OutcomeCounts`] bucket plus the per-op `skipped_baseline`/`skipped_candidate` reasons —
+/// a v1 consumer parsing `op_outcome` exhaustively would reject `"skipped"`, so this is a bump,
+/// not a silent extension.
+pub const ANALYSIS_SCHEMA_VERSION: u32 = 2;
 
 /// The gated metric id carried in [`RegressionAnalysis::gated_metric`]: only the total-latency
 /// median is gated; every other metric is informational context.
@@ -77,7 +80,8 @@ pub enum Correctness {
 }
 
 /// Per-op outcome — the collapsed-row verdict, rolled up across every cache mode and concurrency
-/// (worst cell wins: `Regressed` > `DivergedAdvisory` > `Pass` > `NotApplicable`).
+/// (worst cell wins: `Regressed` > `DivergedAdvisory` > `Pass` > `NotApplicable`; a `Skipped` op
+/// never has a comparable cell, so it never competes with the others).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OpOutcome {
@@ -87,23 +91,28 @@ pub enum OpOutcome {
     Regressed,
     /// Results diverged under the `advisory` policy — needs a human look, not a gate (⚠).
     DivergedAdvisory,
+    /// Capability-skipped on ≥1 side (design Phase 6 §3.5) — recorded but never executed there
+    /// because the engine lacks the op's required procedure. Neither a pass nor a divergence, and
+    /// never a gate (⏭).
+    Skipped,
     /// No evaluable cell and no divergence signal — no verdict (N/A).
     NotApplicable,
 }
 
 impl OpOutcome {
-    /// The marker shown on the op's collapsed row (`🟢`/`🔴`/`⚠`/`N/A`).
+    /// The marker shown on the op's collapsed row (`🟢`/`🔴`/`⚠`/`⏭`/`N/A`).
     pub fn emoji(self) -> &'static str {
         match self {
             OpOutcome::Pass => "🟢",
             OpOutcome::Regressed => "🔴",
             OpOutcome::DivergedAdvisory => "⚠",
+            OpOutcome::Skipped => "⏭",
             OpOutcome::NotApplicable => "N/A",
         }
     }
 }
 
-/// A 🟢 / 🔴 / ⚠ / N-A tally of per-op outcomes.
+/// A 🟢 / 🔴 / ⚠ / ⏭ / N-A tally of per-op outcomes.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OutcomeCounts {
     pub pass: usize,
@@ -111,6 +120,9 @@ pub struct OutcomeCounts {
     /// Ops diverged under the `advisory` policy ([`OpOutcome::DivergedAdvisory`]). Always 0 under
     /// the `gate` policy, where a divergence counts in `regressed`.
     pub diverged: usize,
+    /// Ops capability-skipped on ≥1 side ([`OpOutcome::Skipped`]) — under **both** policies:
+    /// a skip is an expected engine limitation, never a regression or a divergence.
+    pub skipped: usize,
     pub not_applicable: usize,
 }
 
@@ -123,6 +135,7 @@ impl OutcomeCounts {
             OpOutcome::Pass => self.pass += 1,
             OpOutcome::Regressed => self.regressed += 1,
             OpOutcome::DivergedAdvisory => self.diverged += 1,
+            OpOutcome::Skipped => self.skipped += 1,
             OpOutcome::NotApplicable => self.not_applicable += 1,
         }
     }
@@ -290,12 +303,20 @@ pub struct CellAnalysis {
 /// One op's analysis: correctness, the rolled-up outcome and every measured cell.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OpAnalysis {
-    /// Coverage tier (`"core"`/`"full"`) from the catalog or the repo-read shape registry; `None`
-    /// for names known to neither.
+    /// Coverage tier (`"core"`/`"full"`) from the catalog or the recorded-shape registry (repo
+    /// reads and algorithm shapes); `None` for names known to neither.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tier: Option<String>,
     pub correctness: Correctness,
     pub op_outcome: OpOutcome,
+    /// Why the **baseline** run skipped this op (capability probe — design Phase 6 §3.5), or
+    /// `None` when it measured it. A skipped side has no cells; the other side's raw numbers stay
+    /// visible for context but no cell is comparable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skipped_baseline: Option<String>,
+    /// Why the **candidate** run skipped this op, or `None` when it measured it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skipped_candidate: Option<String>,
     pub cells: Vec<CellAnalysis>,
 }
 
@@ -319,7 +340,8 @@ pub struct RegressionAnalysis {
     pub verdict: OverallVerdict,
     /// Per-op outcome tallies. Every op with ≥1 measured cell is tallied; a **diverged** op is
     /// tallied even with no cell (gate ⇒ `regressed`, advisory ⇒ `diverged` — every divergence
-    /// counts). Only a cell-less non-diverged op has nothing to tally.
+    /// counts), and so is a **skipped** op (every skip is visible). Only a cell-less non-diverged,
+    /// non-skipped op has nothing to tally.
     pub totals: OutcomeCounts,
     /// Cells with a real verdict (🟢 or 🔴) across all ops; a diverged op's cells are N/A and
     /// never counted.
@@ -343,7 +365,7 @@ impl RegressionAnalysis {
     pub fn verdict_line(&self) -> (&'static str, String) {
         let emoji = self.verdict.emoji();
         let diverged = self.diverged_ops().len();
-        let headline = match self.verdict {
+        let mut headline = match self.verdict {
             OverallVerdict::NotComparable => {
                 let reason = self.status.not_comparable_reason().unwrap_or("unknown reason");
                 format!("not comparable — {reason}")
@@ -370,6 +392,14 @@ impl RegressionAnalysis {
                 self.comparable_cells
             ),
         };
+        // Skips are annotated, never gated (design Phase 6 §3.5) — visible on every comparable
+        // verdict so a partially-supported engine can't silently shrink the compared set.
+        if self.verdict != OverallVerdict::NotComparable && self.totals.skipped > 0 {
+            headline.push_str(&format!(
+                "; {} op(s) skipped (engine lacks their required procedure)",
+                self.totals.skipped
+            ));
+        }
         (emoji, headline)
     }
 
@@ -504,6 +534,14 @@ fn analyze_op(
     thresholds: &Thresholds,
     policy: DivergencePolicy,
 ) -> OpAnalysis {
+    // Skip reasons (capability probe — design Phase 6 §3.5), per side. A skipped side recorded no
+    // levels, so its cells are one-sided; forcing the verdict N/A below also covers a hand-crafted
+    // report that pairs a skip reason with levels.
+    let skipped_side = |rep: &Report| rep.operations.get(op).and_then(|o| o.skipped.clone());
+    let skipped_baseline = skipped_side(baseline);
+    let skipped_candidate = skipped_side(candidate);
+    let skipped = skipped_baseline.is_some() || skipped_candidate.is_some();
+
     let mut cells = Vec::new();
     for mode in [CacheMode::Cached, CacheMode::Uncached] {
         let mut levels: BTreeSet<usize> = BTreeSet::new();
@@ -523,8 +561,9 @@ fn analyze_op(
             let bp = bm.map(|m| m.metrics.total_ms.median);
             let budget = thresholds.resolve_by_name(op, c);
             // Perf verdict: N/A for every cell of a diverged op (different work ⇒ a latency
-            // comparison is meaningless, under BOTH policies), else the budget rule.
-            let perf_verdict = if diverged {
+            // comparison is meaningless, under BOTH policies) and of a skipped op (one side never
+            // executed it), else the budget rule.
+            let perf_verdict = if diverged || skipped {
                 Verdict::NotApplicable
             } else {
                 match (ap, bp) {
@@ -559,6 +598,10 @@ fn analyze_op(
 
     let correctness = if diverged {
         Correctness::Diverged
+    } else if skipped {
+        // Skipped on ≥1 side ⇒ that side never ran ⇒ no correctness claim, even when the measured
+        // side recorded a digest.
+        Correctness::NotGated
     } else {
         // Non-diverged ⇒ the digests either match on both sides or are absent on both.
         let has_digest = baseline
@@ -570,8 +613,12 @@ fn analyze_op(
     };
 
     // Worst cell wins: Regressed > DivergedAdvisory > Pass > NotApplicable. A diverged op's cells
-    // are all N/A, so divergence and a cell regression are mutually exclusive.
-    let op_outcome = if diverged {
+    // are all N/A, so divergence and a cell regression are mutually exclusive. A skip on either
+    // side outranks everything: the op was never executed there, so no comparison exists — it is
+    // neither a pass nor a divergence, and never a gate.
+    let op_outcome = if skipped {
+        OpOutcome::Skipped
+    } else if diverged {
         match policy {
             DivergencePolicy::Gate => OpOutcome::Regressed,
             DivergencePolicy::Advisory => OpOutcome::DivergedAdvisory,
@@ -588,6 +635,8 @@ fn analyze_op(
         tier: op_tier(op).map(|t| t.as_str().to_string()),
         correctness,
         op_outcome,
+        skipped_baseline,
+        skipped_candidate,
         cells,
     }
 }
@@ -682,8 +731,13 @@ pub fn analyze(
         }
         // Every op with a measured cell is tallied — and so is a cell-less **diverged** op
         // (gate ⇒ `regressed`, advisory ⇒ `diverged`): every divergence counts in the outcome
-        // table. Only a cell-less non-diverged op has nothing to tally.
-        if !oa.cells.is_empty() || oa.correctness == Correctness::Diverged {
+        // table. A **skipped** op is always tallied too (every skip is visible — design Phase 6
+        // §3.5), even when the measured side contributed no cell. Only a cell-less non-diverged,
+        // non-skipped op has nothing to tally.
+        if !oa.cells.is_empty()
+            || oa.correctness == Correctness::Diverged
+            || oa.op_outcome == OpOutcome::Skipped
+        {
             totals.add(oa.op_outcome);
         }
         ops.insert(op.clone(), oa);
@@ -771,6 +825,7 @@ mod tests {
                     }],
                     result_digest: digest.map(str::to_string),
                     policy: None,
+                    skipped: None,
                 },
             );
         }
@@ -833,7 +888,13 @@ mod tests {
         assert_eq!(an.regressed_cells, 0);
         assert_eq!(
             an.totals,
-            OutcomeCounts { pass: 1, regressed: 0, diverged: 0, not_applicable: 0 }
+            OutcomeCounts {
+                pass: 1,
+                regressed: 0,
+                diverged: 0,
+                skipped: 0,
+                not_applicable: 0
+            }
         );
         let op = &an.ops["match_by_index"];
         assert_eq!(op.correctness, Correctness::Match);
@@ -903,12 +964,21 @@ mod tests {
         // The diverged bucket counts it; `regressed` never does.
         assert_eq!(
             an.totals,
-            OutcomeCounts { pass: 1, regressed: 0, diverged: 1, not_applicable: 0 }
+            OutcomeCounts {
+                pass: 1,
+                regressed: 0,
+                diverged: 1,
+                skipped: 0,
+                not_applicable: 0
+            }
         );
         let (emoji, headline) = an.verdict_line();
         assert_eq!(emoji, "⚠");
         assert!(headline.starts_with("pass, 1 diverged"), "{headline}");
-        assert!(headline.contains("advisory under this policy"), "{headline}");
+        assert!(
+            headline.contains("advisory under this policy"),
+            "{headline}"
+        );
     }
 
     #[test]
@@ -923,6 +993,199 @@ mod tests {
         let (emoji, headline) = an.verdict_line();
         assert_eq!(emoji, "⚠");
         assert!(headline.starts_with("no comparable cells"), "{headline}");
+    }
+
+    /// Mark `op` in `rep` as capability-skipped: no levels, no digest, no policy — exactly what
+    /// replay writes for an op whose required procedure the engine lacks (design Phase 6 §3.5).
+    fn skip_op(
+        rep: &mut Report,
+        op: &str,
+        reason: &str,
+    ) {
+        let o = rep.operations.get_mut(op).expect("op present");
+        o.levels = vec![];
+        o.result_digest = None;
+        o.policy = None;
+        o.skipped = Some(reason.to_string());
+    }
+
+    #[test]
+    fn skipped_op_is_neither_pass_nor_divergence() {
+        // Baseline measured `aggregate_count` (with a digest); the candidate engine lacks its
+        // procedure and skipped it. The clean op still compares; the skipped op is ⏭ — not a
+        // pass, not a divergence, not a gate — under BOTH policies.
+        let a = rpt(
+            "main",
+            42001,
+            &[
+                ("match_by_index", 1.0, Some("d1")),
+                ("aggregate_count", 1.0, Some("d2")),
+            ],
+        );
+        let mut b = rpt(
+            "pr",
+            42002,
+            &[
+                ("match_by_index", 1.0, Some("d1")),
+                ("aggregate_count", 1.0, Some("d2")),
+            ],
+        );
+        skip_op(
+            &mut b,
+            "aggregate_count",
+            "engine lacks procedure 'algo.maxFlow' (capability probe)",
+        );
+        for an in [gate(&a, &b), advisory(&a, &b)] {
+            assert_eq!(
+                an.verdict,
+                OverallVerdict::Pass,
+                "a skip never gates or caps"
+            );
+            assert!(an.diverged_ops().is_empty(), "a skip is not a divergence");
+            let oa = &an.ops["aggregate_count"];
+            assert_eq!(oa.op_outcome, OpOutcome::Skipped);
+            assert_eq!(oa.correctness, Correctness::NotGated);
+            assert!(oa.skipped_baseline.is_none());
+            assert_eq!(
+                oa.skipped_candidate.as_deref(),
+                Some("engine lacks procedure 'algo.maxFlow' (capability probe)")
+            );
+            // The measured side's cell stays visible for context but is never comparable.
+            assert!(oa
+                .cells
+                .iter()
+                .all(|c| c.perf_verdict == Verdict::NotApplicable));
+            assert_eq!(
+                an.totals,
+                OutcomeCounts {
+                    pass: 1,
+                    regressed: 0,
+                    diverged: 0,
+                    skipped: 1,
+                    not_applicable: 0
+                }
+            );
+            assert_eq!(an.comparable_cells, 1);
+            let (emoji, headline) = an.verdict_line();
+            assert_eq!(emoji, "🟢");
+            assert!(
+                headline.contains("1 op(s) skipped (engine lacks their required procedure)"),
+                "{headline}"
+            );
+        }
+    }
+
+    #[test]
+    fn op_skipped_on_both_sides_is_tallied_without_cells() {
+        let mut a = rpt(
+            "main",
+            42001,
+            &[
+                ("match_by_index", 1.0, Some("d1")),
+                ("aggregate_count", 1.0, Some("d2")),
+            ],
+        );
+        let mut b = rpt(
+            "pr",
+            42002,
+            &[
+                ("match_by_index", 1.0, Some("d1")),
+                ("aggregate_count", 1.0, Some("d2")),
+            ],
+        );
+        skip_op(
+            &mut a,
+            "aggregate_count",
+            "engine lacks procedure 'algo.MSF' (capability probe)",
+        );
+        skip_op(
+            &mut b,
+            "aggregate_count",
+            "engine lacks procedure 'algo.MSF' (capability probe)",
+        );
+        let an = gate(&a, &b);
+        let oa = &an.ops["aggregate_count"];
+        assert!(
+            oa.cells.is_empty(),
+            "skipped on both sides ⇒ no measured cell"
+        );
+        assert_eq!(oa.op_outcome, OpOutcome::Skipped);
+        assert!(oa.skipped_baseline.is_some() && oa.skipped_candidate.is_some());
+        // Every skip is visible in the tallies, even with no cell.
+        assert_eq!(an.totals.skipped, 1);
+        assert_eq!(an.verdict, OverallVerdict::Pass);
+    }
+
+    #[test]
+    fn all_ops_skipped_is_advisory_never_green() {
+        let a = rpt("main", 42001, &[("match_by_index", 1.0, Some("d1"))]);
+        let mut b = rpt("pr", 42002, &[("match_by_index", 1.0, Some("d1"))]);
+        skip_op(
+            &mut b,
+            "match_by_index",
+            "engine lacks procedure 'algo.pageRank' (capability probe)",
+        );
+        let an = gate(&a, &b);
+        // The only op is skipped ⇒ zero comparable cells ⇒ Advisory (never a silent green).
+        assert_eq!(an.verdict, OverallVerdict::Advisory);
+        assert_eq!(an.comparable_cells, 0);
+        assert_eq!(
+            an.totals,
+            OutcomeCounts {
+                pass: 0,
+                regressed: 0,
+                diverged: 0,
+                skipped: 1,
+                not_applicable: 0
+            }
+        );
+        let (emoji, headline) = an.verdict_line();
+        assert_eq!(emoji, "⚠");
+        assert!(headline.starts_with("no comparable cells"), "{headline}");
+        assert!(headline.contains("1 op(s) skipped"), "{headline}");
+    }
+
+    #[test]
+    fn cells_json_carries_skip_reasons_and_skipped_outcome() {
+        // The serialized skip contract: `op_outcome: "skipped"`, the per-side reason fields
+        // present exactly when a side skipped, and the `skipped` bucket in `totals`.
+        let a = rpt(
+            "main",
+            42001,
+            &[
+                ("match_by_index", 1.0, Some("d1")),
+                ("aggregate_count", 1.0, Some("d2")),
+            ],
+        );
+        let mut b = rpt(
+            "pr",
+            42002,
+            &[
+                ("match_by_index", 1.0, Some("d1")),
+                ("aggregate_count", 1.0, Some("d2")),
+            ],
+        );
+        skip_op(
+            &mut b,
+            "aggregate_count",
+            "engine lacks procedure 'algo.maxFlow' (capability probe)",
+        );
+        let an = gate(&a, &b);
+        let value: serde_json::Value = serde_json::from_str(&an.to_json().unwrap()).unwrap();
+        let op = &value["ops"]["aggregate_count"];
+        assert_eq!(op["op_outcome"], "skipped");
+        assert!(
+            op.get("skipped_baseline").is_none(),
+            "absent side omits its skip field"
+        );
+        assert_eq!(
+            op["skipped_candidate"],
+            "engine lacks procedure 'algo.maxFlow' (capability probe)"
+        );
+        assert_eq!(value["totals"]["skipped"], 1);
+        // Round-trips through serde (the skip fields deserialize too).
+        let back: RegressionAnalysis = serde_json::from_value(value).unwrap();
+        assert_eq!(back, an);
     }
 
     #[test]
@@ -1117,7 +1380,24 @@ mod tests {
                 "warnings",
             ]
         );
-        assert_eq!(value["schema_version"], 1);
+        assert_eq!(value["schema_version"], 2);
+        // …and the per-op shape: the op-level field set (skip fields are omitted when absent —
+        // they appear exactly when a side skipped the op) plus the outcome-counts bucket set.
+        let op = &value["ops"]["match_by_index"];
+        let mut op_keys: Vec<&str> = op.as_object().unwrap().keys().map(String::as_str).collect();
+        op_keys.sort_unstable();
+        assert_eq!(op_keys, vec!["cells", "correctness", "op_outcome", "tier"]);
+        let mut count_keys: Vec<&str> = value["totals"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        count_keys.sort_unstable();
+        assert_eq!(
+            count_keys,
+            vec!["diverged", "not_applicable", "pass", "regressed", "skipped"]
+        );
         // …and the per-cell shape (what the interactive page consumes).
         let cell = &value["ops"]["match_by_index"]["cells"][0];
         let mut cell_keys: Vec<&str> =

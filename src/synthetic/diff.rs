@@ -349,8 +349,13 @@ pub fn regression_markdown(analysis: &RegressionAnalysis) -> String {
         for mode in [CacheMode::Cached, CacheMode::Uncached] {
             render_regression_mode(&mut op_body, oa, mode, analysis.divergence_policy, la, lb);
         }
-        // Ops with no measured cell get no report section; the totals still tally them when
-        // they diverged (gate → regressed, advisory → diverged).
+        // A skipped op keeps its section even with no measured cell — the skip reason is the
+        // content (design Phase 6 §3.5). Other ops with no measured cell get no report section;
+        // the totals still tally them when they diverged (gate → regressed, advisory → diverged).
+        let skip_note = skip_note(oa, la, lb);
+        if let Some(note) = &skip_note {
+            op_body.push_str(&format!("\n_{}_\n", md_cell(note)));
+        }
         if op_body.trim().is_empty() {
             continue;
         }
@@ -362,8 +367,13 @@ pub fn regression_markdown(analysis: &RegressionAnalysis) -> String {
         } else {
             ""
         };
+        let skipped_note = if skip_note.is_some() {
+            " — skipped (perf verdict N/A)"
+        } else {
+            ""
+        };
         body.push_str(&format!(
-            "\n<details><summary>{} <code>{}</code>{diverged_note}</summary>\n{op_body}\n</details>\n",
+            "\n<details><summary>{} <code>{}</code>{diverged_note}{skipped_note}</summary>\n{op_body}\n</details>\n",
             oa.op_outcome.emoji(),
             html_escape(op)
         ));
@@ -401,8 +411,35 @@ pub fn regression_markdown(analysis: &RegressionAnalysis) -> String {
              informational, never part of the verdict. Non-blocking.\n"
         }
     });
+    if analysis.totals.skipped > 0 {
+        out.push_str(
+            "\n_⏭ = skipped: the engine lacks the op's required procedure (capability probe) — \
+             recorded but never executed there, so it is neither a pass nor a divergence._\n",
+        );
+    }
     out.push_str(&body);
     out
+}
+
+/// The one-line skip explanation for an op skipped on either side (capability probe — design
+/// Phase 6 §3.5), or `None` for a measured op. Labels name the runs so an asymmetric skip reads
+/// unambiguously.
+fn skip_note(
+    oa: &OpAnalysis,
+    la: &str,
+    lb: &str,
+) -> Option<String> {
+    match (&oa.skipped_baseline, &oa.skipped_candidate) {
+        (Some(b), Some(c)) if b == c => Some(format!("⏭ skipped on both sides — {b}")),
+        (Some(b), Some(c)) => Some(format!("⏭ skipped on both sides — {la}: {b}; {lb}: {c}")),
+        (Some(b), None) => Some(format!(
+            "⏭ skipped on {la} — {b}; measured on {lb} only, so no cell is comparable"
+        )),
+        (None, Some(c)) => Some(format!(
+            "⏭ skipped on {lb} — {c}; measured on {la} only, so no cell is comparable"
+        )),
+        (None, None) => None,
+    }
 }
 
 /// Render one op × cache-mode regression table (rows = this mode's cells) with a verdict column.
@@ -459,7 +496,7 @@ fn render_regression_mode(
 //
 // The full `regression_markdown` report is authoritative but too big to embed in a PR comment for
 // the full 64-shape corpus (GitHub caps a comment at 65 KB). [`summarize`] distills the *same*
-// [`RegressionAnalysis`] model into a compact structure — overall verdict, per-tier 🟢/🔴/⚠/N-A
+// [`RegressionAnalysis`] model into a compact structure — overall verdict, per-tier 🟢/🔴/⚠/⏭/N-A
 // counts and the worst offenders — that CI can post inline while hosting the full report
 // externally under [`SyntheticSummary::slug`]. Because both renderers consume the same model,
 // drift is impossible by construction (a consistency test still pins the two together).
@@ -469,8 +506,11 @@ fn render_regression_mode(
 /// v2 (design §A5 of `synthetic-three-way-report.md`): adds `budget_profile`,
 /// `divergence_policy`, `gated_metric`, `elapsed_secs`, a `diverged` bucket in [`OutcomeCounts`]
 /// and the four-state [`OverallVerdict`] as `overall_verdict` (replacing v1's three-state
-/// `verdict`).
-pub const SUMMARY_SCHEMA_VERSION: u32 = 2;
+/// `verdict`). v3 (design Phase 6 §3.5 of `synthetic-cover-algorithms-phase6.md`): adds the
+/// `skipped` [`OpOutcome`] value and [`OutcomeCounts`] bucket for capability-skipped ops — a v2
+/// consumer parsing outcomes exhaustively would reject `"skipped"`, so this is a bump, not a
+/// silent extension.
+pub const SUMMARY_SCHEMA_VERSION: u32 = 3;
 
 /// Maximum number of regressed ops listed under "worst offenders" (keeps the comment compact).
 const MAX_OFFENDERS: usize = 5;
@@ -496,7 +536,7 @@ pub struct Offender {
 }
 
 /// A compact, machine-usable summary of a `report --diff --regression` comparison: overall verdict,
-/// per-tier 🟢/🔴/⚠/N-A counts and the worst offenders — small enough to embed in a PR comment while
+/// per-tier 🟢/🔴/⚠/⏭/N-A counts and the worst offenders — small enough to embed in a PR comment while
 /// the full Markdown report is hosted externally and linked by [`slug`](Self::slug). Emitted as JSON
 /// by `report --summary`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -570,11 +610,16 @@ pub fn summarize(analysis: &RegressionAnalysis) -> SyntheticSummary {
     let mut full = OutcomeCounts::default();
     let mut offenders: Vec<Offender> = Vec::new();
     for (op, oa) in &analysis.ops {
-        // Mirror the model's totals: ops with ≥1 cell are tallied, and a cell-less **diverged**
-        // op is tallied too (every divergence counts). Under the `gate` policy (divergence ⇒
-        // `Regressed`) it also surfaces as a worst offender below; under `advisory` it stays a
-        // `DivergedAdvisory` and is intentionally kept out of the offender list.
-        if !oa.cells.is_empty() || oa.correctness == Correctness::Diverged {
+        // Mirror the model's totals: ops with ≥1 cell are tallied, a cell-less **diverged**
+        // op is tallied too (every divergence counts), and so is a **skipped** op (every skip
+        // is visible — design Phase 6 §3.5). Under the `gate` policy (divergence ⇒ `Regressed`)
+        // a divergence also surfaces as a worst offender below; under `advisory` it stays a
+        // `DivergedAdvisory` and is intentionally kept out of the offender list, as is a skip
+        // (an expected engine limitation, not a failure).
+        if !oa.cells.is_empty()
+            || oa.correctness == Correctness::Diverged
+            || oa.op_outcome == OpOutcome::Skipped
+        {
             match oa.tier.as_deref() {
                 Some("core") => core.add(oa.op_outcome),
                 Some("full") => full.add(oa.op_outcome),
@@ -619,7 +664,7 @@ impl SyntheticSummary {
     }
 
     /// A compact Markdown rendering for a PR sticky comment (well under GitHub's 65 KB limit): the
-    /// verdict headline, a per-tier 🟢/🔴/⚠/N-A table and the worst offenders, ending with the
+    /// verdict headline, a per-tier 🟢/🔴/⚠/⏭/N-A table and the worst offenders, ending with the
     /// stable [`slug`](Self::slug) so CI can link the externally-hosted full report.
     pub fn to_markdown(&self) -> String {
         let mut out = String::new();
@@ -638,22 +683,24 @@ impl SyntheticSummary {
             out.push_str(&format!("\n_report: {}_\n", self.slug));
             return out;
         }
-        out.push_str("\n| tier | 🟢 | 🔴 | ⚠ | N/A |\n|---|---:|---:|---:|---:|\n");
+        out.push_str("\n| tier | 🟢 | 🔴 | ⚠ | ⏭ | N/A |\n|---|---:|---:|---:|---:|---:|\n");
         for t in &self.per_tier {
             out.push_str(&format!(
-                "| {} | {} | {} | {} | {} |\n",
+                "| {} | {} | {} | {} | {} | {} |\n",
                 md_cell(&t.tier),
                 t.counts.pass,
                 t.counts.regressed,
                 t.counts.diverged,
+                t.counts.skipped,
                 t.counts.not_applicable
             ));
         }
         out.push_str(&format!(
-            "| **all** | {} | {} | {} | {} |\n",
+            "| **all** | {} | {} | {} | {} | {} |\n",
             self.totals.pass,
             self.totals.regressed,
             self.totals.diverged,
+            self.totals.skipped,
             self.totals.not_applicable
         ));
         if !self.worst_offenders.is_empty() {
@@ -763,6 +810,7 @@ mod tests {
                 }],
                 result_digest: Some("sha256:aa".to_string()),
                 policy: None,
+                skipped: None,
             },
         );
         Report {
@@ -1095,6 +1143,7 @@ mod tests {
                     levels,
                     result_digest: Some("sha256:aa".to_string()),
                     policy: None,
+                    skipped: None,
                 },
             );
         }
@@ -1179,6 +1228,7 @@ mod tests {
                     }],
                     result_digest: Some((*digest).to_string()),
                     policy: None,
+                    skipped: None,
                 },
             );
         }
@@ -1243,6 +1293,7 @@ mod tests {
                 pass: 1,
                 regressed: 0,
                 diverged: 0,
+                skipped: 0,
                 not_applicable: 0
             }
         );
@@ -1258,6 +1309,7 @@ mod tests {
                 pass: 1,
                 regressed: 0,
                 diverged: 0,
+                skipped: 0,
                 not_applicable: 0
             }
         );
@@ -1360,6 +1412,7 @@ mod tests {
                 pass: 1,
                 regressed: 1,
                 diverged: 0,
+                skipped: 0,
                 not_applicable: 0
             }
         );
@@ -1371,6 +1424,7 @@ mod tests {
                 pass: 1,
                 regressed: 0,
                 diverged: 0,
+                skipped: 0,
                 not_applicable: 0
             }
         );
@@ -1380,6 +1434,7 @@ mod tests {
                 pass: 0,
                 regressed: 1,
                 diverged: 0,
+                skipped: 0,
                 not_applicable: 0
             }
         );
@@ -1403,6 +1458,7 @@ mod tests {
                 pass: 1,
                 regressed: 0,
                 diverged: 0,
+                skipped: 0,
                 not_applicable: 0
             }
         );
@@ -1635,8 +1691,8 @@ mod tests {
     }
 
     #[test]
-    fn summary_v2_freezes_the_top_level_field_set() {
-        // The summary JSON is a machine contract (schema v2). This test freezes the exact
+    fn summary_v3_freezes_the_top_level_field_set() {
+        // The summary JSON is a machine contract (schema v3). This test freezes the exact
         // top-level field set — adding/renaming/removing a field must bump
         // SUMMARY_SCHEMA_VERSION and update this list deliberately.
         let a = report(42001, 1.0, 1000.0);
@@ -1668,12 +1724,19 @@ mod tests {
                 "worst_offenders",
             ]
         );
-        assert_eq!(value["schema_version"], 2);
+        assert_eq!(value["schema_version"], 3);
         // The outcome-counts shape (shared by totals and per_tier) is part of the contract too.
-        let mut count_keys: Vec<&str> =
-            value["totals"].as_object().unwrap().keys().map(String::as_str).collect();
+        let mut count_keys: Vec<&str> = value["totals"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
         count_keys.sort_unstable();
-        assert_eq!(count_keys, vec!["diverged", "not_applicable", "pass", "regressed"]);
+        assert_eq!(
+            count_keys,
+            vec!["diverged", "not_applicable", "pass", "regressed", "skipped"]
+        );
     }
 
     #[test]
@@ -1752,17 +1815,23 @@ mod tests {
         // Diverged is its own bucket — never `regressed`.
         assert_eq!(
             s.totals,
-            OutcomeCounts { pass: 1, regressed: 0, diverged: 1, not_applicable: 0 }
+            OutcomeCounts {
+                pass: 1,
+                regressed: 0,
+                diverged: 1,
+                skipped: 0,
+                not_applicable: 0
+            }
         );
         assert_eq!(s.diverged_ops, vec!["aggregate_count".to_string()]);
         // Advisory-diverged ops are not "worst offenders" (nothing regressed).
         assert!(s.worst_offenders.is_empty(), "{s:?}");
         let md = s.to_markdown();
         assert!(md.contains("⚠ pass, 1 diverged"), "{md}");
-        // Tier table gains the ⚠ column; both ops are Core.
-        assert!(md.contains("| tier | 🟢 | 🔴 | ⚠ | N/A |"), "{md}");
-        assert!(md.contains("| core | 1 | 0 | 1 | 0 |"), "{md}");
-        assert!(md.contains("| **all** | 1 | 0 | 1 | 0 |"), "{md}");
+        // Tier table gains the ⚠ and ⏭ columns; both ops are Core.
+        assert!(md.contains("| tier | 🟢 | 🔴 | ⚠ | ⏭ | N/A |"), "{md}");
+        assert!(md.contains("| core | 1 | 0 | 1 | 0 | 0 |"), "{md}");
+        assert!(md.contains("| **all** | 1 | 0 | 1 | 0 | 0 |"), "{md}");
     }
 
     #[test]
@@ -1793,5 +1862,138 @@ mod tests {
         assert!(s.headline.starts_with("no comparable cells"), "{}", s.headline);
         let md = s.to_markdown();
         assert!(md.contains("⚠ no comparable cells"), "{md}");
+    }
+
+    /// Mark `op` in `rep` as capability-skipped, exactly as replay records it.
+    fn skip_op(
+        rep: &mut Report,
+        op: &str,
+        reason: &str,
+    ) {
+        let o = rep.operations.get_mut(op).unwrap();
+        o.levels = vec![];
+        o.result_digest = None;
+        o.policy = None;
+        o.skipped = Some(reason.to_string());
+    }
+
+    #[test]
+    fn skipped_op_renders_the_skip_note_and_lands_in_the_skipped_bucket() {
+        let a = rpt(
+            "main",
+            42001,
+            &[("match_by_index", 1.0, "d1"), ("algo_max_flow_single_pair", 1.0, "d2")],
+        );
+        let mut b = rpt(
+            "pr",
+            42002,
+            &[("match_by_index", 1.0, "d1"), ("algo_max_flow_single_pair", 1.0, "d2")],
+        );
+        skip_op(
+            &mut b,
+            "algo_max_flow_single_pair",
+            "engine lacks procedure 'algo.maxFlow'",
+        );
+        let g = regression_guard(&a, &b);
+        // The skip is not a divergence — the pair is Comparable and the other op still gates.
+        let analysis = analyze_gate(&a, &b, &g, &Thresholds::builtin());
+        assert_eq!(analysis.verdict, OverallVerdict::Pass);
+        let md = regression_markdown(&analysis);
+        // Op section survives with the asymmetric skip note, ⏭ emoji and legend line.
+        assert!(
+            md.contains(
+                "⏭ skipped on pr — engine lacks procedure 'algo.maxFlow'; measured on main only"
+            ),
+            "{md}"
+        );
+        assert!(md.contains("— skipped (perf verdict N/A)"), "{md}");
+        assert!(md.contains("_⏭ = skipped:"), "{md}");
+        assert_eq!(
+            md_collapsed_emoji(&md, "algo_max_flow_single_pair").as_deref(),
+            Some("⏭"),
+            "{md}"
+        );
+        // Headline annotates the skip; the summary tallies it in its own bucket, never offenders.
+        let s = summarize(&analysis);
+        assert_eq!(s.overall_verdict, OverallVerdict::Pass);
+        assert!(s.headline.contains("1 op(s) skipped"), "{}", s.headline);
+        assert_eq!(
+            s.totals,
+            OutcomeCounts {
+                pass: 1,
+                regressed: 0,
+                diverged: 0,
+                skipped: 1,
+                not_applicable: 0
+            }
+        );
+        assert!(s.worst_offenders.is_empty(), "{s:?}");
+        assert!(s.diverged_ops.is_empty(), "{s:?}");
+        // The tier table: the skipped op is a real algorithm shape, so `shape_tier` places it in
+        // the **full** row's ⏭ column, and the **all** row (fed by `totals`) shows it too — every
+        // skip is visible in the summary Markdown.
+        let smd = s.to_markdown();
+        assert!(smd.contains("| core | 1 | 0 | 0 | 0 | 0 |"), "{smd}");
+        assert!(smd.contains("| full | 0 | 0 | 0 | 1 | 0 |"), "{smd}");
+        assert!(smd.contains("| **all** | 1 | 0 | 0 | 1 | 0 |"), "{smd}");
+    }
+
+    #[test]
+    fn op_skipped_on_both_sides_renders_a_single_note() {
+        let a = rpt(
+            "main",
+            42001,
+            &[("match_by_index", 1.0, "d1"), ("algo_max_flow_single_pair", 1.0, "d2")],
+        );
+        let mut b = rpt(
+            "pr",
+            42002,
+            &[("match_by_index", 1.0, "d1"), ("algo_max_flow_single_pair", 1.0, "d2")],
+        );
+        let mut a2 = a.clone();
+        skip_op(
+            &mut a2,
+            "algo_max_flow_single_pair",
+            "engine lacks procedure 'algo.maxFlow'",
+        );
+        skip_op(
+            &mut b,
+            "algo_max_flow_single_pair",
+            "engine lacks procedure 'algo.maxFlow'",
+        );
+        let g = regression_guard(&a2, &b);
+        let analysis = analyze_gate(&a2, &b, &g, &Thresholds::builtin());
+        let md = regression_markdown(&analysis);
+        assert!(
+            md.contains("⏭ skipped on both sides — engine lacks procedure 'algo.maxFlow'"),
+            "{md}"
+        );
+        // Different per-side reasons render both, labeled by run.
+        skip_op(
+            &mut b,
+            "algo_max_flow_single_pair",
+            "engine lacks procedure 'algo.MaxFlowV2'",
+        );
+        let g = regression_guard(&a2, &b);
+        let analysis = analyze_gate(&a2, &b, &g, &Thresholds::builtin());
+        let md = regression_markdown(&analysis);
+        assert!(
+            md.contains(
+                "⏭ skipped on both sides — main: engine lacks procedure 'algo.maxFlow'; \
+                 pr: engine lacks procedure 'algo.MaxFlowV2'"
+            ),
+            "{md}"
+        );
+    }
+
+    #[test]
+    fn skip_free_comparisons_render_no_skip_legend() {
+        let a = rpt("main", 42001, &[("match_by_index", 1.0, "d1")]);
+        let b = rpt("pr", 42002, &[("match_by_index", 1.0, "d1")]);
+        let g = regression_guard(&a, &b);
+        let md = regression_markdown(&analyze_gate(&a, &b, &g, &Thresholds::builtin()));
+        assert!(!md.contains('⏭'), "{md}");
+        let s = summarize_gate(&a, &b, &g, &Thresholds::builtin());
+        assert!(!s.headline.contains("skipped"), "{}", s.headline);
     }
 }

@@ -86,6 +86,14 @@ pub struct OpEntry {
     /// content).
     #[serde(default, skip_serializing_if = "RecordedBudget::is_inherit")]
     pub budget: RecordedBudget,
+    /// The engine procedure this op requires (e.g. `algo.maxFlow`), or `None` for plain Cypher —
+    /// [`crate::synthetic::shapes::ShapeCapability::procedure`] at record time. Replay probes the
+    /// engine's `dbms.procedures()` registry before the reference capture (design §3.5) and
+    /// **skips** an op whose procedure is absent instead of failing the replay. Like the other
+    /// replay-policy fields it is **not** folded into the [`Manifest::workload_hash`] and defaults
+    /// to `None` (never probed/skipped) for bundles written before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability: Option<String>,
     pub count: usize,
 }
 
@@ -255,6 +263,8 @@ pub struct RecordedOp {
     pub result_gated: bool,
     /// Per-op replay budget — see [`OpEntry::budget`]. Inherit (the default) for every current op.
     pub budget: RecordedBudget,
+    /// The engine procedure this op requires, if any — see [`OpEntry::capability`].
+    pub capability: Option<String>,
     pub commands: Vec<String>,
 }
 
@@ -310,6 +320,8 @@ pub fn record(
             // Propagate the catalog's per-op budget (inherit for every current op) so replay
             // applies the same overrides a generated run applies from the spec.
             budget: spec(op).budget.into(),
+            // Catalog ops are plain Cypher — no procedure to probe for.
+            capability: None,
             commands: render_commands(op, dataset, corpus_seed)?,
         });
     }
@@ -457,6 +469,7 @@ fn record_rendered_impl(
             kind: op.key.kind(),
             result_gated: op.result_gated,
             budget: op.budget.clone(),
+            capability: op.capability.clone(),
             count: cyphers.len(),
         });
     }
@@ -797,6 +810,7 @@ mod tests {
             key: OpKey::dynamic("single_vertex_read", QueryType::Read),
             result_gated: true,
             budget: RecordedBudget::default(),
+            capability: None,
             commands: vec![
                 "CYPHER id=1 MATCH (n:User {id:$id}) RETURN n".to_string(),
                 "CYPHER id=2 MATCH (n:User {id:$id}) RETURN n".to_string(),
@@ -834,6 +848,7 @@ mod tests {
             key: OpKey::dynamic("vector_query_nodes_smoke", QueryType::Read),
             result_gated: false,
             budget: RecordedBudget::default(),
+            capability: None,
             commands: vec![
                 "CALL db.idx.vector.queryNodes('User', 'embedding', 10, vecf32([0.1, 0.2, 0.3])) \
                  YIELD node, score RETURN id(node), score LIMIT 10"
@@ -887,6 +902,7 @@ mod tests {
             key: OpKey::dynamic("bulk_insert", QueryType::Write),
             result_gated: true,
             budget: RecordedBudget::default(),
+            capability: None,
             commands: vec!["CYPHER x=1 CREATE (n:User {id:$x})".to_string()],
         }];
         let err = record_rendered(&spec, "g", &ops, 1, 8, &dir).unwrap_err();
@@ -906,6 +922,7 @@ mod tests {
             key: OpKey::dynamic("empty_shape", QueryType::Read),
             result_gated: true,
             budget: RecordedBudget::default(),
+            capability: None,
             commands: vec![],
         }];
         let err = record_rendered(&spec, "g", &ops, 1, 8, &dir).unwrap_err();
@@ -926,12 +943,14 @@ mod tests {
                 key: OpKey::dynamic("a_read", QueryType::Read),
                 result_gated: true,
                 budget: RecordedBudget::default(),
+                capability: None,
                 commands: vec!["CYPHER  RETURN 1".to_string()],
             },
             RecordedOp {
                 key: OpKey::dynamic("a_read", QueryType::Read),
                 result_gated: true,
                 budget: RecordedBudget::default(),
+                capability: None,
                 commands: vec!["CYPHER  RETURN 2".to_string()],
             },
         ];
@@ -964,6 +983,7 @@ mod tests {
             key: OpKey::dynamic("../escape", QueryType::Read),
             result_gated: true,
             budget: RecordedBudget::default(),
+            capability: None,
             commands: vec!["CYPHER  RETURN 1".to_string()],
         }];
         let err = record_rendered(&spec, "g", &ops, 1, 8, &dir).unwrap_err();
@@ -986,12 +1006,14 @@ mod tests {
                 key: OpKey::dynamic("dup", QueryType::Read),
                 result_gated: true,
                 budget: RecordedBudget::default(),
+                capability: None,
                 commands: vec!["CYPHER  RETURN 1".to_string()],
             },
             RecordedOp {
                 key: OpKey::dynamic("dup", QueryType::Write),
                 result_gated: true,
                 budget: RecordedBudget::default(),
+                capability: None,
                 commands: vec!["CYPHER  CREATE (n)".to_string()],
             },
         ];
@@ -1014,6 +1036,7 @@ mod tests {
             key: OpKey::dynamic("safe_read", QueryType::Read),
             result_gated: true,
             budget: RecordedBudget::default(),
+            capability: None,
             commands: vec!["CYPHER  RETURN 1".to_string()],
         }];
         record_rendered(&spec, "g", &ops, 1, 8, &dir).unwrap();
@@ -1041,6 +1064,7 @@ mod tests {
             key: OpKey::dynamic("safe_read", QueryType::Read),
             result_gated: true,
             budget: RecordedBudget::default(),
+            capability: None,
             commands: vec!["CYPHER  RETURN 1".to_string()],
         }];
         record_rendered(&spec, "g", &ops, 1, 8, &dir).unwrap();
@@ -1070,12 +1094,14 @@ mod tests {
                 key: OpKey::dynamic("gated_read", QueryType::Read),
                 result_gated: true,
                 budget: RecordedBudget::default(),
+                capability: None,
                 commands: vec!["CYPHER  RETURN 1".to_string()],
             },
             RecordedOp {
                 key: OpKey::dynamic("na_read", QueryType::Read),
                 result_gated: false,
                 budget: RecordedBudget::default(),
+                capability: None,
                 commands: vec!["CYPHER  MATCH (n) RETURN n LIMIT 1".to_string()],
             },
         ];
@@ -1104,6 +1130,7 @@ mod tests {
                 key: OpKey::dynamic("shape", QueryType::Read),
                 result_gated: gated,
                 budget: RecordedBudget::default(),
+                capability: None,
                 commands: vec!["CYPHER  RETURN 1".to_string()],
             }];
             let m = record_rendered(&spec, "g", &ops, 1, 8, &dir).unwrap();
@@ -1140,6 +1167,7 @@ mod tests {
                 key: OpKey::dynamic("shape", QueryType::Read),
                 result_gated: true,
                 budget,
+                capability: None,
                 commands: vec!["CYPHER  RETURN 1".to_string()],
             }];
             let m = record_rendered(&spec, "g", &ops, 1, 8, &dir).unwrap();
@@ -1178,12 +1206,14 @@ mod tests {
                 key: OpKey::dynamic("heavy_shape", QueryType::Read),
                 result_gated: false,
                 budget: budget.clone(),
+                capability: None,
                 commands: vec!["CYPHER  RETURN 1".to_string()],
             },
             RecordedOp {
                 key: OpKey::dynamic("plain_shape", QueryType::Read),
                 result_gated: true,
                 budget: RecordedBudget::default(),
+                capability: None,
                 commands: vec!["CYPHER  RETURN 2".to_string()],
             },
         ];
@@ -1195,6 +1225,78 @@ mod tests {
         // The manifest text carries a `budget` key only for the budgeted op.
         let manifest_json = std::fs::read_to_string(dir.join("manifest.json")).unwrap();
         assert_eq!(manifest_json.matches("\"budget\"").count(), 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn capability_is_not_folded_into_the_workload_hash() {
+        // Like `kind`/`result_gated`/`budget`, the capability annotation is replay policy (which
+        // procedure to probe for), not workload content: two bundles that differ ONLY in a
+        // capability must share a `workload_hash`, so annotating an op never breaks A/B
+        // comparability with an annotation-free recording of the same workload.
+        let spec = DatasetSpec {
+            seed: 5,
+            nodes: 20,
+            edges: 60,
+        };
+        let make = |capability: Option<String>| {
+            let dir = temp_bundle_dir(if capability.is_some() {
+                "synthrec-cs"
+            } else {
+                "synthrec-cn"
+            });
+            let ops = vec![RecordedOp {
+                key: OpKey::dynamic("shape", QueryType::Read),
+                result_gated: true,
+                budget: RecordedBudget::default(),
+                capability,
+                commands: vec!["CYPHER  RETURN 1".to_string()],
+            }];
+            let m = record_rendered(&spec, "g", &ops, 1, 8, &dir).unwrap();
+            std::fs::remove_dir_all(&dir).ok();
+            m.workload_hash
+        };
+        assert_eq!(make(None), make(Some("algo.maxFlow".to_string())));
+    }
+
+    #[test]
+    fn capability_round_trips_through_the_manifest_and_none_is_omitted() {
+        // An annotated op's required procedure survives record → load; an annotation-free op is
+        // omitted from the manifest JSON entirely, so every pre-field bundle stays byte-compatible
+        // (and deserializes to `None`).
+        let dir = temp_bundle_dir("synthrec-capability");
+        let spec = DatasetSpec {
+            seed: 5,
+            nodes: 20,
+            edges: 60,
+        };
+        let ops = vec![
+            RecordedOp {
+                key: OpKey::dynamic("algo_shape", QueryType::Read),
+                result_gated: false,
+                budget: RecordedBudget::default(),
+                capability: Some("algo.maxFlow".to_string()),
+                commands: vec!["CYPHER  RETURN 1".to_string()],
+            },
+            RecordedOp {
+                key: OpKey::dynamic("plain_shape", QueryType::Read),
+                result_gated: true,
+                budget: RecordedBudget::default(),
+                capability: None,
+                commands: vec!["CYPHER  RETURN 2".to_string()],
+            },
+        ];
+        record_rendered(&spec, "g", &ops, 1, 8, &dir).unwrap();
+
+        let bundle = load(&dir).unwrap();
+        assert_eq!(
+            bundle.manifest.ops[0].capability.as_deref(),
+            Some("algo.maxFlow")
+        );
+        assert_eq!(bundle.manifest.ops[1].capability, None);
+        // The manifest text carries a `capability` key only for the annotated op.
+        let manifest_json = std::fs::read_to_string(dir.join("manifest.json")).unwrap();
+        assert_eq!(manifest_json.matches("\"capability\"").count(), 1);
         std::fs::remove_dir_all(&dir).ok();
     }
 

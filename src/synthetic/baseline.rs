@@ -34,6 +34,12 @@ pub struct BaselineKey {
     /// and for runs where every op inherited the global knobs.
     #[serde(default)]
     pub op_policies: BTreeMap<String, OpPolicy>,
+    /// Ops the run **skipped** (capability probe — design Phase 6 §3.5): recorded but never
+    /// executed because the engine lacks their required procedure. An op skipped on either side
+    /// is exempt from the per-op policy and result-digest gates (it carries neither), and reads
+    /// as neither a pass nor a divergence. Empty for pre-Phase-6 reports.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub skipped_ops: BTreeSet<String>,
 }
 
 impl BaselineKey {
@@ -53,6 +59,12 @@ impl BaselineKey {
                 .iter()
                 .filter_map(|(name, op)| op.policy.clone().map(|p| (name.clone(), p)))
                 .collect(),
+            skipped_ops: report
+                .operations
+                .iter()
+                .filter(|(_, op)| op.skipped.is_some())
+                .map(|(name, _)| name.clone())
+                .collect(),
         }
     }
 }
@@ -69,13 +81,19 @@ pub enum GuardOutcome {
 /// The first per-op **effective-policy** mismatch between two runs, as a human-readable refusal
 /// reason (`None` when every op's policy matches). Compared over the union of budgeted ops: a
 /// policy present on one side only is a mismatch too — that op was measured under different
-/// conditions (e.g. one run's bundle carried a budget the other's didn't).
+/// conditions (e.g. one run's bundle carried a budget the other's didn't). Ops in `skipped` —
+/// capability-skipped on either side (design Phase 6 §3.5) — are exempt: a skipped op was never
+/// measured, so its structurally-absent policy is not a config mismatch.
 fn op_policy_mismatch(
     baseline: &BTreeMap<String, OpPolicy>,
     candidate: &BTreeMap<String, OpPolicy>,
+    skipped: &BTreeSet<String>,
 ) -> Option<String> {
     let all: BTreeSet<&String> = baseline.keys().chain(candidate.keys()).collect();
     for op in all {
+        if skipped.contains(op.as_str()) {
+            continue;
+        }
         let b = baseline.get(op);
         let c = candidate.get(op);
         if b != c {
@@ -126,8 +144,18 @@ pub fn guard(
     // Per-op measurement-policy gate: budgets are deliberately outside the workload_hash (replay
     // policy, not workload content — design §3.4), so two runs of "the same workload" can still
     // have measured an op under different sampling/cache/sweep/timeout conditions. Such latencies
-    // are not comparable — refuse, exactly like a workload mismatch.
-    if let Some(reason) = op_policy_mismatch(&baseline.op_policies, &candidate.op_policies) {
+    // are not comparable — refuse, exactly like a workload mismatch. Ops capability-skipped on
+    // either side are exempt (never measured ⇒ nothing to compare — design Phase 6 §3.5).
+    let skipped_either: BTreeSet<String> = baseline
+        .skipped_ops
+        .union(&candidate.skipped_ops)
+        .cloned()
+        .collect();
+    if let Some(reason) = op_policy_mismatch(
+        &baseline.op_policies,
+        &candidate.op_policies,
+        &skipped_either,
+    ) {
         return GuardOutcome::Abort { reason };
     }
 
@@ -136,8 +164,13 @@ pub fn guard(
     // results faster could masquerade as an improvement. A candidate that is missing a digest the
     // baseline has is also a mismatch (fail closed, matching the docs' "every op" guarantee).
     // Digests are present for `synthetic run --recording` runs; a `synthetic run` baseline has none, so the
-    // loop is a no-op there (and such runs already differ on `workload_hash` above).
+    // loop is a no-op there (and such runs already differ on `workload_hash` above). An op
+    // capability-skipped on either side is exempt: its absent digest means "never ran", not
+    // "returned different results".
     for (op, base_dig) in &baseline.result_digests {
+        if skipped_either.contains(op) {
+            continue;
+        }
         match candidate.result_digests.get(op) {
             Some(cand_dig) if cand_dig == base_dig => {}
             Some(cand_dig) => {
@@ -296,21 +329,36 @@ pub fn regression_guard(
     // Per-op effective measurement policy (design §3.4): budgets are outside the workload_hash,
     // so a matching hash does not prove each op was measured under the same conditions. A per-op
     // policy mismatch is a *config* mismatch — the whole pair is NotComparable, exactly like the
-    // global sampling/sweep checks above.
+    // global sampling/sweep checks above. Ops capability-skipped on either side (design Phase 6
+    // §3.5) are exempt — never measured ⇒ no measurement conditions to mismatch.
+    let skipped = |r: &Report| -> Vec<String> {
+        r.operations
+            .iter()
+            .filter(|(_, op)| op.skipped.is_some())
+            .map(|(name, _)| name.clone())
+            .collect()
+    };
+    let skipped_either: BTreeSet<String> = skipped(baseline)
+        .into_iter()
+        .chain(skipped(candidate))
+        .collect();
     let policies = |r: &Report| -> BTreeMap<String, OpPolicy> {
         r.operations
             .iter()
             .filter_map(|(name, op)| op.policy.clone().map(|p| (name.clone(), p)))
             .collect()
     };
-    if let Some(reason) = op_policy_mismatch(&policies(baseline), &policies(candidate)) {
+    if let Some(reason) =
+        op_policy_mismatch(&policies(baseline), &policies(candidate), &skipped_either)
+    {
         return RegressionGuard::NotComparable { reason };
     }
 
     // 2. Per-op result divergence — reported, never fatal. Over the *union* of ops: two present
     //    digests that differ, or an asymmetric one-side-only digest, is diverged (we can't verify
     //    correctness). Two absent digests carry no correctness info (e.g. a non-recording run) and
-    //    are left comparable, matching the strict guard.
+    //    are left comparable, matching the strict guard. An op capability-skipped on either side
+    //    is never diverged — its absent digest means "never ran", not "returned different results".
     let mut diverged_ops = BTreeSet::new();
     let all_ops: BTreeSet<&String> = baseline
         .operations
@@ -318,6 +366,9 @@ pub fn regression_guard(
         .chain(candidate.operations.keys())
         .collect();
     for op in all_ops {
+        if skipped_either.contains(op.as_str()) {
+            continue;
+        }
         let bd = baseline.operations.get(op).and_then(|o| o.result_digest.as_ref());
         let cd = candidate.operations.get(op).and_then(|o| o.result_digest.as_ref());
         let diverged = match (bd, cd) {
@@ -403,6 +454,7 @@ mod tests {
             server_image: None,
             result_digests: BTreeMap::new(),
             op_policies: BTreeMap::new(),
+            skipped_ops: BTreeSet::new(),
         }
     }
 
@@ -419,6 +471,7 @@ mod tests {
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
             op_policies: BTreeMap::new(),
+            skipped_ops: BTreeSet::new(),
         }
     }
 
@@ -456,6 +509,7 @@ mod tests {
                 .iter()
                 .map(|(k, p)| (k.to_string(), p.clone()))
                 .collect(),
+            skipped_ops: BTreeSet::new(),
         }
     }
 
@@ -496,6 +550,21 @@ mod tests {
         let base = key_with_policies(&[("algo_max_flow", policy(1))]);
         let cand = key_with_policies(&[("algo_max_flow", policy(1))]);
         assert!(matches!(guard(&base, &cand), GuardOutcome::Proceed { .. }));
+    }
+
+    #[test]
+    fn skipped_op_is_exempt_from_the_policy_and_digest_gates() {
+        // The baseline measured `algo_max_flow` under a budget and gated its digest; the candidate
+        // engine lacks the procedure and skipped the op. Its structurally-absent policy/digest is
+        // "never ran", not a config or correctness mismatch — the pair stays comparable
+        // (design Phase 6 §3.5). Both skip directions are exempt.
+        let mut base = key_with_policies(&[("algo_max_flow", policy(1))]);
+        base.result_digests
+            .insert("algo_max_flow".to_string(), "sha256:aaa".to_string());
+        let mut cand = key_with_policies(&[]);
+        cand.skipped_ops.insert("algo_max_flow".to_string());
+        assert!(matches!(guard(&base, &cand), GuardOutcome::Proceed { .. }));
+        assert!(matches!(guard(&cand, &base), GuardOutcome::Proceed { .. }));
     }
 
     #[test]
@@ -615,6 +684,7 @@ mod tests {
             server_image: Some("falkordb@sha256:aaa".to_string()),
             result_digests: BTreeMap::new(),
             op_policies: BTreeMap::new(),
+            skipped_ops: BTreeSet::new(),
         };
         let cand = BaselineKey {
             workload_hash: Some("sha256:abc".to_string()),
@@ -622,6 +692,7 @@ mod tests {
             server_image: Some("falkordb@sha256:bbb".to_string()),
             result_digests: BTreeMap::new(),
             op_policies: BTreeMap::new(),
+            skipped_ops: BTreeSet::new(),
         };
         match guard(&base, &cand) {
             GuardOutcome::Proceed { warnings } => {
@@ -657,6 +728,7 @@ mod regression_guard_tests {
                     levels: vec![],
                     result_digest: dig.map(|s| s.to_string()),
                     policy: None,
+                    skipped: None,
                 },
             );
         }
@@ -901,5 +973,111 @@ mod regression_guard_tests {
         // Only the budgeted op lands in the key; inherit-everything ops stay absent.
         assert_eq!(key.op_policies.len(), 1);
         assert_eq!(key.op_policies.get("algo_max_flow"), Some(&policy(1)));
+    }
+
+    /// Mark `op` in `rep` as capability-skipped, exactly as replay records it (design Phase 6
+    /// §3.5): a skip reason, no levels, no digest, no policy.
+    fn skip_op(
+        rep: &mut Report,
+        op: &str,
+    ) {
+        let o = rep.operations.get_mut(op).unwrap();
+        o.levels = vec![];
+        o.result_digest = None;
+        o.policy = None;
+        o.skipped = Some("engine lacks procedure 'algo.maxFlow' (capability probe)".to_string());
+    }
+
+    #[test]
+    fn regression_guard_exempts_skipped_ops_from_the_policy_gate() {
+        // The baseline measured `algo_max_flow` under a recorded budget; the candidate engine
+        // lacks its procedure and skipped it (so it carries no policy). That asymmetry is
+        // "never ran", not a config mismatch — the pair stays comparable, in both directions.
+        let mut a = rep(
+            "h",
+            100,
+            50,
+            vec![1],
+            None,
+            None,
+            &[("algo_max_flow", None), ("scan", Some("d"))],
+        );
+        let mut b = rep(
+            "h",
+            100,
+            50,
+            vec![1],
+            None,
+            None,
+            &[("algo_max_flow", None), ("scan", Some("d"))],
+        );
+        a.operations.get_mut("algo_max_flow").unwrap().policy = Some(policy(1));
+        skip_op(&mut b, "algo_max_flow");
+        assert!(matches!(
+            regression_guard(&a, &b),
+            RegressionGuard::Comparable { .. }
+        ));
+        assert!(matches!(
+            regression_guard(&b, &a),
+            RegressionGuard::Comparable { .. }
+        ));
+    }
+
+    #[test]
+    fn regression_guard_never_marks_a_skipped_op_diverged() {
+        // The measured side has a digest, the skipped side has none — the usual asymmetric-digest
+        // divergence rule must NOT fire for a skip (nothing ran, so nothing differed).
+        let a = rep(
+            "h",
+            100,
+            50,
+            vec![1],
+            None,
+            None,
+            &[("algo_max_flow", Some("d1")), ("scan", Some("d"))],
+        );
+        let mut b = rep(
+            "h",
+            100,
+            50,
+            vec![1],
+            None,
+            None,
+            &[("algo_max_flow", Some("d1")), ("scan", Some("d"))],
+        );
+        skip_op(&mut b, "algo_max_flow");
+        match regression_guard(&a, &b) {
+            RegressionGuard::Comparable { diverged_ops, .. } => {
+                assert!(
+                    diverged_ops.is_empty(),
+                    "skip is never a divergence: {diverged_ops:?}"
+                );
+            }
+            other => panic!("expected Comparable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn baseline_key_collects_skipped_ops_from_a_report() {
+        let mut r = rep(
+            "h",
+            100,
+            50,
+            vec![1],
+            None,
+            None,
+            &[("algo_max_flow", None), ("scan", None)],
+        );
+        skip_op(&mut r, "algo_max_flow");
+        let key = BaselineKey::from_report(&r);
+        assert_eq!(key.skipped_ops.len(), 1);
+        assert!(key.skipped_ops.contains("algo_max_flow"));
+        // …and a fully-measured report yields an empty set (which serialization omits, keeping
+        // pre-Phase-6 baseline JSON byte-identical).
+        let clean = rep("h", 100, 50, vec![1], None, None, &[("scan", None)]);
+        let clean_key = BaselineKey::from_report(&clean);
+        assert!(clean_key.skipped_ops.is_empty());
+        let json = serde_json::to_string(&clean_key).unwrap();
+        assert!(!json.contains("skipped_ops"), "{json}");
     }
 }

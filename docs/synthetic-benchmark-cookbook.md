@@ -220,6 +220,10 @@ Each algorithm shape records a tight per-op `budget` (25 samples, warm-up 2, C=1
 60 s server timeout) and a reduced corpus (1 command each; a small seeded set of distinct
 `(source, target)` pairs for maxFlow), and starts **result-N/A** — latency/trend coverage, not
 divergence gating.
+Each also records its required procedure as a `capability` (replay policy like `budget`, outside
+the `workload_hash`): at replay, one `CALL dbms.procedures()` probe **skips** any op whose
+procedure the engine lacks — reported as `skipped: <reason>` (⏭ in the diff, its own `skipped`
+bucket in the summary — neither a pass nor a divergence) instead of failing the run.
 Algorithms never enter `--repo-reads full` or the per-PR `synthetic-verify` gate; every generated
 graph is already simple (no parallel `:Friend` edges) with `bench_capacity` on every edge, so the
 flow/MSF shapes need no extra fixture.

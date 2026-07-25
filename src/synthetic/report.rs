@@ -229,6 +229,12 @@ pub struct OperationReport {
     /// the diff/regression/baseline guards.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy: Option<OpPolicy>,
+    /// Why this op was **skipped** — recorded but never executed — or `None` for a measured op.
+    /// Set by the replay capability probe (design Phase 6 §3.5) when the engine lacks the
+    /// procedure the op's manifest entry requires. A skipped op has no levels, no digest and no
+    /// policy; the diff/regression guards treat it as **neither a pass nor a divergence**.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skipped: Option<String>,
 }
 
 impl OperationReport {
@@ -351,6 +357,10 @@ impl Report {
         }
         for (name, op) in &self.operations {
             out.push_str(&format!("\n{}\n", name));
+            if let Some(reason) = &op.skipped {
+                out.push_str(&format!("  skipped — {}\n", reason));
+                continue;
+            }
             render_op_levels(&mut out, op);
         }
         out
@@ -423,6 +433,10 @@ impl Report {
 
         for (name, op) in &self.operations {
             out.push_str(&format!("\n## `{}`\n", name));
+            if let Some(reason) = &op.skipped {
+                out.push_str(&format!("\n_⏭ skipped — {}_\n", md_cell(reason)));
+                continue;
+            }
             render_op_levels_markdown(&mut out, op);
         }
         out
@@ -685,6 +699,7 @@ mod tests {
                 ],
                 result_digest: None,
                 policy: None,
+                skipped: None,
             },
         );
         Report {
@@ -980,6 +995,7 @@ mod tests {
                 ],
                 result_digest: None,
                 policy: None,
+                skipped: None,
             },
         );
         ops.insert(
@@ -993,6 +1009,7 @@ mod tests {
                 }],
                 result_digest: None,
                 policy: None,
+                skipped: None,
             },
         );
         ops.insert(
@@ -1015,6 +1032,7 @@ mod tests {
                 ],
                 result_digest: None,
                 policy: None,
+                skipped: None,
             },
         );
         r.operations = ops;
@@ -1058,5 +1076,46 @@ mod tests {
     #[test]
     fn non_placeholder_version_not_flagged() {
         assert!(!sample_report().meta.server.is_placeholder());
+    }
+
+    #[test]
+    fn skipped_op_round_trips_renders_and_defaults_to_none() {
+        // A capability-skipped op (design Phase 6 §3.5) carries its reason through JSON…
+        let mut report = sample_report();
+        {
+            let op = report.operations.get_mut("return_const").unwrap();
+            op.levels = vec![];
+            op.result_digest = None;
+            op.skipped =
+                Some("engine lacks procedure 'algo.maxFlow' (capability probe)".to_string());
+        }
+        let json = report.to_json().unwrap();
+        assert!(json.contains("\"skipped\""));
+        let back: Report = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            back.operations
+                .get("return_const")
+                .unwrap()
+                .skipped
+                .as_deref(),
+            Some("engine lacks procedure 'algo.maxFlow' (capability probe)")
+        );
+        // …renders in both the console and Markdown outputs…
+        let console = report.to_console();
+        assert!(
+            console.contains("skipped — engine lacks procedure 'algo.maxFlow'"),
+            "{console}"
+        );
+        let md = report.to_markdown();
+        assert!(
+            md.contains("_⏭ skipped — engine lacks procedure 'algo.maxFlow'"),
+            "{md}"
+        );
+        // …while a measured op (and any pre-Phase-6 report) omits the field and reads back None.
+        let plain = sample_report().to_json().unwrap();
+        assert!(!plain.contains("\"skipped\""));
+        let legacy: OperationReport = serde_json::from_str(r#"{"levels": []}"#).unwrap();
+        assert_eq!(legacy.skipped, None);
+        assert!(!sample_report().to_console().contains("skipped —"));
     }
 }
