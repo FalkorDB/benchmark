@@ -16,6 +16,16 @@
 //! integrity (the bundle's `workload_hash` is verified on load), graph fidelity (drop + load +
 //! count-verify), and result correctness (a per-op result-**value** digest + the concurrency check),
 //! leaving latency to be compared advisorily by the [`crate::synthetic::baseline`] guard.
+//!
+//! **Write bundles** (recording format v2, Phase 7 §4.1 latency tier): a bundle whose ops are
+//! writes is measured via `GRAPH.QUERY` at **C=1 only**, with the base graph **reset (drop + load
+//! + count-verify) before every measured cell** (op × cache mode) so mutation drift stays bounded
+//! to one cell's invocations. Nothing is asserted about results or mutation counters — outcomes
+//! are state/value-dependent (§10), so the latency tier records `result_digest: None` and leaves
+//! correctness to the deferred oracle tier. The replay ends with an **error-safe final restore**:
+//! the recorded base is reloaded (on success *and* failure) and its node/edge content digests are
+//! verified against the pristine post-load capture, so a write replay can never leave a mutated
+//! graph behind on the endpoint.
 
 use crate::error::BenchmarkError::OtherError;
 use crate::error::BenchmarkResult;
@@ -23,12 +33,14 @@ use crate::falkor::falkor_endpoint_to_redis_url;
 use crate::queries_repository::QueryType;
 use crate::synthetic::catalog::DEFAULT_RESET_EVERY;
 use crate::synthetic::dataset::{self, DatasetSpec};
-use crate::synthetic::op_runner::{capture_result, ResultShape};
+use crate::synthetic::op_runner::{capture_result, run_and_drain, ResultShape};
 use crate::synthetic::recording::{self, Bundle};
-use crate::synthetic::report::{DatasetInfo, Meta, Report, ServerInfo, SCHEMA_VERSION};
+use crate::synthetic::report::{
+    DatasetInfo, LevelReport, Meta, OperationReport, Report, ServerInfo, SCHEMA_VERSION,
+};
 use crate::synthetic::{
     measure_op, normalize_concurrency, open_graph, provenance, redact_endpoint,
-    validate_op_config, write_report, CacheSelection, Config, MeasureTarget, OpKey,
+    validate_op_config, write_report, CacheMode, CacheSelection, Config, MeasureTarget, OpKey,
 };
 use falkordb::AsyncGraph;
 use futures::StreamExt;
@@ -74,25 +86,20 @@ pub struct ReplayConfig {
 
 /// Replay `config`'s bundle: load the recorded graph, then measure the recorded commands through the
 /// closed-loop engine across the concurrency sweep + cache modes, verifying results are unchanged by
-/// concurrency. Builds the [`Report`].
+/// concurrency (reads) or resetting the base graph per measured cell (writes — see the module docs).
+/// Builds the [`Report`].
 pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
     if config.samples == 0 {
         return Err(OtherError("run --recording --samples must be greater than 0".to_string()));
     }
     let concurrency = normalize_concurrency(&config.concurrency)?;
     let bundle = recording::load(&config.recording_dir)?;
-    // Fail closed on a write op: v1 recording is read-only, and the measurement path uses RO_QUERY.
-    // A hand-crafted bundle naming a write op would otherwise be run as a read.
-    if let Some((op, _)) = bundle
-        .commands
-        .iter()
-        .find(|(op, _)| op.kind() == QueryType::Write)
-    {
-        return Err(OtherError(format!(
-            "recorded op '{}' is a write op — replaying writes is not supported (v1 records reads \
-             only)",
-            op.name()
-        )));
+    // A bundle is single-kind: reads replay through RO_QUERY exactly as before; a write bundle
+    // (format v2) takes the Phase 7 write path. Its invariants — no mixed kinds, no --no-load,
+    // C=1 only, nothing result-gated — are guarded up front, offline, before any connection.
+    let has_writes = bundle.commands.iter().any(|(op, _)| op.kind() == QueryType::Write);
+    if has_writes {
+        validate_write_replay(&bundle, config, &concurrency)?;
     }
     let dataset_spec = bundle.spec();
     let graph_name = config
@@ -135,6 +142,15 @@ pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
             })?;
     }
 
+    // Phase 7 §3.5: capture the pristine base-graph content (node + edge digests) right after the
+    // initial load, so the error-safe final restore below can verify the graph it leaves behind is
+    // EXACTLY the recorded base — content-verified, not just count-verified.
+    let pristine = if has_writes {
+        Some(capture_graph_content(&mut graph, config).await?)
+    } else {
+        None
+    };
+
     // Per-op replay policy from the recorded manifest (keyed by the op's unique name):
     // `result_gated` + the per-op `budget` (design §3.4). A result-N/A op — a shape whose result
     // set isn't byte-stable (LIMIT-without-ORDER, top-k, float scores — design §3.2 / Decision 4)
@@ -164,7 +180,9 @@ pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
             .expect("every replayed op name was validated against the manifest above")
     };
 
-    // Engine config for the recorded workload (writes/reset are irrelevant — recorded ops are reads).
+    // Engine config for the recorded workload (`reset_every` only frames catalog write scratch,
+    // which recorded ops never use — recorded writes measure with `write: None`, resetting via
+    // whole-graph reloads instead).
     let engine_config = Config {
         endpoint: config.endpoint.clone(),
         graph: graph_name.clone(),
@@ -243,6 +261,17 @@ pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
             .client_deadline_ms
             .map(Duration::from_millis)
             .unwrap_or(client_deadline);
+        if op.kind() == QueryType::Write {
+            // Fail-fast probe for a write op, via GRAPH.QUERY (`RO_QUERY` rejects writes
+            // server-side): run the first recorded command once, untimed, so a broken command
+            // fails here instead of mid-measurement. Its mutation is erased by the first
+            // measured cell's base reset. No shapes: the latency tier asserts nothing (§4.1).
+            run_and_drain(&mut graph, QueryType::Write, &cyphers[0], op_st, op_deadline)
+                .await
+                .map_err(|e| OtherError(format!("probing write '{}': {}", op.name(), e)))?;
+            reference.push((op.clone(), Arc::new(cyphers.clone()), Vec::new()));
+            continue;
+        }
         let to_capture: &[String] = if entry.result_gated { cyphers } else { &cyphers[..1] };
         let mut shapes = Vec::with_capacity(to_capture.len());
         for c in to_capture {
@@ -279,61 +308,102 @@ pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
             },
         );
     }
-    for (op, corpus, shapes) in &reference {
-        let entry = entry_for(op.name());
-        let is_gated = entry.result_gated;
-        // Overlay this op's recorded budget on the run's global config (the same per-op overlay a
-        // generated run applies from the catalog spec) — already validated before the reference
-        // pass, so the resolved knobs are known-good here.
-        let op_config = engine_config.with_recorded_budget(&entry.budget);
-        let op_concurrency = normalize_concurrency(&op_config.concurrency)?;
-        let op_deadline = Duration::from_millis(op_config.client_deadline_ms);
-        let op_max_c = op_concurrency.iter().copied().max().unwrap_or(1);
-        // Verify results are IDENTICAL at the op's highest concurrency (untimed) before trusting
-        // the measured latencies — a concurrent path that returns different/wrong results is a
-        // hard fail. Skipped for result-N/A ops, whose results aren't required to be stable.
-        if op_max_c > 1 && is_gated {
-            verify_concurrent(
-                &config.endpoint,
-                &graph_name,
-                corpus,
-                shapes,
-                op_max_c,
-                op_config.server_timeout_ms,
+    // The measurement loop runs inside an immediately-awaited block so a write replay can run its
+    // error-safe final restore on success AND failure (§3.5) before any error propagates.
+    let measured: BenchmarkResult<()> = async {
+        for (op, corpus, shapes) in &reference {
+            let entry = entry_for(op.name());
+            let is_gated = entry.result_gated;
+            // Overlay this op's recorded budget on the run's global config (the same per-op
+            // overlay a generated run applies from the catalog spec) — already validated before
+            // the reference pass, so the resolved knobs are known-good here.
+            let op_config = engine_config.with_recorded_budget(&entry.budget);
+            let op_concurrency = normalize_concurrency(&op_config.concurrency)?;
+            let op_deadline = Duration::from_millis(op_config.client_deadline_ms);
+            if op.kind() == QueryType::Write {
+                let op_report = measure_write_op(
+                    config,
+                    &bundle,
+                    &graph_name,
+                    &dataset_spec,
+                    op,
+                    &op_config,
+                    &op_concurrency,
+                    Arc::clone(corpus),
+                    run_token,
+                    &uid_alloc,
+                    op_deadline,
+                )
+                .await?;
+                operations.insert(op.name().to_string(), op_report);
+                continue;
+            }
+            let op_max_c = op_concurrency.iter().copied().max().unwrap_or(1);
+            // Verify results are IDENTICAL at the op's highest concurrency (untimed) before
+            // trusting the measured latencies — a concurrent path that returns different/wrong
+            // results is a hard fail. Skipped for result-N/A ops, whose results aren't required
+            // to be stable.
+            if op_max_c > 1 && is_gated {
+                verify_concurrent(
+                    &config.endpoint,
+                    &graph_name,
+                    corpus,
+                    shapes,
+                    op_max_c,
+                    op_config.server_timeout_ms,
+                    op_deadline,
+                )
+                .await
+                .map_err(|e| {
+                    OtherError(format!(
+                        "op '{}' returned different results at concurrency {}: {}",
+                        op.name(),
+                        op_max_c,
+                        e
+                    ))
+                })?;
+            }
+            let mut op_report = measure_op(
+                &op_config,
+                &op_concurrency,
+                MeasureTarget::read(),
+                Arc::clone(corpus),
+                run_token,
+                &uid_alloc,
                 op_deadline,
             )
-            .await
-            .map_err(|e| {
-                OtherError(format!(
-                    "op '{}' returned different results at concurrency {}: {}",
-                    op.name(),
-                    op_max_c,
-                    e
-                ))
-            })?;
+            .await?;
+            // Gate the result only for byte-stable shapes; a result-N/A op reports `None` so the
+            // diff guard renders it N/A instead of comparing a non-deterministic digest.
+            op_report.result_digest =
+                is_gated.then(|| op_result_digest(op.name(), shapes));
+            // Persist the op's effective measurement policy when its recorded budget overrode any
+            // global knob (design §3.4): budgets are deliberately outside the workload_hash, so
+            // this block is what lets the diff/regression/baseline guards refuse to compare two
+            // runs that measured the same workload under different per-op conditions.
+            op_report.policy =
+                (!entry.budget.is_inherit()).then(|| op_config.resolved_policy(&op_concurrency));
+            operations.insert(op.name().to_string(), op_report);
         }
-        let mut op_report = measure_op(
-            &op_config,
-            &op_concurrency,
-            MeasureTarget::read(),
-            Arc::clone(corpus),
-            run_token,
-            &uid_alloc,
-            op_deadline,
-        )
-        .await?;
-        // Gate the result only for byte-stable shapes; a result-N/A op reports `None` so the diff
-        // guard renders it N/A instead of comparing a non-deterministic digest.
-        op_report.result_digest =
-            is_gated.then(|| op_result_digest(op.name(), shapes));
-        // Persist the op's effective measurement policy when its recorded budget overrode any
-        // global knob (design §3.4): budgets are deliberately outside the workload_hash, so this
-        // block is what lets the diff/regression/baseline guards refuse to compare two runs that
-        // measured the same workload under different per-op conditions.
-        op_report.policy =
-            (!entry.budget.is_inherit()).then(|| op_config.resolved_policy(&op_concurrency));
-        operations.insert(op.name().to_string(), op_report);
+        Ok(())
     }
+    .await;
+
+    // Phase 7 §3.5: a write replay must leave the endpoint's graph exactly as recorded — final
+    // restore + content verification on success AND failure. On the failure path the restore is
+    // best-effort (logged, never masking the measurement error).
+    if let Some(pristine) = &pristine {
+        let restored = restore_and_verify(&bundle, &graph_name, &dataset_spec, config, pristine).await;
+        match (&measured, restored) {
+            (Ok(()), Err(e)) => return Err(e),
+            (Err(original), Err(e)) => warn!(
+                "final restore after failed write replay also failed: {} (measurement error: {})",
+                e, original
+            ),
+            _ => {}
+        }
+    }
+    measured?;
 
     // The corpus size is what the bundle actually recorded per op (not the compile-time constant) —
     // over every recorded op, including capability-skipped ones (it describes the bundle, not the
@@ -381,6 +451,188 @@ pub async fn run_and_report(config: &ReplayConfig) -> BenchmarkResult<()> {
     let report = run(config).await?;
     println!("{}", report.to_console());
     write_report(&report, &config.out).await
+}
+
+/// Guard the Phase 7 write-replay invariants for a bundle containing write ops — **offline**,
+/// before any connection is attempted, so a bad bundle/flag combination fails closed:
+///
+/// - **single-kind**: recorded bundles never mix reads and writes (one global sweep can't express
+///   swept reads + C=1 writes — design §4); the record path enforces this, but budgets and flags
+///   are outside `workload_hash`, so replay re-checks everything hand-editable;
+/// - **`--no-load` forbidden**: write measurement is defined from the recorded base graph
+///   (per-cell resets reload it — §3.3);
+/// - **C=1 only**: every write op's *effective* sweep (its recorded budget's, else the run's)
+///   must be exactly `[1]` (§5 defers concurrent writes);
+/// - **never result-gated**: the latency tier asserts nothing (§4.1) — a gated write would imply
+///   a correctness capture the write path deliberately skips.
+fn validate_write_replay(
+    bundle: &Bundle,
+    config: &ReplayConfig,
+    global_concurrency: &[usize],
+) -> BenchmarkResult<()> {
+    if let Some((op, _)) = bundle.commands.iter().find(|(op, _)| op.kind() != QueryType::Write) {
+        return Err(OtherError(format!(
+            "recorded bundle mixes write ops with read op '{}' — a bundle must be single-kind \
+             (record reads and writes as separate bundles)",
+            op.name()
+        )));
+    }
+    if !config.load {
+        return Err(OtherError(
+            "--no-load is not supported for a write bundle: write replay must start from the \
+             recorded base graph, which its per-cell resets reload (design §3.3/§3.5)"
+                .to_string(),
+        ));
+    }
+    for (op, _) in &bundle.commands {
+        let entry = bundle.manifest.ops.iter().find(|e| e.name == op.name());
+        let sweep: &[usize] = entry
+            .and_then(|e| e.budget.concurrency.as_deref())
+            .unwrap_or(global_concurrency);
+        if sweep != [1] {
+            return Err(OtherError(format!(
+                "write op '{}' resolves to concurrency sweep {:?} — write replay is C=1 only \
+                 (design §5; budgets are outside workload_hash, so this is enforced at replay)",
+                op.name(),
+                sweep
+            )));
+        }
+        if entry.is_some_and(|e| e.result_gated) {
+            return Err(OtherError(format!(
+                "write op '{}' is marked result-gated — the write latency tier asserts nothing \
+                 (design §4.1), so a write op can never gate on a result digest",
+                op.name()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Measure one recorded **write** op (Phase 7 §4.1): the base graph is **reset (drop + reload +
+/// count-verify) before every measured cell** (one cell per requested cache mode; C=1 enforced by
+/// [`validate_write_replay`]), bounding mutation drift to a single cell's invocations. Each cell
+/// runs [`measure_op`] with the op's config narrowed to that one cache mode, and the per-mode
+/// single-level results are merged into one C=1 [`LevelReport`] (cached + uncached + the derived
+/// compilation cost) so a write op's report shape matches a read op's.
+#[allow(clippy::too_many_arguments)]
+async fn measure_write_op(
+    config: &ReplayConfig,
+    bundle: &Bundle,
+    graph_name: &str,
+    dataset_spec: &DatasetSpec,
+    op: &OpKey,
+    op_config: &Config,
+    op_concurrency: &[usize],
+    corpus: Arc<Vec<String>>,
+    run_token: u64,
+    uid_alloc: &AtomicU64,
+    op_deadline: Duration,
+) -> BenchmarkResult<OperationReport> {
+    let mut cached = None;
+    let mut uncached = None;
+    for &mode in op_config.cache.modes() {
+        // Per-cell base reset, on its own short-lived connection (the measurement workers open
+        // their own).
+        let mut reset_conn = open_graph(&config.endpoint, graph_name).await?;
+        load_recorded_graph(&mut reset_conn, bundle, graph_name, dataset_spec, config).await?;
+        drop(reset_conn);
+        let cell_config = Config {
+            cache: match mode {
+                CacheMode::Cached => CacheSelection::Cached,
+                CacheMode::Uncached => CacheSelection::Uncached,
+            },
+            ..op_config.clone()
+        };
+        let cell_report = measure_op(
+            &cell_config,
+            op_concurrency,
+            MeasureTarget {
+                kind: QueryType::Write,
+                write: None,
+            },
+            Arc::clone(&corpus),
+            run_token,
+            uid_alloc,
+            op_deadline,
+        )
+        .await?;
+        let level = cell_report.levels.into_iter().next().ok_or_else(|| {
+            OtherError(format!("write op '{}' produced no level report", op.name()))
+        })?;
+        match mode {
+            CacheMode::Cached => cached = level.cached,
+            CacheMode::Uncached => uncached = level.uncached,
+        }
+    }
+    let compilation_ms_median = match (&cached, &uncached) {
+        (Some(cm), Some(um)) => Some(um.metrics.server_ms.median - cm.metrics.server_ms.median),
+        _ => None,
+    };
+    Ok(OperationReport {
+        levels: vec![LevelReport {
+            concurrency: 1,
+            cached,
+            uncached,
+            compilation_ms_median,
+        }],
+        // The latency tier asserts nothing about results (§4.1): no digest, ever.
+        result_digest: None,
+        // WRITE_BUDGET always overrides the global sweep, so the effective per-op policy is
+        // always persisted — the diff/baseline guards then refuse cross-policy comparisons.
+        policy: Some(op_config.resolved_policy(op_concurrency)),
+        skipped: None,
+    })
+}
+
+/// The whole-graph content queries backing the write replay's restore verification: the node and
+/// edge multisets, canonicalized value-by-value by [`capture_result`] (order-independent digest;
+/// node/edge canonicalization includes entity ids, which are deterministic across identical fresh
+/// loads because the recorded statements replay in recorded order onto an empty graph).
+const CONTENT_QUERIES: [&str; 2] =
+    ["MATCH (n) RETURN n", "MATCH (a)-[r]->(b) RETURN ID(a), r, ID(b)"];
+
+/// Capture the graph's full content shape ([`CONTENT_QUERIES`]) under load-scale timeouts.
+async fn capture_graph_content(
+    graph: &mut AsyncGraph,
+    config: &ReplayConfig,
+) -> BenchmarkResult<Vec<ResultShape>> {
+    // Whole-graph scans do real work — give them the same generous deadline as a bulk load.
+    let deadline = Duration::from_millis(config.client_deadline_ms.max(60_000));
+    let server_timeout_ms = config
+        .server_timeout_ms
+        .max(i64::try_from(deadline.as_millis()).unwrap_or(i64::MAX));
+    let mut shapes = Vec::with_capacity(CONTENT_QUERIES.len());
+    for cypher in CONTENT_QUERIES {
+        shapes.push(
+            capture_result(graph, cypher, server_timeout_ms, deadline)
+                .await
+                .map_err(|e| OtherError(format!("capturing graph content ({cypher}): {e}")))?,
+        );
+    }
+    Ok(shapes)
+}
+
+/// The write replay's final restore (§3.5): reload the recorded base graph, then verify its
+/// **content** — not just its counts — matches the pristine post-load capture, so the replay
+/// provably leaves the endpoint's graph exactly as recorded.
+async fn restore_and_verify(
+    bundle: &Bundle,
+    graph_name: &str,
+    dataset_spec: &DatasetSpec,
+    config: &ReplayConfig,
+    pristine: &[ResultShape],
+) -> BenchmarkResult<()> {
+    let mut graph = open_graph(&config.endpoint, graph_name).await?;
+    load_recorded_graph(&mut graph, bundle, graph_name, dataset_spec, config).await?;
+    let restored = capture_graph_content(&mut graph, config).await?;
+    if restored != pristine {
+        return Err(OtherError(format!(
+            "final restore left graph '{}' content-diverged from the recorded base (node/edge \
+             digests differ) — the recorded dataset did not reload reproducibly",
+            graph_name
+        )));
+    }
+    Ok(())
 }
 
 /// Ask the engine which procedures it registers (`dbms.procedures()`), returning their
@@ -526,11 +778,84 @@ fn op_result_digest(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::synthetic::catalog::RecordedBudget;
+    use crate::synthetic::recording::{DatasetKnobs, Manifest, OpEntry};
 
     fn shape(rows: usize, digest: &str) -> ResultShape {
         ResultShape {
             rows,
             value_digest: format!("sha256:{digest}"),
+        }
+    }
+
+    fn replay_config(load: bool, concurrency: Vec<usize>) -> ReplayConfig {
+        ReplayConfig {
+            recording_dir: PathBuf::from("/nonexistent/recording"),
+            // Nothing should ever connect in these tests — a guard regression that reaches the
+            // network fails loudly on this closed port instead of hanging.
+            endpoint: "falkor://127.0.0.1:1".to_string(),
+            graph: None,
+            load,
+            samples: 5,
+            warmup: 0,
+            concurrency,
+            cache: CacheSelection::Cached,
+            server_timeout_ms: 5_000,
+            client_deadline_ms: 6_000,
+            out: "unused.json".to_string(),
+            server_image: None,
+            label: None,
+        }
+    }
+
+    /// A minimal in-memory bundle: one op per `(name, kind, result_gated, budget)` row, each with
+    /// a single recorded command. (The workload hash is never checked here — these bundles feed
+    /// [`validate_write_replay`] directly, mimicking what a hand-crafted-but-hash-valid bundle
+    /// could smuggle past `recording::load`.)
+    fn bundle_of(rows: Vec<(&str, QueryType, bool, RecordedBudget)>) -> Bundle {
+        let ops = rows
+            .iter()
+            .map(|(name, kind, gated, budget)| OpEntry {
+                name: name.to_string(),
+                kind: *kind,
+                result_gated: *gated,
+                budget: budget.clone(),
+                capability: None,
+                count: 1,
+            })
+            .collect();
+        let commands = rows
+            .iter()
+            .map(|(name, kind, _, _)| {
+                (OpKey::dynamic(name.to_string(), *kind), vec!["CREATE (n)".to_string()])
+            })
+            .collect();
+        Bundle {
+            manifest: Manifest {
+                format_version: 2,
+                generator_version: "synthbench/v5".to_string(),
+                tool_version: "test".to_string(),
+                dataset: DatasetKnobs {
+                    seed: 7,
+                    nodes: 10,
+                    edges: 20,
+                },
+                graph: "g".to_string(),
+                corpus_seed: 7,
+                batch_size: 8,
+                ops,
+                workload_hash: "sha256:unchecked".to_string(),
+                created_at_epoch_secs: 0,
+            },
+            graph_statements: Vec::new(),
+            commands,
+        }
+    }
+
+    fn write_budget() -> RecordedBudget {
+        RecordedBudget {
+            concurrency: Some(vec![1]),
+            ..RecordedBudget::default()
         }
     }
 
@@ -551,22 +876,72 @@ mod tests {
     #[tokio::test]
     async fn run_rejects_zero_samples() {
         // Guarded before any disk/server access, so this stays hermetic.
-        let config = ReplayConfig {
-            recording_dir: PathBuf::from("/nonexistent/recording"),
-            endpoint: "falkor://127.0.0.1:6379".to_string(),
-            graph: None,
-            load: true,
-            samples: 0,
-            warmup: 0,
-            concurrency: vec![1],
-            cache: CacheSelection::Cached,
-            server_timeout_ms: 5_000,
-            client_deadline_ms: 6_000,
-            out: "unused.json".to_string(),
-            server_image: None,
-            label: None,
-        };
+        let mut config = replay_config(true, vec![1]);
+        config.samples = 0;
         let err = run(&config).await.unwrap_err();
         assert!(format!("{err}").contains("samples must be greater than 0"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_write_replay_rejects_a_mixed_bundle() {
+        // Single-kind invariant (§4): the record path already refuses mixed bundles, but the
+        // replay re-checks because a hand-crafted manifest with a correct v2 hash can mix kinds.
+        let bundle = bundle_of(vec![
+            ("w", QueryType::Write, false, write_budget()),
+            ("r", QueryType::Read, true, RecordedBudget::default()),
+        ]);
+        let err = validate_write_replay(&bundle, &replay_config(true, vec![1]), &[1]).unwrap_err();
+        assert!(format!("{err}").contains("mixes write ops with read op 'r'"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_write_replay_rejects_no_load() {
+        // §3.3/§3.5: write measurement is defined from the recorded base graph.
+        let bundle = bundle_of(vec![("w", QueryType::Write, false, write_budget())]);
+        let err = validate_write_replay(&bundle, &replay_config(false, vec![1]), &[1]).unwrap_err();
+        assert!(
+            format!("{err}").contains("--no-load is not supported for a write bundle"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_write_replay_rejects_a_non_c1_sweep() {
+        // §5: C=1 only — budgets are outside workload_hash, so a tampered budget passes the load
+        // hash gate and MUST be caught here, whether the sweep comes from the budget…
+        let tampered = RecordedBudget {
+            concurrency: Some(vec![8]),
+            ..RecordedBudget::default()
+        };
+        let bundle = bundle_of(vec![("w", QueryType::Write, false, tampered)]);
+        let err = validate_write_replay(&bundle, &replay_config(true, vec![1]), &[1]).unwrap_err();
+        assert!(format!("{err}").contains("write replay is C=1 only"), "got: {err}");
+        assert!(format!("{err}").contains("[8]"), "must name the offending sweep: {err}");
+
+        // …or from the run's global sweep via an inherit budget.
+        let bundle = bundle_of(vec![("w", QueryType::Write, false, RecordedBudget::default())]);
+        let err = validate_write_replay(&bundle, &replay_config(true, vec![1, 8]), &[1, 8])
+            .unwrap_err();
+        assert!(format!("{err}").contains("write replay is C=1 only"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_write_replay_rejects_a_result_gated_write() {
+        // §4.1: the latency tier asserts nothing — result_gated isn't hashed, so a tampered
+        // manifest could otherwise send a write down the RO_QUERY capture path.
+        let bundle = bundle_of(vec![("w", QueryType::Write, true, write_budget())]);
+        let err = validate_write_replay(&bundle, &replay_config(true, vec![1]), &[1]).unwrap_err();
+        assert!(format!("{err}").contains("marked result-gated"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_write_replay_accepts_a_c1_write_bundle() {
+        // The recorded WRITE_BUDGET pins C=[1]; an inherit budget under a C=1 global sweep is
+        // equally valid.
+        let bundle = bundle_of(vec![
+            ("w1", QueryType::Write, false, write_budget()),
+            ("w2", QueryType::Write, false, RecordedBudget::default()),
+        ]);
+        validate_write_replay(&bundle, &replay_config(true, vec![1]), &[1]).unwrap();
     }
 }

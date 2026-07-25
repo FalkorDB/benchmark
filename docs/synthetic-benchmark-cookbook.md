@@ -229,6 +229,26 @@ Algorithms never enter `--repo-reads full` or the per-PR `synthetic-verify` gate
 graph is already simple (no parallel `:Friend` edges) with `bench_capacity` on every edge, so the
 flow/MSF shapes need no extra fixture.
 
+**Variant — the opt-in write shapes.** `--repo-writes` records the A/B benchmark's 10 write shapes
+(`CREATE`/`SET`/`MERGE`/`DETACH DELETE`/`REMOVE`/`FOREACH`) as a **single-kind write bundle** —
+mutually exclusive with every read selector:
+
+```bash
+# The 10 write shapes as their own bundle (recording format v2 — the hash binds each op's kind):
+benchmark synthetic record --repo-writes --nodes 1000 --edges 5000 --seed 7 --out-dir rec-writes
+benchmark synthetic run --recording rec-writes --endpoint falkor://127.0.0.1:6379 --out writes.json
+```
+
+This is the **latency tier** of the writes design: replay measures each write shape via
+`GRAPH.QUERY` at its pinned **C=1 budget** (100 samples, warm-up 10), **resets the base graph
+before every measured cell** (op × cache mode) so mutation drift stays bounded, and asserts
+**nothing** about results or mutation counters (`result_digest` stays `null` — outcomes are state-
+and value-dependent). The replay finishes with an **error-safe final restore**: on success *and*
+failure the recorded base is reloaded and its node/edge **content digests** are verified against
+the pristine post-load capture, so the endpoint's graph is provably left exactly as recorded.
+`--no-load` is refused for write bundles. Writes never enter `--repo-reads`, any tier, or the
+per-PR `synthetic-verify` gate.
+
 ---
 
 <a id="story-4"></a>

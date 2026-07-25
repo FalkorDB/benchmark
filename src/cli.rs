@@ -547,6 +547,12 @@ pub enum SyntheticCommands {
         )]
         repo_algorithms: bool,
         #[arg(
+            long = "repo-writes",
+            conflicts_with_all = ["ops", "all_reads", "tier", "repo_reads", "repo_algorithms"],
+            help = "record the A/B benchmark's 10 WRITE shapes from queries_repository (CREATE/SET/MERGE/DELETE/REMOVE/FOREACH) as a write bundle (recording format v2; the workload_hash binds each op's read/write kind). Replay measures them via GRAPH.QUERY at C=1 only, resetting the base graph before every measured cell and restoring + content-verifying it afterwards; results/counters are NOT asserted (latency tier). Write bundles are single-kind: mutually exclusive with every read selector."
+        )]
+        repo_writes: bool,
+        #[arg(
             long,
             help = "seed for the dataset and the per-operation corpora (same seed + same tool build ⇒ identical bundle; default 0)"
         )]
