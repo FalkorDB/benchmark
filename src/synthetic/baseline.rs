@@ -115,8 +115,12 @@ pub fn guard(
 
     let mut warnings = Vec::new();
     // Only warn "same version" when both versions are actually *known* and equal — two unknown
-    // (`None`) versions are not a known match, so don't claim there's no delta to measure.
-    if baseline.module_graph_ver.is_some() && baseline.module_graph_ver == candidate.module_graph_ver
+    // (`None`) versions are not a known match, so don't claim there's no delta to measure. The
+    // dev placeholder is excluded too: two edge/RC images both reporting the placeholder are NOT
+    // known to be the same build (the separate placeholder warning below covers them).
+    if baseline.module_graph_ver.is_some()
+        && baseline.module_graph_ver == candidate.module_graph_ver
+        && baseline.module_graph_ver != Some(ServerInfo::PLACEHOLDER_VER)
     {
         warnings.push(format!(
             "baseline and candidate ran the same FalkorDB module version ({}) — there is no \
@@ -270,12 +274,27 @@ fn advisory_warnings(
     let mut warnings = Vec::new();
     let bv = baseline.meta.server.module_graph_ver;
     let cv = candidate.meta.server.module_graph_ver;
-    if bv.is_some() && bv == cv {
+    // Two placeholder versions are NOT a known match (every edge/RC image reports the same
+    // placeholder), so suppress the "same version" claim and let the placeholder warning below
+    // carry the signal (design §A6 of synthetic-three-way-report.md).
+    if bv.is_some() && bv == cv && bv != Some(ServerInfo::PLACEHOLDER_VER) {
         warnings.push(format!(
             "baseline and candidate ran the same FalkorDB module version ({}) — there is no \
              version delta to measure",
             ver_str(cv)
         ));
+    }
+    // A *differing* module version is noted too — advisory only, never a comparability guard
+    // (design §A1). Placeholder sides are excluded: the placeholder warning below carries the
+    // signal, and a placeholder-to-real "change" is not a meaningful version delta.
+    if let (Some(a), Some(b)) = (bv, cv) {
+        if a != b && a != ServerInfo::PLACEHOLDER_VER && b != ServerInfo::PLACEHOLDER_VER {
+            warnings.push(format!(
+                "FalkorDB module version changed: {} → {}",
+                ver_str(bv),
+                ver_str(cv)
+            ));
+        }
     }
     if bv == Some(ServerInfo::PLACEHOLDER_VER) || cv == Some(ServerInfo::PLACEHOLDER_VER) {
         warnings.push(
@@ -427,6 +446,21 @@ mod tests {
                 assert!(warnings.iter().any(|w| w.contains("dev placeholder")));
             }
             other => panic!("expected Proceed with a placeholder warning, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn equal_placeholder_versions_do_not_claim_a_same_version_match() {
+        // Two edge/RC images both report the placeholder — that is NOT a known version match, so
+        // only the placeholder warning fires, not the misleading "no delta to measure" one.
+        let base = key(Some("sha256:abc"), Some(ServerInfo::PLACEHOLDER_VER));
+        let cand = key(Some("sha256:abc"), Some(ServerInfo::PLACEHOLDER_VER));
+        match guard(&base, &cand) {
+            GuardOutcome::Proceed { warnings } => {
+                assert!(!warnings.iter().any(|w| w.contains("same FalkorDB module version")));
+                assert!(warnings.iter().any(|w| w.contains("dev placeholder")));
+            }
+            other => panic!("expected Proceed, got {other:?}"),
         }
     }
 
@@ -597,5 +631,57 @@ mod regression_guard_tests {
         // One side unread (None) can't be compared, so it does not disqualify.
         b.meta.server.max_queued_queries = None;
         assert!(matches!(regression_guard(&a, &b), RegressionGuard::Comparable { .. }));
+    }
+
+    #[test]
+    fn advisory_warnings_suppress_same_version_for_placeholder_pairs() {
+        // A real matching version still warns "no delta to measure"…
+        let a = rep("h", 100, 50, vec![1], Some(42001), None, &[]);
+        let b = rep("h", 100, 50, vec![1], Some(42001), None, &[]);
+        match regression_guard(&a, &b) {
+            RegressionGuard::Comparable { warnings, .. } => {
+                assert!(warnings.iter().any(|w| w.contains("same FalkorDB module version")));
+            }
+            other => panic!("expected Comparable, got {other:?}"),
+        }
+        // …but two placeholder versions (every edge/RC image) are not a known match: only the
+        // placeholder warning fires (design §A6 of synthetic-three-way-report.md).
+        let pa = rep("h", 100, 50, vec![1], Some(ServerInfo::PLACEHOLDER_VER), None, &[]);
+        let pb = rep("h", 100, 50, vec![1], Some(ServerInfo::PLACEHOLDER_VER), None, &[]);
+        match regression_guard(&pa, &pb) {
+            RegressionGuard::Comparable { warnings, .. } => {
+                assert!(!warnings.iter().any(|w| w.contains("same FalkorDB module version")));
+                assert!(warnings.iter().any(|w| w.contains("dev placeholder")));
+            }
+            other => panic!("expected Comparable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn advisory_warnings_note_a_real_module_version_change() {
+        // Two differing *real* versions: an advisory "version changed" note — never a guard
+        // (design §A1; the comparison stays Comparable).
+        let a = rep("h", 100, 50, vec![1], Some(42001), None, &[]);
+        let b = rep("h", 100, 50, vec![1], Some(42002), None, &[]);
+        match regression_guard(&a, &b) {
+            RegressionGuard::Comparable { warnings, .. } => {
+                assert!(
+                    warnings.iter().any(|w| w.contains("module version changed")),
+                    "{warnings:?}"
+                );
+            }
+            other => panic!("expected Comparable, got {other:?}"),
+        }
+        // A placeholder on either side is not a meaningful delta: only the placeholder warning
+        // fires, never a "changed" note against a placeholder.
+        let pa = rep("h", 100, 50, vec![1], Some(ServerInfo::PLACEHOLDER_VER), None, &[]);
+        let pb = rep("h", 100, 50, vec![1], Some(42002), None, &[]);
+        match regression_guard(&pa, &pb) {
+            RegressionGuard::Comparable { warnings, .. } => {
+                assert!(!warnings.iter().any(|w| w.contains("module version changed")));
+                assert!(warnings.iter().any(|w| w.contains("dev placeholder")));
+            }
+            other => panic!("expected Comparable, got {other:?}"),
+        }
     }
 }

@@ -15,6 +15,7 @@
 //! modes cycle the same corpus in the same order, keeping the cached-vs-uncached medians comparable
 //! on a matched workload.
 
+pub mod analysis;
 pub mod catalog;
 pub mod config;
 pub mod baseline;
@@ -46,6 +47,7 @@ use crate::synthetic::op_runner::{run_and_drain, OpSample};
 use crate::synthetic::report::{
     DatasetInfo, LevelMetrics, LevelReport, Meta, OperationReport, Report,
 };
+use crate::synthetic::thresholds::BudgetProfile;
 use crate::synthetic::writes::{verify_mutation, WritePlan, WriteScratch};
 use clap::ValueEnum;
 use falkordb::{AsyncGraph, ConnectionStrategy, FalkorClientBuilder};
@@ -1519,10 +1521,59 @@ pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkRes
             );
             Ok(())
         }
-        crate::cli::SyntheticCommands::Report { input, diff, regression, thresholds, out, elapsed_secs, summary } => {
-            report_command(input, diff, regression, thresholds, out, elapsed_secs, summary).await
+        crate::cli::SyntheticCommands::Report {
+            input,
+            diff,
+            regression,
+            thresholds,
+            out,
+            elapsed_secs,
+            summary,
+            cells,
+            budget_profile,
+            divergence_policy,
+        } => {
+            // clap's value_parser restricts both to known names, so these parses cannot fail; map
+            // errors anyway so a future drift fails loudly instead of silently defaulting.
+            let budget_profile = budget_profile
+                .as_deref()
+                .map(str::parse::<BudgetProfile>)
+                .transpose()
+                .map_err(OtherError)?
+                .unwrap_or_default();
+            let divergence_policy = divergence_policy
+                .as_deref()
+                .map(str::parse::<analysis::DivergencePolicy>)
+                .transpose()
+                .map_err(OtherError)?
+                .unwrap_or_default();
+            report_command(
+                input,
+                diff,
+                regression,
+                out,
+                RegressionOpts {
+                    thresholds,
+                    elapsed_secs,
+                    summary,
+                    cells,
+                    budget_profile,
+                    divergence_policy,
+                },
+            )
+            .await
         }
     }
+}
+
+/// The regression-mode knobs of `synthetic report` (all ignored outside `--regression`).
+struct RegressionOpts {
+    thresholds: Option<String>,
+    elapsed_secs: Option<f64>,
+    summary: Option<String>,
+    cells: Option<String>,
+    budget_profile: BudgetProfile,
+    divergence_policy: analysis::DivergencePolicy,
 }
 
 /// `synthetic report`: re-render a saved report (`input`) to console + Markdown, or **diff** two
@@ -1533,10 +1584,8 @@ async fn report_command(
     input: Option<String>,
     diff: Vec<String>,
     regression: bool,
-    thresholds: Option<String>,
     out: Option<String>,
-    elapsed_secs: Option<f64>,
-    summary: Option<String>,
+    opts: RegressionOpts,
 ) -> BenchmarkResult<()> {
     let load = |path: &str| -> BenchmarkResult<crate::synthetic::report::Report> {
         let text = std::fs::read_to_string(path)
@@ -1551,22 +1600,53 @@ async fn report_command(
 
         // NON-FATAL regression mode: colored per-cell verdicts, never aborts on divergence.
         if regression {
-            let budgets = match thresholds {
-                Some(path) => crate::synthetic::thresholds::Thresholds::from_file(&path)?,
+            let budgets = match &opts.thresholds {
+                Some(path) => crate::synthetic::thresholds::Thresholds::from_file_with_profile(
+                    path,
+                    opts.budget_profile,
+                )?,
+                // The built-in defaults define only the strict profile; selecting another without
+                // a TOML that declares it is a config error, not something to silently fall back
+                // from (design §A4).
+                None if opts.budget_profile != BudgetProfile::Strict => {
+                    return Err(OtherError(format!(
+                        "--budget-profile {} requires --thresholds <file> with a [{}] section \
+                         (the built-in defaults define no such profile)",
+                        opts.budget_profile.as_str(),
+                        opts.budget_profile.as_str()
+                    )));
+                }
                 None => crate::synthetic::thresholds::Thresholds::builtin(),
             };
             let guard = baseline::regression_guard(&a, &b);
-            let md = diff::regression_markdown(&a, &b, &guard, &budgets, elapsed_secs);
+            // Analyze ONCE; every artifact (Markdown, summary, cells JSON) renders from this one
+            // model, so they can never disagree.
+            let analysis = analysis::analyze(
+                &a,
+                &b,
+                &guard,
+                &budgets,
+                &analysis::AnalysisOptions {
+                    budget_profile: opts.budget_profile,
+                    divergence_policy: opts.divergence_policy,
+                    elapsed_secs: opts.elapsed_secs,
+                },
+            );
+            let md = diff::regression_markdown(&analysis);
             let out_path = out.unwrap_or_else(|| "synthetic-regression.md".to_string());
             tokio::fs::write(&out_path, &md).await?;
             println!("{}", md);
             println!("regression report written to {}", out_path);
-            // Optionally also emit the compact machine-usable summary (Decision 5), derived from the
-            // SAME guard + thresholds so it can never disagree with the full report above.
-            if let Some(summary_path) = summary {
-                let compact = diff::summarize(&a, &b, &guard, &budgets);
+            // Optionally also emit the compact machine-usable summary (Decision 5).
+            if let Some(summary_path) = opts.summary {
+                let compact = diff::summarize(&analysis);
                 tokio::fs::write(&summary_path, compact.to_json()?).await?;
                 println!("summary written to {}", summary_path);
+            }
+            // Optionally emit the full analysis model — source material for the interactive page.
+            if let Some(cells_path) = opts.cells {
+                tokio::fs::write(&cells_path, analysis.to_json()?).await?;
+                println!("cells written to {}", cells_path);
             }
             return Ok(());
         }
@@ -2391,6 +2471,9 @@ mod tests {
             out: None,
             elapsed_secs: None,
             summary: None,
+            cells: None,
+            budget_profile: None,
+            divergence_policy: None,
         })
         .await
         .expect_err("report with no args ⇒ error");
@@ -2442,6 +2525,9 @@ mod tests {
             out: Some(diff_out.clone()),
             elapsed_secs: None,
             summary: None,
+            cells: None,
+            budget_profile: None,
+            divergence_policy: None,
         })
         .await
         .is_ok());
@@ -2455,6 +2541,9 @@ mod tests {
             out: Some(diff_out.clone()),
             elapsed_secs: None,
             summary: None,
+            cells: None,
+            budget_profile: None,
+            divergence_policy: None,
         })
         .await
         .expect_err("workload_hash mismatch must abort");
@@ -2503,6 +2592,9 @@ mod tests {
             out: Some(out.clone()),
             elapsed_secs: None,
             summary: Some(sum.clone()),
+            cells: None,
+            budget_profile: None,
+            divergence_policy: None,
         })
         .await
         .is_ok());
@@ -2513,9 +2605,137 @@ mod tests {
         // correctness divergence ⇒ Regressed verdict with the diverged op surfaced.
         let compact: diff::SyntheticSummary =
             serde_json::from_str(&std::fs::read_to_string(&sum).unwrap()).unwrap();
-        assert_eq!(compact.verdict, diff::SummaryVerdict::Regressed);
+        assert_eq!(compact.overall_verdict, analysis::OverallVerdict::Regressed);
         assert_eq!(compact.diverged_ops, vec!["match_by_index".to_string()]);
         for p in [a, b, out, sum] {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+
+    #[tokio::test]
+    async fn report_regression_writes_cells_json_and_honors_advisory_policy() {
+        // Hermetic: same divergent pair as above, but with `--cells` + `--divergence-policy
+        // advisory`: the command writes the full analysis model and the verdict caps at Advisory.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir();
+        let write = |label: &str, digest: &str| -> String {
+            let p = dir.join(format!(
+                "cells-{}-{}.json",
+                std::process::id(),
+                SEQ.fetch_add(1, Ordering::Relaxed)
+            ));
+            let json = format!(
+                r#"{{"meta":{{"tool_version":"0.1.0","endpoint":"x","samples":1,"warmup":0,"concurrency":[1],"server_timeout_ms":5000,"client_deadline_ms":6000,"connection":"c","started_at_epoch_secs":0,"server":{{"module_graph_ver":42001}},"dataset":{{"seed":1,"nodes":10,"edges":20,"corpus_hash":"sha256:same"}},"label":"{label}"}},"operations":{{"match_by_index":{{"levels":[],"result_digest":"{digest}"}}}}}}"#
+            );
+            std::fs::write(&p, json).unwrap();
+            p.to_string_lossy().into_owned()
+        };
+        let a = write("main", "sha256:aa");
+        let b = write("pr", "sha256:bb"); // diverged result
+        let out = dir
+            .join(format!("cells-out-{}.md", std::process::id()))
+            .to_string_lossy()
+            .into_owned();
+        let cells = dir
+            .join(format!("cells-model-{}.json", std::process::id()))
+            .to_string_lossy()
+            .into_owned();
+        assert!(run_command(crate::cli::SyntheticCommands::Report {
+            input: None,
+            regression: true,
+            thresholds: None,
+            diff: vec![a.clone(), b.clone()],
+            out: Some(out.clone()),
+            elapsed_secs: Some(1.5),
+            summary: None,
+            cells: Some(cells.clone()),
+            budget_profile: None,
+            divergence_policy: Some("advisory".to_string()),
+        })
+        .await
+        .is_ok());
+        let model: analysis::RegressionAnalysis =
+            serde_json::from_str(&std::fs::read_to_string(&cells).unwrap()).unwrap();
+        assert_eq!(model.verdict, analysis::OverallVerdict::Advisory);
+        assert_eq!(model.divergence_policy, analysis::DivergencePolicy::Advisory);
+        assert_eq!(model.elapsed_secs, Some(1.5));
+        assert_eq!(
+            model.ops["match_by_index"].op_outcome,
+            analysis::OpOutcome::DivergedAdvisory
+        );
+        let md = std::fs::read_to_string(&out).unwrap();
+        assert!(md.contains("advisory"), "{md}");
+        for p in [a, b, out, cells] {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+
+    #[tokio::test]
+    async fn report_regression_rejects_cross_engine_profile_without_thresholds_file() {
+        // `--budget-profile cross-engine` without a TOML that defines the profile is a hard,
+        // actionable error — never a silent fallback to the strict budgets (design §A4).
+        let dir = std::env::temp_dir();
+        let p = dir
+            .join(format!("bp-{}.json", std::process::id()))
+            .to_string_lossy()
+            .into_owned();
+        let json = r#"{"meta":{"tool_version":"0.1.0","endpoint":"x","samples":1,"warmup":0,"concurrency":[1],"server_timeout_ms":5000,"client_deadline_ms":6000,"connection":"c","started_at_epoch_secs":0,"server":{},"dataset":{"seed":1,"nodes":10,"edges":20,"corpus_hash":"sha256:same"}},"operations":{}}"#;
+        std::fs::write(&p, json).unwrap();
+        let err = run_command(crate::cli::SyntheticCommands::Report {
+            input: None,
+            regression: true,
+            thresholds: None,
+            diff: vec![p.clone(), p.clone()],
+            out: None,
+            elapsed_secs: None,
+            summary: None,
+            cells: None,
+            budget_profile: Some("cross-engine".to_string()),
+            divergence_policy: None,
+        })
+        .await
+        .expect_err("cross-engine without --thresholds must fail");
+        assert!(
+            format!("{err}").contains("requires --thresholds"),
+            "got: {err}"
+        );
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[tokio::test]
+    async fn report_regression_applies_a_cross_engine_thresholds_file() {
+        // With a TOML that defines [cross-engine], `--budget-profile cross-engine` resolves that
+        // profile's budgets — the rendered guard column shows the override, not the strict default.
+        let dir = std::env::temp_dir();
+        let stem = format!("bpx-{}", std::process::id());
+        let rep = dir.join(format!("{stem}.json")).to_string_lossy().into_owned();
+        let json = r#"{"meta":{"tool_version":"0.1.0","endpoint":"x","samples":1,"warmup":0,"concurrency":[1],"server_timeout_ms":5000,"client_deadline_ms":6000,"connection":"c","started_at_epoch_secs":0,"server":{},"dataset":{"seed":1,"nodes":10,"edges":20,"corpus_hash":"sha256:same"}},"operations":{"match_by_index":{"levels":[{"concurrency":1,"cached":{"throughput_ops_per_sec":1000.0,"metrics":{"server_ms":{"n":10,"removed":0,"min":1.0,"mean":1.0,"median":1.0,"p90":1.0,"p95":1.0,"p99":1.0,"max":1.0,"stddev":0.0},"total_ms":{"n":10,"removed":0,"min":1.0,"mean":1.0,"median":1.0,"p90":1.0,"p95":1.0,"p99":1.0,"max":1.0,"stddev":0.0},"non_internal_ms":{"n":10,"removed":0,"min":0.0,"mean":0.0,"median":0.0,"p90":0.0,"p95":0.0,"p99":0.0,"max":0.0,"stddev":0.0},"cached_false_rate":0.0,"cached_unknown":0}}}],"result_digest":"sha256:aa"}}}"#;
+        std::fs::write(&rep, json).unwrap();
+        let toml_path = dir.join(format!("{stem}.toml")).to_string_lossy().into_owned();
+        std::fs::write(
+            &toml_path,
+            "[cross-engine.default]\nbudget_pct = 123.0\nfloor_ms = 2.0\n",
+        )
+        .unwrap();
+        let out = dir.join(format!("{stem}.md")).to_string_lossy().into_owned();
+        assert!(run_command(crate::cli::SyntheticCommands::Report {
+            input: None,
+            regression: true,
+            thresholds: Some(toml_path.clone()),
+            diff: vec![rep.clone(), rep.clone()],
+            out: Some(out.clone()),
+            elapsed_secs: None,
+            summary: None,
+            cells: None,
+            budget_profile: Some("cross-engine".to_string()),
+            divergence_policy: None,
+        })
+        .await
+        .is_ok());
+        let md = std::fs::read_to_string(&out).unwrap();
+        assert!(md.contains("123% AND 2 ms"), "cross-engine budget not applied: {md}");
+        for p in [rep, toml_path, out] {
             let _ = std::fs::remove_file(p);
         }
     }

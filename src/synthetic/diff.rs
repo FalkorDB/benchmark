@@ -2,22 +2,21 @@
 //! mode and concurrency level (throughput + total-latency p50/p90/p95/p99 with per-metric deltas),
 //! as pasteable Markdown. Used by `synthetic report --diff` after the [`crate::synthetic::baseline`]
 //! guard confirms the two runs measured the same workload.
+//!
+//! The **regression** flavors ([`regression_markdown`], [`summarize`]) are pure renderers of the
+//! [`RegressionAnalysis`] model built by [`crate::synthetic::analysis::analyze`] — the verdicts
+//! are computed once, there.
 
-use crate::synthetic::baseline::RegressionGuard;
+use crate::synthetic::analysis::{
+    CacheMode, CellAnalysis, CellContextSide, Correctness, DivergencePolicy,
+    OpAnalysis, OpOutcome, OutcomeCounts, OverallVerdict, RegressionAnalysis,
+};
 use crate::synthetic::provenance::decode_module_version;
 use crate::synthetic::report::{md_cell, LevelMetrics, LevelReport, Report};
-use crate::synthetic::shapes::repo_read_tier;
-use crate::synthetic::thresholds::{Thresholds, Verdict};
-use crate::synthetic::{OpName, Tier};
+use crate::synthetic::thresholds::{BudgetProfile, Verdict};
+use crate::synthetic::Tier;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
-
-/// Coverage [`Tier`] for an op key of either kind: legacy catalog tags resolve via
-/// [`OpName::from_tag`]; dynamic (string-keyed) repo read shapes via the shape registry
-/// ([`repo_read_tier`]); names known to neither have no tier.
-fn op_tier(op: &str) -> Option<Tier> {
-    OpName::from_tag(op).map(OpName::tier).or_else(|| repo_read_tier(op))
-}
 
 /// Which cache mode of a [`LevelReport`] to read.
 #[derive(Clone, Copy)]
@@ -188,20 +187,22 @@ fn percentiles(m: &LevelMetrics) -> String {
     format!("{:.3} / {:.3} / {:.3} / {:.3}", s.median, s.p90, s.p95, s.p99)
 }
 
-/// A regression-table latency cell: the gated **p50** on the primary line, with p90/p99 and
-/// throughput folded onto a smaller `context:` line (informational, never gated). `—` when the
-/// side is absent. Values are fixed-precision measurements, so no operator-supplied text is
-/// interpolated (no `md_cell` escaping needed).
-fn latency_cell(m: Option<&LevelMetrics>) -> String {
-    match m {
-        None => "—".to_string(),
-        Some(m) => {
-            let s = &m.metrics.total_ms;
-            format!(
-                "{:.3}<br><sub>context: p90 {:.3} · p99 {:.3} · {:.0} op/s</sub>",
-                s.median, s.p90, s.p99, m.throughput_ops_per_sec
-            )
-        }
+/// A regression-table latency cell: the gated **p50** on the primary line, with p90/p95/p99 and
+/// throughput folded onto a smaller `context:` line (informational, never gated, appended only
+/// when the report carries it). `—` only when the side's p50 is absent. Values are
+/// fixed-precision measurements, so no operator-supplied text is interpolated (no `md_cell`
+/// escaping needed).
+fn latency_cell(
+    p50: Option<f64>,
+    ctx: Option<&CellContextSide>,
+) -> String {
+    match (p50, ctx) {
+        (Some(p50), Some(c)) => format!(
+            "{:.3}<br><sub>context: p90 {:.3} · p95 {:.3} · p99 {:.3} · {:.0} op/s</sub>",
+            p50, c.p90_ms, c.p95_ms, c.p99_ms, c.throughput_ops_per_sec
+        ),
+        (Some(p50), None) => format!("{p50:.3}"),
+        (None, _) => "—".to_string(),
     }
 }
 
@@ -279,164 +280,143 @@ fn row2(
 
 // ==== Non-fatal regression report ===============================================================
 
-/// Render the **non-fatal** `report --regression` markdown: per-cell 🟢/🔴/N/A verdicts on p50
-/// (total-latency median) against the threshold budget, with throughput shown for context. Ops the
-/// `guard` flags as diverged get a perf verdict of N/A (correctness-🔴). A `NotComparable` guard
-/// renders a single "not comparable" note. Never errors.
-pub fn regression_markdown(
-    baseline: &Report,
-    candidate: &Report,
-    guard: &RegressionGuard,
-    thresholds: &Thresholds,
-    elapsed_secs: Option<f64>,
-) -> String {
-    let la = col_label(baseline, "baseline");
-    let lb = col_label(candidate, "candidate");
+/// Render the **non-fatal** `report --regression` markdown from the [`RegressionAnalysis`] model:
+/// per-cell 🟢/🔴/N-A verdicts on p50 (total-latency median) against the threshold budget, with
+/// throughput shown for context. Diverged ops get a perf verdict of N/A — 🔴 under the `gate`
+/// divergence policy, ⚠ under `advisory`. A `NotComparable` status renders a single "not
+/// comparable" note. Never errors.
+pub fn regression_markdown(analysis: &RegressionAnalysis) -> String {
+    let la = analysis.comparison.baseline_label.as_str();
+    let lb = analysis.comparison.candidate_label.as_str();
     let mut head = String::new();
     head.push_str(&format!(
         "### 🧪 Synthetic per-op regression — {} vs {}\n\n",
-        md_cell(&lb),
-        md_cell(&la)
+        md_cell(lb),
+        md_cell(la)
     ));
-    if let Some(secs) = elapsed_secs {
+    if let Some(secs) = analysis.elapsed_secs {
         head.push_str(&format!(
             "⏱ Computed in {} (benchmark + reporting).\n\n",
             fmt_duration_secs(secs)
         ));
     }
-    head.push_str(&format!("| field | {} | {} |\n|---|---|---|\n", md_cell(&la), md_cell(&lb)));
-    row2(&mut head, "FalkorDB module", &ver(baseline), &ver(candidate));
+    head.push_str(&format!("| field | {} | {} |\n|---|---|---|\n", md_cell(la), md_cell(lb)));
+    let meta = &analysis.meta;
+    row2(
+        &mut head,
+        "FalkorDB module",
+        meta.baseline.module_version.as_deref().unwrap_or("unknown"),
+        meta.candidate.module_version.as_deref().unwrap_or("unknown"),
+    );
     row2(
         &mut head,
         "server image",
-        baseline.meta.server.server_image.as_deref().unwrap_or("—"),
-        candidate.meta.server.server_image.as_deref().unwrap_or("—"),
+        meta.baseline.server_image.as_deref().unwrap_or("—"),
+        meta.candidate.server_image.as_deref().unwrap_or("—"),
     );
-    row2(&mut head, "workload_hash", &opt_hash(baseline), &opt_hash(candidate));
+    let hash_cell = |h: &Option<String>| {
+        h.as_ref().map(|h| format!("`{h}`")).unwrap_or_else(|| "—".to_string())
+    };
+    row2(
+        &mut head,
+        "workload_hash",
+        &hash_cell(&meta.baseline.workload_hash),
+        &hash_cell(&meta.candidate.workload_hash),
+    );
     row2(
         &mut head,
         "samples / warmup",
-        &format!("{} / {}", baseline.meta.samples, baseline.meta.warmup),
-        &format!("{} / {}", candidate.meta.samples, candidate.meta.warmup),
+        &format!("{} / {}", meta.baseline.samples, meta.baseline.warmup),
+        &format!("{} / {}", meta.candidate.samples, meta.candidate.warmup),
     );
     head.push('\n');
-    head.push_str(&thresholds.settings_markdown());
+    head.push_str(&meta.thresholds.settings_markdown());
 
-    let (diverged, warnings) = match guard {
-        RegressionGuard::NotComparable { reason } => {
-            head.push_str(&format!(
-                "\n> ⚠ **not comparable** — {}. No latency verdict is shown.\n",
-                md_cell(reason)
-            ));
-            return head;
-        }
-        RegressionGuard::Comparable { diverged_ops, warnings } => (diverged_ops, warnings),
-    };
+    if let Some(reason) = analysis.status.not_comparable_reason() {
+        head.push_str(&format!(
+            "\n> ⚠ **not comparable** — {}. No latency verdict is shown.\n",
+            md_cell(reason)
+        ));
+        return head;
+    }
 
-    // Render the per-op tables into `body`, counting regressed cells as we go.
+    // Render the per-op tables into `body`, straight from the model's cells.
     let mut body = String::new();
-    let mut regressed = 0usize;
-    let mut comparable_cells = 0usize;
-    let ops: BTreeSet<&String> = baseline
-        .operations
-        .keys()
-        .chain(candidate.operations.keys())
-        .collect();
-    for op in ops {
-        let op_diverged = diverged.contains(op);
-        let regressed_before = regressed;
-        let comparable_before = comparable_cells;
+    for (op, oa) in &analysis.ops {
         // Render this op's cache-mode tables into a temp buffer so the whole op section can be
         // wrapped in a **collapsed** <details> — keeps the PR sticky comment compact by default.
         let mut op_body = String::new();
-        for mode in [Mode::Cached, Mode::Uncached] {
-            render_regression_mode(
-                &mut op_body, baseline, candidate, op, mode, op_diverged, thresholds, &la, &lb,
-                &mut regressed, &mut comparable_cells,
-            );
+        for mode in [CacheMode::Cached, CacheMode::Uncached] {
+            render_regression_mode(&mut op_body, oa, mode, analysis.divergence_policy, la, lb);
         }
+        // Ops with no measured cell get no report section; the totals still tally them when
+        // they diverged (gate → regressed, advisory → diverged).
         if op_body.trim().is_empty() {
             continue;
         }
-        // Per-op headline on the collapsed row: 🔴 if any cell regressed OR results diverged; 🟢 if
-        // it had ≥1 comparable cell and none regressed; N/A when no cell was evaluable (all rows
-        // N/A) so it never reads like a pass.
-        let op_emoji = if op_diverged || regressed > regressed_before {
-            "🔴"
-        } else if comparable_cells > comparable_before {
-            "🟢"
+        let diverged_note = if oa.correctness == Correctness::Diverged {
+            match analysis.divergence_policy {
+                DivergencePolicy::Gate => " — ⚠ results differ (perf verdict N/A)",
+                DivergencePolicy::Advisory => " — ⚠ results differ (advisory; perf verdict N/A)",
+            }
         } else {
-            "N/A"
+            ""
         };
-        let diverged_note =
-            if op_diverged { " — ⚠ results differ (perf verdict N/A)" } else { "" };
         body.push_str(&format!(
-            "\n<details><summary>{op_emoji} <code>{}</code>{diverged_note}</summary>\n{op_body}\n</details>\n",
+            "\n<details><summary>{} <code>{}</code>{diverged_note}</summary>\n{op_body}\n</details>\n",
+            oa.op_outcome.emoji(),
             html_escape(op)
         ));
     }
 
-    // Assemble: header + summary + warnings + legend + body. The top-line is 🟢 only when there
-    // is neither a p50 regression NOR a correctness (result) divergence.
+    // Assemble: header + verdict line + divergence list + warnings + legend + body.
     let mut out = head;
-    let summary = if regressed > 0 {
-        format!("🔴 {regressed} of {comparable_cells} comparable cell(s) over budget")
-    } else if !diverged.is_empty() {
-        format!(
-            "🔴 no p50 regression beyond budget, but {} op(s) have differing results (correctness)",
-            diverged.len()
-        )
-    } else {
-        format!("🟢 no p50 regression beyond budget across {comparable_cells} comparable cell(s)")
-    };
-    out.push_str(&format!("\n**{} vs {}** — {}\n", md_cell(&lb), md_cell(&la), summary));
+    let (emoji, headline) = analysis.verdict_line();
+    out.push_str(&format!(
+        "\n**{} vs {}** — {emoji} {headline}\n",
+        md_cell(lb),
+        md_cell(la)
+    ));
+    let diverged = analysis.diverged_ops();
     if !diverged.is_empty() {
-        let names: Vec<&str> = diverged.iter().map(String::as_str).collect();
         out.push_str(&format!(
             "\n_⚠ {} op(s) with differing results (perf N/A): {}_\n",
             diverged.len(),
-            names.join(", ")
+            diverged.join(", ")
         ));
     }
-    for w in warnings {
+    for w in &analysis.warnings {
         out.push_str(&format!("\n> ⚠ {}\n", md_cell(w)));
     }
-    out.push_str(
-        "\n🟢 = faster or within budget · 🔴 = slower than budget **or** results differ · \
-         N/A = no perf verdict. Only **p50** is gated — the `context:` line (p90/p99 · throughput) \
-         and `Δms` are informational, never part of the verdict. Non-blocking.\n",
-    );
+    out.push_str(match analysis.divergence_policy {
+        DivergencePolicy::Gate => {
+            "\n🟢 = faster or within budget · 🔴 = slower than budget **or** results differ · \
+             N/A = no perf verdict. Only **p50** is gated — the `context:` line (p90/p95/p99 · throughput) \
+             and `Δms` are informational, never part of the verdict. Non-blocking.\n"
+        }
+        DivergencePolicy::Advisory => {
+            "\n🟢 = faster or within budget · 🔴 = slower than budget · ⚠ = results differ \
+             (advisory — the engines did different work, so perf is N/A) · N/A = no perf verdict. \
+             Only **p50** is gated — the `context:` line (p90/p95/p99 · throughput) and `Δms` are \
+             informational, never part of the verdict. Non-blocking.\n"
+        }
+    });
     out.push_str(&body);
     out
 }
 
-/// Render one op × cache-mode regression table with a verdict column, accumulating the
-/// regressed/comparable cell counts.
-#[allow(clippy::too_many_arguments)]
+/// Render one op × cache-mode regression table (rows = this mode's cells) with a verdict column.
 fn render_regression_mode(
     out: &mut String,
-    a: &Report,
-    b: &Report,
-    op: &str,
-    mode: Mode,
-    op_diverged: bool,
-    thresholds: &Thresholds,
+    oa: &OpAnalysis,
+    mode: CacheMode,
+    policy: DivergencePolicy,
     la: &str,
     lb: &str,
-    regressed: &mut usize,
-    comparable_cells: &mut usize,
 ) {
-    let mut levels: BTreeSet<usize> = BTreeSet::new();
-    for rep in [a, b] {
-        if let Some(opr) = rep.operations.get(op) {
-            for lvl in &opr.levels {
-                if mode.pick(lvl).is_some() {
-                    levels.insert(lvl.concurrency);
-                }
-            }
-        }
-    }
-    if levels.is_empty() {
+    let cells: Vec<&CellAnalysis> =
+        oa.cells.iter().filter(|c| c.cache_mode == mode).collect();
+    if cells.is_empty() {
         return;
     }
     out.push_str(&format!("\n_{}_\n\n", mode.label()));
@@ -446,52 +426,31 @@ fn render_regression_mode(
         md_cell(la),
         md_cell(lb),
     ));
-    for c in levels {
-        let am = level_metrics(a, op, c, mode);
-        let bm = level_metrics(b, op, c, mode);
-        let ap = am.map(|m| m.metrics.total_ms.median);
-        let bp = bm.map(|m| m.metrics.total_ms.median);
-        // Resolve the budget ONCE per (op, C) and reuse it for both the printed guard and the
-        // verdict, so the shown threshold can never disagree with the one that was applied. The
-        // string-keyed lookup gives dynamic (recorded) op names the same budget resolution as
-        // static catalog ops: `[op.<name>]` override if configured, else `[default]`.
-        let resolved = thresholds.resolve_by_name(op, c);
-
-        let a_cell = latency_cell(am);
-        let b_cell = latency_cell(bm);
+    for cell in cells {
+        let a_cell = latency_cell(cell.baseline_p50_ms, cell.context.baseline.as_ref());
+        let b_cell = latency_cell(cell.candidate_p50_ms, cell.context.candidate.as_ref());
         // Gated delta: p50 % change + signed absolute ms change (so the ms floor is auditable).
-        // Only shown when both p50s are valid (finite, > 0) — i.e. exactly when a verdict exists;
-        // otherwise the cell is N/A and an absolute Δ would be misleading.
-        let dp50 = match (ap, bp) {
-            (Some(x), Some(y)) if x.is_finite() && x > 0.0 && y.is_finite() && y > 0.0 => {
-                format!("{} ({:+.3})", pct(x, y), y - x)
-            }
+        // Present exactly when both p50s are valid — otherwise `—` (an absolute Δ would mislead).
+        let dp50 = match (cell.delta_pct, cell.delta_ms) {
+            (Some(pct), Some(ms)) => format!("{pct:+.1}% ({ms:+.3})"),
             _ => "—".to_string(),
         };
         // The configured guard for this exact cell.
-        let guard = resolved.guard_cell();
-        let verdict = if op_diverged {
-            "🔴 N/A".to_string()
-        } else {
-            match (ap, bp) {
-                (Some(x), Some(y)) => {
-                    let v = resolved.verdict(x, y);
-                    match v {
-                        Verdict::Regressed => {
-                            *regressed += 1;
-                            *comparable_cells += 1;
-                        }
-                        // A real (comparable) 🟢 cell.
-                        Verdict::Ok => *comparable_cells += 1,
-                        // Zero/non-finite p50 on either side ⇒ no verdict; not a comparable cell.
-                        Verdict::NotApplicable => {}
-                    }
-                    v.emoji().to_string()
-                }
-                _ => "N/A".to_string(),
+        let guard = cell.budget.guard_cell();
+        // A diverged op's cells are N/A with the policy's severity marker; otherwise the p50
+        // verdict computed in the model.
+        let verdict = if oa.correctness == Correctness::Diverged {
+            match policy {
+                DivergencePolicy::Gate => "🔴 N/A",
+                DivergencePolicy::Advisory => "⚠ N/A",
             }
+        } else {
+            cell.perf_verdict.emoji()
         };
-        out.push_str(&format!("| {c} | {a_cell} | {b_cell} | {dp50} | {guard} | {verdict} |\n"));
+        out.push_str(&format!(
+            "| {} | {a_cell} | {b_cell} | {dp50} | {guard} | {verdict} |\n",
+            cell.concurrency
+        ));
     }
 }
 
@@ -500,75 +459,23 @@ fn render_regression_mode(
 //
 // The full `regression_markdown` report is authoritative but too big to embed in a PR comment for
 // the full 64-shape corpus (GitHub caps a comment at 65 KB). [`summarize`] distills the *same*
-// inputs (baseline, candidate, guard, thresholds) into a compact structure — overall verdict,
-// per-tier 🟢/🔴/N-A counts and the worst offenders — that CI can post inline while hosting the full
-// report externally under [`SyntheticSummary::slug`]. Its per-op verdict mirrors the collapsed row
-// in `regression_markdown` exactly; a consistency test pins the two together.
+// [`RegressionAnalysis`] model into a compact structure — overall verdict, per-tier 🟢/🔴/⚠/N-A
+// counts and the worst offenders — that CI can post inline while hosting the full report
+// externally under [`SyntheticSummary::slug`]. Because both renderers consume the same model,
+// drift is impossible by construction (a consistency test still pins the two together).
 // -------------------------------------------------------------------------------------------------
 
 /// Schema version of the JSON emitted by `report --summary`, bumped on any breaking field change.
-pub const SUMMARY_SCHEMA_VERSION: u32 = 1;
+/// v2 (design §A5 of `synthetic-three-way-report.md`): adds `budget_profile`,
+/// `divergence_policy`, `gated_metric`, `elapsed_secs`, a `diverged` bucket in [`OutcomeCounts`]
+/// and the four-state [`OverallVerdict`] as `overall_verdict` (replacing v1's three-state
+/// `verdict`).
+pub const SUMMARY_SCHEMA_VERSION: u32 = 2;
 
 /// Maximum number of regressed ops listed under "worst offenders" (keeps the comment compact).
 const MAX_OFFENDERS: usize = 5;
 
-/// Overall verdict of a regression comparison, for the compact [`SyntheticSummary`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SummaryVerdict {
-    /// No p50 regression beyond budget and no result divergence.
-    Pass,
-    /// At least one p50 cell over budget, or ≥1 op whose results differ.
-    Regressed,
-    /// The two runs measured different workloads/configs — no latency verdict.
-    NotComparable,
-}
-
-impl SummaryVerdict {
-    /// The emoji shown before the headline.
-    fn emoji(self) -> &'static str {
-        match self {
-            SummaryVerdict::Pass => "🟢",
-            SummaryVerdict::Regressed => "🔴",
-            SummaryVerdict::NotComparable => "⚠",
-        }
-    }
-}
-
-/// Per-op outcome, mirroring the collapsed-row emoji in [`regression_markdown`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OpOutcome {
-    /// ≥1 comparable p50 cell and none over budget (🟢).
-    Pass,
-    /// Results diverged, or ≥1 p50 cell over budget (🔴).
-    Regressed,
-    /// The op has cells but none were evaluable — no verdict (N/A).
-    NotApplicable,
-}
-
-/// A 🟢 / 🔴 / N-A tally.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OutcomeCounts {
-    pub pass: usize,
-    pub regressed: usize,
-    pub not_applicable: usize,
-}
-
-impl OutcomeCounts {
-    fn add(
-        &mut self,
-        outcome: OpOutcome,
-    ) {
-        match outcome {
-            OpOutcome::Pass => self.pass += 1,
-            OpOutcome::Regressed => self.regressed += 1,
-            OpOutcome::NotApplicable => self.not_applicable += 1,
-        }
-    }
-}
-
-/// Per-[`Tier`] outcome counts (`core` / `full`).
+/// Per-[`crate::synthetic::Tier`] outcome counts (`core` / `full`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TierSummary {
     /// The tier tag: `core` or `full`.
@@ -589,10 +496,10 @@ pub struct Offender {
 }
 
 /// A compact, machine-usable summary of a `report --diff --regression` comparison: overall verdict,
-/// per-tier 🟢/🔴/N-A counts and the worst offenders — small enough to embed in a PR comment while
+/// per-tier 🟢/🔴/⚠/N-A counts and the worst offenders — small enough to embed in a PR comment while
 /// the full Markdown report is hosted externally and linked by [`slug`](Self::slug). Emitted as JSON
 /// by `report --summary`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SyntheticSummary {
     pub schema_version: u32,
     pub baseline_label: String,
@@ -600,10 +507,20 @@ pub struct SyntheticSummary {
     /// Stable, filesystem- and anchor-safe id for this comparison (for hosting/linking the full
     /// report). The same pair of runs always yields the same slug.
     pub slug: String,
-    pub verdict: SummaryVerdict,
-    /// One-line human headline (no leading emoji — [`verdict`](Self::verdict) carries it).
+    /// The budget profile that was applied (`strict` / `cross-engine`).
+    pub budget_profile: BudgetProfile,
+    /// How divergences were treated (`gate` / `advisory`).
+    pub divergence_policy: DivergencePolicy,
+    /// The gated metric id (`total_ms.p50`); everything else is informational.
+    pub gated_metric: String,
+    /// Total wall-clock seconds the caller spent computing the check (`--elapsed-secs`), if given.
+    pub elapsed_secs: Option<f64>,
+    /// The four-state overall verdict (see [`OverallVerdict`] for the aggregation rule).
+    pub overall_verdict: OverallVerdict,
+    /// One-line human headline (no leading emoji — [`overall_verdict`](Self::overall_verdict)
+    /// carries it).
     pub headline: String,
-    /// Present only when `verdict == NotComparable`.
+    /// Present only when `overall_verdict == NotComparable`.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub not_comparable_reason: Option<String>,
     pub comparable_cells: usize,
@@ -619,206 +536,61 @@ pub struct SyntheticSummary {
     pub worst_offenders: Vec<Offender>,
 }
 
-/// Count the regressed and comparable p50 cells for one op across both cache modes, using the same
-/// level-union and verdict rules as [`render_regression_mode`]. Returns `None` when the op has no
-/// renderable cell in either report, so the summary skips it exactly like the Markdown does.
-fn op_cell_counts(
-    baseline: &Report,
-    candidate: &Report,
-    op: &str,
-    thresholds: &Thresholds,
-) -> Option<(usize, usize)> {
-    let mut regressed = 0usize;
-    let mut comparable = 0usize;
-    let mut had_cell = false;
-    for mode in [Mode::Cached, Mode::Uncached] {
-        let mut levels: BTreeSet<usize> = BTreeSet::new();
-        for rep in [baseline, candidate] {
-            if let Some(opr) = rep.operations.get(op) {
-                for lvl in &opr.levels {
-                    if mode.pick(lvl).is_some() {
-                        levels.insert(lvl.concurrency);
-                    }
-                }
-            }
-        }
-        for c in levels {
-            had_cell = true;
-            let ap = level_metrics(baseline, op, c, mode).map(|m| m.metrics.total_ms.median);
-            let bp = level_metrics(candidate, op, c, mode).map(|m| m.metrics.total_ms.median);
-            let resolved = thresholds.resolve_by_name(op, c);
-            if let (Some(x), Some(y)) = (ap, bp) {
-                match resolved.verdict(x, y) {
-                    Verdict::Regressed => {
-                        regressed += 1;
-                        comparable += 1;
-                    }
-                    Verdict::Ok => comparable += 1,
-                    Verdict::NotApplicable => {}
-                }
-            }
-        }
-    }
-    had_cell.then_some((regressed, comparable))
-}
-
-/// Collapse one op's cell counts + divergence into a single [`OpOutcome`], matching the collapsed
-/// `<summary>` emoji rule in [`regression_markdown`].
-fn op_outcome(
-    regressed: usize,
-    comparable: usize,
-    diverged: bool,
-) -> OpOutcome {
-    if diverged || regressed > 0 {
-        OpOutcome::Regressed
-    } else if comparable > 0 {
-        OpOutcome::Pass
-    } else {
-        OpOutcome::NotApplicable
-    }
-}
-
-/// Lowercase, hyphenate and trim `s` into an anchor/filesystem-safe slug fragment (runs of
-/// non-alphanumerics collapse to a single `-`; empty input becomes `run`).
-fn slugify(s: &str) -> String {
-    let mut out = String::new();
-    for ch in s.chars() {
-        if ch.is_ascii_alphanumeric() {
-            out.push(ch.to_ascii_lowercase());
-        } else if !out.ends_with('-') && !out.is_empty() {
-            out.push('-');
-        }
-    }
-    while out.ends_with('-') {
-        out.pop();
-    }
-    if out.is_empty() {
-        out.push_str("run");
-    }
-    out
-}
-
-/// A stable slug identifying this comparison, so CI can host the full report at a predictable path
-/// and link it from the summary. Derived from the run labels and the shared `workload_hash` digest,
-/// so the same pair of runs always produces the same slug.
-fn summary_slug(
-    candidate: &Report,
-    baseline: &Report,
-    candidate_label: &str,
-    baseline_label: &str,
-) -> String {
-    let hash = candidate
-        .meta
-        .dataset
-        .as_ref()
-        .or(baseline.meta.dataset.as_ref())
-        .map(|d| d.workload_hash.as_str())
-        .unwrap_or("nohash");
-    // Keep the digest, not the algorithm prefix (e.g. `sha256:abcdef…` → `abcdef…`).
-    let digest: String = hash
-        .rsplit(':')
-        .next()
-        .unwrap_or(hash)
-        .chars()
-        .take(12)
-        .collect();
-    format!(
-        "synthetic-{}-vs-{}-{}",
-        slugify(candidate_label),
-        slugify(baseline_label),
-        slugify(&digest)
-    )
-}
-
-/// Distill a regression comparison into a compact [`SyntheticSummary`]. Uses the *same* inputs and
-/// per-op verdict rules as [`regression_markdown`], so the two never disagree (pinned by test).
-pub fn summarize(
-    baseline: &Report,
-    candidate: &Report,
-    guard: &RegressionGuard,
-    thresholds: &Thresholds,
-) -> SyntheticSummary {
-    let baseline_label = col_label(baseline, "baseline");
-    let candidate_label = col_label(candidate, "candidate");
-    let slug = summary_slug(candidate, baseline, &candidate_label, &baseline_label);
-
-    let diverged = match guard {
-        RegressionGuard::NotComparable { reason } => {
-            return SyntheticSummary {
-                schema_version: SUMMARY_SCHEMA_VERSION,
-                baseline_label,
-                candidate_label,
-                slug,
-                verdict: SummaryVerdict::NotComparable,
-                headline: format!("not comparable — {}", reason),
-                not_comparable_reason: Some(reason.clone()),
-                comparable_cells: 0,
-                regressed_cells: 0,
-                diverged_ops: Vec::new(),
-                totals: OutcomeCounts::default(),
-                per_tier: Vec::new(),
-                worst_offenders: Vec::new(),
-            };
-        }
-        RegressionGuard::Comparable { diverged_ops, .. } => diverged_ops,
+/// Distill a [`RegressionAnalysis`] into the compact [`SyntheticSummary`]. A pure renderer of the
+/// model — verdicts, counts and cell tallies were computed once in
+/// [`crate::synthetic::analysis::analyze`], so this can never disagree with
+/// [`regression_markdown`].
+pub fn summarize(analysis: &RegressionAnalysis) -> SyntheticSummary {
+    let (_, headline) = analysis.verdict_line();
+    let mut summary = SyntheticSummary {
+        schema_version: SUMMARY_SCHEMA_VERSION,
+        baseline_label: analysis.comparison.baseline_label.clone(),
+        candidate_label: analysis.comparison.candidate_label.clone(),
+        slug: analysis.comparison.slug.clone(),
+        budget_profile: analysis.budget_profile,
+        divergence_policy: analysis.divergence_policy,
+        gated_metric: analysis.gated_metric.clone(),
+        elapsed_secs: analysis.elapsed_secs,
+        overall_verdict: analysis.verdict,
+        headline,
+        not_comparable_reason: analysis.status.not_comparable_reason().map(str::to_string),
+        comparable_cells: analysis.comparable_cells,
+        regressed_cells: analysis.regressed_cells,
+        diverged_ops: analysis.diverged_ops().iter().map(|s| s.to_string()).collect(),
+        totals: analysis.totals,
+        per_tier: Vec::new(),
+        worst_offenders: Vec::new(),
     };
+    if summary.not_comparable_reason.is_some() {
+        // Not comparable: the headline carries the reason; there is nothing to tally.
+        return summary;
+    }
 
-    let mut totals = OutcomeCounts::default();
     let mut core = OutcomeCounts::default();
     let mut full = OutcomeCounts::default();
-    let mut comparable_cells = 0usize;
-    let mut regressed_cells = 0usize;
     let mut offenders: Vec<Offender> = Vec::new();
-
-    let ops: BTreeSet<&String> = baseline
-        .operations
-        .keys()
-        .chain(candidate.operations.keys())
-        .collect();
-    for op in ops {
-        // Skip ops with no renderable cell — exactly what the Markdown report does.
-        let Some((cell_regressed, cell_comparable)) =
-            op_cell_counts(baseline, candidate, op, thresholds)
-        else {
-            continue;
-        };
-        let op_diverged = diverged.contains(op);
-        let outcome = op_outcome(cell_regressed, cell_comparable, op_diverged);
-        // Global cell tallies mirror the Markdown report, which does NOT budget-check a diverged
-        // op's cells (they render as "🔴 N/A"), so a divergence never inflates the cell counts.
-        if !op_diverged {
-            comparable_cells += cell_comparable;
-            regressed_cells += cell_regressed;
+    for (op, oa) in &analysis.ops {
+        // Mirror the model's totals: ops with ≥1 cell are tallied, and a cell-less **diverged**
+        // op is tallied too (every divergence counts). Under the `gate` policy (divergence ⇒
+        // `Regressed`) it also surfaces as a worst offender below; under `advisory` it stays a
+        // `DivergedAdvisory` and is intentionally kept out of the offender list.
+        if !oa.cells.is_empty() || oa.correctness == Correctness::Diverged {
+            match oa.tier.as_deref() {
+                Some("core") => core.add(oa.op_outcome),
+                Some("full") => full.add(oa.op_outcome),
+                _ => {}
+            }
         }
-
-        totals.add(outcome);
-        let tier = op_tier(op);
-        match tier {
-            Some(Tier::Core) => core.add(outcome),
-            Some(Tier::Full) => full.add(outcome),
-            None => {}
-        }
-        if outcome == OpOutcome::Regressed {
-            offenders.push(Offender {
-                op: op.to_string(),
-                tier: tier.map(|t| t.as_str().to_string()),
-                diverged: op_diverged,
-                regressed_cells: if op_diverged { 0 } else { cell_regressed },
-            });
-        }
-    }
-
-    let mut diverged_ops: Vec<String> = diverged.iter().cloned().collect();
-    diverged_ops.sort();
-    // A correctness divergence is the worst signal, so surface every diverged op — including ones
-    // with no measured cell, which the op loop above skips exactly like the Markdown report.
-    for op in &diverged_ops {
-        if !offenders.iter().any(|o| &o.op == op) {
+        if oa.op_outcome == OpOutcome::Regressed {
             offenders.push(Offender {
                 op: op.clone(),
-                tier: op_tier(op).map(|t| t.as_str().to_string()),
-                diverged: true,
-                regressed_cells: 0,
+                tier: oa.tier.clone(),
+                diverged: oa.correctness == Correctness::Diverged,
+                regressed_cells: oa
+                    .cells
+                    .iter()
+                    .filter(|c| c.perf_verdict == Verdict::Regressed)
+                    .count(),
             });
         }
     }
@@ -831,47 +603,12 @@ pub fn summarize(
     });
     offenders.truncate(MAX_OFFENDERS);
 
-    // Verdict + headline mirror the top line of `regression_markdown` (minus its leading emoji).
-    let verdict = if regressed_cells > 0 || !diverged_ops.is_empty() {
-        SummaryVerdict::Regressed
-    } else {
-        SummaryVerdict::Pass
-    };
-    let headline = if regressed_cells > 0 {
-        format!("{regressed_cells} of {comparable_cells} comparable cell(s) over budget")
-    } else if !diverged_ops.is_empty() {
-        format!(
-            "no p50 regression beyond budget, but {} op(s) have differing results (correctness)",
-            diverged_ops.len()
-        )
-    } else {
-        format!("no p50 regression beyond budget across {comparable_cells} comparable cell(s)")
-    };
-
-    SyntheticSummary {
-        schema_version: SUMMARY_SCHEMA_VERSION,
-        baseline_label,
-        candidate_label,
-        slug,
-        verdict,
-        headline,
-        not_comparable_reason: None,
-        comparable_cells,
-        regressed_cells,
-        diverged_ops,
-        totals,
-        per_tier: vec![
-            TierSummary {
-                tier: Tier::Core.as_str().to_string(),
-                counts: core,
-            },
-            TierSummary {
-                tier: Tier::Full.as_str().to_string(),
-                counts: full,
-            },
-        ],
-        worst_offenders: offenders,
-    }
+    summary.per_tier = vec![
+        TierSummary { tier: Tier::Core.as_str().to_string(), counts: core },
+        TierSummary { tier: Tier::Full.as_str().to_string(), counts: full },
+    ];
+    summary.worst_offenders = offenders;
+    summary
 }
 
 impl SyntheticSummary {
@@ -882,8 +619,8 @@ impl SyntheticSummary {
     }
 
     /// A compact Markdown rendering for a PR sticky comment (well under GitHub's 65 KB limit): the
-    /// verdict headline, a per-tier 🟢/🔴/N-A table and the worst offenders, ending with the stable
-    /// [`slug`](Self::slug) so CI can link the externally-hosted full report.
+    /// verdict headline, a per-tier 🟢/🔴/⚠/N-A table and the worst offenders, ending with the
+    /// stable [`slug`](Self::slug) so CI can link the externally-hosted full report.
     pub fn to_markdown(&self) -> String {
         let mut out = String::new();
         out.push_str(&format!(
@@ -893,7 +630,7 @@ impl SyntheticSummary {
         ));
         out.push_str(&format!(
             "{} {}\n",
-            self.verdict.emoji(),
+            self.overall_verdict.emoji(),
             md_cell(&self.headline)
         ));
         if self.not_comparable_reason.is_some() {
@@ -901,19 +638,23 @@ impl SyntheticSummary {
             out.push_str(&format!("\n_report: {}_\n", self.slug));
             return out;
         }
-        out.push_str("\n| tier | 🟢 | 🔴 | N/A |\n|---|---:|---:|---:|\n");
+        out.push_str("\n| tier | 🟢 | 🔴 | ⚠ | N/A |\n|---|---:|---:|---:|---:|\n");
         for t in &self.per_tier {
             out.push_str(&format!(
-                "| {} | {} | {} | {} |\n",
+                "| {} | {} | {} | {} | {} |\n",
                 md_cell(&t.tier),
                 t.counts.pass,
                 t.counts.regressed,
+                t.counts.diverged,
                 t.counts.not_applicable
             ));
         }
         out.push_str(&format!(
-            "| **all** | {} | {} | {} |\n",
-            self.totals.pass, self.totals.regressed, self.totals.not_applicable
+            "| **all** | {} | {} | {} | {} |\n",
+            self.totals.pass,
+            self.totals.regressed,
+            self.totals.diverged,
+            self.totals.not_applicable
         ));
         if !self.worst_offenders.is_empty() {
             let items: Vec<String> = self
@@ -938,9 +679,50 @@ impl SyntheticSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::synthetic::analysis::{analyze, AnalysisOptions};
+    use crate::synthetic::baseline::RegressionGuard;
     use crate::synthetic::report::{DatasetInfo, MetricSet, Meta, OperationReport, ServerInfo};
     use crate::synthetic::stats::Summary;
+    use crate::synthetic::thresholds::Thresholds;
     use std::collections::BTreeMap;
+
+    /// Analyze under the default (gate) policy — what almost every rendering test wants.
+    fn analyze_gate(
+        a: &Report,
+        b: &Report,
+        g: &crate::synthetic::baseline::RegressionGuard,
+        t: &Thresholds,
+    ) -> RegressionAnalysis {
+        analyze(a, b, g, t, &AnalysisOptions::default())
+    }
+
+    /// Old-signature shim: render the regression Markdown for two reports under gate policy.
+    fn regression_md(
+        a: &Report,
+        b: &Report,
+        g: &crate::synthetic::baseline::RegressionGuard,
+        t: &Thresholds,
+        elapsed_secs: Option<f64>,
+    ) -> String {
+        let analysis = analyze(
+            a,
+            b,
+            g,
+            t,
+            &AnalysisOptions { elapsed_secs, ..Default::default() },
+        );
+        regression_markdown(&analysis)
+    }
+
+    /// Old-signature shim: summarize two reports under gate policy.
+    fn summarize_gate(
+        a: &Report,
+        b: &Report,
+        g: &crate::synthetic::baseline::RegressionGuard,
+        t: &Thresholds,
+    ) -> SyntheticSummary {
+        summarize(&analyze_gate(a, b, g, t))
+    }
 
     fn summ(median: f64) -> Summary {
         Summary {
@@ -1080,13 +862,13 @@ mod tests {
         // within budget: +5% and +0.05 ms (below the 0.5 ms floor) => green
         let b_ok = report(42002, 1.05, 1000.0);
         let g = regression_guard(&a, &b_ok);
-        let md = regression_markdown(&a, &b_ok, &g, &Thresholds::builtin(), None);
+        let md = regression_md(&a, &b_ok, &g, &Thresholds::builtin(), None);
         assert!(md.contains("🟢"), "{md}");
         assert!(md.contains("no p50 regression"), "{md}");
         // over budget: +100% and +1 ms => red
         let b_bad = report(42002, 2.0, 500.0);
         let g2 = regression_guard(&a, &b_bad);
-        let md2 = regression_markdown(&a, &b_bad, &g2, &Thresholds::builtin(), None);
+        let md2 = regression_md(&a, &b_bad, &g2, &Thresholds::builtin(), None);
         assert!(md2.contains("🔴"), "{md2}");
         assert!(md2.contains("1 of 1 comparable cell(s) over budget"), "{md2}");
     }
@@ -1100,7 +882,7 @@ mod tests {
         b.operations.get_mut("match_by_index").unwrap().result_digest =
             Some("sha256:bb".to_string());
         let g = regression_guard(&a, &b);
-        let md = regression_markdown(&a, &b, &g, &Thresholds::builtin(), None);
+        let md = regression_md(&a, &b, &g, &Thresholds::builtin(), None);
         assert!(md.contains("results differ"), "{md}");
         assert!(md.contains("🔴 N/A"), "{md}");
         // The top-line summary must be 🔴 (correctness), not a misleading 🟢.
@@ -1116,7 +898,7 @@ mod tests {
         let mut b = report(42002, 1.0, 1000.0);
         b.meta.dataset.as_mut().unwrap().workload_hash = "sha256:zzz".to_string();
         let g = regression_guard(&a, &b);
-        let md = regression_markdown(&a, &b, &g, &Thresholds::builtin(), None);
+        let md = regression_md(&a, &b, &g, &Thresholds::builtin(), None);
         assert!(md.contains("not comparable"), "{md}");
     }
 
@@ -1133,20 +915,25 @@ mod tests {
         assert!(md.contains("v1\\|x") && md.contains("v2\\|y"), "diff headers not escaped: {md}");
         // regression headers (field header + per-op header)
         let g = regression_guard(&a, &b);
-        let reg = regression_markdown(&a, &b, &g, &Thresholds::builtin(), None);
+        let reg = regression_md(&a, &b, &g, &Thresholds::builtin(), None);
         assert!(reg.contains("v1\\|x") && reg.contains("v2\\|y"), "regression headers not escaped: {reg}");
     }
 
     #[test]
     fn regression_na_cells_are_not_counted_as_comparable() {
         use crate::synthetic::baseline::regression_guard;
-        use crate::synthetic::thresholds::Thresholds;
         // A zero baseline p50 ⇒ the cell's verdict is N/A; it must NOT inflate the comparable count.
+        // With every cell N/A the overall verdict is ⚠ Advisory ("no comparable cells"), never a
+        // green pass (design §A1: all-N/A is never green).
         let a = report(42001, 0.0, 1000.0);
         let b = report(42002, 1.0, 1000.0);
         let g = regression_guard(&a, &b);
-        let md = regression_markdown(&a, &b, &g, &Thresholds::builtin(), None);
-        assert!(md.contains("across 0 comparable cell(s)"), "{md}");
+        let md = regression_md(&a, &b, &g, &Thresholds::builtin(), None);
+        assert!(
+            md.contains("⚠ no comparable cells — no cell had a valid p50 on both sides"),
+            "{md}"
+        );
+        assert!(!md.contains("🟢 no p50 regression"), "all-N/A must not read as a pass: {md}");
         // An all-N/A op reads as N/A on its collapsed summary, never a green pass.
         assert!(md.contains("N/A <code>match_by_index</code></summary>"), "{md}");
         assert!(!md.contains("🟢 <code>match_by_index</code>"), "{md}");
@@ -1162,7 +949,7 @@ mod tests {
         let b = report(42002, 1.0, 1000.0);
         let g = regression_guard(&a, &b);
         // With an elapsed value the compute-time line renders alongside the thresholds settings.
-        let md = regression_markdown(&a, &b, &g, &Thresholds::builtin(), Some(754.0));
+        let md = regression_md(&a, &b, &g, &Thresholds::builtin(), Some(754.0));
         assert!(md.contains("**Thresholds**"), "settings table missing: {md}");
         assert!(md.contains("| _default_ | 10% | 0.5 ms |"), "{md}");
         assert!(md.contains("Budget precedence: per-op×concurrency"), "rule missing: {md}");
@@ -1171,7 +958,7 @@ mod tests {
             "timing missing: {md}"
         );
         // Without an elapsed value there is no compute-time line.
-        let md_none = regression_markdown(&a, &b, &g, &Thresholds::builtin(), None);
+        let md_none = regression_md(&a, &b, &g, &Thresholds::builtin(), None);
         assert!(!md_none.contains('⏱'), "unexpected timing line: {md_none}");
     }
 
@@ -1199,6 +986,7 @@ mod tests {
             .as_mut()
             .unwrap();
         m.metrics.total_ms.p90 = p90;
+        m.metrics.total_ms.p95 = (p90 + p99) / 2.0;
         m.metrics.total_ms.p99 = p99;
     }
 
@@ -1209,7 +997,7 @@ mod tests {
         let a = report(42001, 1.0, 1000.0);
         let b = report(42002, 1.1, 900.0); // +10% p50 (+0.100 ms), −10% tput
         let g = regression_guard(&a, &b);
-        let md = regression_markdown(&a, &b, &g, &Thresholds::builtin(), None);
+        let md = regression_md(&a, &b, &g, &Thresholds::builtin(), None);
         // Header keeps p50 named and adds the guard column.
         assert!(md.contains("p50 (ms)") && md.contains("p50 guard (>% AND >ms)"), "{md}");
         // Δp50 carries the signed absolute ms delta so the floor is auditable.
@@ -1231,7 +1019,7 @@ mod tests {
         let mut b = report(42002, 1.0, 1000.0);
         set_tails(&mut b, 50.0, 500.0);
         let g = regression_guard(&a, &b);
-        let md = regression_markdown(&a, &b, &g, &Thresholds::builtin(), None);
+        let md = regression_md(&a, &b, &g, &Thresholds::builtin(), None);
         // Verdict + comparable count are exactly what they'd be without the tail blow-up.
         assert!(
             md.contains("🟢 no p50 regression beyond budget across 1 comparable cell(s)"),
@@ -1240,7 +1028,14 @@ mod tests {
         // …the op's collapsed summary is 🟢 (its p50 didn't regress)…
         assert!(md.contains("🟢 <code>match_by_index</code></summary>"), "{md}");
         // …and the blown-up tail is still shown, as context.
-        assert!(md.contains("context: p90 50.000 · p99 500.000"), "{md}");
+        assert!(md.contains("context: p90 50.000 · p95 275.000 · p99 500.000"), "{md}");
+    }
+
+    #[test]
+    fn latency_cell_renders_p50_without_context() {
+        // A valid p50 must never be hidden just because the tail context is absent.
+        assert_eq!(latency_cell(Some(1.5), None), "1.500");
+        assert_eq!(latency_cell(None, None), "—");
     }
 
     #[test]
@@ -1251,7 +1046,7 @@ mod tests {
         let mut b = report(42002, 2.0, 500.0); // +100% p50 ⇒ red
         set_tails(&mut b, 0.10, 0.20); // tails *better* than baseline — must not rescue the verdict
         let g = regression_guard(&a, &b);
-        let md = regression_markdown(&a, &b, &g, &Thresholds::builtin(), None);
+        let md = regression_md(&a, &b, &g, &Thresholds::builtin(), None);
         assert!(md.contains("🔴 1 of 1 comparable cell(s) over budget"), "{md}");
     }
 
@@ -1264,7 +1059,7 @@ mod tests {
         let a = report(42001, 1.0, 1000.0);
         let b = report(42002, 1.0, 1000.0);
         let g = regression_guard(&a, &b);
-        let md = regression_markdown(&a, &b, &g, &t, None);
+        let md = regression_md(&a, &b, &g, &t, None);
         assert!(md.contains("20% AND 0.5 ms"), "resolved override guard: {md}");
     }
 
@@ -1310,7 +1105,7 @@ mod tests {
         let a = big_report(1);
         let b = big_report(2);
         let g = regression_guard(&a, &b);
-        let md = regression_markdown(&a, &b, &g, &Thresholds::builtin(), Some(300.0));
+        let md = regression_md(&a, &b, &g, &Thresholds::builtin(), Some(300.0));
         // 9 ops × 6 concurrencies × 2 cache modes = 108 cells. Keep the rendered report well under
         // GitHub's 65_536-char comment cap so the Part-B sticky comment keeps headroom for its
         // wrappers/warnings (see the design's comment-size budget).
@@ -1329,7 +1124,7 @@ mod tests {
         let a = report(42001, 1.0, 1000.0);
         let b = report(42002, 2.0, 500.0); // +100% p50 ⇒ regressed
         let g = regression_guard(&a, &b);
-        let md = regression_markdown(&a, &b, &g, &Thresholds::builtin(), None);
+        let md = regression_md(&a, &b, &g, &Thresholds::builtin(), None);
         assert!(md.contains("<details><summary>"), "sections must be collapsible: {md}");
         assert!(md.contains("</details>"), "{md}");
         assert!(
@@ -1352,14 +1147,13 @@ mod tests {
         let vb = b.operations.remove("match_by_index").unwrap();
         b.operations.insert(evil.to_string(), vb);
         let g = regression_guard(&a, &b);
-        let md = regression_markdown(&a, &b, &g, &Thresholds::builtin(), None);
+        let md = regression_md(&a, &b, &g, &Thresholds::builtin(), None);
         assert!(md.contains("<code>x&lt;b&gt;&amp;y</code>"), "op not HTML-escaped: {md}");
         assert!(!md.contains("<code>x<b>&y"), "raw HTML leaked: {md}");
     }
     // --- Lean summary (Decision 5) ---------------------------------------------------------------
 
     use crate::synthetic::baseline::regression_guard;
-    use crate::synthetic::thresholds::Thresholds;
 
     /// Build a report with one cached level (concurrency 1) per `(op_tag, p50_median, digest)`.
     fn rpt(
@@ -1414,8 +1208,8 @@ mod tests {
         }
     }
 
-    /// The collapsed-row emoji `regression_markdown` renders for `op` (`🟢`/`🔴`/`N/A`), or `None`
-    /// when the op has no collapsed row (skipped for having no cell).
+    /// The collapsed-row emoji `regression_markdown` renders for `op` (`🟢`/`🔴`/`⚠`/`N/A`), or
+    /// `None` when the op has no collapsed row (skipped for having no cell).
     fn md_collapsed_emoji(
         md: &str,
         op: &str,
@@ -1429,27 +1223,20 @@ mod tests {
         })
     }
 
-    fn outcome_emoji(o: OpOutcome) -> &'static str {
-        match o {
-            OpOutcome::Pass => "🟢",
-            OpOutcome::Regressed => "🔴",
-            OpOutcome::NotApplicable => "N/A",
-        }
-    }
-
     #[test]
     fn summarize_counts_a_within_budget_op_green() {
         let a = report(42001, 1.0, 1000.0);
         let b = report(42002, 1.05, 1000.0); // +5%, below the 0.5ms floor ⇒ within budget
         let g = regression_guard(&a, &b);
-        let s = summarize(&a, &b, &g, &Thresholds::builtin());
+        let s = summarize_gate(&a, &b, &g, &Thresholds::builtin());
         assert_eq!(s.schema_version, SUMMARY_SCHEMA_VERSION);
-        assert_eq!(s.verdict, SummaryVerdict::Pass);
+        assert_eq!(s.overall_verdict, OverallVerdict::Pass);
         assert_eq!(
             s.totals,
             OutcomeCounts {
                 pass: 1,
                 regressed: 0,
+                diverged: 0,
                 not_applicable: 0
             }
         );
@@ -1464,6 +1251,7 @@ mod tests {
             OutcomeCounts {
                 pass: 1,
                 regressed: 0,
+                diverged: 0,
                 not_applicable: 0
             }
         );
@@ -1478,8 +1266,8 @@ mod tests {
         let a = report(42001, 1.0, 1000.0);
         let b = report(42002, 2.0, 500.0); // +100%, +1ms ⇒ over budget
         let g = regression_guard(&a, &b);
-        let s = summarize(&a, &b, &g, &Thresholds::builtin());
-        assert_eq!(s.verdict, SummaryVerdict::Regressed);
+        let s = summarize_gate(&a, &b, &g, &Thresholds::builtin());
+        assert_eq!(s.overall_verdict, OverallVerdict::Regressed);
         assert_eq!(s.regressed_cells, 1);
         assert_eq!(s.comparable_cells, 1);
         assert_eq!(s.totals.regressed, 1);
@@ -1509,8 +1297,8 @@ mod tests {
             .unwrap()
             .result_digest = Some("sha256:bb".to_string());
         let g = regression_guard(&a, &b);
-        let s = summarize(&a, &b, &g, &Thresholds::builtin());
-        assert_eq!(s.verdict, SummaryVerdict::Regressed);
+        let s = summarize_gate(&a, &b, &g, &Thresholds::builtin());
+        assert_eq!(s.overall_verdict, OverallVerdict::Regressed);
         assert_eq!(s.diverged_ops, vec!["match_by_index".to_string()]);
         // A diverged op's cells are NOT counted (they render as 🔴 N/A), mirroring the full report.
         assert_eq!(s.comparable_cells, 0);
@@ -1529,8 +1317,8 @@ mod tests {
         let mut b = report(42002, 1.0, 1000.0);
         b.meta.dataset.as_mut().unwrap().workload_hash = "sha256:zzz".to_string();
         let g = regression_guard(&a, &b);
-        let s = summarize(&a, &b, &g, &Thresholds::builtin());
-        assert_eq!(s.verdict, SummaryVerdict::NotComparable);
+        let s = summarize_gate(&a, &b, &g, &Thresholds::builtin());
+        assert_eq!(s.overall_verdict, OverallVerdict::NotComparable);
         assert!(s.not_comparable_reason.is_some());
         assert!(s.headline.starts_with("not comparable"));
         assert!(s.per_tier.is_empty());
@@ -1559,12 +1347,13 @@ mod tests {
             &[("match_by_index", 1.05, "d1"), ("expand_hops_5", 2.0, "d2")],
         );
         let g = regression_guard(&a, &b);
-        let s = summarize(&a, &b, &g, &Thresholds::builtin());
+        let s = summarize_gate(&a, &b, &g, &Thresholds::builtin());
         assert_eq!(
             s.totals,
             OutcomeCounts {
                 pass: 1,
                 regressed: 1,
+                diverged: 0,
                 not_applicable: 0
             }
         );
@@ -1575,6 +1364,7 @@ mod tests {
             OutcomeCounts {
                 pass: 1,
                 regressed: 0,
+                diverged: 0,
                 not_applicable: 0
             }
         );
@@ -1583,6 +1373,7 @@ mod tests {
             OutcomeCounts {
                 pass: 0,
                 regressed: 1,
+                diverged: 0,
                 not_applicable: 0
             }
         );
@@ -1599,12 +1390,13 @@ mod tests {
         let a = rpt("main", 42001, &[("mystery_op", 1.0, "d1")]);
         let b = rpt("pr", 42002, &[("mystery_op", 1.0, "d1")]);
         let g = regression_guard(&a, &b);
-        let s = summarize(&a, &b, &g, &Thresholds::builtin());
+        let s = summarize_gate(&a, &b, &g, &Thresholds::builtin());
         assert_eq!(
             s.totals,
             OutcomeCounts {
                 pass: 1,
                 regressed: 0,
+                diverged: 0,
                 not_applicable: 0
             }
         );
@@ -1627,17 +1419,17 @@ mod tests {
         let a = rpt("main", 42001, &[("single_vertex_read", 2.0, "d1")]);
         let b = rpt("pr", 42002, &[("single_vertex_read", 2.6, "d1")]);
         let g = regression_guard(&a, &b);
-        let md = regression_markdown(&a, &b, &g, &t, None);
+        let md = regression_md(&a, &b, &g, &t, None);
         assert!(md.contains("50% AND 0.1 ms"), "guard column shows the override:\n{md}");
         assert!(md.contains("🟢 <code>single_vertex_read</code>"), "{md}");
-        let s = summarize(&a, &b, &g, &t);
+        let s = summarize_gate(&a, &b, &g, &t);
         assert_eq!(s.totals.pass, 1, "{s:?}");
         // `single_vertex_read` is a Tier::Core repo read shape (shapes.rs registry).
         let core = s.per_tier.iter().find(|t| t.tier == "core").unwrap();
         assert_eq!(core.counts.pass, 1, "{s:?}");
         // Same inputs under the strict built-in default (10% AND 0.5 ms): +30%/Δ0.6 ms regresses,
         // and the offender carries the registry tier.
-        let strict = summarize(&a, &b, &g, &Thresholds::builtin());
+        let strict = summarize_gate(&a, &b, &g, &Thresholds::builtin());
         assert_eq!(strict.totals.regressed, 1, "{strict:?}");
         assert_eq!(strict.worst_offenders[0].tier.as_deref(), Some("core"), "{strict:?}");
     }
@@ -1667,35 +1459,29 @@ mod tests {
         );
         let th = Thresholds::builtin();
         let g = regression_guard(&a, &b);
-        let md = regression_markdown(&a, &b, &g, &th, None);
-        let s = summarize(&a, &b, &g, &th);
+        let analysis = analyze_gate(&a, &b, &g, &th);
+        let md = regression_markdown(&analysis);
+        let s = summarize(&analysis);
 
-        // Per-op: the summary's outcome emoji must equal the collapsed-row emoji in the report.
-        let diverged: std::collections::BTreeSet<&str> = match &g {
-            RegressionGuard::Comparable { diverged_ops, .. } => {
-                diverged_ops.iter().map(String::as_str).collect()
-            }
-            RegressionGuard::NotComparable { .. } => unreachable!(),
-        };
+        // Per-op: the model's outcome emoji must equal the collapsed-row emoji in the report.
         for op in [
             "match_by_index",
             "expand_hops_5",
             "aggregate_count",
             "return_const",
         ] {
-            let (r, c) = op_cell_counts(&a, &b, op, &th).unwrap();
-            let outcome = op_outcome(r, c, diverged.contains(op));
+            let outcome = analysis.ops[op].op_outcome;
             assert_eq!(
                 md_collapsed_emoji(&md, op).as_deref(),
-                Some(outcome_emoji(outcome)),
+                Some(outcome.emoji()),
                 "op {op} emoji mismatch"
             );
         }
         // Top line: the reconstructed "{emoji} {headline}" must appear verbatim in the full report.
         assert!(
-            md.contains(&format!("{} {}", s.verdict.emoji(), s.headline)),
+            md.contains(&format!("{} {}", s.overall_verdict.emoji(), s.headline)),
             "headline mismatch\nsummary: {} {}\nmd: {md}",
-            s.verdict.emoji(),
+            s.overall_verdict.emoji(),
             s.headline
         );
     }
@@ -1718,7 +1504,7 @@ mod tests {
         let a = rpt("main", 42001, &a_ops);
         let b = rpt("pr", 42002, &b_ops);
         let g = regression_guard(&a, &b);
-        let s = summarize(&a, &b, &g, &Thresholds::builtin());
+        let s = summarize_gate(&a, &b, &g, &Thresholds::builtin());
         assert_eq!(s.worst_offenders.len(), 5, "capped at MAX_OFFENDERS");
         assert_eq!(
             s.worst_offenders[0].op, "property_projection",
@@ -1743,8 +1529,8 @@ mod tests {
 
     #[test]
     fn summarize_surfaces_a_diverged_op_with_no_measured_cell() {
-        // An op present in both runs but with empty levels: skipped from the tallies (no cell) yet
-        // still surfaced as a worst offender because its results diverged.
+        // An op present in both runs but with empty levels: tallied (every divergence counts,
+        // design v5) and surfaced as a worst offender because its results diverged.
         let mut a = rpt("main", 42001, &[("match_by_index", 1.0, "d1")]);
         let mut b = rpt("pr", 42002, &[("match_by_index", 1.0, "d2")]);
         a.operations
@@ -1758,25 +1544,21 @@ mod tests {
             .levels
             .clear();
         let g = regression_guard(&a, &b);
-        let s = summarize(&a, &b, &g, &Thresholds::builtin());
-        assert_eq!(s.verdict, SummaryVerdict::Regressed);
+        let s = summarize_gate(&a, &b, &g, &Thresholds::builtin());
+        assert_eq!(s.overall_verdict, OverallVerdict::Regressed);
         assert_eq!(
             s.totals,
-            OutcomeCounts::default(),
-            "no cell ⇒ no outcome tallied"
+            OutcomeCounts { regressed: 1, ..OutcomeCounts::default() },
+            "a cell-less diverged op is tallied (gate ⇒ regressed)"
+        );
+        assert_eq!(
+            s.per_tier.iter().find(|t| t.tier == "core").unwrap().counts.regressed,
+            1,
+            "…and rolls into its tier"
         );
         assert_eq!(s.worst_offenders.len(), 1);
         assert_eq!(s.worst_offenders[0].op, "match_by_index");
         assert!(s.worst_offenders[0].diverged);
-    }
-
-    #[test]
-    fn slugify_normalizes_hyphenates_and_falls_back() {
-        assert_eq!(slugify("Release 1.2.3"), "release-1-2-3");
-        assert_eq!(slugify("  PR / main  "), "pr-main");
-        assert_eq!(slugify("a__b--c"), "a-b-c");
-        assert_eq!(slugify("***"), "run");
-        assert_eq!(slugify(""), "run");
     }
 
     #[test]
@@ -1786,8 +1568,8 @@ mod tests {
         b.meta.label = Some("release 2.0".to_string());
         b.meta.dataset.as_mut().unwrap().workload_hash = "sha256:abc".to_string();
         let g = regression_guard(&a, &b);
-        let s1 = summarize(&a, &b, &g, &Thresholds::builtin());
-        let s2 = summarize(&a, &b, &g, &Thresholds::builtin());
+        let s1 = summarize_gate(&a, &b, &g, &Thresholds::builtin());
+        let s2 = summarize_gate(&a, &b, &g, &Thresholds::builtin());
         assert_eq!(s1.slug, s2.slug, "same inputs ⇒ same slug");
         assert!(
             s1.slug.starts_with("synthetic-release-2-0-vs-"),
@@ -1802,11 +1584,177 @@ mod tests {
         let a = report(42001, 1.0, 1000.0);
         let b = report(42002, 2.0, 500.0);
         let g = regression_guard(&a, &b);
-        let s = summarize(&a, &b, &g, &Thresholds::builtin());
+        let s = summarize_gate(&a, &b, &g, &Thresholds::builtin());
         let json = s.to_json().unwrap();
         let back: SyntheticSummary = serde_json::from_str(&json).unwrap();
         assert_eq!(s, back);
-        // Machine-usable: snake_case verdict tokens.
-        assert!(json.contains("\"verdict\": \"regressed\""), "{json}");
+        // Machine-usable: snake_case verdict/profile/policy tokens.
+        assert!(json.contains("\"overall_verdict\": \"regressed\""), "{json}");
+        assert!(json.contains("\"budget_profile\": \"strict\""), "{json}");
+        assert!(json.contains("\"divergence_policy\": \"gate\""), "{json}");
+        assert!(json.contains("\"gated_metric\": \"total_ms.p50\""), "{json}");
+        // No `--elapsed-secs` ⇒ explicit null (the field is always present).
+        assert!(json.contains("\"elapsed_secs\": null"), "{json}");
+    }
+
+    #[test]
+    fn summary_v2_freezes_the_top_level_field_set() {
+        // The summary JSON is a machine contract (schema v2). This test freezes the exact
+        // top-level field set — adding/renaming/removing a field must bump
+        // SUMMARY_SCHEMA_VERSION and update this list deliberately.
+        let a = report(42001, 1.0, 1000.0);
+        let b = report(42002, 2.0, 500.0);
+        let g = regression_guard(&a, &b);
+        let s = summarize_gate(&a, &b, &g, &Thresholds::builtin());
+        let value: serde_json::Value = serde_json::from_str(&s.to_json().unwrap()).unwrap();
+        let mut keys: Vec<&str> =
+            value.as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec![
+                "baseline_label",
+                "budget_profile",
+                "candidate_label",
+                "comparable_cells",
+                "diverged_ops",
+                "divergence_policy",
+                "elapsed_secs",
+                "gated_metric",
+                "headline",
+                "overall_verdict",
+                "per_tier",
+                "regressed_cells",
+                "schema_version",
+                "slug",
+                "totals",
+                "worst_offenders",
+            ]
+        );
+        assert_eq!(value["schema_version"], 2);
+        // The outcome-counts shape (shared by totals and per_tier) is part of the contract too.
+        let mut count_keys: Vec<&str> =
+            value["totals"].as_object().unwrap().keys().map(String::as_str).collect();
+        count_keys.sort_unstable();
+        assert_eq!(count_keys, vec!["diverged", "not_applicable", "pass", "regressed"]);
+    }
+
+    #[test]
+    fn summary_carries_elapsed_secs_when_given() {
+        let a = report(42001, 1.0, 1000.0);
+        let b = report(42002, 1.0, 1000.0);
+        let g = regression_guard(&a, &b);
+        let analysis = analyze(
+            &a,
+            &b,
+            &g,
+            &Thresholds::builtin(),
+            &AnalysisOptions { elapsed_secs: Some(754.5), ..Default::default() },
+        );
+        let s = summarize(&analysis);
+        assert_eq!(s.elapsed_secs, Some(754.5));
+        assert!(s.to_json().unwrap().contains("\"elapsed_secs\": 754.5"));
+    }
+
+    // --- Advisory divergence policy (design §A3) ------------------------------------------------
+
+    /// Analyze under the advisory divergence policy.
+    fn analyze_advisory(
+        a: &Report,
+        b: &Report,
+        g: &RegressionGuard,
+        t: &Thresholds,
+    ) -> RegressionAnalysis {
+        analyze(
+            a,
+            b,
+            g,
+            t,
+            &AnalysisOptions {
+                divergence_policy: DivergencePolicy::Advisory,
+                ..Default::default()
+            },
+        )
+    }
+
+    #[test]
+    fn advisory_policy_renders_diverged_op_as_warning_not_failure() {
+        // Two ops: one clean pass, one diverged. Under `advisory` the diverged op is ⚠ (not 🔴),
+        // its perf cells stay N/A, and the overall verdict caps at Advisory.
+        let a = rpt("main", 42001, &[("match_by_index", 1.0, "d1"), ("aggregate_count", 1.0, "d2")]);
+        let b = rpt("pr", 42002, &[("match_by_index", 1.0, "d1"), ("aggregate_count", 1.0, "d2-diff")]);
+        let g = regression_guard(&a, &b);
+        let analysis = analyze_advisory(&a, &b, &g, &Thresholds::builtin());
+        let md = regression_markdown(&analysis);
+        // Top line: ⚠ pass-with-divergence, not a red failure.
+        assert!(
+            md.contains("⚠ pass, 1 diverged — no p50 regression beyond budget across 1 comparable cell(s)"),
+            "{md}"
+        );
+        assert!(md.contains("divergence is advisory under this policy"), "{md}");
+        // The diverged op's collapsed row is ⚠ with an advisory note; its cells are "⚠ N/A".
+        assert_eq!(md_collapsed_emoji(&md, "aggregate_count").as_deref(), Some("⚠"), "{md}");
+        assert!(md.contains("results differ (advisory; perf verdict N/A)"), "{md}");
+        assert!(md.contains("⚠ N/A"), "{md}");
+        assert!(!md.contains("🔴 N/A"), "no red N/A under advisory: {md}");
+        // The clean op still passes.
+        assert_eq!(md_collapsed_emoji(&md, "match_by_index").as_deref(), Some("🟢"), "{md}");
+        // Legend explains ⚠.
+        assert!(md.contains("⚠ = results differ"), "{md}");
+    }
+
+    #[test]
+    fn advisory_policy_summary_counts_divergence_in_its_own_bucket() {
+        let a = rpt("main", 42001, &[("match_by_index", 1.0, "d1"), ("aggregate_count", 1.0, "d2")]);
+        let b = rpt("pr", 42002, &[("match_by_index", 1.0, "d1"), ("aggregate_count", 1.0, "d2-diff")]);
+        let g = regression_guard(&a, &b);
+        let analysis = analyze_advisory(&a, &b, &g, &Thresholds::builtin());
+        let s = summarize(&analysis);
+        assert_eq!(s.overall_verdict, OverallVerdict::Advisory);
+        assert_eq!(s.divergence_policy, DivergencePolicy::Advisory);
+        // Diverged is its own bucket — never `regressed`.
+        assert_eq!(
+            s.totals,
+            OutcomeCounts { pass: 1, regressed: 0, diverged: 1, not_applicable: 0 }
+        );
+        assert_eq!(s.diverged_ops, vec!["aggregate_count".to_string()]);
+        // Advisory-diverged ops are not "worst offenders" (nothing regressed).
+        assert!(s.worst_offenders.is_empty(), "{s:?}");
+        let md = s.to_markdown();
+        assert!(md.contains("⚠ pass, 1 diverged"), "{md}");
+        // Tier table gains the ⚠ column; both ops are Core.
+        assert!(md.contains("| tier | 🟢 | 🔴 | ⚠ | N/A |"), "{md}");
+        assert!(md.contains("| core | 1 | 0 | 1 | 0 |"), "{md}");
+        assert!(md.contains("| **all** | 1 | 0 | 1 | 0 |"), "{md}");
+    }
+
+    #[test]
+    fn gate_policy_is_the_default_and_keeps_divergence_red() {
+        // Same reports as the advisory test, but under the default (gate) policy: 🔴 everywhere.
+        let a = rpt("main", 42001, &[("aggregate_count", 1.0, "d2")]);
+        let b = rpt("pr", 42002, &[("aggregate_count", 1.0, "d2-diff")]);
+        let g = regression_guard(&a, &b);
+        let analysis = analyze_gate(&a, &b, &g, &Thresholds::builtin());
+        assert_eq!(analysis.divergence_policy, DivergencePolicy::Gate);
+        assert_eq!(analysis.verdict, OverallVerdict::Regressed);
+        let md = regression_markdown(&analysis);
+        assert!(md.contains("🔴 N/A"), "{md}");
+        assert!(md.contains("results differ (perf verdict N/A)"), "{md}");
+        assert!(!md.contains("advisory"), "gate output must not mention advisory: {md}");
+    }
+
+    #[test]
+    fn zero_comparable_cells_is_advisory_not_green() {
+        // All-N/A comparison (zero baseline p50): verdict is Advisory with the no-cells wording.
+        let a = report(42001, 0.0, 1000.0);
+        let b = report(42002, 1.0, 1000.0);
+        let g = regression_guard(&a, &b);
+        let analysis = analyze_gate(&a, &b, &g, &Thresholds::builtin());
+        assert_eq!(analysis.verdict, OverallVerdict::Advisory);
+        let s = summarize(&analysis);
+        assert_eq!(s.overall_verdict, OverallVerdict::Advisory);
+        assert!(s.headline.starts_with("no comparable cells"), "{}", s.headline);
+        let md = s.to_markdown();
+        assert!(md.contains("⚠ no comparable cells"), "{md}");
     }
 }
