@@ -2541,7 +2541,8 @@ mod tests {
     #[tokio::test]
     async fn run_command_record_offline_records_algorithm_shapes() {
         // `synthetic record --repo-algorithms` runs OFFLINE (Phase 6 §7.3): it writes a bundle
-        // containing exactly the 4 opt-in algorithm shapes — each result-N/A with its recorded
+        // containing exactly the 4 opt-in algorithm shapes — max_flow/msf result-gated,
+        // pagerank/harmonic result-N/A (design §6), each with its recorded
         // per-op budget — and, without --repo-reads, no read shape and no fulltext/vector fixture
         // (the algorithm shapes run on the plain simple graph). Exercises the Record handler's
         // `repo_algorithms` plumbing end-to-end (shapes::record_algorithm_reads → record_rendered).
