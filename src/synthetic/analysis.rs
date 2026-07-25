@@ -8,7 +8,7 @@
 use crate::synthetic::baseline::RegressionGuard;
 use crate::synthetic::provenance::decode_module_version;
 use crate::synthetic::report::{LevelMetrics, LevelReport, Report};
-use crate::synthetic::shapes::repo_read_tier;
+use crate::synthetic::shapes::shape_tier;
 use crate::synthetic::thresholds::{
     BudgetProfile, ResolvedBudget, Thresholds, ThresholdsEcho, Verdict,
 };
@@ -390,10 +390,10 @@ impl RegressionAnalysis {
 }
 
 /// Coverage [`Tier`] for an op key of either kind: legacy catalog tags resolve via
-/// [`OpName::from_tag`]; dynamic (string-keyed) repo read shapes via the shape registry
-/// ([`repo_read_tier`]); names known to neither have no tier.
+/// [`OpName::from_tag`]; dynamic (string-keyed) recorded shapes — repo reads and algorithm shapes
+/// alike — via the shape registry ([`shape_tier`]); names known to neither have no tier.
 pub(crate) fn op_tier(op: &str) -> Option<Tier> {
-    OpName::from_tag(op).map(OpName::tier).or_else(|| repo_read_tier(op))
+    OpName::from_tag(op).map(OpName::tier).or_else(|| shape_tier(op))
 }
 
 /// The display name for a run's column: its `--label` if set, else the caller-supplied `fallback`.

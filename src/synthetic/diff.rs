@@ -1441,6 +1441,37 @@ mod tests {
     }
 
     #[test]
+    fn algorithm_shape_gets_budget_and_tier_end_to_end() {
+        // Phase 6 duck finding: algorithm ops must be first-class in reporting/thresholds — an
+        // `[op.algo_*]` override applies, the op rolls into its registry tier (`full`, from the
+        // family-agnostic `shape_tier`) rather than vanishing from the per-tier buckets, and an
+        // offender carries that tier.
+        let toml = "[op.algo_max_flow_single_pair]\nbudget_pct = 50.0\nfloor_ms = 0.1\n";
+        let t = Thresholds::from_toml_str(toml).unwrap();
+        // 2.0 → 2.6 ms = +30%, Δ0.6 ms: within the 50% override (pass), but over the strict
+        // built-in default (10% AND 0.5 ms) — proving the override, not the default, was applied.
+        let a = rpt("main", 42001, &[("algo_max_flow_single_pair", 2.0, "d1")]);
+        let b = rpt("pr", 42002, &[("algo_max_flow_single_pair", 2.6, "d1")]);
+        let g = regression_guard(&a, &b);
+        let md = regression_md(&a, &b, &g, &t, None);
+        assert!(md.contains("50% AND 0.1 ms"), "guard column shows the override:\n{md}");
+        assert!(md.contains("🟢 <code>algo_max_flow_single_pair</code>"), "{md}");
+        let s = summarize_gate(&a, &b, &g, &t);
+        assert_eq!(s.totals.pass, 1, "{s:?}");
+        // `algo_max_flow_single_pair` is a Tier::Full algorithm shape (shapes.rs registry) — it
+        // must count in `full`, not fall out of both buckets like an unknown tag.
+        let full = s.per_tier.iter().find(|t| t.tier == "full").unwrap();
+        assert_eq!(full.counts.pass, 1, "{s:?}");
+        let core = s.per_tier.iter().find(|t| t.tier == "core").unwrap();
+        assert_eq!(core.counts, OutcomeCounts::default(), "{s:?}");
+        // Same inputs under the strict built-in default: +30%/Δ0.6 ms regresses, and the offender
+        // carries the registry tier.
+        let strict = summarize_gate(&a, &b, &g, &Thresholds::builtin());
+        assert_eq!(strict.totals.regressed, 1, "{strict:?}");
+        assert_eq!(strict.worst_offenders[0].tier.as_deref(), Some("full"), "{strict:?}");
+    }
+
+    #[test]
     fn summarize_and_regression_markdown_agree_on_every_op() {
         // One green (Core), one red (Full), one diverged (Core), one N/A (Core, zero baseline).
         let a = rpt(

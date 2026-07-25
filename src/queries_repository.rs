@@ -103,7 +103,8 @@ impl QueryGenerator {
     {
         QueryGenerator {
             query_type,
-            generator: Box::new(generator),
+            // Plain generators have no path draw to preempt; the forced path is ignored.
+            generator: Box::new(move |rng, _path| generator(rng)),
         }
     }
 
@@ -112,18 +113,27 @@ impl QueryGenerator {
     /// stream, so successive renders vary without any caller-supplied seed.
     pub fn generate(&self) -> Query {
         let mut rng = rand::rng();
-        (self.generator)(&mut rng)
+        (self.generator)(&mut rng, None)
     }
 
     /// Render this query from a caller-supplied RNG, so a fixed seed yields a byte-identical
     /// Cypher+params corpus (design §4.1 — the seedable named-generation entry).
     pub fn generate_with_rng(&self, rng: &mut dyn Rng) -> Query {
-        (self.generator)(rng)
+        (self.generator)(rng, None)
+    }
+
+    /// Render this query with an explicit `(source, target)` path preempting the generator's own
+    /// path draw ([`RandomUtil::random_path`]); any other draws still come from `rng`. This is the
+    /// deterministic, total entry the synthetic distinct-corpus fallback enumerates the pair space
+    /// through (`src/synthetic/shapes.rs`); generators that never draw a path render as usual.
+    pub fn generate_with_path(&self, rng: &mut dyn Rng, path: (i32, i32)) -> Query {
+        (self.generator)(rng, Some(path))
     }
 }
 
-// Define a type alias for the function type
-type QueryFn = Box<dyn Fn(&mut dyn Rng) -> Query + Send + Sync>;
+// Define a type alias for the function type: a query generator draws from the supplied RNG, with
+// an optional forced path preempting its `random_path` draw (see `RandomUtil::random_path`).
+type QueryFn = Box<dyn Fn(&mut dyn Rng, Option<(i32, i32)>) -> Query + Send + Sync>;
 
 // Define a type alias for the tuple
 type QueryEntry = (String, QueryType, QueryFn);
@@ -175,11 +185,12 @@ impl QueriesRepositoryBuilder<Flavour> {
         self.queries.push((
             name.into(),
             query_type,
-            Box::new(move |rng: &mut dyn Rng| {
+            Box::new(move |rng: &mut dyn Rng, forced_path: Option<(i32, i32)>| {
                 let mut random = RandomUtil {
                     rng,
                     vertices,
                     _edges: edges,
+                    forced_path,
                 };
                 generator(&mut random, flavour)
             }),
@@ -231,15 +242,13 @@ impl QueriesRepository {
         }
     }
 
-    fn add_with_id<F>(
+    fn add_with_id(
         &mut self,
         id: u16,
         name: impl Into<String>,
         query_type: QueryType,
-        generator: F,
-    ) where
-        F: Fn(&mut dyn Rng) -> Query + Send + Sync + 'static,
-    {
+        generator: QueryFn,
+    ) {
         let name = name.into();
         self.name_to_id.insert(name.clone(), id);
         self.catalog.push(QueryCatalogEntry {
@@ -248,6 +257,10 @@ impl QueriesRepository {
             q_type: query_type,
         });
 
+        let generator = QueryGenerator {
+            query_type,
+            generator,
+        };
         match query_type {
             QueryType::Read => {
                 self.read_query_names.push(name.clone());
@@ -256,13 +269,11 @@ impl QueriesRepository {
                 } else {
                     self.non_algorithm_read_query_names.push(name.clone());
                 }
-                self.read_queries
-                    .insert(name, QueryGenerator::new(query_type, generator));
+                self.read_queries.insert(name, generator);
             }
             QueryType::Write => {
                 self.write_query_names.push(name.clone());
-                self.write_queries
-                    .insert(name, QueryGenerator::new(query_type, generator));
+                self.write_queries.insert(name, generator);
             }
         }
     }
@@ -276,6 +287,13 @@ impl QueriesRepository {
     /// and writes.
     pub fn non_algorithm_read_names(&self) -> &[String] {
         &self.non_algorithm_read_query_names
+    }
+
+    /// The algorithm read shape names, in definition order — the opt-in whole-graph algorithm
+    /// shapes the synthetic check records via [`Self::render_read_with_rng`] (Phase 6 §3.3).
+    /// Empty unless the repository was built with an [`AlgorithmQuerySelection`] enabling them.
+    pub fn algorithm_read_names(&self) -> &[String] {
+        &self.algorithm_read_query_names
     }
 
     /// Render the read shape `name` from a caller-supplied RNG, so a fixed seed yields a
@@ -294,6 +312,26 @@ impl QueriesRepository {
             name.to_string(),
             generator.query_type,
             generator.generate_with_rng(rng),
+        ))
+    }
+
+    /// Render the read shape `name` with an explicit `(source, target)` path preempting its own
+    /// path draw — the deterministic, total entry the synthetic distinct-corpus fallback walks the
+    /// pair space through (`src/synthetic/shapes.rs`). Any non-path draws still come from `rng`.
+    /// Returns `None` if `name` is not a known read shape.
+    pub fn render_read_with_path(
+        &self,
+        name: &str,
+        rng: &mut dyn Rng,
+        path: (i32, i32),
+    ) -> Option<PreparedQuery> {
+        let generator = self.read_queries.get(name)?;
+        let q_id = *self.name_to_id.get(name)?;
+        Some(PreparedQuery::new(
+            q_id,
+            name.to_string(),
+            generator.query_type,
+            generator.generate_with_path(rng, path),
         ))
     }
 
@@ -342,6 +380,10 @@ struct RandomUtil<'a> {
     rng: &'a mut dyn Rng,
     vertices: i32,
     _edges: i32,
+    /// When set, the next [`Self::random_path`] returns this pair instead of drawing — the
+    /// deterministic entry the synthetic distinct-corpus fallback renders explicit pairs through
+    /// ([`QueryGenerator::generate_with_path`]).
+    forced_path: Option<(i32, i32)>,
 }
 
 impl RandomUtil<'_> {
@@ -350,6 +392,9 @@ impl RandomUtil<'_> {
     }
     #[allow(dead_code)]
     fn random_path(&mut self) -> (i32, i32) {
+        if let Some(path) = self.forced_path.take() {
+            return path;
+        }
         let start = self.random_vertex();
         let mut end = self.random_vertex();
 
@@ -375,6 +420,12 @@ impl UsersQueriesRepository {
         self.queries_repository.non_algorithm_read_names()
     }
 
+    /// The algorithm read shape names, in definition order (Phase 6 §3.3). Empty unless the
+    /// repository was built with an [`AlgorithmQuerySelection`] enabling them.
+    pub fn algorithm_read_names(&self) -> &[String] {
+        self.queries_repository.algorithm_read_names()
+    }
+
     /// Render the read shape `name` from a caller-supplied RNG (record-once determinism, §4.1).
     /// Returns `None` if `name` is not a known read shape.
     pub fn render_read_with_rng(
@@ -383,6 +434,17 @@ impl UsersQueriesRepository {
         rng: &mut dyn Rng,
     ) -> Option<PreparedQuery> {
         self.queries_repository.render_read_with_rng(name, rng)
+    }
+
+    /// See [`QueriesRepository::render_read_with_path`] — the deterministic explicit-pair render
+    /// entry for the synthetic distinct-corpus fallback.
+    pub fn render_read_with_path(
+        &self,
+        name: &str,
+        rng: &mut dyn Rng,
+        path: (i32, i32),
+    ) -> Option<PreparedQuery> {
+        self.queries_repository.render_read_with_path(name, rng, path)
     }
 
     pub fn random_queries(

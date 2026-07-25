@@ -1470,6 +1470,7 @@ pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkRes
             all_reads,
             tier,
             repo_reads,
+            repo_algorithms,
             seed,
             nodes,
             edges,
@@ -1479,13 +1480,14 @@ pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkRes
             let ops = crate::cli::expand_op_selectors(&ops);
             // Reuse the run-config resolution (with generate=true) to validate + resolve the
             // dataset knobs, graph and read-op selection, then record OFFLINE (no server).
-            // `--repo-reads` selects the repo read SHAPES implicitly (not catalog ops), so it
-            // forces `all_reads` only to satisfy op resolution; the resolved ops are ignored below.
+            // `--repo-reads`/`--repo-algorithms` select repo SHAPES implicitly (not catalog ops),
+            // so they force `all_reads` only to satisfy op resolution; the resolved ops are
+            // ignored below.
             let overrides = config::CliOverrides {
                 endpoint: None,
                 graph,
                 ops,
-                all_reads: all_reads || repo_reads.is_some(),
+                all_reads: all_reads || repo_reads.is_some() || repo_algorithms,
                 tier,
                 samples: None,
                 warmup: None,
@@ -1507,24 +1509,37 @@ pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkRes
             let spec = resolved.dataset.ok_or_else(|| {
                 OtherError("record requires --nodes/--edges (or a config) to generate a dataset".to_string())
             })?;
-            let manifest = if let Some(tier) = repo_reads {
+            let manifest = if repo_reads.is_some() || repo_algorithms {
                 // Phase 3/4/5: record the queries_repository read shapes (Baseline reads +
                 // ExtendedCore `temporal_spatial_roundtrip` + the FixtureDependent fulltext/vector
-                // reads). Each shape's corpus is rendered ONCE here from `resolved.seed ^ salt`
-                // (record-once → replay-verbatim), then `record_rendered[_with_fixture]` writes the
-                // identical bundle format the catalog path produces (so `workload_hash` stays
-                // byte-identical across replay endpoints — the A/B compares two FalkorDB versions).
-                // When the selected tier includes any FixtureDependent shape, the fulltext/vector
-                // fixture is baked into the recorded graph (once), so every replay gets the identical
-                // fixture (that fixture DDL is FalkorDB-specific — FalkorDB-vs-FalkorDB, not
-                // cross-database).
-                let recorded = crate::synthetic::shapes::record_repo_reads(
-                    tier,
-                    spec.nodes as i32,
-                    spec.edges as i32,
-                    resolved.seed,
-                )?;
-                if crate::synthetic::shapes::repo_reads_need_fixture(tier) {
+                // reads); Phase 6: optionally append the 4 opt-in algorithm shapes
+                // (`--repo-algorithms`, orthogonal to `--repo-reads`). Each shape's corpus is
+                // rendered ONCE here from `resolved.seed ^ salt` (record-once → replay-verbatim),
+                // then `record_rendered[_with_fixture]` writes the identical bundle format the
+                // catalog path produces (so `workload_hash` stays byte-identical across replay
+                // endpoints — the A/B compares two FalkorDB versions). When the selected reads tier
+                // includes any FixtureDependent shape, the fulltext/vector fixture is baked into
+                // the recorded graph (once), so every replay gets the identical fixture (that
+                // fixture DDL is FalkorDB-specific — FalkorDB-vs-FalkorDB, not cross-database).
+                // The algorithm shapes need no fixture: every generated graph is simple
+                // (synthbench/v5) and every `:Friend` edge carries `bench_capacity`.
+                let mut recorded = match repo_reads {
+                    Some(tier) => crate::synthetic::shapes::record_repo_reads(
+                        tier,
+                        spec.nodes as i32,
+                        spec.edges as i32,
+                        resolved.seed,
+                    )?,
+                    None => Vec::new(),
+                };
+                if repo_algorithms {
+                    recorded.extend(crate::synthetic::shapes::record_algorithm_reads(
+                        spec.nodes as i32,
+                        spec.edges as i32,
+                        resolved.seed,
+                    )?);
+                }
+                if repo_reads.is_some_and(crate::synthetic::shapes::repo_reads_need_fixture) {
                     recording::record_rendered_with_fixture(
                         &spec,
                         &resolved.graph,
@@ -2334,6 +2349,7 @@ mod tests {
             all_reads: false,
             tier: Some(Tier::Core),
             repo_reads: None,
+            repo_algorithms: false,
             seed: Some(3),
             nodes: Some(200),
             edges: Some(600),
@@ -2372,6 +2388,7 @@ mod tests {
             all_reads: false,
             tier: None,
             repo_reads: Some(Tier::Core),
+            repo_algorithms: false,
             seed: Some(5),
             nodes: Some(300),
             edges: Some(900),
@@ -2437,6 +2454,7 @@ mod tests {
             all_reads: false,
             tier: None,
             repo_reads: Some(Tier::Full),
+            repo_algorithms: false,
             seed: Some(5),
             nodes: Some(300),
             edges: Some(900),
@@ -2503,6 +2521,7 @@ mod tests {
             all_reads: false,
             tier: None,
             repo_reads: Some(Tier::Full),
+            repo_algorithms: false,
             seed: Some(7),
             nodes: Some(1000),
             edges: Some(5000),
@@ -2514,6 +2533,117 @@ mod tests {
             bundle.manifest.workload_hash,
             "sha256:830faf23b57ed61be8e1728a2ec73f09cf3d6fe2d24f0d70b6f8c11ed00c8de4",
             "the --repo-reads full command stream changed byte-wise"
+        );
+        std::fs::remove_dir_all(&out_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn run_command_record_offline_records_algorithm_shapes() {
+        // `synthetic record --repo-algorithms` runs OFFLINE (Phase 6 §7.3): it writes a bundle
+        // containing exactly the 4 opt-in algorithm shapes — each result-N/A with its recorded
+        // per-op budget — and, without --repo-reads, no read shape and no fulltext/vector fixture
+        // (the algorithm shapes run on the plain simple graph). Exercises the Record handler's
+        // `repo_algorithms` plumbing end-to-end (shapes::record_algorithm_reads → record_rendered).
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let out_dir = std::env::temp_dir().join(format!(
+            "syn-rec-repoalgos-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let command = crate::cli::SyntheticCommands::Record {
+            config: None,
+            graph: Some("galgos".to_string()),
+            ops: vec![],
+            all_reads: false,
+            tier: None,
+            repo_reads: None,
+            repo_algorithms: true,
+            seed: Some(5),
+            nodes: Some(300),
+            edges: Some(900),
+            out_dir: out_dir.to_string_lossy().into_owned(),
+        };
+        run_command(command)
+            .await
+            .expect("offline algorithm record succeeds without a server");
+        let bundle = recording::load(&out_dir).expect("algorithm bundle loads");
+        let names: Vec<&str> = bundle.manifest.ops.iter().map(|o| o.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "algo_pagerank_summary",
+                "algo_max_flow_single_pair",
+                "algo_msf_summary",
+                "algo_harmonic_summary"
+            ],
+            "exactly the 4 algorithm shapes, in definition order"
+        );
+        for entry in &bundle.manifest.ops {
+            assert!(!entry.result_gated, "{} must start result-N/A (design §6)", entry.name);
+            assert!(
+                !entry.budget.is_inherit(),
+                "{} must carry its recorded per-op budget",
+                entry.name
+            );
+        }
+        // No fixture: the algorithm shapes address the plain generated (simple) graph.
+        assert!(
+            !bundle
+                .graph_statements
+                .iter()
+                .any(|(phase, _)| *phase == crate::synthetic::dataset::LoadPhase::Fixture),
+            "an algorithms-only bundle must not bake the fulltext/vector fixture"
+        );
+        std::fs::remove_dir_all(&out_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn run_command_record_combines_repo_reads_with_algorithms() {
+        // --repo-algorithms is ORTHOGONAL to --repo-reads (design §3.2): combined, the bundle is
+        // the 50 full-tier reads followed by the 4 algorithm shapes (54 ops), with the fixture
+        // still baked for the FixtureDependent reads.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let out_dir = std::env::temp_dir().join(format!(
+            "syn-rec-reads-plus-algos-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let command = crate::cli::SyntheticCommands::Record {
+            config: None,
+            graph: Some("gcombined".to_string()),
+            ops: vec![],
+            all_reads: false,
+            tier: None,
+            repo_reads: Some(Tier::Full),
+            repo_algorithms: true,
+            seed: Some(5),
+            nodes: Some(300),
+            edges: Some(900),
+            out_dir: out_dir.to_string_lossy().into_owned(),
+        };
+        run_command(command).await.expect("offline combined record succeeds");
+        let bundle = recording::load(&out_dir).expect("combined bundle loads");
+        assert_eq!(bundle.manifest.ops.len(), 54, "50 reads + 4 algorithm shapes");
+        let names: Vec<&str> = bundle.manifest.ops.iter().map(|o| o.name.as_str()).collect();
+        assert_eq!(names[0], "single_vertex_read", "reads come first, in record order");
+        assert_eq!(
+            &names[50..],
+            [
+                "algo_pagerank_summary",
+                "algo_max_flow_single_pair",
+                "algo_msf_summary",
+                "algo_harmonic_summary"
+            ],
+            "algorithm shapes are appended after the reads"
+        );
+        assert!(
+            bundle
+                .graph_statements
+                .iter()
+                .any(|(phase, _)| *phase == crate::synthetic::dataset::LoadPhase::Fixture),
+            "the FixtureDependent reads still bake the fixture"
         );
         std::fs::remove_dir_all(&out_dir).ok();
     }

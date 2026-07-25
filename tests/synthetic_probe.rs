@@ -1327,6 +1327,7 @@ async fn record_and_replay_via_run_command() {
         all_reads: false,
         tier: None,
         repo_reads: None,
+        repo_algorithms: false,
         seed: Some(11),
         nodes: Some(400),
         edges: Some(1200),
@@ -1374,8 +1375,73 @@ async fn record_and_replay_via_run_command() {
     drop_graph(graph).await;
 }
 
-/// A recorded workload replayed at concurrency > 1 (both cache modes) must return identical results
-/// (the untimed concurrent verify passes) and produce a per-level, per-mode report.
+/// Phase 6 §7.3 acceptance: `record --repo-algorithms` (offline, via the CLI arm) then a live
+/// replay measures all 4 whole-graph algorithm shapes end-to-end on the generated **simple** graph
+/// (synthbench/v5 — `algo.maxFlow` rejects parallel edges, so this passing proves the guarantee).
+/// Each op must obey its recorded per-op budget (C=1, cached-only), stay result-N/A (no digest),
+/// and persist its resolved effective policy.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires a running FalkorDB server"]
+async fn record_and_replay_algorithm_shapes_end_to_end() {
+    use benchmark::cli::SyntheticCommands;
+    use benchmark::synthetic::run_command;
+
+    let graph = "syn_it_algos";
+    drop_graph(graph).await;
+    let dir = temp_bundle_dir("syn-it-algos");
+    let out_dir = dir.to_string_lossy().into_owned();
+
+    run_command(SyntheticCommands::Record {
+        config: None,
+        graph: Some(graph.to_string()),
+        ops: vec![],
+        all_reads: false,
+        tier: None,
+        repo_reads: None,
+        repo_algorithms: true,
+        seed: Some(7),
+        nodes: Some(300),
+        edges: Some(900),
+        out_dir: out_dir.clone(),
+    })
+    .await
+    .expect("record --repo-algorithms via run_command");
+
+    let out = dir.join("algos.json").to_string_lossy().into_owned();
+    let mut config = replay_config(&dir, graph, &out, true);
+    // Global knobs the per-op budgets must override (sweep + cache) or inherit (nothing: the
+    // algorithm budget pins samples/warmup/cache/sweep/timeouts).
+    config.samples = 3;
+    config.warmup = 1;
+    config.concurrency = vec![1, 2];
+    config.cache = benchmark::synthetic::CacheSelection::Both;
+    let report = replay::run(&config).await.expect("replay the 4 algorithm shapes");
+
+    for name in [
+        "algo_pagerank_summary",
+        "algo_max_flow_single_pair",
+        "algo_msf_summary",
+        "algo_harmonic_summary",
+    ] {
+        let op = report
+            .operations
+            .get(name)
+            .unwrap_or_else(|| panic!("{name} missing from the replay report"));
+        let levels: Vec<usize> = op.levels.iter().map(|l| l.concurrency).collect();
+        assert_eq!(levels, vec![1], "{name} must measure only its budgeted C=1 sweep");
+        assert!(op.levels[0].cached.is_some(), "{name} measures cached");
+        assert!(op.levels[0].uncached.is_none(), "{name} skips uncached (budget)");
+        assert!(op.result_digest.is_none(), "{name} starts result-N/A (design §6)");
+        let policy = op.policy.as_ref().unwrap_or_else(|| panic!("{name} must persist policy"));
+        assert_eq!(policy.samples, 25, "{name} budgeted samples");
+        assert_eq!(policy.concurrency, vec![1], "{name} budgeted sweep");
+        assert_eq!(policy.server_timeout_ms, 60_000, "{name} budgeted server timeout");
+    }
+
+    std::fs::remove_dir_all(&dir).ok();
+    drop_graph(graph).await;
+}
+
 #[tokio::test]
 #[ignore = "requires a running FalkorDB server"]
 async fn replay_concurrency_sweep_verifies_results_and_reports_levels() {
