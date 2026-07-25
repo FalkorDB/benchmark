@@ -647,6 +647,18 @@ concurrency = { 32 = 40.0 }
     }
 
     #[test]
+    fn accepts_write_shape_op_key() {
+        // Phase 7: a write shape name is a valid `[op.*]` key — `shape_tier` chains the write
+        // family, so per-op budgets can be tuned for recorded writes like any other dynamic op.
+        let cfg = "[op.merge_friend_edge_upsert]\nbudget_pct = 45.0\nfloor_ms = 1.0\n";
+        let t = Thresholds::from_toml_str(cfg).unwrap();
+        assert!(OpName::from_tag("merge_friend_edge_upsert").is_none(), "must be dynamic");
+        let r = t.resolve_by_name("merge_friend_edge_upsert", 1);
+        assert_eq!(r.budget_pct, 45.0);
+        assert_eq!(r.floor_ms, 1.0);
+    }
+
+    #[test]
     fn rejects_invalid_budget_and_floor_and_metric() {
         assert!(Thresholds::from_toml_str("[default]\nbudget_pct = -1.0\n")
             .unwrap_err()

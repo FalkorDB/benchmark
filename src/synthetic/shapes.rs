@@ -117,6 +117,10 @@ pub enum CoverageFamily {
     /// never by `--repo-reads`/tier, never in the per-PR gate, and absent from the A/B
     /// `--query-profile`.
     Algorithm,
+    /// An opt-in mutation shape (Phase 7 §1) — selected **only** by `--repo-writes`, never by
+    /// `--repo-reads`/tier, never in the per-PR gate. Latency tier: measured via `GRAPH.QUERY`
+    /// with periodic base-graph resets, result + counters untracked (design §4.1).
+    Write,
 }
 
 /// One repo read shape's synthetic metadata: its stable [`queries_repository`] name, coverage
@@ -317,12 +321,14 @@ pub fn repo_read_shapes() -> Vec<ShapeSpec> {
 }
 
 /// The coverage [`Tier`] of the recorded shape named `name` — **family-agnostic**: repo read
-/// shapes and the Phase 6 algorithm shapes alike — or `None` when no shape has that name. Lets
-/// string-keyed consumers (thresholds validation, report tier rollups) resolve a dynamic recorded
-/// op exactly like a static catalog op. Selection stays per-family ([`record_repo_reads`] /
-/// [`record_algorithm_reads`]) — this is a lookup, not a selector.
+/// shapes, the Phase 6 algorithm shapes and the Phase 7 write shapes alike — or `None` when no
+/// shape has that name. Lets string-keyed consumers (thresholds validation, report tier rollups)
+/// resolve a dynamic recorded op exactly like a static catalog op. Selection stays per-family
+/// ([`record_repo_reads`] / [`record_algorithm_reads`] / [`record_repo_writes`]) — this is a
+/// lookup, not a selector.
 pub fn shape_tier(name: &str) -> Option<Tier> {
-    // Chain the component lists (same order as `repo_read_shapes`, then the algorithm family)
+    // Chain the component lists (same order as `repo_read_shapes`, then the algorithm family,
+    // then the write family)
     // instead of materializing the combined Vec on every lookup;
     // `shape_tier_covers_every_shape` guards drift.
     baseline_read_shapes()
@@ -330,6 +336,7 @@ pub fn shape_tier(name: &str) -> Option<Tier> {
         .chain(extended_core_read_shapes())
         .chain(fixture_dependent_read_shapes())
         .chain(algorithm_read_shapes())
+        .chain(write_shapes())
         .find(|shape| shape.name == name)
         .map(|shape| shape.tier)
 }
@@ -447,6 +454,102 @@ pub fn algorithm_read_shapes() -> Vec<ShapeSpec> {
     ]
 }
 
+/// The per-op replay budget every write shape records (Phase 7 §4.1): **C=1 only** — concurrent
+/// writes are explicitly deferred (design §5; interleaved mutations change what each invocation
+/// does, so a C>1 latency number would not be comparable across versions) — with a modest
+/// samples/warmup so the drift a cell accumulates between base resets stays small (~110
+/// invocations/cell). Cache modes + timeouts inherit the run's global knobs: the write shapes are
+/// single-entity point mutations, as cheap as the point reads, and their uncached-vs-cached
+/// compilation split is as meaningful as for reads. Recorded into the bundle ([`RecordedBudget`])
+/// and overlaid at replay; the resolved effective policy is persisted per op and guarded by
+/// `report --diff`.
+///
+/// [`RecordedBudget`]: crate::synthetic::catalog::RecordedBudget
+const WRITE_SWEEP: [usize; 1] = [1];
+const WRITE_BUDGET: OpBudget = OpBudget {
+    samples: Some(100),
+    warmup: Some(10),
+    concurrency: Some(&WRITE_SWEEP),
+    cache: None,
+    server_timeout_ms: None,
+    client_deadline_ms: None,
+};
+
+/// The curated annotation for the **10 opt-in write shapes** (Phase 7 §1), in `queries_repository`
+/// definition order. Selected **only** by `--repo-writes` — never by `--repo-reads`/tier, never in
+/// the per-PR gate ([`repo_read_shapes`] stays exactly the 50 non-algorithm reads).
+///
+/// The op *set* is auto-discovered: the drift-guard test asserts this table's names are **exactly**
+/// [`UsersQueriesRepository::write_names`], so adding/removing a write shape there fails the build
+/// until this table is updated.
+///
+/// Every shape is **latency-tier** (design §4.1): replayed via `GRAPH.QUERY` with periodic
+/// base-graph resets, and `ResultPolicy::NotApplicable` — mutation outcomes are state- and
+/// value-dependent (MERGE create-vs-match, SET-same-value counting 0, DETACH DELETE no-ops on
+/// repeat — §2/§10.1), `timestamp()`/`date()`/`rand()` values are non-reproducible (§3.4), and the
+/// correctness tier (an online per-command outcome oracle with per-invocation restore) is
+/// deliberately deferred to later Phase 7 PRs (§6.2–6.3). No capability: all plain Cypher.
+pub fn write_shapes() -> Vec<ShapeSpec> {
+    // Every row is a Write-family, Full-tier, result-N/A shape with the write budget and a full
+    // corpus; only the name and the N/A reason vary.
+    fn s(
+        name: &'static str,
+        why_na: &'static str,
+    ) -> ShapeSpec {
+        ShapeSpec {
+            name,
+            family: CoverageFamily::Write,
+            tier: Tier::Full,
+            result_policy: ResultPolicy::NotApplicable(why_na),
+            capability: None,
+            corpus_size: CORPUS_SIZE,
+            budget: WRITE_BUDGET,
+        }
+    }
+    vec![
+        s(
+            "single_vertex_write",
+            "latency tier — plain CREATE grows the graph (duplicate ids); outcome untracked",
+        ),
+        s(
+            "single_vertex_update",
+            "latency tier — SET counters are value-dependent (1↔0 on repeated value, §10.1)",
+        ),
+        s(
+            "single_edge_update",
+            "latency tier — server rand() picks the target edge; never correctness-verifiable (§3.4)",
+        ),
+        s(
+            "single_edge_write",
+            "latency tier — MERGE create-vs-match depends on accumulated state; date() non-reproducible",
+        ),
+        s(
+            "merge_user_insert_path",
+            "latency tier — create-once-then-match ordering; timestamp() non-reproducible (§10.2)",
+        ),
+        s(
+            "merge_user_upsert_existing",
+            "latency tier — ON MATCH SET counters value-dependent; timestamp() non-reproducible",
+        ),
+        s(
+            "merge_friend_edge_upsert",
+            "latency tier — MERGE create-vs-match depends on accumulated state; date() non-reproducible",
+        ),
+        s(
+            "detach_delete_user",
+            "latency tier — deletes are state-dependent (no-op on repeat) with variable counts",
+        ),
+        s(
+            "remove_user_property_and_label",
+            "latency tier — REMOVE needs prepared state; deferred to the correctness tier (§4.2)",
+        ),
+        s(
+            "foreach_loop_mutation",
+            "latency tier — SET counters value-dependent on repeat against the same User",
+        ),
+    ]
+}
+
 /// The algorithm selection [`record_algorithm_reads`] uses: **all four** enabled, so the
 /// repository registers every `algo_*` read and the drift-guard sees the complete set.
 fn all_algorithms() -> AlgorithmQuerySelection {
@@ -557,11 +660,37 @@ pub fn record_algorithm_reads(
     )
 }
 
+/// Render the 10 opt-in write shapes ([`write_shapes`]) into [`RecordedOp`]s — **offline**, no
+/// server (Phase 7 §3.1, selected by `--repo-writes`).
+///
+/// The write pool is profile-independent (registered unconditionally in `queries_repository`), so
+/// a plain Baseline repository sees all 10; the annotation table is validated against
+/// [`UsersQueriesRepository::write_names`] (annotation drift fails loudly). The rendered corpora
+/// address the plain generated dataset — seeded ids within `1..=vertices` (plus the disjoint
+/// `vertices + id` insert band `merge_user_insert_path` uses), no fixture. Replay measures them
+/// via `GRAPH.QUERY` with periodic base resets (latency tier, design §4.1).
+pub fn record_repo_writes(
+    vertices: i32,
+    edges: i32,
+    corpus_seed: u64,
+) -> BenchmarkResult<Vec<RecordedOp>> {
+    let repo = UsersQueriesRepository::new(
+        vertices,
+        edges,
+        Flavour::FalkorDB,
+        AlgorithmQuerySelection::default(),
+        QueryCoverageProfile::Baseline,
+    );
+    let available: BTreeSet<&str> = repo.write_names().iter().map(String::as_str).collect();
+    render_shapes(&repo, &available, "write", &write_shapes(), vertices, corpus_seed)
+}
+
 /// Render each of `shapes` into a [`RecordedOp`] from `repo`, seeding every shape's corpus with
 /// `corpus_seed ^ salt` (the op's [`OpKey::salt`]) so a given seed yields a byte-identical corpus
 /// (record-once → replay-verbatim). `available` is the repository's auto-discovered name set for
 /// the family being rendered; `kind` names it in the annotation-drift error. Shared by
-/// [`record_selected_shapes`] (non-algorithm reads) and [`record_algorithm_reads`] (Phase 6).
+/// [`record_selected_shapes`] (non-algorithm reads), [`record_algorithm_reads`] (Phase 6) and
+/// [`record_repo_writes`] (Phase 7 — rendered through the repo's write seam, keyed `Write`).
 fn render_shapes(
     repo: &UsersQueriesRepository,
     available: &BTreeSet<&str>,
@@ -586,21 +715,32 @@ fn render_shapes(
                 shape.name
             )));
         }
-        let key = OpKey::dynamic(shape.name.to_string(), QueryType::Read);
+        // The op's key kind follows its family: Write-family shapes render through the repo's
+        // write seam and record as write ops (format v2, kind hashed); everything else is a read.
+        let (key_kind, render): (QueryType, &dyn Fn(&mut StdRng) -> Option<crate::queries_repository::PreparedQuery>) =
+            match shape.family {
+                CoverageFamily::Write => (QueryType::Write, &|rng: &mut StdRng| {
+                    repo.render_write_with_rng(shape.name, rng)
+                }),
+                _ => (QueryType::Read, &|rng: &mut StdRng| {
+                    repo.render_read_with_rng(shape.name, rng)
+                }),
+            };
+        let key = OpKey::dynamic(shape.name.to_string(), key_kind);
         let mut rng = StdRng::seed_from_u64(corpus_seed ^ key.salt());
         let mut commands = Vec::with_capacity(shape.corpus_size);
         // An Algorithm-family multi-command corpus is a seeded set of DISTINCT commands (the
         // maxFlow pair set — measuring the same pair twice adds runtime without coverage), so
         // duplicate draws re-render, bounded and deterministically (same seed ⇒ same skips ⇒ same
-        // corpus). Read corpora keep plain sequential draws: duplicates there are legitimate
-        // (a parameterless read renders CORPUS_SIZE identical commands by design).
+        // corpus). Read and write corpora keep plain sequential draws: duplicates there are
+        // legitimate (a parameterless read renders CORPUS_SIZE identical commands by design).
         let need_distinct = shape.family == CoverageFamily::Algorithm && shape.corpus_size > 1;
         let mut seen = BTreeSet::new();
         let max_attempts = shape.corpus_size * 16;
         let mut attempts = 0usize;
         while commands.len() < shape.corpus_size && attempts < max_attempts {
             attempts += 1;
-            let prepared = repo.render_read_with_rng(shape.name, &mut rng).ok_or_else(|| {
+            let prepared = render(&mut rng).ok_or_else(|| {
                 OtherError(format!("shape '{}' failed to render", shape.name))
             })?;
             if need_distinct && !seen.insert(prepared.cypher.clone()) {
@@ -680,7 +820,11 @@ mod tests {
     fn shape_tier_covers_every_shape() {
         // Drift guard for the chained lookup: every shape in every family registry must resolve
         // to its own tier, so a new component list can't silently escape `shape_tier`.
-        for shape in repo_read_shapes().into_iter().chain(algorithm_read_shapes()) {
+        for shape in repo_read_shapes()
+            .into_iter()
+            .chain(algorithm_read_shapes())
+            .chain(write_shapes())
+        {
             assert_eq!(shape_tier(shape.name), Some(shape.tier), "{}", shape.name);
         }
     }
@@ -802,6 +946,58 @@ mod tests {
         // is reachable only through record_algorithm_reads.
         let reads_repo = read_shapes_repository(QueryCoverageProfile::FixtureDependent, 1000, 5000);
         assert!(reads_repo.algorithm_read_names().is_empty());
+    }
+
+    #[test]
+    fn write_shapes_match_exactly_the_repo_write_names() {
+        // Derive-with-annotation for Phase 7 (§8 acceptance): the annotation table must be EXACTLY
+        // the 10 writes the repository auto-discovers, in definition order (the record order that
+        // feeds workload_hash). If `queries_repository` adds/renames/removes/reorders a write,
+        // this fails until `write_shapes()` is realigned.
+        let repo = UsersQueriesRepository::new(
+            1000,
+            5000,
+            Flavour::FalkorDB,
+            AlgorithmQuerySelection::default(),
+            QueryCoverageProfile::Baseline,
+        );
+        let discovered: Vec<&str> = repo.write_names().iter().map(String::as_str).collect();
+        let annotated: Vec<&str> = write_shapes().iter().map(|s| s.name).collect();
+        assert_eq!(annotated.len(), 10, "Phase 7 §1 defines exactly 10 write shapes");
+        assert_eq!(annotated, discovered, "write shapes drifted from repo write names");
+    }
+
+    #[test]
+    fn write_shapes_are_uniformly_latency_tier_annotated() {
+        // Phase 7 §4.1 (latency tier): every write shape is Write-family, Full-tier (never in the
+        // per-PR Core gate), result-N/A (mutation outcomes are state/value-dependent — §2/§10),
+        // plain Cypher (no capability), full corpus, and pinned to the C=1 write budget (§5 defers
+        // concurrent writes).
+        for shape in write_shapes() {
+            assert_eq!(shape.family, CoverageFamily::Write, "{}", shape.name);
+            assert_eq!(shape.tier, Tier::Full, "{}", shape.name);
+            assert!(
+                matches!(shape.result_policy, ResultPolicy::NotApplicable(_)),
+                "'{}' must be result-N/A in the latency tier",
+                shape.name
+            );
+            assert!(shape.capability.is_none(), "{}", shape.name);
+            assert_eq!(shape.corpus_size, CORPUS_SIZE, "{}", shape.name);
+            assert_eq!(shape.budget, WRITE_BUDGET, "{}", shape.name);
+        }
+        assert_eq!(WRITE_BUDGET.concurrency, Some(&WRITE_SWEEP[..]), "write replay is C=1 (§5)");
+    }
+
+    #[test]
+    fn repo_read_selection_is_unchanged_by_the_write_family() {
+        // --repo-reads must keep selecting EXACTLY the 50 non-algorithm reads: the write family is
+        // reachable only through record_repo_writes (its own selector), never via tier selection.
+        let selected = selected_shapes(Tier::Full);
+        assert_eq!(selected.len(), 50);
+        assert!(
+            selected.iter().all(|s| !matches!(s.family, CoverageFamily::Write | CoverageFamily::Algorithm)),
+            "tier selection must never pull in write or algorithm shapes"
+        );
     }
 
     #[test]
@@ -939,6 +1135,37 @@ mod tests {
         assert_eq!(unique_pairs.len(), MAX_FLOW_CORPUS_SIZE, "seeded pairs must differ");
         // …and the same seed reproduces the identical corpus (record-once → replay-verbatim).
         let again = record_algorithm_reads(1000, 5000, 7).expect("re-record");
+        for (a, b) in ops.iter().zip(&again) {
+            assert_eq!(a.commands, b.commands, "'{}' corpus must be seed-stable", a.key.name());
+        }
+    }
+
+    #[test]
+    fn record_repo_writes_renders_seeded_write_corpora() {
+        // The Phase 7 record path end-to-end (offline): 10 write ops in definition order, each
+        // keyed Write (kind feeds the format-v2 workload_hash), un-gated, budgeted C=1, with a
+        // full seed-stable corpus.
+        let ops = record_repo_writes(1000, 5000, 7).expect("record repo writes");
+        let names: Vec<&str> = ops.iter().map(|op| op.key.name()).collect();
+        let annotated: Vec<&str> = write_shapes().iter().map(|s| s.name).collect();
+        assert_eq!(names, annotated, "record order must be the annotation (definition) order");
+        for op in &ops {
+            assert_eq!(op.key.kind(), QueryType::Write, "{}", op.key.name());
+            assert!(!op.result_gated, "'{}' is latency-tier (result-N/A)", op.key.name());
+            assert!(op.capability.is_none(), "{}", op.key.name());
+            assert_eq!(
+                op.budget,
+                RecordedBudget::from(WRITE_BUDGET),
+                "'{}' must record the write budget",
+                op.key.name()
+            );
+            assert_eq!(op.commands.len(), CORPUS_SIZE, "{}", op.key.name());
+        }
+        // Spot-check rendered Cypher mutates (CREATE/SET/MERGE/DELETE/REMOVE/FOREACH)…
+        assert!(ops[0].commands[0].contains("CREATE"), "{}", ops[0].commands[0]);
+        assert!(ops[1].commands[0].contains("SET"), "{}", ops[1].commands[0]);
+        // …and the same seed reproduces the identical corpora (record-once → replay-verbatim).
+        let again = record_repo_writes(1000, 5000, 7).expect("re-record");
         for (a, b) in ops.iter().zip(&again) {
             assert_eq!(a.commands, b.commands, "'{}' corpus must be seed-stable", a.key.name());
         }
