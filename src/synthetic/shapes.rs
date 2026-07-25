@@ -261,6 +261,20 @@ pub fn repo_read_shapes() -> Vec<ShapeSpec> {
     shapes
 }
 
+/// The coverage [`Tier`] of the repo read shape named `name`, or `None` when no repo read shape has
+/// that name. Lets string-keyed consumers (thresholds validation, report tier rollups) resolve a
+/// dynamic recorded op exactly like a static catalog op.
+pub fn repo_read_tier(name: &str) -> Option<Tier> {
+    // Chain the component lists (same order as `repo_read_shapes`) instead of materializing the
+    // combined Vec on every lookup; `repo_read_tier_covers_every_repo_read_shape` guards drift.
+    baseline_read_shapes()
+        .into_iter()
+        .chain(extended_core_read_shapes())
+        .chain(fixture_dependent_read_shapes())
+        .find(|shape| shape.name == name)
+        .map(|shape| shape.tier)
+}
+
 /// The repo read shapes the given `tier` selects, in record order: [`Tier::Full`] selects every repo
 /// read; [`Tier::Core`] selects only the core subset. Shared by [`record_repo_reads`] and
 /// [`repo_reads_need_fixture`] so the two agree on what a tier records.
@@ -375,6 +389,23 @@ mod tests {
     /// The set of names in the annotation table.
     fn annotated_names() -> BTreeSet<&'static str> {
         baseline_read_shapes().iter().map(|s| s.name).collect()
+    }
+
+    #[test]
+    fn repo_read_tier_resolves_by_name() {
+        // String-keyed tier lookup over the registry: a core shape, a full shape, and a miss.
+        assert_eq!(repo_read_tier("single_vertex_read"), Some(Tier::Core));
+        assert_eq!(repo_read_tier("vector_query_nodes_smoke"), Some(Tier::Full));
+        assert_eq!(repo_read_tier("not_a_shape"), None);
+    }
+
+    #[test]
+    fn repo_read_tier_covers_every_repo_read_shape() {
+        // Drift guard for the chained lookup: every shape in the combined registry must resolve
+        // to its own tier, so a new component list can't silently escape `repo_read_tier`.
+        for shape in repo_read_shapes() {
+            assert_eq!(repo_read_tier(shape.name), Some(shape.tier), "{}", shape.name);
+        }
     }
 
     #[test]

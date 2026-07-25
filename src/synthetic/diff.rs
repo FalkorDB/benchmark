@@ -6,10 +6,18 @@
 use crate::synthetic::baseline::RegressionGuard;
 use crate::synthetic::provenance::decode_module_version;
 use crate::synthetic::report::{md_cell, LevelMetrics, LevelReport, Report};
+use crate::synthetic::shapes::repo_read_tier;
 use crate::synthetic::thresholds::{Thresholds, Verdict};
 use crate::synthetic::{OpName, Tier};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
+
+/// Coverage [`Tier`] for an op key of either kind: legacy catalog tags resolve via
+/// [`OpName::from_tag`]; dynamic (string-keyed) repo read shapes via the shape registry
+/// ([`repo_read_tier`]); names known to neither have no tier.
+fn op_tier(op: &str) -> Option<Tier> {
+    OpName::from_tag(op).map(OpName::tier).or_else(|| repo_read_tier(op))
+}
 
 /// Which cache mode of a [`LevelReport`] to read.
 #[derive(Clone, Copy)]
@@ -336,7 +344,6 @@ pub fn regression_markdown(
         .collect();
     for op in ops {
         let op_diverged = diverged.contains(op);
-        let opname = OpName::from_tag(op);
         let regressed_before = regressed;
         let comparable_before = comparable_cells;
         // Render this op's cache-mode tables into a temp buffer so the whole op section can be
@@ -344,8 +351,8 @@ pub fn regression_markdown(
         let mut op_body = String::new();
         for mode in [Mode::Cached, Mode::Uncached] {
             render_regression_mode(
-                &mut op_body, baseline, candidate, op, opname, mode, op_diverged, thresholds, &la,
-                &lb, &mut regressed, &mut comparable_cells,
+                &mut op_body, baseline, candidate, op, mode, op_diverged, thresholds, &la, &lb,
+                &mut regressed, &mut comparable_cells,
             );
         }
         if op_body.trim().is_empty() {
@@ -411,7 +418,6 @@ fn render_regression_mode(
     a: &Report,
     b: &Report,
     op: &str,
-    opname: Option<OpName>,
     mode: Mode,
     op_diverged: bool,
     thresholds: &Thresholds,
@@ -446,8 +452,10 @@ fn render_regression_mode(
         let ap = am.map(|m| m.metrics.total_ms.median);
         let bp = bm.map(|m| m.metrics.total_ms.median);
         // Resolve the budget ONCE per (op, C) and reuse it for both the printed guard and the
-        // verdict, so the shown threshold can never disagree with the one that was applied.
-        let resolved = opname.map(|name| thresholds.resolve(name, c));
+        // verdict, so the shown threshold can never disagree with the one that was applied. The
+        // string-keyed lookup gives dynamic (recorded) op names the same budget resolution as
+        // static catalog ops: `[op.<name>]` override if configured, else `[default]`.
+        let resolved = thresholds.resolve_by_name(op, c);
 
         let a_cell = latency_cell(am);
         let b_cell = latency_cell(bm);
@@ -460,14 +468,14 @@ fn render_regression_mode(
             }
             _ => "—".to_string(),
         };
-        // The configured guard for this exact cell — only resolvable for a known op.
-        let guard = resolved.map(|r| r.guard_cell()).unwrap_or_else(|| "—".to_string());
+        // The configured guard for this exact cell.
+        let guard = resolved.guard_cell();
         let verdict = if op_diverged {
             "🔴 N/A".to_string()
         } else {
-            match (ap, bp, resolved) {
-                (Some(x), Some(y), Some(r)) => {
-                    let v = r.verdict(x, y);
+            match (ap, bp) {
+                (Some(x), Some(y)) => {
+                    let v = resolved.verdict(x, y);
                     match v {
                         Verdict::Regressed => {
                             *regressed += 1;
@@ -620,7 +628,6 @@ fn op_cell_counts(
     op: &str,
     thresholds: &Thresholds,
 ) -> Option<(usize, usize)> {
-    let opname = OpName::from_tag(op);
     let mut regressed = 0usize;
     let mut comparable = 0usize;
     let mut had_cell = false;
@@ -639,9 +646,9 @@ fn op_cell_counts(
             had_cell = true;
             let ap = level_metrics(baseline, op, c, mode).map(|m| m.metrics.total_ms.median);
             let bp = level_metrics(candidate, op, c, mode).map(|m| m.metrics.total_ms.median);
-            let resolved = opname.map(|name| thresholds.resolve(name, c));
-            if let (Some(x), Some(y), Some(r)) = (ap, bp, resolved) {
-                match r.verdict(x, y) {
+            let resolved = thresholds.resolve_by_name(op, c);
+            if let (Some(x), Some(y)) = (ap, bp) {
+                match resolved.verdict(x, y) {
                     Verdict::Regressed => {
                         regressed += 1;
                         comparable += 1;
@@ -785,7 +792,7 @@ pub fn summarize(
         }
 
         totals.add(outcome);
-        let tier = OpName::from_tag(op).map(OpName::tier);
+        let tier = op_tier(op);
         match tier {
             Some(Tier::Core) => core.add(outcome),
             Some(Tier::Full) => full.add(outcome),
@@ -809,7 +816,7 @@ pub fn summarize(
         if !offenders.iter().any(|o| &o.op == op) {
             offenders.push(Offender {
                 op: op.clone(),
-                tier: OpName::from_tag(op).map(|n| n.tier().as_str().to_string()),
+                tier: op_tier(op).map(|t| t.as_str().to_string()),
                 diverged: true,
                 regressed_cells: 0,
             });
@@ -1585,9 +1592,10 @@ mod tests {
     }
 
     #[test]
-    fn summarize_excludes_unknown_tag_ops_from_tier_counts() {
-        // A dynamic, string-keyed op (Phase 1a) whose tag is not a static OpName has no tier and
-        // no resolvable budget, so it counts as N/A in the totals but toward neither tier.
+    fn summarize_gates_unknown_tag_ops_but_excludes_them_from_tier_counts() {
+        // A string-keyed op known to neither the catalog nor the repo read shape registry still
+        // resolves a budget (`[default]` fallback) so it gets a real verdict, but it has no tier:
+        // it counts in the totals yet toward neither `core` nor `full`.
         let a = rpt("main", 42001, &[("mystery_op", 1.0, "d1")]);
         let b = rpt("pr", 42002, &[("mystery_op", 1.0, "d1")]);
         let g = regression_guard(&a, &b);
@@ -1595,9 +1603,9 @@ mod tests {
         assert_eq!(
             s.totals,
             OutcomeCounts {
-                pass: 0,
+                pass: 1,
                 regressed: 0,
-                not_applicable: 1
+                not_applicable: 0
             }
         );
         let core = s.per_tier.iter().find(|t| t.tier == "core").unwrap();
@@ -1605,6 +1613,33 @@ mod tests {
         assert_eq!(core.counts, OutcomeCounts::default());
         assert_eq!(full.counts, OutcomeCounts::default());
         assert!(s.worst_offenders.is_empty());
+    }
+
+    #[test]
+    fn dynamic_repo_read_shape_gets_budget_and_tier_end_to_end() {
+        // The full A0 path (design §4 of synthetic-three-way-report.md): a recorded repo read
+        // shape — a dynamic op name that is NOT a catalog `OpName` — gets its `[op.*]` TOML
+        // override applied in the rendered report and rolls up into its registry tier.
+        let toml = "[op.single_vertex_read]\nbudget_pct = 50.0\nfloor_ms = 0.1\n";
+        let t = Thresholds::from_toml_str(toml).unwrap();
+        // 2.0 → 2.6 ms = +30%, Δ0.6 ms: within the 50% override (pass), but over the strict
+        // built-in default (10% AND 0.5 ms) — proving the override, not the default, was applied.
+        let a = rpt("main", 42001, &[("single_vertex_read", 2.0, "d1")]);
+        let b = rpt("pr", 42002, &[("single_vertex_read", 2.6, "d1")]);
+        let g = regression_guard(&a, &b);
+        let md = regression_markdown(&a, &b, &g, &t, None);
+        assert!(md.contains("50% AND 0.1 ms"), "guard column shows the override:\n{md}");
+        assert!(md.contains("🟢 <code>single_vertex_read</code>"), "{md}");
+        let s = summarize(&a, &b, &g, &t);
+        assert_eq!(s.totals.pass, 1, "{s:?}");
+        // `single_vertex_read` is a Tier::Core repo read shape (shapes.rs registry).
+        let core = s.per_tier.iter().find(|t| t.tier == "core").unwrap();
+        assert_eq!(core.counts.pass, 1, "{s:?}");
+        // Same inputs under the strict built-in default (10% AND 0.5 ms): +30%/Δ0.6 ms regresses,
+        // and the offender carries the registry tier.
+        let strict = summarize(&a, &b, &g, &Thresholds::builtin());
+        assert_eq!(strict.totals.regressed, 1, "{strict:?}");
+        assert_eq!(strict.worst_offenders[0].tier.as_deref(), Some("core"), "{strict:?}");
     }
 
     #[test]
