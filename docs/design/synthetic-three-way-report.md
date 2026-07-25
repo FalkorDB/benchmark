@@ -1,6 +1,6 @@
 # Design: three-way synthetic PR report — PR vs main vs C engine, with an interactive page
 
-**Status: draft (v3, after two rubber-duck review rounds)**
+**Status: draft (v4, after three rubber-duck review rounds)**
 **Extends:** [`synthetic-pr-regression-report.md`](synthetic-pr-regression-report.md) (approved; Part A merged in this repo, Part B is falkordb-rs-next-gen PR #745).
 
 ## 1. Goal
@@ -94,13 +94,20 @@ from it. Sketch (field names final at implementation; serde snake_case):
 RegressionAnalysis {
   schema_version: 1,
   comparison: { baseline_label, candidate_label, slug },
+  // Header/config metadata Markdown needs, lifted from the two Reports so the renderer never
+  // reaches back into them: per-side module version, server image, workload_hash, samples,
+  // warmup, concurrency sweep — plus the resolved threshold settings table.
+  meta: { baseline/candidate: { module_version, server_image, workload_hash, samples, warmup,
+          concurrency: [usize] }, thresholds: ThresholdsEcho },
   budget_profile: "strict" | "cross-engine",
   divergence_policy: "gate" | "advisory",
   gated_metric: "total_ms.p50",
-  status: Comparable | NotComparable { reason },     // workload-hash guard, version checks
+  status: Comparable | NotComparable { reason },     // workload-hash/config guard only —
+                                                      // version mismatches are advisory warnings
+                                                      // (as today), never comparability guards
   warnings: [String],                                 // advisory lines (placeholder-aware, §A6)
   elapsed_secs: Option<f64>,                          // as passed via --elapsed-secs (f64 kept)
-  verdict: OverallVerdict,                            // 🟢/🔴/⚠/N-A — Rust-computed
+  verdict: OverallVerdict,                            // Rust-computed (see below)
   ops: BTreeMap<String, OpAnalysis>,
 }
 OpAnalysis {
@@ -121,12 +128,21 @@ CellAnalysis {
 }
 ```
 
-Notes locked by review round 2:
+Notes locked by review rounds 2–3:
 
-- `correctness` truth table matches **today's** behavior exactly: both digests present + equal =
-  `Match`; present + different **or asymmetric** = `Diverged`; both absent = `NotGated`
-  (comparable, timed, no correctness claim). Summary v2 counts `NotGated` ops inside the normal
-  pass/fail buckets (as today), never as diverged.
+- **`OverallVerdict` (summary schema v2)** is a four-state enum with a fixed aggregation rule,
+  replacing v1's three-state `SummaryVerdict`:
+  - `NotComparable` — `status` is NotComparable (workload/config mismatch); nothing else counts.
+  - `Regressed` (🔴) — ≥ 1 regressed perf cell, **or** (under `gate` policy) ≥ 1 diverged op.
+  - `PassWithDivergences` (⚠) — no regressed cell, but ≥ 1 diverged op under `advisory` policy
+    **or** zero comparable perf cells anywhere (all-N/A / all-diverged runs are never green).
+  - `Pass` (🟢) — ≥ 1 comparable cell, no regression, no divergence.
+- `correctness` truth table matches **today's digest semantics** exactly: both digests present +
+  equal = `Match`; present + different **or asymmetric** = `Diverged`; both absent = `NotGated`
+  (comparable, timed, no correctness claim). For bucket counts this is "as today" for catalog
+  ops; the four non-gated **repo-read** shapes currently land in N/A via the G1 bug, so **after
+  A0** they enter the normal pass/fail buckets like any other op. `NotGated` never counts as
+  diverged.
 - p95 **is included** in `context` (the report schema already carries it; v2 of this design had
   dropped it by accident).
 - `op_outcome` and the overall `verdict` are **computed in Rust** and serialized — the page
@@ -142,7 +158,8 @@ Notes locked by review round 2:
 `report --diff A B --regression … --cells cells.json` serializes the `RegressionAnalysis` to
 JSON. `--cells`, `--budget-profile` and `--divergence-policy` are only valid with
 `--diff --regression` (clap `requires`, like `--summary`; plain `--diff --cells` is rejected).
-Readme gains a doc-tested example. This is the page's only data source.
+Readme gains a doc-tested example. Cells files are the **source material** for the page's
+`data.json` (§B2) — the page itself fetches only `data.json`.
 
 ### A3. Divergence policy (G3)
 
@@ -229,10 +246,12 @@ Stacked PR on `barakb/synthetic-pr-regression`. All scripts stay under
   1. record once; measure `pr`, then `main` (all under `set -e`, as today);
   2. **immediately** produce and persist every `main-pr` artifact (report + summary + cells)
      into the trap-surviving output dir;
-  3. run the C leg via explicit `if c_leg; then … else …` branching (not blanket `set +e`):
-     `measure` is refactored to capture the benchmark's exit status and return it (so trailing
-     cleanup `echo`s can't mask a failure), and the C leg is wrapped in `timeout` bounded well
-     below the job timeout so a hang cannot prevent the artifact upload;
+  3. run the C leg as a **separate child script** (`synthetic-c-leg.sh`, `bash -euo pipefail`)
+     invoked under `timeout <bound> bash …` from an explicit `if`: a child script keeps `errexit`
+     live inside the guarded code (Bash disables `set -e` in any function/compound command tested
+     by `if`, so in-process guarding silently masks mid-stage failures), and `timeout` — which
+     cannot run a shell function — bounds the leg well below the job timeout so a hang cannot
+     prevent the artifact upload;
   4. on C failure: write **two** stub summaries (`summary-c-pr.json`, `summary-c-main.json`,
      `verdict: not_comparable`, `not_comparable_reason` = the failure stage) and mark both
      comparisons `unavailable` in `data.json` (§B2) — the comment and page show *why* C is
@@ -299,11 +318,13 @@ Page model (all client-side, driven only by `data.json`):
   comparison's `divergence_policy`.
 - **Header**: PR number/SHA, arch, images (ref + digest), per-comparison profile/policy, and
   **total benchmark wall-clock** from `meta`.
-- **Tests**: a Python builder-side test asserts the template contains no `innerHTML` and that
-  `data.json` embedding is sound; a **Playwright DOM test** (next-gen already runs browser
-  tests) loads the page with a `data.json` containing `<script>`-shaped op/engine labels and
-  asserts they render inert as text and the selectors/filters behave (this is the only claim a
-  browser can actually prove).
+- **Tests** (new infrastructure — next-gen has **no** browser-test setup today, only Python
+  `tests/requirements.txt`): a static Python test asserts the committed template contains no
+  `innerHTML`/`insertAdjacentHTML` and that a sample `data.json` round-trips the schema; a
+  **Playwright DOM test** — added in this PR as new dev tooling (`pytest-playwright` +
+  chromium, own requirements file + CI step, browser cached) — serves the template with a
+  `data.json` containing `<script>`-shaped op/engine labels and asserts they render inert as
+  text and the selectors/filters behave (the only claim a browser can actually prove).
 
 ### B4. Sticky comment
 
@@ -320,16 +341,20 @@ only (the gating signal), and one link to the interactive page. Markers
   upload the single `SYNTHETIC_OUT` artifact; `timeout-minutes: 90` (three measured legs vs
   two, plus C image pull; 60→90 is deliberate headroom, and the C leg's own `timeout` bound
   keeps a hang from eating the margin).
-- **Closed-PR race**: cleanup and both arch publishers move into the **same repository-wide
-  per-PR concurrency group** (serialization first), and each publisher re-checks PR state
-  (`gh pr view --json state`) inside that group, skipping fail-closed when the PR is closed.
-  The state re-check alone is insufficient (close can land between check and push) — the
-  concurrency group is what closes the race; the check handles the cleanup-already-ran case.
+- **Closed-PR race**: the workflow-level arch-split concurrency stays unchanged (both arches
+  must run for one PR); serialization is added at the **job level** — both arch `synthetic-publish`
+  jobs and the cleanup job share one per-PR concurrency group (`synthetic-pages-pr-<N>`,
+  `cancel-in-progress: false`), and each publisher re-checks PR state (`gh pr view --json state`)
+  inside that group, skipping fail-closed when closed. GitHub keeps a single *pending* slot per
+  group (a newer queued job replaces an older pending one): a replaced publisher is fine (newer
+  data wins; a publisher queued after cleanup fail-closes on the state check), and a cleanup
+  replaced while pending only delays leaf removal — cleanup is idempotent and re-runnable, and a
+  stale leaf is cosmetic, never corruption.
 - **Fork PRs**: same-repository PRs only (the existing prepare job already excludes fork
   heads — images aren't pushed for forks). Supporting forks would need a separate trusted
   workflow design; explicitly out of scope.
 
-## 6. What the rubber-duck reviews corrected (v1 → v2 → v3)
+## 6. What the rubber-duck reviews corrected (v1 → v2 → v3 → v4)
 
 Round 1 (17 findings) — folded into v2: dynamic-op budgets/tiers silently N/A (→ A0); no
 single verdict source (→ A1); divergence conflated with perf (→ A3); `docker.io/` digest
@@ -360,10 +385,21 @@ Justfile doc-comment + instruction tables); "old renderer breaks" wording (→ w
 A5); unverified "negligible delta" claim removed (→ §2); XSS test overclaim (→ builder test +
 Playwright DOM test, B3).
 
+Round 3 (6 findings) — folded into v4: the A1 model couldn't render Markdown alone (missing
+module versions/images/hashes/samples/warmup/threshold echo — → A1 `meta`; "version checks"
+corrected to advisory warnings); the overall verdict enum/aggregation was undefined (→ A1
+`OverallVerdict` four-state rule incl. all-diverged and zero-comparable-cells); `if c_leg`
+would disable `errexit` inside the guarded code (→ child script under `timeout`, B1); "as
+today" was inaccurate for the four non-gated repo-read shapes (→ A1 truth-table note); the
+shared concurrency group needed job-level scoping to avoid blocking both arches, plus the
+single-pending-slot caveat (→ B5); page test/data wording contradictions and the nonexistent
+Playwright infra (→ A2 source-material wording, B3 new-tooling setup).
+
 ## 7. Deliverables & order
 
 1. **benchmark PR 1 (A0)** — dynamic-op budgets/tiers bug fix. Small, independently valuable,
-   no schema change (safe under #745's pin).
+   no schema change (safe under #745's pin). **Status: implemented — PR
+   [#255](https://github.com/FalkorDB/benchmark/pull/255).**
 2. **benchmark PR 2 (A1–A7)** — analysis model, `--cells`, profiles, divergence policy,
    summary v2, sanity-recipe + docs; then tag post-v2.2.
 3. **next-gen PR (B1–B5)** — stacked on #745, pinned to the new tag.
