@@ -388,7 +388,6 @@ pub async fn run_and_report(config: &ReplayConfig) -> BenchmarkResult<()> {
     write_report(&report, &config.out).await
 }
 
-/// Drop `graph`, execute the bundle's recorded load statements, and verify the node/edge counts.
 /// Ask the engine which procedures it registers (`dbms.procedures()`), returning their
 /// **lowercased** names — the capability probe (design Phase 6 §3.5). One query per replay,
 /// mirroring the A/B driver's `detect_algorithm_capabilities` (matching is case-insensitive so a
@@ -432,6 +431,7 @@ async fn probe_procedures(
         })?
 }
 
+/// Drop `graph`, execute the bundle's recorded load statements, and verify the node/edge counts.
 async fn load_recorded_graph(
     graph: &mut AsyncGraph,
     bundle: &Bundle,
