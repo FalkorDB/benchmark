@@ -206,11 +206,8 @@ pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
     let available = if required.is_empty() {
         None
     } else {
-        Some(
-            probe_procedures(&mut graph, config.server_timeout_ms, client_deadline)
-                .await
-                .map_err(|e| OtherError(format!("capability probe failed: {}", e)))?,
-        )
+        // `probe_procedures` errors already name the capability probe — bubble them up as-is.
+        Some(probe_procedures(&mut graph, config.server_timeout_ms, client_deadline).await?)
     };
     let skip_reason = |name: &str| -> Option<String> {
         let procedure = entry_for(name).capability.as_deref()?;
@@ -404,15 +401,15 @@ async fn probe_procedures(
             .with_timeout(server_timeout_ms)
             .execute()
             .await
-            .map_err(|e| OtherError(format!("procedure registry query failed: {:?}", e)))?;
+            .map_err(|e| OtherError(format!("capability probe: procedure registry query failed: {:?}", e)))?;
         let mut names = BTreeSet::new();
         let mut data = query_result.data;
         while let Some(row) = data.next().await {
             let row = row
-                .map_err(|e| OtherError(format!("procedure registry row decode error: {:?}", e)))?;
+                .map_err(|e| OtherError(format!("capability probe: registry row decode error: {:?}", e)))?;
             let name: String = row.try_get_at(0).map_err(|e| {
                 OtherError(format!(
-                    "procedure registry returned a non-string name: {:?}",
+                    "capability probe: registry returned a non-string name: {:?}",
                     e
                 ))
             })?;
@@ -424,7 +421,7 @@ async fn probe_procedures(
         .await
         .map_err(|e| {
             OtherError(format!(
-                "client deadline ({} ms) exceeded probing procedures: {}",
+                "capability probe: client deadline ({} ms) exceeded: {}",
                 client_deadline.as_millis(),
                 e
             ))
