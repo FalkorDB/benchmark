@@ -60,12 +60,13 @@ The synthetic **live** path benchmarks *synthetic-owned* writes with isolation
 
 ### 3.1 Replay is read-only by construction
 Recording rejects any `QueryType::Write` (`src/synthetic/recording.rs:285-289,359-365`); every recorded command is
-tagged `"kind":"read"` (`src/synthetic/recording.rs:430-445`); replay renders scratch writes rather than replaying
-recorded commands (`src/synthetic/mod.rs:947-989`), runs every reference command through `GRAPH.RO_QUERY`
+tagged `"kind":"read"` (`src/synthetic/recording.rs:430-445`); writes exist only in the **live
+`synthetic run` write worker**, which renders scratch writes from templates — never from recorded
+commands (`src/synthetic/mod.rs:947-989`); replay runs every reference command through `GRAPH.RO_QUERY`
 (`src/synthetic/op_runner.rs:56,141`), fails closed on writes (`src/synthetic/replay.rs:79`), and always measures with
 `MeasureTarget::read()` (`src/synthetic/replay.rs:222`). **Fix:** a **recorded-write worker source**, a
 `GRAPH.QUERY` write measurement path, and a **versioned bundle** carrying the write kind (currently op
-kind is *excluded* from `workload_hash`, `recording.rs:62-80,212-230`).
+kind is *excluded* from `workload_hash`, `src/synthetic/recording.rs:62-80,212-230`).
 
 ### 3.2 Counters are state/value/order-dependent — no cheap deterministic oracle
 Per §2, a constant `ExpectedMutation` is wrong. Deterministic verification needs a **per-command,
@@ -108,7 +109,7 @@ not live state. **Fix:** error-safe final restore, forbid `--no-load` for writes
    Replaces the 5-variant `ExpectedMutation` with a **generalized per-invocation expected outcome**.
 
 Selection is an **orthogonal** `--repo-writes` axis (like Phase 6's `--repo-algorithms`), initially
-**mutually exclusive** with `--repo-reads` (replay has one global concurrency sweep, `replay.rs:39-57`,
+**mutually exclusive** with `--repo-reads` (replay has one global concurrency sweep, `src/synthetic/replay.rs:39-57`,
 so a mixed bundle cannot express C=1 writes alongside C=1,8 reads).
 
 ## 5. Scope: in / out
@@ -168,7 +169,8 @@ nightly/on-demand job exercises the write shapes.
 4. **The counter model is too small** — 5 rigid variants + 4 counters cannot express DETACH DELETE or
    REMOVE; needs a generalized outcome + `relationships_deleted`/`properties_removed`/`labels_removed`
    (§2).
-5. **Write replay is real architecture** — RO_QUERY-only measurement, scratch-rendering worker,
+5. **Write replay is real architecture** — RO_QUERY-only measurement, scratch rendering confined
+   to the live-run write worker,
    `"kind":"read"` records, op kind excluded from `workload_hash`; needs a recorded-write worker +
    versioned bundle (§3.1).
 6. **Restore safety & content verification** — final restore on success/failure, forbid `--no-load`
