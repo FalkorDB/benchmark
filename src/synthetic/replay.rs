@@ -18,14 +18,14 @@
 //! leaving latency to be compared advisorily by the [`crate::synthetic::baseline`] guard.
 //!
 //! **Write bundles** (recording format v2, Phase 7 §4.1 latency tier): a bundle whose ops are
-//! writes is measured via `GRAPH.QUERY` at **C=1 only**, with the base graph **reset (drop + load
-//! + count-verify) before every measured cell** (op × cache mode) so mutation drift stays bounded
-//! to one cell's invocations. Nothing is asserted about results or mutation counters — outcomes
-//! are state/value-dependent (§10), so the latency tier records `result_digest: None` and leaves
-//! correctness to the deferred oracle tier. The replay ends with an **error-safe final restore**:
-//! the recorded base is reloaded (on success *and* failure) and its node/edge content digests are
-//! verified against the pristine post-load capture, so a write replay can never leave a mutated
-//! graph behind on the endpoint.
+//! writes is measured via `GRAPH.QUERY` at **C=1 only**, with the base graph **reset (drop +
+//! load + count-verify) before every measured cell** (op × cache mode) so mutation drift stays
+//! bounded to one cell's invocations. Nothing is asserted about results or mutation counters —
+//! outcomes are state/value-dependent (§10), so the latency tier records `result_digest: None`
+//! and leaves correctness to the deferred oracle tier. The replay ends with an **error-safe final
+//! restore**: the recorded base is reloaded (on success *and* failure) and its node/edge content
+//! digests are verified against the pristine post-load capture, so a write replay can never leave
+//! a mutated graph behind on the endpoint.
 
 use crate::error::BenchmarkError::OtherError;
 use crate::error::BenchmarkResult;

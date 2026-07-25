@@ -717,15 +717,14 @@ fn render_shapes(
         }
         // The op's key kind follows its family: Write-family shapes render through the repo's
         // write seam and record as write ops (format v2, kind hashed); everything else is a read.
-        let (key_kind, render): (QueryType, &dyn Fn(&mut StdRng) -> Option<crate::queries_repository::PreparedQuery>) =
-            match shape.family {
-                CoverageFamily::Write => (QueryType::Write, &|rng: &mut StdRng| {
-                    repo.render_write_with_rng(shape.name, rng)
-                }),
-                _ => (QueryType::Read, &|rng: &mut StdRng| {
-                    repo.render_read_with_rng(shape.name, rng)
-                }),
-            };
+        let key_kind = match shape.family {
+            CoverageFamily::Write => QueryType::Write,
+            _ => QueryType::Read,
+        };
+        let render = |rng: &mut StdRng| match shape.family {
+            CoverageFamily::Write => repo.render_write_with_rng(shape.name, rng),
+            _ => repo.render_read_with_rng(shape.name, rng),
+        };
         let key = OpKey::dynamic(shape.name.to_string(), key_kind);
         let mut rng = StdRng::seed_from_u64(corpus_seed ^ key.salt());
         let mut commands = Vec::with_capacity(shape.corpus_size);
