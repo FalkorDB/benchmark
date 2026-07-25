@@ -162,7 +162,7 @@ Notes locked by review rounds 2–3:
 `report --diff A B --regression … --cells cells.json` serializes the `RegressionAnalysis` to
 JSON. `--cells`, `--budget-profile` and `--divergence-policy` are only valid with
 `--diff --regression` (clap `requires`, like `--summary`; plain `--diff --cells` is rejected).
-Readme gains a doc-tested example. Cells files are the **source material** for the page's
+`readme.md` gains a doc-tested example. Cells files are the **source material** for the page's
 `data.json` (§B2) — the page itself fetches only `data.json`.
 
 ### A3. Divergence policy (G3)
@@ -224,7 +224,7 @@ the pin bump, so old-pin→v1 and new-pin→v2 are the only combinations that ca
 
 ### A7. Release + docs
 
-Readme (synthetic section) documents `--cells`, `--budget-profile`, `--divergence-policy`, the
+`readme.md` (synthetic section) documents `--cells`, `--budget-profile`, `--divergence-policy`, the
 `[cross-engine]` TOML profile and the dynamic-op-name budget behavior. `just synthetic-sanity`
 is extended to round-trip `--cells` + `--budget-profile cross-engine` +
 `--divergence-policy advisory`; its Justfile doc-comment and the recipe tables in
@@ -308,11 +308,11 @@ Page model (all client-side, driven only by `data.json`):
   the Rust-emitted all-modes `op_outcome` (v1 schema has no per-mode rollup; the matrix header
   says "all cache modes").
 - **Matrix view**: rows = ops, columns = the three comparisons, cell = the Rust-emitted
-  `op_outcome` emoji (🟢/🔴/⚠/N-A). **Filter chips** (predicates over comparison IDs, absent
+  `op_outcome` emoji (🟢/🔴/⚠/N/A). **Filter chips** (predicates over comparison IDs, absent
   comparisons excluded from quantifiers):
   - `all` — no filter;
   - `any red` — 🔴 in ≥ 1 available comparison (OR);
-  - `all green` — 🟢 in **every** available comparison (AND; an op with any N-A/⚠ cell in some
+  - `all green` — 🟢 in **every** available comparison (AND; an op with any N/A/⚠ cell in some
     comparison does not qualify);
   - `red vs C` — 🔴 in `c-pr` or `c-main` (regardless of `main-pr`);
   - `red vs main` — 🔴 in `main-pr` (regardless of the C comparisons);
