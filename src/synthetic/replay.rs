@@ -8,7 +8,7 @@
 //! single-flight **reference pass** (capturing each result-gated command's result shape; a
 //! result-N/A op skips the full capture — design §3.4), then measures each op through the shared
 //! closed-loop engine across the configured **concurrency sweep + cache modes** — overlaying each
-//! op's recorded [`RecordedBudget`] on the run's global knobs, exactly as a generated run overlays
+//! op's recorded [`RecordedBudget`](crate::synthetic::catalog::RecordedBudget) on the run's global knobs, exactly as a generated run overlays
 //! the catalog's per-op budget — and, at each op's highest concurrency, **verifies results are
 //! unchanged under concurrency**.
 //!
@@ -21,7 +21,7 @@ use crate::error::BenchmarkError::OtherError;
 use crate::error::BenchmarkResult;
 use crate::falkor::falkor_endpoint_to_redis_url;
 use crate::queries_repository::QueryType;
-use crate::synthetic::catalog::{RecordedBudget, DEFAULT_RESET_EVERY};
+use crate::synthetic::catalog::DEFAULT_RESET_EVERY;
 use crate::synthetic::dataset::{self, DatasetSpec};
 use crate::synthetic::op_runner::{capture_result, ResultShape};
 use crate::synthetic::recording::{self, Bundle};
@@ -138,21 +138,19 @@ pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
     // set isn't byte-stable (LIMIT-without-ORDER, top-k, float scores — design §3.2 / Decision 4)
     // — is still loaded, replayed, and timed, but its result is neither captured in full, nor
     // cross-concurrency-verified, nor digested, so a benign result difference never fails the A/B
-    // non-divergence gate. Unknown names default to gated + inherit (the safe defaults).
-    let inherit_budget = recording::OpEntry {
-        name: String::new(),
-        kind: QueryType::Read,
-        result_gated: true,
-        budget: RecordedBudget::default(),
-        count: 0,
-    };
+    // non-divergence gate. `load()` builds `bundle.commands` from `manifest.ops`, so every replayed
+    // name has an entry by construction — a miss is bundle corruption and must fail loudly.
     let op_entries: std::collections::HashMap<&str, &recording::OpEntry> = bundle
         .manifest
         .ops
         .iter()
         .map(|e| (e.name.as_str(), e))
         .collect();
-    let entry_for = |name: &str| *op_entries.get(name).unwrap_or(&&inherit_budget);
+    let entry_for = |name: &str| {
+        *op_entries
+            .get(name)
+            .unwrap_or_else(|| panic!("op '{name}' replayed without a manifest entry (corrupt bundle)"))
+    };
 
     // Engine config for the recorded workload (writes/reset are irrelevant — recorded ops are reads).
     let engine_config = Config {
