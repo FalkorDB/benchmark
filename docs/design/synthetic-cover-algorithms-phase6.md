@@ -143,15 +143,16 @@ curated metadata in `shapes.rs`), but on a **separate axis** from reads:
 Floats are digested by `f64::to_bits()` (exact), so the question is **value** stability run-to-run on
 the same image:
 
-| Shape | Proposed `result_policy` | Why |
+| Shape | `result_policy` (final) | Why |
 | --- | --- | --- |
 | `algo_pagerank_summary` | **N/A** | `RETURN score LIMIT 1` (no `ORDER BY`) — arbitrary single float. |
-| `algo_harmonic_summary` | **N/A** (pending) | `avg`/`max` over all nodes; iterative/aggregation value stability unproven. |
-| `algo_max_flow_single_pair` | **Gated (candidate)** | Max-flow of a fixed simple graph + capacities + seeded pair is a unique integral value coerced to exact `f64`. |
-| `algo_msf_summary` | **Gated (candidate)** | `edge_count` and MSF `total_weight` are unique (tie-breaking cannot change the minimum total). |
+| `algo_harmonic_summary` | **N/A** | `avg`/`max` over all nodes; iterative/aggregation value stability unproven. |
+| `algo_max_flow_single_pair` | **Gated** | Max-flow of a fixed simple graph + capacities + seeded pair is a unique integral value coerced to exact `f64`; digests verified byte-stable (§7 step 5). |
+| `algo_msf_summary` | **Gated** | `edge_count` and MSF `total_weight` are unique (tie-breaking cannot change the minimum total); digests verified byte-stable (§7 step 5). |
 
-Default **all four to N/A**; promote `max_flow`/`msf` to `Gated` **only after** confirming byte-stable
-digests across ≥2 runs on the per-PR image (the reads' bar). Never add a synthetic-only `ORDER BY`.
+All four defaulted to N/A until the promotion bar was met: promote `max_flow`/`msf` to `Gated`
+**only after** confirming byte-stable digests across ≥2 runs on the per-PR image (the reads' bar).
+Never add a synthetic-only `ORDER BY`.
 *(Resolved — see §7 step 5: verified byte-stable, `max_flow`/`msf` promoted; `pagerank`/`harmonic`
 stay N/A per this table.)*
 
