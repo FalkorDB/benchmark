@@ -205,6 +205,24 @@ Each op entry may also carry a **`budget`** — per-op overrides for
 (omitted when fully inherited, and never part of the `workload_hash`).
 `just synthetic-record <name>` wraps this and writes under `recordings/<name>/` (git-ignored).
 
+**Variant — the opt-in algorithm shapes.** `--repo-algorithms` appends the 4 whole-graph algorithm
+read shapes (`algo.pageRank` / `algo.maxFlow` / `algo.MSF` / `algo.HarmonicCentrality`) to the
+bundle, alone or on top of `--repo-reads`:
+
+```bash
+# The 50 A/B read shapes + the 4 algorithm shapes in one bundle (54 ops), or algorithms alone:
+benchmark synthetic record --repo-reads full --repo-algorithms \
+  --nodes 1000 --edges 5000 --seed 7 --out-dir rec-algos
+benchmark synthetic record --repo-algorithms --nodes 1000 --edges 5000 --seed 7 --out-dir rec-algos-only
+```
+
+Each algorithm shape records a tight per-op `budget` (25 samples, warm-up 2, C=1, cached-only,
+60 s server timeout) and a reduced corpus (1 command each; a small seeded `(source, target)` pair
+set for maxFlow), and starts **result-N/A** — latency/trend coverage, not divergence gating.
+Algorithms never enter `--repo-reads full` or the per-PR `synthetic-verify` gate; every generated
+graph is already simple (no parallel `:Friend` edges) with `bench_capacity` on every edge, so the
+flow/MSF shapes need no extra fixture.
+
 ---
 
 <a id="story-4"></a>

@@ -278,6 +278,13 @@ impl QueriesRepository {
         &self.non_algorithm_read_query_names
     }
 
+    /// The algorithm read shape names, in definition order — the opt-in whole-graph algorithm
+    /// shapes the synthetic check records via [`Self::render_read_with_rng`] (Phase 6 §3.3).
+    /// Empty unless the repository was built with an [`AlgorithmQuerySelection`] enabling them.
+    pub fn algorithm_read_names(&self) -> &[String] {
+        &self.algorithm_read_query_names
+    }
+
     /// Render the read shape `name` from a caller-supplied RNG, so a fixed seed yields a
     /// byte-identical Cypher+params corpus (design §4.1 — the seedable entry the record-once /
     /// replay-verbatim synthetic path renders each shape's corpus with). Returns `None` if `name`
@@ -373,6 +380,12 @@ impl UsersQueriesRepository {
     /// synthetic check records via [`Self::render_read_with_rng`] (design §3.4).
     pub fn non_algorithm_read_names(&self) -> &[String] {
         self.queries_repository.non_algorithm_read_names()
+    }
+
+    /// The algorithm read shape names, in definition order (Phase 6 §3.3). Empty unless the
+    /// repository was built with an [`AlgorithmQuerySelection`] enabling them.
+    pub fn algorithm_read_names(&self) -> &[String] {
+        self.queries_repository.algorithm_read_names()
     }
 
     /// Render the read shape `name` from a caller-supplied RNG (record-once determinism, §4.1).

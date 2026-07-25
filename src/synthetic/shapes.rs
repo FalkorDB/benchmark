@@ -40,7 +40,7 @@ use crate::queries_repository::{
 };
 use crate::synthetic::catalog::{OpBudget, CORPUS_SIZE};
 use crate::synthetic::recording::RecordedOp;
-use crate::synthetic::{OpKey, Tier};
+use crate::synthetic::{CacheSelection, OpKey, Tier};
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 use std::collections::BTreeSet;
@@ -79,10 +79,38 @@ pub enum ShapeCapability {
     FulltextQueryNodes,
     /// `db.idx.fulltext.queryRelationships` — a fulltext index over `:Friend(ft_text)`.
     FulltextQueryRelationships,
+    /// `algo.pageRank` — whole-graph PageRank (Phase 6, per-procedure per design §3.5).
+    AlgoPageRank,
+    /// `algo.maxFlow` — single-pair max flow over `bench_capacity` (Phase 6).
+    AlgoMaxFlow,
+    /// `algo.MSF` — minimum spanning forest over `bench_capacity` (Phase 6).
+    AlgoMsf,
+    /// `algo.HarmonicCentrality` — whole-graph harmonic centrality (Phase 6).
+    AlgoHarmonic,
+}
+
+/// The **synthetic-only** coverage family a shape belongs to (design Phase 6 §3.3): which curated
+/// annotation table defines it and which record-time selector picks it up.
+///
+/// Deliberately **not** [`QueryCoverageProfile`] — that enum is the global A/B `--query-profile`
+/// CLI surface (`clap::ValueEnum`), so an `Algorithm` member there would expose a misleading
+/// `--query-profile algorithm` on the A/B benchmark that still wouldn't enable algorithm queries
+/// (that's [`AlgorithmQuerySelection`]). This family axis exists only inside the synthetic check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoverageFamily {
+    /// A non-algorithm repo read, tagged with the A/B [`QueryCoverageProfile`] that introduced it
+    /// (`Baseline` Phase 3, `ExtendedCore` Phase 4, `FixtureDependent` Phase 5). Selected by
+    /// `--repo-reads <tier>`.
+    Reads(QueryCoverageProfile),
+    /// An opt-in whole-graph algorithm read (Phase 6) — selected **only** by `--repo-algorithms`,
+    /// never by `--repo-reads`/tier, never in the per-PR gate, and absent from the A/B
+    /// `--query-profile`.
+    Algorithm,
 }
 
 /// One repo read shape's synthetic metadata: its stable [`queries_repository`] name, coverage
-/// **profile** (Baseline / ExtendedCore / FixtureDependent), coverage **tier** (Decision 1), result
+/// **family** (non-algorithm read tagged with its A/B profile, or opt-in algorithm — Phase 6),
+/// coverage **tier** (Decision 1), result
 /// policy (Decision 4), optional **capability** (Phase 5 fulltext/vector), and its record-time
 /// **corpus size** + replay **budget** (design §3.4).
 ///
@@ -99,10 +127,10 @@ pub enum ShapeCapability {
 pub struct ShapeSpec {
     /// The shape's stable `queries_repository` read name (also the recorded op's key).
     pub name: &'static str,
-    /// Coverage profile the shape belongs to: [`QueryCoverageProfile::Baseline`] (Phase 3),
-    /// [`QueryCoverageProfile::ExtendedCore`] (Phase 4), or [`QueryCoverageProfile::FixtureDependent`]
-    /// (Phase 5).
-    pub profile: QueryCoverageProfile,
+    /// The synthetic-only [`CoverageFamily`] the shape belongs to: a non-algorithm read tagged
+    /// with the [`QueryCoverageProfile`] that introduced it (Phases 3–5), or an opt-in
+    /// [`CoverageFamily::Algorithm`] shape (Phase 6).
+    pub family: CoverageFamily,
     /// Coverage tier: [`Tier::Core`] gates every PR; [`Tier::Full`] runs nightly/on-demand.
     pub tier: Tier,
     /// Whether replay gates this shape's result digest ([`ResultPolicy`]).
@@ -141,7 +169,7 @@ pub fn baseline_read_shapes() -> Vec<ShapeSpec> {
     ) -> ShapeSpec {
         ShapeSpec {
             name,
-            profile: QueryCoverageProfile::Baseline,
+            family: CoverageFamily::Reads(QueryCoverageProfile::Baseline),
             tier,
             result_policy,
             capability: None,
@@ -219,7 +247,7 @@ pub fn baseline_read_shapes() -> Vec<ShapeSpec> {
 pub fn extended_core_read_shapes() -> Vec<ShapeSpec> {
     vec![ShapeSpec {
         name: "temporal_spatial_roundtrip",
-        profile: QueryCoverageProfile::ExtendedCore,
+        family: CoverageFamily::Reads(QueryCoverageProfile::ExtendedCore),
         tier: Tier::Core,
         result_policy: ResultPolicy::Gated,
         capability: None,
@@ -253,7 +281,7 @@ pub fn fixture_dependent_read_shapes() -> Vec<ShapeSpec> {
     ) -> ShapeSpec {
         ShapeSpec {
             name,
-            profile: QueryCoverageProfile::FixtureDependent,
+            family: CoverageFamily::Reads(QueryCoverageProfile::FixtureDependent),
             tier: Tier::Full,
             result_policy: ResultPolicy::NotApplicable(
                 "vector/fulltext top-k ordering is non-deterministic",
@@ -312,7 +340,107 @@ fn selected_shapes(tier: Tier) -> Vec<ShapeSpec> {
 pub fn repo_reads_need_fixture(tier: Tier) -> bool {
     selected_shapes(tier)
         .iter()
-        .any(|shape| shape.profile == QueryCoverageProfile::FixtureDependent)
+        .any(|shape| shape.family == CoverageFamily::Reads(QueryCoverageProfile::FixtureDependent))
+}
+
+/// The concurrency sweep every algorithm shape measures: a single closed-loop worker. Whole-graph
+/// algorithms saturate the engine by themselves, so a concurrency curve adds runtime without
+/// information.
+static ALGORITHM_SWEEP: [usize; 1] = [1];
+
+/// The corpus size for `algo_max_flow_single_pair` — a small seeded set of distinct
+/// `(source, target)` pairs (design §3.4), instead of the [`CORPUS_SIZE`]-command corpus a cheap
+/// read records.
+const MAX_FLOW_CORPUS_SIZE: usize = 4;
+
+/// The per-op budget every algorithm shape records (design §3.4): whole-graph algorithms are
+/// ~40–80 ms/call, so they dial samples/concurrency down and their timeouts up instead of
+/// inheriting the global read-tuned knobs. Recorded into the bundle ([`RecordedBudget`]) and
+/// overlaid on the global config at replay; the resolved effective policy is persisted per op and
+/// guarded by `report --diff`.
+///
+/// [`RecordedBudget`]: crate::synthetic::catalog::RecordedBudget
+const ALGORITHM_BUDGET: OpBudget = OpBudget {
+    samples: Some(25),
+    warmup: Some(2),
+    concurrency: Some(&ALGORITHM_SWEEP),
+    cache: Some(CacheSelection::Cached),
+    server_timeout_ms: Some(60_000),
+    client_deadline_ms: Some(75_000),
+};
+
+/// The curated annotation for the **4 opt-in whole-graph algorithm read shapes** (design Phase 6
+/// §7.3), in `queries_repository` definition order. Selected **only** by `--repo-algorithms` —
+/// never by `--repo-reads`/tier, never in the per-PR gate ([`repo_read_shapes`] is exactly the 50
+/// non-algorithm reads).
+///
+/// The op *set* is auto-discovered: the drift-guard test asserts this table's names are **exactly**
+/// [`UsersQueriesRepository::algorithm_read_names`] of an all-algorithms-enabled repository, so
+/// adding/removing an algorithm read there fails the build until this table is updated.
+///
+/// All four start [`ResultPolicy::NotApplicable`] per the design's §6 determinism table;
+/// `max_flow`/`msf` are gating **candidates**, promoted only after byte-stability across ≥2
+/// independent record runs on the same image is verified (design §7.5). Never force determinism
+/// with a synthetic-only `ORDER BY`. Each carries the per-procedure [`ShapeCapability`] it
+/// exercises (annotation in this phase; probe-before-capture is design §3.5).
+pub fn algorithm_read_shapes() -> Vec<ShapeSpec> {
+    use ShapeCapability::{AlgoHarmonic, AlgoMaxFlow, AlgoMsf, AlgoPageRank};
+    // Every row is an Algorithm-family, Full-tier shape with the algorithm budget; only the
+    // corpus size (1 for parameterless shapes, a small seeded pair set for maxFlow), capability
+    // and N/A reason vary.
+    fn s(
+        name: &'static str,
+        capability: ShapeCapability,
+        corpus_size: usize,
+        not_applicable_reason: &'static str,
+    ) -> ShapeSpec {
+        ShapeSpec {
+            name,
+            family: CoverageFamily::Algorithm,
+            tier: Tier::Full,
+            result_policy: ResultPolicy::NotApplicable(not_applicable_reason),
+            capability: Some(capability),
+            corpus_size,
+            budget: ALGORITHM_BUDGET,
+        }
+    }
+    vec![
+        s(
+            "algo_pagerank_summary",
+            AlgoPageRank,
+            1,
+            "RETURN score LIMIT 1 without ORDER BY — arbitrary single float",
+        ),
+        s(
+            "algo_max_flow_single_pair",
+            AlgoMaxFlow,
+            MAX_FLOW_CORPUS_SIZE,
+            "gating candidate — pending byte-stable digests across >=2 record runs (design §7.5)",
+        ),
+        s(
+            "algo_msf_summary",
+            AlgoMsf,
+            1,
+            "gating candidate — pending byte-stable digests across >=2 record runs (design §7.5)",
+        ),
+        s(
+            "algo_harmonic_summary",
+            AlgoHarmonic,
+            1,
+            "avg/max over all nodes — iterative float value stability unproven",
+        ),
+    ]
+}
+
+/// The algorithm selection [`record_algorithm_reads`] uses: **all four** enabled, so the
+/// repository registers every `algo_*` read and the drift-guard sees the complete set.
+fn all_algorithms() -> AlgorithmQuerySelection {
+    AlgorithmQuerySelection {
+        pagerank: true,
+        max_flow: true,
+        msf: true,
+        harmonic: true,
+    }
 }
 
 /// The algorithm selection the baseline-read source uses: **none**. Algorithm reads are opt-in and
@@ -374,12 +502,62 @@ fn record_selected_shapes(
         .iter()
         .map(String::as_str)
         .collect();
+    render_shapes(&repo, &available, "non-algorithm read", shapes, corpus_seed)
+}
 
+/// Render the 4 opt-in algorithm read shapes ([`algorithm_read_shapes`]) into [`RecordedOp`]s —
+/// **offline**, no server (design Phase 6 §7.3, selected by `--repo-algorithms`).
+///
+/// Renders from an **all-algorithms-enabled** repository (design §3.3 — the read-shape path builds
+/// with [`no_algorithms`], which never registers the `algo_*` reads) and validates the annotation
+/// table against [`UsersQueriesRepository::algorithm_read_names`] (annotation drift fails loudly).
+/// The rendered corpora address the plain generated dataset: since `synthbench/v5` every generated
+/// graph is **simple** (no parallel `:Friend` edges — `algo.maxFlow` rejects multi-edges) and every
+/// `:Friend` edge carries `bench_capacity` (maxFlow's `capacityProperty`, MSF's `weightAttribute`),
+/// so no extra fixture is baked.
+pub fn record_algorithm_reads(
+    vertices: i32,
+    edges: i32,
+    corpus_seed: u64,
+) -> BenchmarkResult<Vec<RecordedOp>> {
+    let repo = UsersQueriesRepository::new(
+        vertices,
+        edges,
+        Flavour::FalkorDB,
+        all_algorithms(),
+        QueryCoverageProfile::Baseline,
+    );
+    let available: BTreeSet<&str> = repo
+        .algorithm_read_names()
+        .iter()
+        .map(String::as_str)
+        .collect();
+    render_shapes(
+        &repo,
+        &available,
+        "algorithm read",
+        &algorithm_read_shapes(),
+        corpus_seed,
+    )
+}
+
+/// Render each of `shapes` into a [`RecordedOp`] from `repo`, seeding every shape's corpus with
+/// `corpus_seed ^ salt` (the op's [`OpKey::salt`]) so a given seed yields a byte-identical corpus
+/// (record-once → replay-verbatim). `available` is the repository's auto-discovered name set for
+/// the family being rendered; `kind` names it in the annotation-drift error. Shared by
+/// [`record_selected_shapes`] (non-algorithm reads) and [`record_algorithm_reads`] (Phase 6).
+fn render_shapes(
+    repo: &UsersQueriesRepository,
+    available: &BTreeSet<&str>,
+    kind: &str,
+    shapes: &[ShapeSpec],
+    corpus_seed: u64,
+) -> BenchmarkResult<Vec<RecordedOp>> {
     let mut ops = Vec::with_capacity(shapes.len());
     for shape in shapes {
         if !available.contains(shape.name) {
             return Err(OtherError(format!(
-                "repo read shape '{}' is annotated but not a queries_repository non-algorithm read \
+                "repo read shape '{}' is annotated but not a queries_repository {kind} \
                  (annotation drift — update src/synthetic/shapes.rs)",
                 shape.name
             )));
@@ -479,7 +657,7 @@ mod tests {
         assert_eq!(added, annotated, "ExtendedCore adds exactly the annotated extended-core reads");
         assert!(added.contains("temporal_spatial_roundtrip"));
         for shape in extended_core_read_shapes() {
-            assert_eq!(shape.profile, QueryCoverageProfile::ExtendedCore);
+            assert_eq!(shape.family, CoverageFamily::Reads(QueryCoverageProfile::ExtendedCore));
         }
     }
 
@@ -509,7 +687,10 @@ mod tests {
         );
         // Every fixture shape is FixtureDependent, Full-tier, result-N/A, and carries a capability.
         for shape in fixture_dependent_read_shapes() {
-            assert_eq!(shape.profile, QueryCoverageProfile::FixtureDependent);
+            assert_eq!(
+                shape.family,
+                CoverageFamily::Reads(QueryCoverageProfile::FixtureDependent)
+            );
             assert_eq!(shape.tier, Tier::Full);
             assert!(!shape.result_policy.is_gated(), "top-k reads are result-N/A");
             assert!(shape.capability.is_some(), "fixture reads carry a capability");
@@ -540,6 +721,126 @@ mod tests {
     }
 
     #[test]
+    fn algorithm_shapes_match_exactly_the_repo_algorithm_read_names() {
+        // Derive-with-annotation for Phase 6: the annotation table must be EXACTLY the algorithm
+        // reads an all-algorithms-enabled repository auto-discovers, in definition order. If
+        // `queries_repository` adds/renames/removes an `algo_*` read, this fails until
+        // `algorithm_read_shapes()` is updated.
+        let repo = UsersQueriesRepository::new(
+            1000,
+            5000,
+            Flavour::FalkorDB,
+            all_algorithms(),
+            QueryCoverageProfile::Baseline,
+        );
+        let discovered: Vec<&str> =
+            repo.algorithm_read_names().iter().map(String::as_str).collect();
+        let annotated: Vec<&str> = algorithm_read_shapes().iter().map(|s| s.name).collect();
+        assert_eq!(annotated, discovered, "algorithm shapes drifted from repo algorithm reads");
+        // The read-shape repository (no_algorithms) must discover NO algorithm reads — the family
+        // is reachable only through record_algorithm_reads.
+        let reads_repo = read_shapes_repository(QueryCoverageProfile::FixtureDependent, 1000, 5000);
+        assert!(reads_repo.algorithm_read_names().is_empty());
+    }
+
+    #[test]
+    fn algorithm_shapes_are_all_result_na_full_tier_with_per_procedure_capabilities() {
+        // Design §6: all four start result-N/A (max_flow/msf promote only after §7.5 byte-stability
+        // verification); §3.5: each carries its per-procedure capability; §3.4: each records a
+        // reduced corpus (1, or the small seeded maxFlow pair set) under the algorithm budget.
+        let shapes = algorithm_read_shapes();
+        assert_eq!(shapes.len(), 4);
+        for shape in &shapes {
+            assert_eq!(shape.family, CoverageFamily::Algorithm, "'{}'", shape.name);
+            assert_eq!(shape.tier, Tier::Full, "'{}'", shape.name);
+            assert!(!shape.result_policy.is_gated(), "'{}' must start result-N/A", shape.name);
+            assert_eq!(shape.budget, ALGORITHM_BUDGET, "'{}'", shape.name);
+        }
+        let caps: Vec<Option<ShapeCapability>> = shapes.iter().map(|s| s.capability).collect();
+        assert_eq!(
+            caps,
+            vec![
+                Some(ShapeCapability::AlgoPageRank),
+                Some(ShapeCapability::AlgoMaxFlow),
+                Some(ShapeCapability::AlgoMsf),
+                Some(ShapeCapability::AlgoHarmonic),
+            ]
+        );
+        let corpora: Vec<usize> = shapes.iter().map(|s| s.corpus_size).collect();
+        assert_eq!(
+            corpora,
+            vec![1, MAX_FLOW_CORPUS_SIZE, 1, 1],
+            "parameterless shapes render once; maxFlow renders its seeded pair set"
+        );
+    }
+
+    #[test]
+    fn repo_read_shapes_exclude_algorithms_and_stay_exactly_todays_50_reads() {
+        // Design §3.2: `repo_read_shapes()` / `--repo-reads full` remain EXACTLY today's 50
+        // non-algorithm reads — algorithms are selected only by the orthogonal --repo-algorithms
+        // (never by tier, never in the per-PR gate). The workload-hash golden in mod.rs pins the
+        // recorded byte stream; this pins the selection sets.
+        let read_names: BTreeSet<&str> = repo_read_shapes().iter().map(|s| s.name).collect();
+        assert_eq!(read_names.len(), 50);
+        let algo_names: BTreeSet<&str> = algorithm_read_shapes().iter().map(|s| s.name).collect();
+        assert!(
+            read_names.is_disjoint(&algo_names),
+            "algorithm shapes must never enter repo_read_shapes()"
+        );
+        for name in &algo_names {
+            assert_eq!(
+                repo_read_tier(name),
+                None,
+                "'{name}' must not resolve to a repo read tier (algorithms are outside --repo-reads)"
+            );
+        }
+    }
+
+    #[test]
+    fn record_algorithm_reads_renders_seeded_budgeted_corpora() {
+        // The Phase 6 record path end-to-end (offline): 4 ops in definition order, each carrying
+        // the algorithm budget and its reduced corpus, byte-identical for a fixed seed.
+        let ops = record_algorithm_reads(1000, 5000, 7).expect("record algorithm reads");
+        let names: Vec<&str> = ops.iter().map(|op| op.key.name()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "algo_pagerank_summary",
+                "algo_max_flow_single_pair",
+                "algo_msf_summary",
+                "algo_harmonic_summary"
+            ]
+        );
+        for op in &ops {
+            assert!(!op.result_gated, "'{}' starts result-N/A (design §6)", op.key.name());
+            assert_eq!(
+                op.budget,
+                RecordedBudget::from(ALGORITHM_BUDGET),
+                "'{}' must record the algorithm budget",
+                op.key.name()
+            );
+        }
+        let corpora: Vec<usize> = ops.iter().map(|op| op.commands.len()).collect();
+        assert_eq!(corpora, vec![1, MAX_FLOW_CORPUS_SIZE, 1, 1]);
+        // The rendered Cypher exercises the real procedures…
+        assert!(ops[0].commands[0].contains("algo.pageRank"), "{}", ops[0].commands[0]);
+        assert!(ops[1].commands[0].contains("algo.maxFlow"), "{}", ops[1].commands[0]);
+        assert!(ops[1].commands[0].contains("bench_capacity"), "{}", ops[1].commands[0]);
+        assert!(ops[2].commands[0].contains("algo.MSF"), "{}", ops[2].commands[0]);
+        assert!(ops[3].commands[0].contains("algo.HarmonicCentrality"), "{}", ops[3].commands[0]);
+        // …the maxFlow corpus is a seeded set of distinct (source, target) pairs (deterministic
+        // for the fixed seed, so distinctness is a stable fact)…
+        let unique_pairs: BTreeSet<&str> =
+            ops[1].commands.iter().map(String::as_str).collect();
+        assert_eq!(unique_pairs.len(), MAX_FLOW_CORPUS_SIZE, "seeded pairs must differ");
+        // …and the same seed reproduces the identical corpus (record-once → replay-verbatim).
+        let again = record_algorithm_reads(1000, 5000, 7).expect("re-record");
+        for (a, b) in ops.iter().zip(&again) {
+            assert_eq!(a.commands, b.commands, "'{}' corpus must be seed-stable", a.key.name());
+        }
+    }
+
+    #[test]
     fn there_are_forty_six_baseline_reads_with_a_nonempty_core_subset() {
         let shapes = baseline_read_shapes();
         assert_eq!(shapes.len(), 46, "expected the 46 baseline reads (design §3.4)");
@@ -557,18 +858,26 @@ mod tests {
         let names: BTreeSet<&str> = shapes.iter().map(|s| s.name).collect();
         assert_eq!(names.len(), 50, "shape names must be unique across profiles");
         assert_eq!(
-            shapes.iter().filter(|s| s.profile == QueryCoverageProfile::ExtendedCore).count(),
+            shapes
+                .iter()
+                .filter(|s| s.family == CoverageFamily::Reads(QueryCoverageProfile::ExtendedCore))
+                .count(),
             1,
             "exactly one extended-core read"
         );
         assert_eq!(
-            shapes.iter().filter(|s| s.profile == QueryCoverageProfile::FixtureDependent).count(),
+            shapes
+                .iter()
+                .filter(
+                    |s| s.family == CoverageFamily::Reads(QueryCoverageProfile::FixtureDependent)
+                )
+                .count(),
             3,
             "exactly three fixture-dependent reads"
         );
         // `temporal_spatial_roundtrip` is ExtendedCore, Core-tier, and result-gated.
         let ts = shapes.iter().find(|s| s.name == "temporal_spatial_roundtrip").unwrap();
-        assert_eq!(ts.profile, QueryCoverageProfile::ExtendedCore);
+        assert_eq!(ts.family, CoverageFamily::Reads(QueryCoverageProfile::ExtendedCore));
         assert_eq!(ts.tier, Tier::Core);
         assert!(ts.result_policy.is_gated());
         assert_eq!(ts.capability, None);
@@ -579,7 +888,10 @@ mod tests {
             "fulltext_query_relationships_smoke",
         ] {
             let s = shapes.iter().find(|s| s.name == name).unwrap();
-            assert_eq!(s.profile, QueryCoverageProfile::FixtureDependent);
+            assert_eq!(
+                s.family,
+                CoverageFamily::Reads(QueryCoverageProfile::FixtureDependent)
+            );
             assert_eq!(s.tier, Tier::Full);
             assert!(!s.result_policy.is_gated());
             assert!(s.capability.is_some());
@@ -727,7 +1039,7 @@ mod tests {
         // safety net behind the derive-with-annotation model.
         let bogus = [ShapeSpec {
             name: "__not_a_repo_read__",
-            profile: QueryCoverageProfile::Baseline,
+            family: CoverageFamily::Reads(QueryCoverageProfile::Baseline),
             tier: Tier::Full,
             result_policy: ResultPolicy::Gated,
             capability: None,
@@ -761,7 +1073,7 @@ mod tests {
         static SWEEP: [usize; 1] = [1];
         let small = [ShapeSpec {
             name: "single_vertex_read",
-            profile: QueryCoverageProfile::Baseline,
+            family: CoverageFamily::Reads(QueryCoverageProfile::Baseline),
             tier: Tier::Core,
             result_policy: ResultPolicy::Gated,
             capability: None,
@@ -797,7 +1109,7 @@ mod tests {
     fn record_selected_shapes_rejects_a_zero_corpus_naming_the_shape() {
         let bogus = [ShapeSpec {
             name: "single_vertex_read",
-            profile: QueryCoverageProfile::Baseline,
+            family: CoverageFamily::Reads(QueryCoverageProfile::Baseline),
             tier: Tier::Core,
             result_policy: ResultPolicy::Gated,
             capability: None,

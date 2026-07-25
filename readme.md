@@ -473,6 +473,17 @@ just synthetic-compare-versions demo falkor://127.0.0.1:6379 falkor://127.0.0.1:
   folded into the `workload_hash`. This is the plumbing that lets whole-graph algorithm shapes
   (~40–80 ms/call) record a 1-command corpus with a tight budget instead of the default 256×sweep.
   `--repo-reads` is mutually exclusive with `--op`/`--all-reads`/`--tier`.
+  **`--repo-algorithms`** additionally records the **4 opt-in whole-graph algorithm read shapes**
+  (`algo.pageRank` / `algo.maxFlow` / `algo.MSF` / `algo.HarmonicCentrality`), each with a tight
+  per-op budget (25 samples, warm-up 2, C=1, cached-only, 60 s server timeout) and a reduced corpus
+  (1 command for the parameterless shapes; a small seeded `(source, target)` pair set for maxFlow).
+  All four start **result-N/A** (their values aren't verified byte-stable yet — `max_flow`/`msf`
+  are gating candidates pending that verification), so they add latency/trend coverage without
+  joining the divergence gate. The selector is **orthogonal** to `--repo-reads` (combinable with it
+  or usable alone; also mutually exclusive with `--op`/`--all-reads`/`--tier`): algorithm shapes are
+  **never** part of `--repo-reads full` nor the per-PR `synthetic-verify` gate. They need no extra
+  fixture — every generated graph is **simple** (no parallel `:Friend` edges, which `algo.maxFlow`
+  rejects) and every `:Friend` edge carries the `bench_capacity` property the flow/MSF shapes use.
 - **`benchmark synthetic run --recording <dir> [--concurrency … --cache …]`** drops + loads +
   **count-verifies** the recorded graph, then measures the recorded commands across the concurrency
   sweep + cache modes, writing a report plus a per-op **`result_digest`** (a hash of the result

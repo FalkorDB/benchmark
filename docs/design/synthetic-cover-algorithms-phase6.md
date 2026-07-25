@@ -157,9 +157,14 @@ digests across ≥2 runs on the per-PR image (the reads' bar). Never add a synth
 1. ✅ **Simple-graph algorithm fixture** (§3.1) — deterministic, no parallel `:Friend` edges + tests.
 2. ✅ **Recorded-shape budget/corpus plumbing** (§3.4) — per-shape corpus size + budget on the
    dynamic path; N/A shapes skip full reference capture.
-3. **Annotation + selection (all N/A):** synthetic-only family, `algorithm_read_shapes()`,
+3. ✅ **Annotation + selection (all N/A):** synthetic-only family, `algorithm_read_shapes()`,
    `algorithm_read_names()` + drift-guard, `record_algorithm_reads()`, `--repo-algorithms`. Record +
-   replay the 4 shapes end-to-end, opt-in.
+   replay the 4 shapes end-to-end, opt-in. *(Implemented: `CoverageFamily::{Reads(profile),
+   Algorithm}` replaces `ShapeSpec.profile` — the A/B `QueryCoverageProfile` is untouched;
+   `record_algorithm_reads()` renders from an all-algorithms-enabled repository with its own
+   drift-guard; `--repo-algorithms` composes orthogonally with `--repo-reads`, and tests pin that
+   `repo_read_shapes()`/`--repo-reads full` remain exactly the 50 reads with the pinned
+   `workload_hash` golden. Capability variants are annotation-only until step 4.)*
 4. **Per-procedure capability** (§3.5) — probe-before-capture + skipped-op reporting.
 5. **Promote deterministic shapes:** flip `max_flow`/`msf` to `Gated` once verified byte-stable.
 6. **Docs:** cookbook + readme.
