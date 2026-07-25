@@ -63,14 +63,15 @@ impl ResultPolicy {
     }
 }
 
-/// The engine capability a fixture-dependent read requires beyond plain Cypher (design §3.5). The
-/// fulltext/vector smoke reads name the specific index procedure they exercise.
+/// The engine procedure a shape requires beyond plain Cypher (design §3.5): the fulltext/vector
+/// smoke reads name the index procedure they exercise, the algorithm shapes their `algo.*`
+/// procedure.
 ///
 /// Recording persists [`Self::procedure`] on each shape's manifest entry
 /// ([`crate::synthetic::recording::OpEntry::capability`]), and replay probes the engine's
 /// procedure registry **before** the reference capture (design §3.5): an op whose required
 /// procedure is absent is *skipped* — reported, but never executed — instead of failing the whole
-/// replay. Non-fixture reads need nothing (`capability = None`).
+/// replay. Capability-free shapes need nothing (`capability = None`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShapeCapability {
     /// `db.idx.vector.queryNodes` — a vector index over `:User(embedding)`.

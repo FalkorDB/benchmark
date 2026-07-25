@@ -268,8 +268,9 @@ pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
     let uid_alloc = AtomicU64::new(0);
 
     let mut operations = BTreeMap::new();
-    // Skipped ops first: an empty-levels entry carrying the skip reason, so the report keeps the
-    // full recorded op set and the diff/regression guards can tell "skipped" from "not recorded".
+    // Skipped ops get an empty-levels entry carrying the skip reason (BTreeMap renders by key),
+    // so the report keeps the full recorded op set and the diff/regression guards can tell
+    // "skipped" from "not recorded".
     for (name, reason) in skipped {
         operations.insert(
             name,
