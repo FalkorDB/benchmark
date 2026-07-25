@@ -1566,8 +1566,21 @@ async fn record_and_replay_algorithm_shapes_end_to_end() {
     config2.warmup = 1;
     let report2 = replay::run(&config2).await.expect("second independent replay");
     for name in ["algo_max_flow_single_pair", "algo_msf_summary"] {
+        let second = report2
+            .operations
+            .get(name)
+            .unwrap_or_else(|| panic!("{name} must be measured by the second replay"));
+        assert!(
+            second.skipped.is_none(),
+            "{name} must pass the capability probe on the second replay"
+        );
+        let d2 = second
+            .result_digest
+            .as_ref()
+            .unwrap_or_else(|| panic!("{name} must stay digest-gated on the second replay"));
         assert_eq!(
-            report.operations[name].result_digest, report2.operations[name].result_digest,
+            report.operations[name].result_digest.as_ref(),
+            Some(d2),
             "{name} digest must be byte-stable across independent replays"
         );
     }
