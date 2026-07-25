@@ -12,7 +12,7 @@ _Δ is 100·(B−A)/A. **Latency: lower is better** (a positive Δ = slower / re
 
 > ⚠ baseline and candidate ran the same FalkorDB module version (4.20.1) — there is no version delta to measure
 
-## `aggregate_count`
+## <code>aggregate\_count</code>
 
 _cached (plan reused — execution only)_
 
@@ -28,7 +28,7 @@ _uncached (forced plan-cache miss — execution + compilation)_
 | 1 | 0.409 / 0.464 / 0.491 / 0.538 | 0.425 / 0.487 / 0.519 / 0.571 | +4.1% | 2337 | 2261 | -3.3% |
 | 4 | 0.541 / 0.645 / 0.676 / 0.746 | 0.560 / 0.689 / 0.732 / 0.860 | +3.5% | 7190 | 6690 | -6.9% |
 
-## `expand_1_hop`
+## <code>expand\_1\_hop</code>
 
 _cached (plan reused — execution only)_
 
@@ -44,7 +44,7 @@ _uncached (forced plan-cache miss — execution + compilation)_
 | 1 | 0.457 / 0.543 / 0.571 / 0.648 | 0.562 / 0.786 / 0.855 / 1.007 | +22.9% | 2115 | 1588 | -24.9% |
 | 4 | 0.581 / 0.741 / 0.813 / 0.964 | 0.572 / 0.694 / 0.742 / 0.830 | -1.6% | 6115 | 6721 | +9.9% |
 
-## `match_by_index`
+## <code>match\_by\_index</code>
 
 _cached (plan reused — execution only)_
 
