@@ -2,7 +2,7 @@
 
 **Status:** proposal for review — **not implemented**. Draft for maintainer review before any code
 (per the workflow). **Rubber-duck reviewed**; this revision folds in the review's corrections — the
-first draft's "counters are deterministic" thesis was wrong (see §11). Follows the reads-scope work
+first draft's "counters are deterministic" thesis was wrong (see §10). Follows the reads-scope work
 (design [`synthetic-cover-ab-query-shapes.md`](./synthetic-cover-ab-query-shapes.md), Phases 1–5,
 merged in PRs #240–#250) and is the sibling of the algorithms design (Phase 6). The parent design
 deferred writes to "their own state-isolation design" (§3.3) — this is that design.
@@ -38,7 +38,7 @@ first draft listed 8 and mis-described several:
 ## 2. What is already in place (and why it is not enough)
 
 The synthetic **live** path benchmarks *synthetic-owned* writes with isolation
-(`src/synthetic/writes.rs`, `catalog.rs:272-370`), but the primitives **do not** transfer cleanly:
+(`src/synthetic/writes.rs`, `src/synthetic/catalog.rs:272-370`), but the primitives **do not** transfer cleanly:
 
 - **`ExpectedMutation`** is **5 rigid unit variants** and **`MutationStats` has only 4 counters**
   (`writes.rs:221-287`): `nodes_created`/`nodes_deleted`/`relationships_created`/`properties_set` —
@@ -52,7 +52,7 @@ The synthetic **live** path benchmarks *synthetic-owned* writes with isolation
 - **`WriteScratch`** isolates via a per-worker scratch label + disjoint key band; the A/B shapes hit
   **base** labels at **seeded** ids — no scratch isolation applies.
 - **`ResetSchedule`** resets between multi-invocation windows — but the recorded corpus is **256
-  commands, cycled** (`catalog.rs:19-22`, `mod.rs:947-954`), and at the default 200 warm-up + 1000
+  commands, cycled** (`src/synthetic/catalog.rs:19-22`, `src/synthetic/mod.rs:947-954`), and at the default 200 warm-up + 1000
   samples with a large cadence the same command repeats **without** resetting, so MERGE create-vs-match
   and delete no-ops make even the "fixed-count" shapes **non-constant**.
 
