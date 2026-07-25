@@ -522,6 +522,33 @@ just synthetic-compare-versions demo falkor://127.0.0.1:6379 falkor://127.0.0.1:
     `[cross-engine.op.<name>]` sections (same shape as the top-level `[default]`/`[op.<name>]`,
     typically looser for engine-vs-engine noise) and **errors** if the TOML doesn't define them —
     there is no silent fallback to the strict budgets.
+
+A `--cells` file deserializes straight back into the tool's public `RegressionAnalysis` type, so
+downstream tooling consumes the analysis without re-parsing Markdown (compiled and type-checked as
+a doctest — see `src/doc_examples.rs`):
+
+```rust,no_run
+use benchmark::synthetic::analysis::RegressionAnalysis;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let cells: RegressionAnalysis =
+        serde_json::from_str(&std::fs::read_to_string("cells.json")?)?;
+    let (emoji, headline) = cells.verdict_line();
+    println!("{emoji} {headline}");
+    for (op, analysis) in &cells.ops {
+        for cell in &analysis.cells {
+            // `delta_pct` is present exactly when the cell has a real verdict (🟢/🔴).
+            if let Some(delta) = cell.delta_pct {
+                println!(
+                    "{op} C={} ({:?}): {delta:+.1}% of a {}% budget",
+                    cell.concurrency, cell.cache_mode, cell.budget.budget_pct
+                );
+            }
+        }
+    }
+    Ok(())
+}
+```
 - **`just synthetic-sanity`** self-checks the tool: it records the same workload twice (asserting an
   identical `workload_hash` — deterministic recording), then `run --recording` at C=1,4 + `report
   --diff` (incl. the C>1 result verification), then a `report --regression` pass exercising a

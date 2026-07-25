@@ -8,7 +8,7 @@
 //! are computed once, there.
 
 use crate::synthetic::analysis::{
-    CacheMode, CellAnalysis, CellContextSide, ComparisonStatus, Correctness, DivergencePolicy,
+    CacheMode, CellAnalysis, CellContextSide, Correctness, DivergencePolicy,
     OpAnalysis, OpOutcome, OutcomeCounts, OverallVerdict, RegressionAnalysis,
 };
 use crate::synthetic::provenance::decode_module_version;
@@ -330,7 +330,7 @@ pub fn regression_markdown(analysis: &RegressionAnalysis) -> String {
     head.push('\n');
     head.push_str(&meta.thresholds.settings_markdown());
 
-    if let ComparisonStatus::NotComparable { reason } = &analysis.status {
+    if let Some(reason) = analysis.status.not_comparable_reason() {
         head.push_str(&format!(
             "\n> ⚠ **not comparable** — {}. No latency verdict is shown.\n",
             md_cell(reason)
@@ -550,10 +550,7 @@ pub fn summarize(analysis: &RegressionAnalysis) -> SyntheticSummary {
         elapsed_secs: analysis.elapsed_secs,
         overall_verdict: analysis.verdict,
         headline,
-        not_comparable_reason: match &analysis.status {
-            ComparisonStatus::NotComparable { reason } => Some(reason.clone()),
-            ComparisonStatus::Comparable => None,
-        },
+        not_comparable_reason: analysis.status.not_comparable_reason().map(str::to_string),
         comparable_cells: analysis.comparable_cells,
         regressed_cells: analysis.regressed_cells,
         diverged_ops: analysis.diverged_ops().iter().map(|s| s.to_string()).collect(),
@@ -561,8 +558,8 @@ pub fn summarize(analysis: &RegressionAnalysis) -> SyntheticSummary {
         per_tier: Vec::new(),
         worst_offenders: Vec::new(),
     };
-    if matches!(analysis.status, ComparisonStatus::NotComparable { .. }) {
-        // NotComparable: the headline carries the reason; there is nothing to tally.
+    if summary.not_comparable_reason.is_some() {
+        // Not comparable: the headline carries the reason; there is nothing to tally.
         return summary;
     }
 
@@ -570,9 +567,10 @@ pub fn summarize(analysis: &RegressionAnalysis) -> SyntheticSummary {
     let mut full = OutcomeCounts::default();
     let mut offenders: Vec<Offender> = Vec::new();
     for (op, oa) in &analysis.ops {
-        // Ops with no measured cell have nothing to tally (mirroring the totals) — but a diverged
-        // one still surfaces as a worst offender below (correctness is the worst signal).
-        if !oa.cells.is_empty() {
+        // Mirror the model's totals: ops with ≥1 cell are tallied, and a cell-less **diverged**
+        // op is tallied too (every divergence counts) — it also surfaces as a worst offender
+        // below (correctness is the worst signal).
+        if !oa.cells.is_empty() || oa.correctness == Correctness::Diverged {
             match oa.tier.as_deref() {
                 Some("core") => core.add(oa.op_outcome),
                 Some("full") => full.add(oa.op_outcome),
@@ -1519,8 +1517,8 @@ mod tests {
 
     #[test]
     fn summarize_surfaces_a_diverged_op_with_no_measured_cell() {
-        // An op present in both runs but with empty levels: skipped from the tallies (no cell) yet
-        // still surfaced as a worst offender because its results diverged.
+        // An op present in both runs but with empty levels: tallied (every divergence counts,
+        // design v5) and surfaced as a worst offender because its results diverged.
         let mut a = rpt("main", 42001, &[("match_by_index", 1.0, "d1")]);
         let mut b = rpt("pr", 42002, &[("match_by_index", 1.0, "d2")]);
         a.operations
@@ -1538,8 +1536,13 @@ mod tests {
         assert_eq!(s.overall_verdict, OverallVerdict::Regressed);
         assert_eq!(
             s.totals,
-            OutcomeCounts::default(),
-            "no cell ⇒ no outcome tallied"
+            OutcomeCounts { regressed: 1, ..OutcomeCounts::default() },
+            "a cell-less diverged op is tallied (gate ⇒ regressed)"
+        );
+        assert_eq!(
+            s.per_tier.iter().find(|t| t.tier == "core").unwrap().counts.regressed,
+            1,
+            "…and rolls into its tier"
         );
         assert_eq!(s.worst_offenders.len(), 1);
         assert_eq!(s.worst_offenders[0].op, "match_by_index");
