@@ -188,9 +188,10 @@ fn percentiles(m: &LevelMetrics) -> String {
 }
 
 /// A regression-table latency cell: the gated **p50** on the primary line, with p90/p95/p99 and
-/// throughput folded onto a smaller `context:` line (informational, never gated). `—` when the
-/// side is absent. Values are fixed-precision measurements, so no operator-supplied text is
-/// interpolated (no `md_cell` escaping needed).
+/// throughput folded onto a smaller `context:` line (informational, never gated, appended only
+/// when the report carries it). `—` only when the side's p50 is absent. Values are
+/// fixed-precision measurements, so no operator-supplied text is interpolated (no `md_cell`
+/// escaping needed).
 fn latency_cell(
     p50: Option<f64>,
     ctx: Option<&CellContextSide>,
@@ -200,7 +201,8 @@ fn latency_cell(
             "{:.3}<br><sub>context: p90 {:.3} · p95 {:.3} · p99 {:.3} · {:.0} op/s</sub>",
             p50, c.p90_ms, c.p95_ms, c.p99_ms, c.throughput_ops_per_sec
         ),
-        _ => "—".to_string(),
+        (Some(p50), None) => format!("{p50:.3}"),
+        (None, _) => "—".to_string(),
     }
 }
 
@@ -569,8 +571,9 @@ pub fn summarize(analysis: &RegressionAnalysis) -> SyntheticSummary {
     let mut offenders: Vec<Offender> = Vec::new();
     for (op, oa) in &analysis.ops {
         // Mirror the model's totals: ops with ≥1 cell are tallied, and a cell-less **diverged**
-        // op is tallied too (every divergence counts) — it also surfaces as a worst offender
-        // below (correctness is the worst signal).
+        // op is tallied too (every divergence counts). Under the `gate` policy (divergence ⇒
+        // `Regressed`) it also surfaces as a worst offender below; under `advisory` it stays a
+        // `DivergedAdvisory` and is intentionally kept out of the offender list.
         if !oa.cells.is_empty() || oa.correctness == Correctness::Diverged {
             match oa.tier.as_deref() {
                 Some("core") => core.add(oa.op_outcome),
@@ -1026,6 +1029,13 @@ mod tests {
         assert!(md.contains("🟢 <code>match_by_index</code></summary>"), "{md}");
         // …and the blown-up tail is still shown, as context.
         assert!(md.contains("context: p90 50.000 · p95 275.000 · p99 500.000"), "{md}");
+    }
+
+    #[test]
+    fn latency_cell_renders_p50_without_context() {
+        // A valid p50 must never be hidden just because the tail context is absent.
+        assert_eq!(latency_cell(Some(1.5), None), "1.500");
+        assert_eq!(latency_cell(None, None), "—");
     }
 
     #[test]
