@@ -416,7 +416,9 @@ the per-PR group runs).
    summary v2, sanity-recipe + docs; then tag post-v2.2. **Status: implemented — PR
    [#256](https://github.com/FalkorDB/benchmark/pull/256) (stacked on #255); release tag
    follows merge.**
-3. **next-gen PR (B1–B5)** — stacked on #745, pinned to the new tag.
+3. **next-gen PR (B1–B5)** — stacked on #745, pinned to the new tag. **Status: implemented —
+   PR [falkordb-rs-next-gen#748](https://github.com/FalkorDB/falkordb-rs-next-gen/pull/748)
+   (pins `SYNTHETIC_BENCHMARK_REF` to the #256 head; re-pin to the release tag after merge).**
 
 Each PR: design-first (this doc), ≥90% patch coverage on Rust changes, `just ci` +
 `just coverage` green locally, docs synced. Next-gen PRs await human review (no self-merge).
