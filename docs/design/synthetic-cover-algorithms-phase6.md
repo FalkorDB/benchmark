@@ -1,7 +1,8 @@
 # Design — cover the A/B benchmark's algorithm shapes in the synthetic check (Phase 6)
 
-**Status:** proposal for review — **not implemented**. Draft for maintainer review before any code
-(per the workflow). **Rubber-duck reviewed**; this revision folds in the review's corrections — the
+**Status:** approved — **phased implementation in progress** (per-phase markers in §7; the empirical
+§3.1 facts are confirmed and recorded inline). **Rubber-duck reviewed**; this revision folds in the
+review's corrections — the
 first draft understated the work (see §11). Follows the reads-scope work (design
 [`synthetic-cover-ab-query-shapes.md`](./synthetic-cover-ab-query-shapes.md), Phases 1–5, merged in
 PRs #240–#250): the per-op non-divergence gate now covers the **50 A/B read shapes** but deliberately
@@ -56,7 +57,15 @@ duplicate `(src,dst)` pairs. On a multigraph FalkorDB's `algo.maxFlow` errors
 **false for maxFlow**. **Fix:** a deterministic **simple-graph guarantee** for the algorithm fixture
 (dedupe `(src,dst)` at generation, keeping the count/`bench_capacity` deterministic) or an
 algorithm-specific simple fixture; add a "no parallel `:Friend` edges" test + a live maxFlow smoke
-test. *(Empirically confirm the dup-pair count and the tensors error first.)*
+test. *(Empirically confirmed before implementation: the seed=7 1000/5000 oracle fixture contained
+**8 duplicate `(src,dst)` pairs** (4992 distinct of 5000), and `algo.maxFlow` on that graph fails
+with exactly `algo.maxFlow: relationship type must not contain multi-edges (tensors)` — for **any**
+`(s,t)` pair, the check is per relationship type, on `falkordb/falkordb:edge`.)* ✅ implemented: the
+generator now guarantees a simple graph for **every** dataset (`GENERATOR_VERSION` bumped to
+`synthbench/v5`; duplicate draws re-probe deterministically, count and `bench_capacity` unchanged in
+non-colliding slots), `edges` is capped at `nodes × (nodes − 1)`, and a live
+`max_flow_runs_on_the_generated_simple_graph` smoke test loads the oracle fixture and runs the real
+repo shape.
 
 ### 3.2 `Tier::Full` cannot double as "algorithm opt-in"
 `--repo-reads` is `Option<Tier>` (`src/cli.rs:542`); selection filters **only** by tier
@@ -137,7 +146,7 @@ Default **all four to N/A**; promote `max_flow`/`msf` to `Gated` **only after** 
 digests across ≥2 runs on the per-PR image (the reads' bar). Never add a synthetic-only `ORDER BY`.
 
 ## 7. Phasing (prerequisites first, each its own PR)
-1. **Simple-graph algorithm fixture** (§3.1) — deterministic, no parallel `:Friend` edges + tests.
+1. ✅ **Simple-graph algorithm fixture** (§3.1) — deterministic, no parallel `:Friend` edges + tests.
 2. **Recorded-shape budget/corpus plumbing** (§3.4) — per-shape corpus size + budget on the dynamic
    path; N/A shapes skip full reference capture.
 3. **Annotation + selection (all N/A):** synthetic-only family, `algorithm_read_shapes()`,
