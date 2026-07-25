@@ -197,7 +197,9 @@ stay N/A per this table.)*
    `falkordb/falkordb@sha256:e47e0fb112ff29764965a1c25e2f983dd269de33367ca3f2fba61368b735f38c`) —
    two from the same server process and one after a full server restart —
    for all four shapes; per the §6 table only `max_flow`/`msf` are promoted (`pagerank`/`harmonic`
-   stay N/A — arbitrary/iterative floats even if empirically stable on the small fixture). The
+   stay N/A — arbitrary/iterative floats even if empirically stable on the small fixture). Digest
+   *values* are engine-build- and workload-specific; the promotion claim is **stability on one
+   image**, not any particular bytes. The
    algorithm e2e integration test now replays every bundle **twice** and asserts the gated digests
    match, so byte-stability is re-verified continuously (including on the CI image/arch). A future
    instability would surface as a loud divergence, and the shape can be demoted back to N/A.
@@ -209,7 +211,8 @@ stay N/A per this table.)*
 2. **Float/iteration value stability (§6)** — whether `max_flow`/`msf` digests are byte-stable
    run-to-run; if not they stay N/A (latency-only), like `pagerank`/`harmonic`. ✅ resolved:
    byte-stable across 3 independent replays (incl. a server restart) on `falkordb/falkordb:edge`
-   (pinned: `falkordb/falkordb@sha256:e47e0fb112ff29764965a1c25e2f983dd269de33367ca3f2fba61368b735f38c`); both
+   (pinned: `falkordb/falkordb@sha256:e47e0fb112ff29764965a1c25e2f983dd269de33367ca3f2fba61368b735f38c`);
+   digest values themselves are engine-build- and workload-specific (only stability is claimed); both
    promoted to Gated, with the two-replay digest-equality assertion in the algorithm e2e test
    guarding against future instability.
 3. **Value of N/A-only coverage** — N/A shapes add latency/trend coverage + exercise the `algo.*`
