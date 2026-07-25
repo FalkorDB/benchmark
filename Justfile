@@ -245,8 +245,11 @@ synthetic-compare-versions name endpoint_a endpoint_b:
 # Self-contained sanity check for the synthetic tool itself: spin up a throwaway Docker FalkorDB,
 # RECORD a small workload TWICE (asserting the two workload_hashes are identical — deterministic
 # recording), then REPLAY it (load) and re-replay (no-load) and GUARD (workload_hash + result
-# digests must match). Passes iff recording is deterministic and the replay pipeline completes +
-# guards clean; latency is NOT asserted (environment noise). Tears the server down afterwards.
+# digests must match), then exercise the REGRESSION artifacts end-to-end: `report --regression`
+# with a `[cross-engine]` budget profile, `--divergence-policy advisory`, and the machine outputs
+# (`--summary` schema v2 + `--cells` analysis model). Passes iff recording is deterministic and
+# the replay + report pipelines complete + guard clean; latency is NOT asserted (environment
+# noise). Tears the server down afterwards.
 synthetic-sanity:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -279,6 +282,35 @@ synthetic-sanity:
         --endpoint "$endpoint" --no-load --concurrency 1,4 --samples 300 --warmup 50 --out recordings/_sanity_a/cand.json
     cargo run --quiet --bin benchmark -- synthetic report \
         --diff recordings/_sanity_a/ref.json recordings/_sanity_a/cand.json --out recordings/_sanity_a/diff.md
+    # Regression flavor end-to-end: a [cross-engine] budget profile + advisory divergence policy +
+    # the machine artifacts (--summary schema v2, --cells analysis model). The two runs measured
+    # identical work on one server, so this checks the plumbing, never latency.
+    cat > recordings/_sanity_a/thresholds.toml <<'TOML'
+    [default]
+    budget_pct = 10.0
+    floor_ms = 0.5
+
+    [cross-engine.default]
+    budget_pct = 100.0
+    floor_ms = 2.0
+
+    [cross-engine.op.match_by_index]
+    budget_pct = 150.0
+    TOML
+    cargo run --quiet --bin benchmark -- synthetic report \
+        --diff recordings/_sanity_a/ref.json recordings/_sanity_a/cand.json \
+        --regression --thresholds recordings/_sanity_a/thresholds.toml \
+        --budget-profile cross-engine --divergence-policy advisory \
+        --out recordings/_sanity_a/regression.md \
+        --summary recordings/_sanity_a/summary.json \
+        --cells recordings/_sanity_a/cells.json
+    grep -q '"schema_version": 2' recordings/_sanity_a/summary.json || { echo "SANITY FAIL: summary is not schema v2"; exit 1; }
+    grep -q '"budget_profile": "cross-engine"' recordings/_sanity_a/summary.json || { echo "SANITY FAIL: summary lacks the cross-engine profile"; exit 1; }
+    grep -q '"divergence_policy": "advisory"' recordings/_sanity_a/summary.json || { echo "SANITY FAIL: summary lacks the advisory policy"; exit 1; }
+    grep -q '"overall_verdict"' recordings/_sanity_a/summary.json || { echo "SANITY FAIL: summary lacks overall_verdict"; exit 1; }
+    grep -q '"gated_metric": "total_ms.p50"' recordings/_sanity_a/cells.json || { echo "SANITY FAIL: cells JSON lacks the gated metric"; exit 1; }
+    grep -q '"budget_pct": 150' recordings/_sanity_a/cells.json || { echo "SANITY FAIL: cells JSON did not apply the [cross-engine.op] override"; exit 1; }
+    echo "regression artifacts OK (cross-engine profile + advisory policy + summary/cells)"
     echo "synthetic-sanity OK"
 
 # CI NON-DIVERGENCE CHECK: run the recorded workload (ALL A/B read shapes via `--repo-reads full`)
