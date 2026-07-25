@@ -485,8 +485,8 @@ just synthetic-compare-versions demo falkor://127.0.0.1:6379 falkor://127.0.0.1:
   noise guard, defaulting to 10 % / 0.5 ms and overridable per-operation and per-operation×concurrency
   in a TOML file (`[default]` + `[op.<name>]` with a `concurrency` inline table). `<name>` may be a
   catalog op (`synthetic list-ops`) **or** a recorded repo-read shape (e.g. `single_vertex_read`);
-  every measured op resolves a budget — string-keyed override first, else `[default]` — and rolls
-  into its coverage tier. Unlike `--diff`,
+  every measured op resolves a budget — string-keyed override first, else `[default]`; catalog ops
+  and recorded repo-read shapes also roll into their coverage tier. Unlike `--diff`,
   it **never aborts**: an op whose `result_digest` differs is shown 🔴 with a `⚠ results differ`
   note and a perf verdict of **N/A** (a mismatched workload/config renders the whole report
   *not comparable*). The report **header echoes the resolved thresholds** (the default budget/floor

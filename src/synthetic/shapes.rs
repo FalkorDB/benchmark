@@ -391,8 +391,7 @@ mod tests {
     fn repo_read_tier_resolves_by_name() {
         // String-keyed tier lookup over the registry: a core shape, a full shape, and a miss.
         assert_eq!(repo_read_tier("single_vertex_read"), Some(Tier::Core));
-        let full = repo_read_shapes().into_iter().find(|s| s.tier == Tier::Full).unwrap();
-        assert_eq!(repo_read_tier(full.name), Some(Tier::Full));
+        assert_eq!(repo_read_tier("vector_query_nodes_smoke"), Some(Tier::Full));
         assert_eq!(repo_read_tier("not_a_shape"), None);
     }
 
