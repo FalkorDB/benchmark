@@ -384,6 +384,13 @@ fn record_selected_shapes(
                 shape.name
             )));
         }
+        if shape.corpus_size == 0 {
+            return Err(OtherError(format!(
+                "repo read shape '{}' has corpus_size 0 — every shape must render at least one \
+                 command (fix its ShapeSpec in src/synthetic/shapes.rs)",
+                shape.name
+            )));
+        }
         let key = OpKey::dynamic(shape.name.to_string(), QueryType::Read);
         let mut rng = StdRng::seed_from_u64(corpus_seed ^ key.salt());
         let mut commands = Vec::with_capacity(shape.corpus_size);
@@ -783,6 +790,25 @@ mod tests {
             ops[0].commands.as_slice(),
             &full_svr.commands[..3],
             "a reduced corpus is a prefix of the full render"
+        );
+    }
+
+    #[test]
+    fn record_selected_shapes_rejects_a_zero_corpus_naming_the_shape() {
+        let bogus = [ShapeSpec {
+            name: "single_vertex_read",
+            profile: QueryCoverageProfile::Baseline,
+            tier: Tier::Core,
+            result_policy: ResultPolicy::Gated,
+            capability: None,
+            corpus_size: 0,
+            budget: OpBudget::INHERIT,
+        }];
+        let err = record_selected_shapes(&bogus, 1000, 5000, 42).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("single_vertex_read") && msg.contains("corpus_size 0"),
+            "the error must name the shape and the zero corpus, got: {msg}"
         );
     }
 }

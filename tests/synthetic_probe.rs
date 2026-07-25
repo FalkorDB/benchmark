@@ -1239,7 +1239,7 @@ async fn replay_honors_per_op_budgets_and_result_na_skips_reference_capture() {
     }
     assert!(global.result_digest.is_some(), "global_op stays result-gated");
 
-    // na_probe_op: replay succeeded despite the broken second command (capture skipped), no digest.
+    // na_probe_op: replay succeeded despite the broken third command (capture skipped), no digest.
     let na = &report.operations["na_probe_op"];
     assert!(na.result_digest.is_none(), "na_probe_op is result-N/A");
     let levels: Vec<usize> = na.levels.iter().map(|l| l.concurrency).collect();
