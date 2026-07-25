@@ -2703,6 +2703,43 @@ mod tests {
         let _ = std::fs::remove_file(&p);
     }
 
+    #[tokio::test]
+    async fn report_regression_applies_a_cross_engine_thresholds_file() {
+        // With a TOML that defines [cross-engine], `--budget-profile cross-engine` resolves that
+        // profile's budgets — the rendered guard column shows the override, not the strict default.
+        let dir = std::env::temp_dir();
+        let stem = format!("bpx-{}", std::process::id());
+        let rep = dir.join(format!("{stem}.json")).to_string_lossy().into_owned();
+        let json = r#"{"meta":{"tool_version":"0.1.0","endpoint":"x","samples":1,"warmup":0,"concurrency":[1],"server_timeout_ms":5000,"client_deadline_ms":6000,"connection":"c","started_at_epoch_secs":0,"server":{},"dataset":{"seed":1,"nodes":10,"edges":20,"corpus_hash":"sha256:same"}},"operations":{"match_by_index":{"levels":[{"concurrency":1,"cached":{"throughput_ops_per_sec":1000.0,"metrics":{"server_ms":{"n":10,"removed":0,"min":1.0,"mean":1.0,"median":1.0,"p90":1.0,"p95":1.0,"p99":1.0,"max":1.0,"stddev":0.0},"total_ms":{"n":10,"removed":0,"min":1.0,"mean":1.0,"median":1.0,"p90":1.0,"p95":1.0,"p99":1.0,"max":1.0,"stddev":0.0},"non_internal_ms":{"n":10,"removed":0,"min":0.0,"mean":0.0,"median":0.0,"p90":0.0,"p95":0.0,"p99":0.0,"max":0.0,"stddev":0.0},"cached_false_rate":0.0,"cached_unknown":0}}}],"result_digest":"sha256:aa"}}}"#;
+        std::fs::write(&rep, json).unwrap();
+        let toml_path = dir.join(format!("{stem}.toml")).to_string_lossy().into_owned();
+        std::fs::write(
+            &toml_path,
+            "[cross-engine.default]\nbudget_pct = 123.0\nfloor_ms = 2.0\n",
+        )
+        .unwrap();
+        let out = dir.join(format!("{stem}.md")).to_string_lossy().into_owned();
+        assert!(run_command(crate::cli::SyntheticCommands::Report {
+            input: None,
+            regression: true,
+            thresholds: Some(toml_path.clone()),
+            diff: vec![rep.clone(), rep.clone()],
+            out: Some(out.clone()),
+            elapsed_secs: None,
+            summary: None,
+            cells: None,
+            budget_profile: Some("cross-engine".to_string()),
+            divergence_policy: None,
+        })
+        .await
+        .is_ok());
+        let md = std::fs::read_to_string(&out).unwrap();
+        assert!(md.contains("123% AND 2 ms"), "cross-engine budget not applied: {md}");
+        for p in [rep, toml_path, out] {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+
     #[test]
     fn markdown_path_swaps_json_suffix_or_appends() {
         assert_eq!(markdown_path("synthetic-report.json"), "synthetic-report.md");
