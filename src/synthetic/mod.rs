@@ -39,13 +39,13 @@ use crate::falkor::falkor_endpoint_to_redis_url;
 use crate::queries_repository::QueryType;
 use crate::query::Query;
 use crate::synthetic::catalog::{
-    spec, DatasetHandle, DatasetRequirement, OpBudget, OperationSpec, CORPUS_SIZE,
+    spec, DatasetHandle, DatasetRequirement, OpBudget, OperationSpec, RecordedBudget, CORPUS_SIZE,
 };
 use crate::synthetic::dataset::DatasetSpec;
 use crate::synthetic::engine::{run_closed_loop, OpInvoker};
 use crate::synthetic::op_runner::{run_and_drain, OpSample};
 use crate::synthetic::report::{
-    DatasetInfo, LevelMetrics, LevelReport, Meta, OperationReport, Report,
+    DatasetInfo, LevelMetrics, LevelReport, Meta, OperationReport, OpPolicy, Report,
 };
 use crate::synthetic::thresholds::BudgetProfile;
 use crate::synthetic::writes::{verify_mutation, WritePlan, WriteScratch};
@@ -55,7 +55,7 @@ use futures::StreamExt;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 use serde::de::{self, Deserializer};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -363,7 +363,7 @@ impl Tier {
 }
 
 /// Which plan-cache condition to measure an operation under.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
 #[value(rename_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
 pub enum CacheSelection {
@@ -477,6 +477,13 @@ impl Config {
     /// record-once / replay-verbatim A/B comparability for every current op. Used per op by [`run`]
     /// to derive that op's effective knobs before measuring it.
     pub fn with_budget(&self, budget: &OpBudget) -> Config {
+        self.with_recorded_budget(&RecordedBudget::from(*budget))
+    }
+
+    /// [`Self::with_budget`] for the owned manifest form ([`RecordedBudget`], design §3.4): the
+    /// single overlay implementation, shared by the catalog path (via [`Self::with_budget`]) and
+    /// the recorded-bundle replay path, so the two can't drift.
+    pub fn with_recorded_budget(&self, budget: &RecordedBudget) -> Config {
         let mut cfg = self.clone();
         if let Some(samples) = budget.samples {
             cfg.samples = samples;
@@ -484,8 +491,8 @@ impl Config {
         if let Some(warmup) = budget.warmup {
             cfg.warmup = warmup;
         }
-        if let Some(concurrency) = budget.concurrency {
-            cfg.concurrency = concurrency.to_vec();
+        if let Some(concurrency) = &budget.concurrency {
+            cfg.concurrency = concurrency.clone();
         }
         if let Some(cache) = budget.cache {
             cfg.cache = cache;
@@ -497,6 +504,23 @@ impl Config {
             cfg.client_deadline_ms = client_deadline_ms;
         }
         cfg
+    }
+
+    /// The fully resolved per-op measurement policy this config describes, with `sweep` as the
+    /// op's normalized concurrency levels — persisted on [`OperationReport::policy`] for ops whose
+    /// budget overrode any global knob, so the diff/regression/baseline guards can compare it.
+    pub(crate) fn resolved_policy(
+        &self,
+        sweep: &[usize],
+    ) -> OpPolicy {
+        OpPolicy {
+            samples: self.samples,
+            warmup: self.warmup,
+            concurrency: sweep.to_vec(),
+            cache: self.cache,
+            server_timeout_ms: self.server_timeout_ms,
+            client_deadline_ms: self.client_deadline_ms,
+        }
     }
 }
 
@@ -678,7 +702,7 @@ pub async fn run(config: &Config) -> BenchmarkResult<Report> {
         // is unchanged. The corpus is still seeded from the global `config.seed` (never budgeted),
         // so the recorded query strings stay identical regardless of any budget.
         let op_config = config.with_budget(&op_spec.budget);
-        validate_op_config(op, &op_config)?;
+        validate_op_config(op.as_str(), &op_config)?;
         let op_concurrency = normalize_concurrency(&op_config.concurrency)?;
         let op_client_deadline = Duration::from_millis(op_config.client_deadline_ms);
         // Seed each op's corpus deterministically (same --seed ⇒ byte-identical corpus).
@@ -695,7 +719,7 @@ pub async fn run(config: &Config) -> BenchmarkResult<Report> {
         // render per-invocation, so this is unused for them). This is the same string a recorded
         // bundle stores, so a generated run and a `--recording` run measure identically.
         let rendered: Arc<Vec<String>> = Arc::new(corpus.iter().map(|q| q.to_cypher()).collect());
-        let op_report = measure_op(
+        let mut op_report = measure_op(
             &op_config,
             &op_concurrency,
             MeasureTarget::from_spec(&op_spec),
@@ -705,6 +729,10 @@ pub async fn run(config: &Config) -> BenchmarkResult<Report> {
             op_client_deadline,
         )
         .await?;
+        // Persist the op's effective measurement policy when its catalog budget overrode any
+        // global knob (all-INHERIT today), so a cross-run comparison can guard it per-op.
+        op_report.policy =
+            (op_spec.budget != OpBudget::INHERIT).then(|| op_config.resolved_policy(&op_concurrency));
         operations.insert(op.as_str().to_string(), op_report);
     }
 
@@ -767,14 +795,25 @@ pub(crate) fn normalize_concurrency(concurrency: &[usize]) -> BenchmarkResult<Ve
 }
 
 /// Validate a per-op resolved [`Config`]: the global `run()` guard only checks the global knobs, so
-/// a per-op [`OpBudget`] that zeroed `samples` or set an invalid concurrency sweep would slip past
-/// it and fail later with a less actionable error. Reject it up front, naming the op. Concurrency
-/// reuses [`normalize_concurrency`]'s rules (kept the single source of truth) with the op prefixed.
-pub(crate) fn validate_op_config(op: OpName, cfg: &Config) -> BenchmarkResult<()> {
+/// a per-op budget — a catalog [`OpBudget`] or a recorded bundle's [`RecordedBudget`] — that zeroed
+/// `samples` or set an invalid concurrency sweep would slip past it and fail later with a less
+/// actionable error. Reject it up front, naming the op. Concurrency reuses
+/// [`normalize_concurrency`]'s rules (kept the single source of truth) with the op prefixed.
+pub(crate) fn validate_op_config(op: &str, cfg: &Config) -> BenchmarkResult<()> {
     if cfg.samples == 0 {
         return Err(OtherError(format!(
-            "operation '{}' resolved to a per-op budget with samples = 0; samples must be greater than 0",
-            op.as_str()
+            "operation '{op}' resolved to a per-op budget with samples = 0; samples must be greater than 0"
+        )));
+    }
+    if cfg.server_timeout_ms <= 0 {
+        return Err(OtherError(format!(
+            "operation '{op}' resolved to a per-op budget with server_timeout_ms = {}; the timeout must be positive",
+            cfg.server_timeout_ms
+        )));
+    }
+    if cfg.client_deadline_ms == 0 {
+        return Err(OtherError(format!(
+            "operation '{op}' resolved to a per-op budget with client_deadline_ms = 0; the deadline must be positive"
         )));
     }
     if let Err(e) = normalize_concurrency(&cfg.concurrency) {
@@ -783,7 +822,7 @@ pub(crate) fn validate_op_config(op: OpName, cfg: &Config) -> BenchmarkResult<()
             OtherError(m) => m,
             other => other.to_string(),
         };
-        return Err(OtherError(format!("operation '{}': {detail}", op.as_str())));
+        return Err(OtherError(format!("operation '{op}': {detail}")));
     }
     Ok(())
 }
@@ -1075,6 +1114,7 @@ pub(crate) async fn measure_op(
     Ok(OperationReport {
         levels,
         result_digest: None,
+        policy: None,
     })
 }
 
@@ -2081,6 +2121,43 @@ mod tests {
     }
 
     #[test]
+    fn with_recorded_budget_matches_the_catalog_overlay() {
+        // `with_budget` delegates to `with_recorded_budget` (one overlay implementation), so a
+        // recorded bundle's owned budget must resolve exactly like the catalog's static form —
+        // replay and generated runs can't drift apart.
+        let base = Config {
+            samples: 100,
+            warmup: 20,
+            concurrency: vec![1, 8],
+            ..Config::default()
+        };
+        static SWEEP: [usize; 1] = [2];
+        let catalog_form = OpBudget {
+            samples: Some(1),
+            concurrency: Some(&SWEEP),
+            cache: Some(CacheSelection::Cached),
+            ..OpBudget::INHERIT
+        };
+        let via_catalog = base.with_budget(&catalog_form);
+        let via_recorded = base.with_recorded_budget(&RecordedBudget::from(catalog_form));
+        assert_eq!(via_catalog.samples, via_recorded.samples);
+        assert_eq!(via_catalog.warmup, via_recorded.warmup);
+        assert_eq!(via_catalog.concurrency, via_recorded.concurrency);
+        assert_eq!(via_catalog.cache, via_recorded.cache);
+        assert_eq!(via_catalog.server_timeout_ms, via_recorded.server_timeout_ms);
+        assert_eq!(via_catalog.client_deadline_ms, via_recorded.client_deadline_ms);
+        assert_eq!(via_recorded.samples, 1);
+        assert_eq!(via_recorded.concurrency, vec![2]);
+        assert_eq!(via_recorded.cache, CacheSelection::Cached);
+        // An inherit (default) recorded budget — every pre-field bundle — changes nothing.
+        let inherited = base.with_recorded_budget(&RecordedBudget::default());
+        assert_eq!(inherited.samples, base.samples);
+        assert_eq!(inherited.warmup, base.warmup);
+        assert_eq!(inherited.concurrency, base.concurrency);
+        assert_eq!(inherited.cache, base.cache);
+    }
+
+    #[test]
     fn validate_op_config_rejects_invalid_per_op_budgets() {
         // The global `run()` guard only checks the global knobs; a per-op budget that zeroed
         // samples or produced an invalid concurrency sweep must fail fast, naming the offending op.
@@ -2094,7 +2171,7 @@ mod tests {
             samples: Some(0),
             ..OpBudget::INHERIT
         });
-        let msg = validate_op_config(OpName::ReturnConst, &zeroed)
+        let msg = validate_op_config(OpName::ReturnConst.as_str(), &zeroed)
             .unwrap_err()
             .to_string();
         assert!(msg.contains("samples must be greater than 0"), "{msg}");
@@ -2104,7 +2181,7 @@ mod tests {
             concurrency: vec![],
             ..base.clone()
         };
-        let msg = validate_op_config(OpName::MatchByIndex, &empty)
+        let msg = validate_op_config(OpName::MatchByIndex.as_str(), &empty)
             .unwrap_err()
             .to_string();
         assert!(msg.contains("match_by_index"), "{msg}");
@@ -2114,13 +2191,32 @@ mod tests {
             concurrency: vec![0],
             ..base.clone()
         };
-        let msg = validate_op_config(OpName::MatchByIndex, &zero_level)
+        let msg = validate_op_config(OpName::MatchByIndex.as_str(), &zero_level)
             .unwrap_err()
             .to_string();
         assert!(msg.contains("match_by_index"), "{msg}");
         assert!(msg.contains(">= 1"), "{msg}");
+        // A non-positive server timeout — e.g. a manifest typo of -1 — fails fast, op-named.
+        let bad_timeout = base.with_budget(&OpBudget {
+            server_timeout_ms: Some(-1),
+            ..OpBudget::INHERIT
+        });
+        let msg = validate_op_config(OpName::ReturnConst.as_str(), &bad_timeout)
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("server_timeout_ms = -1"), "{msg}");
+        assert!(msg.contains("return_const"), "{msg}");
+        // A zero client deadline — the driver would otherwise time out every call confusingly.
+        let bad_deadline = base.with_budget(&OpBudget {
+            client_deadline_ms: Some(0),
+            ..OpBudget::INHERIT
+        });
+        let msg = validate_op_config(OpName::ReturnConst.as_str(), &bad_deadline)
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("client_deadline_ms = 0"), "{msg}");
         // A fully valid (inherited) config passes.
-        validate_op_config(OpName::ReturnConst, &base).unwrap();
+        validate_op_config(OpName::ReturnConst.as_str(), &base).unwrap();
     }
 
     #[test]
@@ -2380,6 +2476,45 @@ mod tests {
             let entry = bundle.manifest.ops.iter().find(|o| o.name == name).unwrap();
             assert!(!entry.result_gated, "{name} must be result-N/A (top-k)");
         }
+        std::fs::remove_dir_all(&out_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn repo_reads_full_workload_hash_golden_is_pinned() {
+        // GOLDEN: `synthetic record --graph verify --repo-reads full --seed 7 --nodes 1000
+        // --edges 5000` must keep producing this exact workload_hash. The hash is a length-framed
+        // SHA-256 over the recording header, every graph load statement (fixture included) and
+        // every rendered command — so this single value pins the complete `--repo-reads full`
+        // command stream byte-for-byte, proving the "recorded bundles are byte-identical across
+        // code changes" claim (design §3.4) rather than spot-checking defaults. If this test
+        // fails, a code change altered the recorded workload: bump the recording
+        // `GENERATOR_VERSION`, regenerate any saved bundles, and update this golden deliberately.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let out_dir = std::env::temp_dir().join(format!(
+            "syn-rec-golden-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let command = crate::cli::SyntheticCommands::Record {
+            config: None,
+            graph: Some("verify".to_string()),
+            ops: vec![],
+            all_reads: false,
+            tier: None,
+            repo_reads: Some(Tier::Full),
+            seed: Some(7),
+            nodes: Some(1000),
+            edges: Some(5000),
+            out_dir: out_dir.to_string_lossy().into_owned(),
+        };
+        run_command(command).await.expect("offline full repo-reads record succeeds");
+        let bundle = recording::load(&out_dir).expect("golden bundle loads");
+        assert_eq!(
+            bundle.manifest.workload_hash,
+            "sha256:830faf23b57ed61be8e1728a2ec73f09cf3d6fe2d24f0d70b6f8c11ed00c8de4",
+            "the --repo-reads full command stream changed byte-wise"
+        );
         std::fs::remove_dir_all(&out_dir).ok();
     }
 

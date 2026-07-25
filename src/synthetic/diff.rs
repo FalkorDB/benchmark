@@ -762,6 +762,7 @@ mod tests {
                     compilation_ms_median: None,
                 }],
                 result_digest: Some("sha256:aa".to_string()),
+                policy: None,
             },
         );
         Report {
@@ -1090,7 +1091,11 @@ mod tests {
                 .collect();
             operations.insert(
                 op.to_string(),
-                OperationReport { levels, result_digest: Some("sha256:aa".to_string()) },
+                OperationReport {
+                    levels,
+                    result_digest: Some("sha256:aa".to_string()),
+                    policy: None,
+                },
             );
         }
         let mut r = report(ver, 1.0, 1000.0);
@@ -1173,6 +1178,7 @@ mod tests {
                         compilation_ms_median: None,
                     }],
                     result_digest: Some((*digest).to_string()),
+                    policy: None,
                 },
             );
         }

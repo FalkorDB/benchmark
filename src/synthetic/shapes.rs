@@ -38,7 +38,7 @@ use crate::error::BenchmarkResult;
 use crate::queries_repository::{
     AlgorithmQuerySelection, Flavour, QueryCoverageProfile, QueryType, UsersQueriesRepository,
 };
-use crate::synthetic::catalog::CORPUS_SIZE;
+use crate::synthetic::catalog::{OpBudget, CORPUS_SIZE};
 use crate::synthetic::recording::RecordedOp;
 use crate::synthetic::{OpKey, Tier};
 use rand::rngs::StdRng;
@@ -83,9 +83,14 @@ pub enum ShapeCapability {
 
 /// One repo read shape's synthetic metadata: its stable [`queries_repository`] name, coverage
 /// **profile** (Baseline / ExtendedCore / FixtureDependent), coverage **tier** (Decision 1), result
-/// policy (Decision 4), and optional **capability** (Phase 5 fulltext/vector).
+/// policy (Decision 4), optional **capability** (Phase 5 fulltext/vector), and its record-time
+/// **corpus size** + replay **budget** (design §3.4).
 ///
-/// Kind is always `Read` for this table; per-op **budget** is deferred to its phase. The Baseline and
+/// Kind is always `Read` for this table. Every current repo read renders a full
+/// [`CORPUS_SIZE`]-command corpus and inherits the global runtime knobs
+/// ([`OpBudget::INHERIT`] — pinned by a drift-guard test); the fields exist so heavier future
+/// shapes (whole-graph algorithms, ~40–80 ms/call) can record a small corpus and dial their own
+/// samples/concurrency/timeouts down without perturbing the rest of the bundle. The Baseline and
 /// ExtendedCore reads need no capability (`capability = None`); the FixtureDependent fulltext/vector
 /// reads carry the [`ShapeCapability`] they exercise — see the module docs.
 ///
@@ -104,6 +109,12 @@ pub struct ShapeSpec {
     pub result_policy: ResultPolicy,
     /// The engine capability this shape requires, or `None` for plain-Cypher reads ([`ShapeCapability`]).
     pub capability: Option<ShapeCapability>,
+    /// How many commands to render into the recorded corpus (must be ≥ 1). [`CORPUS_SIZE`] for
+    /// every current repo read; a parameterless or heavy shape can record fewer.
+    pub corpus_size: usize,
+    /// Per-op runtime budget recorded into the bundle ([`OpBudget`], design §3.4) and overlaid on
+    /// the global config at replay. [`OpBudget::INHERIT`] for every current repo read.
+    pub budget: OpBudget,
 }
 
 /// The curated annotation for the **46 baseline non-algorithm read shapes** (design §3.4).
@@ -121,7 +132,8 @@ pub struct ShapeSpec {
 pub fn baseline_read_shapes() -> Vec<ShapeSpec> {
     use ResultPolicy::{Gated, NotApplicable};
     use Tier::{Core, Full};
-    // `s(name, tier, policy)` keeps the table dense and readable — every row is a `Baseline` read.
+    // `s(name, tier, policy)` keeps the table dense and readable — every row is a `Baseline` read
+    // with a full corpus and an inherited (global) runtime budget.
     fn s(
         name: &'static str,
         tier: Tier,
@@ -133,6 +145,8 @@ pub fn baseline_read_shapes() -> Vec<ShapeSpec> {
             tier,
             result_policy,
             capability: None,
+            corpus_size: CORPUS_SIZE,
+            budget: OpBudget::INHERIT,
         }
     }
     vec![
@@ -209,6 +223,8 @@ pub fn extended_core_read_shapes() -> Vec<ShapeSpec> {
         tier: Tier::Core,
         result_policy: ResultPolicy::Gated,
         capability: None,
+        corpus_size: CORPUS_SIZE,
+        budget: OpBudget::INHERIT,
     }]
 }
 
@@ -229,7 +245,8 @@ pub fn extended_core_read_shapes() -> Vec<ShapeSpec> {
 /// reads the `FixtureDependent` profile adds over `ExtendedCore`.
 pub fn fixture_dependent_read_shapes() -> Vec<ShapeSpec> {
     use ShapeCapability::{FulltextQueryNodes, FulltextQueryRelationships, VectorQueryNodes};
-    // Every row is a FixtureDependent, Full-tier, result-N/A read; only the name + capability differ.
+    // Every row is a FixtureDependent, Full-tier, result-N/A read with a full corpus and an
+    // inherited (global) runtime budget; only the name + capability differ.
     fn s(
         name: &'static str,
         capability: ShapeCapability,
@@ -242,6 +259,8 @@ pub fn fixture_dependent_read_shapes() -> Vec<ShapeSpec> {
                 "vector/fulltext top-k ordering is non-deterministic",
             ),
             capability: Some(capability),
+            corpus_size: CORPUS_SIZE,
+            budget: OpBudget::INHERIT,
         }
     }
     vec![
@@ -324,11 +343,12 @@ fn read_shapes_repository(
 /// Render the selected `tier`'s repo read shapes into [`RecordedOp`]s, ready for
 /// [`record_rendered`](crate::synthetic::recording::record_rendered) — **offline**, no server.
 ///
-/// Each shape's corpus is [`CORPUS_SIZE`] renders drawn from a fixed per-shape seed
-/// (`corpus_seed ^ salt`, the op's [`OpKey::salt`]), so a given seed yields a byte-identical corpus
-/// (record-once → replay-verbatim). [`Tier::Full`] selects every repo read; [`Tier::Core`] selects
-/// only the core subset. Returns an error if the annotation table names a shape that isn't an
-/// auto-discovered `queries_repository` non-algorithm read (annotation drift).
+/// Each shape's corpus is `corpus_size` renders ([`CORPUS_SIZE`] for every current repo read) drawn
+/// from a fixed per-shape seed (`corpus_seed ^ salt`, the op's [`OpKey::salt`]), so a given seed
+/// yields a byte-identical corpus (record-once → replay-verbatim); its [`OpBudget`] is recorded
+/// alongside so replay applies the same per-op overrides. [`Tier::Full`] selects every repo read;
+/// [`Tier::Core`] selects only the core subset. Returns an error if the annotation table names a
+/// shape that isn't an auto-discovered `queries_repository` non-algorithm read (annotation drift).
 pub fn record_repo_reads(
     tier: Tier,
     vertices: i32,
@@ -364,10 +384,17 @@ fn record_selected_shapes(
                 shape.name
             )));
         }
+        if shape.corpus_size == 0 {
+            return Err(OtherError(format!(
+                "repo read shape '{}' has corpus_size 0 — every shape must render at least one \
+                 command (fix its ShapeSpec in src/synthetic/shapes.rs)",
+                shape.name
+            )));
+        }
         let key = OpKey::dynamic(shape.name.to_string(), QueryType::Read);
         let mut rng = StdRng::seed_from_u64(corpus_seed ^ key.salt());
-        let mut commands = Vec::with_capacity(CORPUS_SIZE);
-        for _ in 0..CORPUS_SIZE {
+        let mut commands = Vec::with_capacity(shape.corpus_size);
+        for _ in 0..shape.corpus_size {
             let prepared = repo.render_read_with_rng(shape.name, &mut rng).ok_or_else(|| {
                 OtherError(format!("repo read shape '{}' failed to render", shape.name))
             })?;
@@ -376,6 +403,7 @@ fn record_selected_shapes(
         ops.push(RecordedOp {
             key,
             result_gated: shape.result_policy.is_gated(),
+            budget: shape.budget.into(),
             commands,
         });
     }
@@ -385,6 +413,7 @@ fn record_selected_shapes(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::synthetic::catalog::RecordedBudget;
 
     /// The set of names in the annotation table.
     fn annotated_names() -> BTreeSet<&'static str> {
@@ -702,11 +731,84 @@ mod tests {
             tier: Tier::Full,
             result_policy: ResultPolicy::Gated,
             capability: None,
+            corpus_size: CORPUS_SIZE,
+            budget: OpBudget::INHERIT,
         }];
         let err = record_selected_shapes(&bogus, 1000, 5000, 1).unwrap_err();
         assert!(
             format!("{err}").contains("annotation drift"),
             "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn every_current_repo_read_inherits_the_global_budget_and_full_corpus() {
+        // Pin today's behaviour: no repo read overrides the global runtime knobs or records a
+        // reduced corpus, so recorded bundles — and their pinned workload_hashes — are unchanged
+        // by the budget/corpus plumbing (design §3.4). A future shape that needs a budget (e.g.
+        // the Phase 6 algorithm reads) belongs in its own table, not here.
+        for shape in repo_read_shapes() {
+            assert_eq!(shape.budget, OpBudget::INHERIT, "'{}' must inherit", shape.name);
+            assert_eq!(shape.corpus_size, CORPUS_SIZE, "'{}' must render a full corpus", shape.name);
+        }
+    }
+
+    #[test]
+    fn record_selected_shapes_honors_corpus_size_and_budget() {
+        // A shape's `corpus_size` bounds its rendered corpus, its `budget` lands on the recorded
+        // op (owned manifest form), and a truncated corpus is a strict prefix of the full render
+        // (the corpus RNG stream is unchanged — smaller just stops earlier).
+        static SWEEP: [usize; 1] = [1];
+        let small = [ShapeSpec {
+            name: "single_vertex_read",
+            profile: QueryCoverageProfile::Baseline,
+            tier: Tier::Core,
+            result_policy: ResultPolicy::Gated,
+            capability: None,
+            corpus_size: 3,
+            budget: OpBudget {
+                samples: Some(1),
+                concurrency: Some(&SWEEP),
+                ..OpBudget::INHERIT
+            },
+        }];
+        let ops = record_selected_shapes(&small, 1000, 5000, 42).unwrap();
+        assert_eq!(ops.len(), 1);
+        assert_eq!(ops[0].commands.len(), 3, "corpus_size bounds the rendered corpus");
+        assert_eq!(
+            ops[0].budget,
+            RecordedBudget {
+                samples: Some(1),
+                concurrency: Some(vec![1]),
+                ..RecordedBudget::default()
+            },
+            "the shape's budget lands on the recorded op"
+        );
+        let full = record_repo_reads(Tier::Full, 1000, 5000, 42).unwrap();
+        let full_svr = full.iter().find(|o| o.key.name() == "single_vertex_read").unwrap();
+        assert_eq!(
+            ops[0].commands.as_slice(),
+            &full_svr.commands[..3],
+            "a reduced corpus is a prefix of the full render"
+        );
+    }
+
+    #[test]
+    fn record_selected_shapes_rejects_a_zero_corpus_naming_the_shape() {
+        let bogus = [ShapeSpec {
+            name: "single_vertex_read",
+            profile: QueryCoverageProfile::Baseline,
+            tier: Tier::Core,
+            result_policy: ResultPolicy::Gated,
+            capability: None,
+            corpus_size: 0,
+            budget: OpBudget::INHERIT,
+        }];
+        let err = record_selected_shapes(&bogus, 1000, 5000, 42).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("single_vertex_read") && msg.contains("corpus_size 0"),
+            "the error must name the shape and the zero corpus, got: {msg}"
         );
     }
 }

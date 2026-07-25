@@ -5,9 +5,12 @@
 //! run) and the Criterion baseline (whose iteration count adapts to observed latency), this **loads
 //! the recorded graph** and measures the **recorded command stream** — the same graph and the same
 //! commands on every version, so two versions' reports are genuinely comparable. It runs an untimed
-//! single-flight **reference pass** (capturing each command's result shape), then measures each op
-//! through the shared closed-loop engine across the configured **concurrency sweep + cache modes**,
-//! and — at the highest concurrency — **verifies results are unchanged under concurrency**.
+//! single-flight **reference pass** (capturing each result-gated command's result shape; a
+//! result-N/A op skips the full capture — design §3.4), then measures each op through the shared
+//! closed-loop engine across the configured **concurrency sweep + cache modes** — overlaying each
+//! op's recorded [`RecordedBudget`](crate::synthetic::catalog::RecordedBudget) on the run's global knobs, exactly as a generated run overlays
+//! the catalog's per-op budget — and, at each op's highest concurrency, **verifies results are
+//! unchanged under concurrency**.
 //!
 //! The measured latency itself is still subject to environment noise; the *hard* guarantees are
 //! integrity (the bundle's `workload_hash` is verified on load), graph fidelity (drop + load +
@@ -24,8 +27,8 @@ use crate::synthetic::op_runner::{capture_result, ResultShape};
 use crate::synthetic::recording::{self, Bundle};
 use crate::synthetic::report::{DatasetInfo, Meta, Report, ServerInfo, SCHEMA_VERSION};
 use crate::synthetic::{
-    measure_op, normalize_concurrency, open_graph, provenance, redact_endpoint, write_report,
-    CacheSelection, Config, MeasureTarget, OpKey,
+    measure_op, normalize_concurrency, open_graph, provenance, redact_endpoint,
+    validate_op_config, write_report, CacheSelection, Config, MeasureTarget, OpKey,
 };
 use falkordb::AsyncGraph;
 use sha2::{Digest, Sha256};
@@ -130,28 +133,34 @@ pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
             })?;
     }
 
-    // Reference pass (untimed, single-flight) over every recorded command: capture each result's
-    // shape (cardinality + order-independent value digest). This is the correctness oracle and also
-    // primes the plan cache. Reads return scalars, so a single connection is safe.
-    let st = config.server_timeout_ms;
-    let mut reference: Vec<(OpKey, Arc<Vec<String>>, Vec<ResultShape>)> =
-        Vec::with_capacity(bundle.commands.len());
-    for (op, cyphers) in &bundle.commands {
-        if cyphers.is_empty() {
-            return Err(OtherError(format!("op '{}' has no recorded commands", op.name())));
+    // Per-op replay policy from the recorded manifest (keyed by the op's unique name):
+    // `result_gated` + the per-op `budget` (design §3.4). A result-N/A op — a shape whose result
+    // set isn't byte-stable (LIMIT-without-ORDER, top-k, float scores — design §3.2 / Decision 4)
+    // — is still loaded, replayed, and timed, but its result is neither captured in full, nor
+    // cross-concurrency-verified, nor digested, so a benign result difference never fails the A/B
+    // non-divergence gate.
+    let op_entries: std::collections::HashMap<&str, &recording::OpEntry> = bundle
+        .manifest
+        .ops
+        .iter()
+        .map(|e| (e.name.as_str(), e))
+        .collect();
+    // `load()` builds `bundle.commands` from `manifest.ops`, so every replayed name has an entry
+    // by construction — verify anyway so a future load-path change fails gracefully, not deep in
+    // the measurement loops.
+    for (op, _) in &bundle.commands {
+        if !op_entries.contains_key(op.name()) {
+            return Err(OtherError(format!(
+                "op '{}' replayed without a manifest entry (corrupt bundle)",
+                op.name()
+            )));
         }
-        let mut shapes = Vec::with_capacity(cyphers.len());
-        for c in cyphers {
-            shapes.push(
-                capture_result(&mut graph, c, st, client_deadline)
-                    .await
-                    .map_err(|e| OtherError(format!("capturing '{}': {}", op.name(), e)))?,
-            );
-        }
-        reference.push((op.clone(), Arc::new(cyphers.clone()), shapes));
     }
-    // Setup connection done; drop it so it isn't an idle extra connection during the sweep.
-    drop(graph);
+    let entry_for = |name: &str| {
+        *op_entries
+            .get(name)
+            .expect("every replayed op name was validated against the manifest above")
+    };
 
     // Engine config for the recorded workload (writes/reset are irrelevant — recorded ops are reads).
     let engine_config = Config {
@@ -174,62 +183,110 @@ pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
         label: config.label.clone(),
         dataset: None,
     };
+
+    // Validate every op's resolved budget overlay up front — before the reference pass uses its
+    // timeouts — so a malformed manifest (zeroed samples, a non-positive timeout, an empty sweep)
+    // fails closed with an error naming the op instead of a confusing driver error mid-capture.
+    for (op, _) in &bundle.commands {
+        let op_config = engine_config.with_recorded_budget(&entry_for(op.name()).budget);
+        validate_op_config(op.name(), &op_config)?;
+    }
+
+    // Reference pass (untimed, single-flight): capture each result's shape (cardinality +
+    // order-independent value digest) for every **result-gated** command — the correctness oracle,
+    // which also primes the plan cache. A result-N/A op's shapes are never verified or digested, so
+    // it skips the full capture (a heavy shape would pay corpus × per-call latency for nothing —
+    // design §3.4) and only its first command runs once, to fail fast on a broken recorded command.
+    // Captures run under the op's budgeted timeouts so a budgeted heavy op can't trip the global
+    // deadline before measurement starts. Reads return scalars, so a single connection is safe.
+    let mut reference: Vec<(OpKey, Arc<Vec<String>>, Vec<ResultShape>)> =
+        Vec::with_capacity(bundle.commands.len());
+    for (op, cyphers) in &bundle.commands {
+        if cyphers.is_empty() {
+            return Err(OtherError(format!("op '{}' has no recorded commands", op.name())));
+        }
+        let entry = entry_for(op.name());
+        let op_st = entry.budget.server_timeout_ms.unwrap_or(config.server_timeout_ms);
+        let op_deadline = entry
+            .budget
+            .client_deadline_ms
+            .map(Duration::from_millis)
+            .unwrap_or(client_deadline);
+        let to_capture: &[String] = if entry.result_gated { cyphers } else { &cyphers[..1] };
+        let mut shapes = Vec::with_capacity(to_capture.len());
+        for c in to_capture {
+            shapes.push(
+                capture_result(&mut graph, c, op_st, op_deadline)
+                    .await
+                    .map_err(|e| OtherError(format!("capturing '{}': {}", op.name(), e)))?,
+            );
+        }
+        if !entry.result_gated {
+            // The probe shape is discarded: downstream code treats a shapeless op as result-N/A.
+            shapes.clear();
+        }
+        reference.push((op.clone(), Arc::new(cyphers.clone()), shapes));
+    }
+    // Setup connection done; drop it so it isn't an idle extra connection during the sweep.
+    drop(graph);
+
     let run_token = rand::random_range(0..=u64::MAX);
     let uid_alloc = AtomicU64::new(0);
-    let max_c = concurrency.iter().copied().max().unwrap_or(1);
-
-    // Per-op result-gating policy from the recorded manifest (keyed by the op's unique name). A
-    // result-N/A op — a shape whose result set isn't byte-stable (LIMIT-without-ORDER, top-k,
-    // float scores — design §3.2 / Decision 4) — is still loaded, replayed, and timed, but its
-    // result is neither cross-concurrency-verified nor digested, so a benign result difference
-    // never fails the A/B non-divergence gate. Unknown names default to gated (the safe default).
-    let result_gated: std::collections::HashMap<&str, bool> = bundle
-        .manifest
-        .ops
-        .iter()
-        .map(|e| (e.name.as_str(), e.result_gated))
-        .collect();
 
     let mut operations = BTreeMap::new();
     for (op, corpus, shapes) in &reference {
-        let is_gated = result_gated.get(op.name()).copied().unwrap_or(true);
-        // Verify results are IDENTICAL at the highest concurrency (untimed) before trusting the
-        // measured latencies — a concurrent path that returns different/wrong results is a hard
-        // fail. Skipped for result-N/A ops, whose results aren't required to be stable.
-        if max_c > 1 && is_gated {
+        let entry = entry_for(op.name());
+        let is_gated = entry.result_gated;
+        // Overlay this op's recorded budget on the run's global config (the same per-op overlay a
+        // generated run applies from the catalog spec) — already validated before the reference
+        // pass, so the resolved knobs are known-good here.
+        let op_config = engine_config.with_recorded_budget(&entry.budget);
+        let op_concurrency = normalize_concurrency(&op_config.concurrency)?;
+        let op_deadline = Duration::from_millis(op_config.client_deadline_ms);
+        let op_max_c = op_concurrency.iter().copied().max().unwrap_or(1);
+        // Verify results are IDENTICAL at the op's highest concurrency (untimed) before trusting
+        // the measured latencies — a concurrent path that returns different/wrong results is a
+        // hard fail. Skipped for result-N/A ops, whose results aren't required to be stable.
+        if op_max_c > 1 && is_gated {
             verify_concurrent(
                 &config.endpoint,
                 &graph_name,
                 corpus,
                 shapes,
-                max_c,
-                st,
-                client_deadline,
+                op_max_c,
+                op_config.server_timeout_ms,
+                op_deadline,
             )
             .await
             .map_err(|e| {
                 OtherError(format!(
                     "op '{}' returned different results at concurrency {}: {}",
                     op.name(),
-                    max_c,
+                    op_max_c,
                     e
                 ))
             })?;
         }
         let mut op_report = measure_op(
-            &engine_config,
-            &concurrency,
+            &op_config,
+            &op_concurrency,
             MeasureTarget::read(),
             Arc::clone(corpus),
             run_token,
             &uid_alloc,
-            client_deadline,
+            op_deadline,
         )
         .await?;
         // Gate the result only for byte-stable shapes; a result-N/A op reports `None` so the diff
         // guard renders it N/A instead of comparing a non-deterministic digest.
         op_report.result_digest =
             is_gated.then(|| op_result_digest(op.name(), shapes));
+        // Persist the op's effective measurement policy when its recorded budget overrode any
+        // global knob (design §3.4): budgets are deliberately outside the workload_hash, so this
+        // block is what lets the diff/regression/baseline guards refuse to compare two runs that
+        // measured the same workload under different per-op conditions.
+        op_report.policy =
+            (!entry.budget.is_inherit()).then(|| op_config.resolved_policy(&op_concurrency));
         operations.insert(op.name().to_string(), op_report);
     }
 

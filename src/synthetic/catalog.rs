@@ -15,6 +15,7 @@ use crate::query::{Query, QueryBuilder};
 use crate::synthetic::writes::{ExpectedMutation, WritePlan, WriteScratch};
 use crate::synthetic::{CacheSelection, OpName, Tier};
 use rand::{Rng, RngExt};
+use serde::{Deserialize, Serialize};
 
 /// Number of distinct parameterizations pre-generated per operation. The measured loop cycles
 /// through this corpus, so varying parameter *values* exercise real binding while the query
@@ -122,6 +123,56 @@ impl OpBudget {
         server_timeout_ms: None,
         client_deadline_ms: None,
     };
+}
+
+/// The owned, serializable twin of [`OpBudget`], carried per op in a recorded bundle's manifest
+/// (`OpEntry::budget`) so `synthetic run --recording` applies the same per-op overrides a generated
+/// run applies from the catalog (design §3.4). `Default` is full inheritance — exactly
+/// [`OpBudget::INHERIT`] — and an inherit budget is omitted from the manifest entirely, so every
+/// existing bundle deserializes unchanged. Like `kind`/`result_gated`, the budget is **replay
+/// policy, not workload content**: it is *not* folded into the bundle's `workload_hash`.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecordedBudget {
+    /// Override the measured sample count for this op.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub samples: Option<usize>,
+    /// Override the warm-up (discarded) sample count for this op.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warmup: Option<usize>,
+    /// Replace the concurrency sweep for this op (closed-loop worker counts).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub concurrency: Option<Vec<usize>>,
+    /// Override which plan-cache condition(s) to measure this op under.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache: Option<CacheSelection>,
+    /// Override the per-query server timeout (ms) for this op.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_timeout_ms: Option<i64>,
+    /// Override the per-query client deadline (ms) for this op.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_deadline_ms: Option<u64>,
+}
+
+impl RecordedBudget {
+    /// `true` when no knob is overridden (the [`Default`]), i.e. the op inherits every global knob.
+    /// Serde uses this to omit inherit budgets from the manifest.
+    pub fn is_inherit(&self) -> bool {
+        *self == RecordedBudget::default()
+    }
+}
+
+impl From<OpBudget> for RecordedBudget {
+    fn from(b: OpBudget) -> Self {
+        RecordedBudget {
+            samples: b.samples,
+            warmup: b.warmup,
+            concurrency: b.concurrency.map(<[usize]>::to_vec),
+            cache: b.cache,
+            server_timeout_ms: b.server_timeout_ms,
+            client_deadline_ms: b.client_deadline_ms,
+        }
+    }
 }
 
 /// One catalog entry: an operation's identity, its read/write kind, a one-line description, the
@@ -1008,5 +1059,60 @@ mod tests {
         // merge_hit is drift-free, so its reset issues no statements.
         let scratch = WriteScratch::new(0xE, 0, 10).unwrap();
         assert!(write_noop(&scratch).unwrap().is_empty());
+    }
+
+    #[test]
+    fn recorded_budget_mirrors_op_budget_field_for_field() {
+        // `From<OpBudget>` must carry every knob into the owned manifest form — a dropped field
+        // here would silently strip that override from every recorded bundle.
+        static SWEEP: [usize; 2] = [1, 4];
+        let full = OpBudget {
+            samples: Some(3),
+            warmup: Some(1),
+            concurrency: Some(&SWEEP),
+            cache: Some(CacheSelection::Cached),
+            server_timeout_ms: Some(30_000),
+            client_deadline_ms: Some(31_000),
+        };
+        let recorded = RecordedBudget::from(full);
+        assert_eq!(
+            recorded,
+            RecordedBudget {
+                samples: Some(3),
+                warmup: Some(1),
+                concurrency: Some(vec![1, 4]),
+                cache: Some(CacheSelection::Cached),
+                server_timeout_ms: Some(30_000),
+                client_deadline_ms: Some(31_000),
+            }
+        );
+        assert!(!recorded.is_inherit());
+        // INHERIT maps to the default (all-None) form — the one serde omits from the manifest.
+        let inherit = RecordedBudget::from(OpBudget::INHERIT);
+        assert_eq!(inherit, RecordedBudget::default());
+        assert!(inherit.is_inherit());
+    }
+
+    #[test]
+    fn recorded_budget_serde_round_trips_and_omits_inherited_knobs() {
+        // Partial budget: only overridden knobs appear in the JSON (each `None` is skipped)…
+        let budget = RecordedBudget {
+            samples: Some(5),
+            concurrency: Some(vec![1]),
+            cache: Some(CacheSelection::Uncached),
+            ..RecordedBudget::default()
+        };
+        let json = serde_json::to_string(&budget).unwrap();
+        assert_eq!(json, r#"{"samples":5,"concurrency":[1],"cache":"uncached"}"#);
+        let back: RecordedBudget = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, budget);
+        // …an inherit budget serializes to an empty object and deserializes from one…
+        assert_eq!(serde_json::to_string(&RecordedBudget::default()).unwrap(), "{}");
+        let empty: RecordedBudget = serde_json::from_str("{}").unwrap();
+        assert!(empty.is_inherit());
+        // …and an unknown knob is rejected (deny_unknown_fields), so a manifest typo can't
+        // silently become "inherit".
+        let err = serde_json::from_str::<RecordedBudget>(r#"{"sample":5}"#).unwrap_err();
+        assert!(err.to_string().contains("unknown field"), "{err}");
     }
 }

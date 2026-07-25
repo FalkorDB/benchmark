@@ -1149,6 +1149,133 @@ async fn record_repo_reads_then_replay_roundtrips_byte_identically() {
     drop_graph(graph).await;
 }
 
+/// Per-op budget + result-N/A reference-capture skip at replay (design §3.4).
+///
+/// Records a bundle whose ops carry different [`RecordedBudget`]s and replays it once under a
+/// global `concurrency [1, 2]` / `cache both` config:
+/// - `budgeted_op` (samples 1, warmup 0, concurrency `[1]`, cached-only) must measure exactly one
+///   C=1 cached level — its recorded budget overrides the run's global sweep and cache selection;
+/// - `global_op` (no budget) must measure the full global sweep under both cache modes;
+/// - `na_probe_op` (result-N/A, same tight budget) carries a **deliberately broken third
+///   command**: replay must still succeed because a result-N/A op skips the full reference
+///   capture (only its first command is probed) and its 1-sample C=1 cached measured loop (one
+///   untimed prime + one sample) never cycles past `corpus[1]`. Before the skip, the reference
+///   pass captured every command and this bundle failed hard.
+///
+/// Multi-thread runtime: FalkorDB entity decoding uses `block_in_place`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires a running FalkorDB server"]
+async fn replay_honors_per_op_budgets_and_result_na_skips_reference_capture() {
+    use benchmark::synthetic::catalog::RecordedBudget;
+    use benchmark::synthetic::recording::RecordedOp;
+    use benchmark::synthetic::OpKey;
+
+    let graph = "syn_it_budget";
+    drop_graph(graph).await;
+    let dir = temp_bundle_dir("syn-it-budget");
+    let spec = DatasetSpec {
+        seed: 9,
+        nodes: 200,
+        edges: 400,
+    };
+    let tight = RecordedBudget {
+        samples: Some(1),
+        warmup: Some(0),
+        concurrency: Some(vec![1]),
+        cache: Some(benchmark::synthetic::CacheSelection::Cached),
+        ..RecordedBudget::default()
+    };
+    let ops = vec![
+        RecordedOp {
+            key: OpKey::dynamic("budgeted_op", QueryType::Read),
+            result_gated: true,
+            budget: tight.clone(),
+            commands: vec!["MATCH (u:User {id: 1}) RETURN u.id".to_string()],
+        },
+        RecordedOp {
+            key: OpKey::dynamic("global_op", QueryType::Read),
+            result_gated: true,
+            budget: RecordedBudget::default(),
+            commands: vec![
+                "MATCH (u:User {id: 2}) RETURN u.id".to_string(),
+                "MATCH (u:User {id: 3}) RETURN u.id".to_string(),
+            ],
+        },
+        RecordedOp {
+            key: OpKey::dynamic("na_probe_op", QueryType::Read),
+            result_gated: false,
+            budget: tight.clone(),
+            commands: vec![
+                "MATCH (u:User {id: 4}) RETURN u.id".to_string(),
+                "MATCH (u:User {id: 5}) RETURN u.id".to_string(),
+                // Invalid on purpose: only reachable by a full reference capture.
+                "MATCH (u:User RETURN syntax_error".to_string(),
+            ],
+        },
+    ];
+    recording::record_rendered(&spec, graph, &ops, spec.seed, 256, &dir).expect("record");
+
+    let out = dir.join("r.json").to_string_lossy().into_owned();
+    let mut config = replay_config(&dir, graph, &out, true);
+    config.samples = 3;
+    config.warmup = 1;
+    config.concurrency = vec![1, 2];
+    config.cache = benchmark::synthetic::CacheSelection::Both;
+    let report = replay::run(&config).await.expect("replay with per-op budgets");
+
+    // budgeted_op: exactly one C=1 level, cached-only, result-gated.
+    let budgeted = &report.operations["budgeted_op"];
+    let levels: Vec<usize> = budgeted.levels.iter().map(|l| l.concurrency).collect();
+    assert_eq!(levels, vec![1], "budgeted_op must measure only its budgeted sweep");
+    assert!(budgeted.levels[0].cached.is_some(), "budgeted_op measures cached");
+    assert!(budgeted.levels[0].uncached.is_none(), "budgeted_op skips uncached (budget)");
+    assert!(budgeted.result_digest.is_some(), "budgeted_op stays result-gated");
+    // Its effective (resolved) measurement policy is persisted so the diff/baseline guards can
+    // refuse a comparison against a run that measured it under different conditions.
+    let expected_policy = benchmark::synthetic::report::OpPolicy {
+        samples: 1,
+        warmup: 0,
+        concurrency: vec![1],
+        cache: benchmark::synthetic::CacheSelection::Cached,
+        server_timeout_ms: 5_000, // inherited from the run's global knobs
+        client_deadline_ms: 6_000,
+    };
+    assert_eq!(
+        budgeted.policy.as_ref(),
+        Some(&expected_policy),
+        "budgeted_op persists its resolved per-op policy"
+    );
+
+    // global_op: the full global sweep, both cache modes, result-gated.
+    let global = &report.operations["global_op"];
+    let levels: Vec<usize> = global.levels.iter().map(|l| l.concurrency).collect();
+    assert_eq!(levels, vec![1, 2], "global_op inherits the global sweep");
+    for level in &global.levels {
+        assert!(level.cached.is_some(), "global_op measures cached");
+        assert!(level.uncached.is_some(), "global_op measures uncached");
+    }
+    assert!(global.result_digest.is_some(), "global_op stays result-gated");
+    assert!(global.policy.is_none(), "an inherit-everything op persists no per-op policy");
+
+    // na_probe_op: replay succeeded despite the broken third command (capture skipped), no digest.
+    let na = &report.operations["na_probe_op"];
+    assert!(na.result_digest.is_none(), "na_probe_op is result-N/A");
+    let levels: Vec<usize> = na.levels.iter().map(|l| l.concurrency).collect();
+    assert_eq!(levels, vec![1], "na_probe_op must measure only its budgeted sweep");
+    assert_eq!(
+        na.policy.as_ref(),
+        Some(&expected_policy),
+        "the result-N/A op carries the same tight budget, so the same resolved policy"
+    );
+
+    // The report's meta echoes the run's global knobs (budgets are per-op policy).
+    assert_eq!(report.meta.concurrency, vec![1, 2]);
+    assert_eq!(report.meta.samples, 3);
+
+    std::fs::remove_dir_all(&dir).ok();
+    drop_graph(graph).await;
+}
+
 /// replay --no-load against a graph that doesn't hold the recorded dataset fails closed (the
 /// count-verify rejects it) rather than silently measuring the wrong graph.
 #[tokio::test]
