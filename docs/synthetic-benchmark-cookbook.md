@@ -200,6 +200,9 @@ rec/commands: aggregate_count.jsonl aggregate_group.jsonl expand_1_hop.jsonl
 
 A full manifest is in
 [`docs/synthetic/sample-recording-manifest.json`](synthetic/sample-recording-manifest.json).
+Each op entry may also carry a **`budget`** — per-op overrides for
+`samples`/`warmup`/`concurrency`/`cache` and the timeouts that replay applies to that op only
+(omitted when fully inherited, and never part of the `workload_hash`).
 `just synthetic-record <name>` wraps this and writes under `recordings/<name>/` (git-ignored).
 
 ---

@@ -25,7 +25,7 @@
 use crate::error::BenchmarkError::OtherError;
 use crate::error::BenchmarkResult;
 use crate::queries_repository::QueryType;
-use crate::synthetic::catalog::spec;
+use crate::synthetic::catalog::{spec, RecordedBudget};
 use crate::synthetic::dataset::{
     fixture_statements, load_statements, DatasetSpec, LoadPhase, GENERATOR_VERSION,
 };
@@ -77,6 +77,15 @@ pub struct OpEntry {
     /// and defaults to `true` for bundles written before this field existed.
     #[serde(default = "default_result_gated")]
     pub result_gated: bool,
+    /// Per-op runtime budget replay overlays on its global config ([`RecordedBudget`], design
+    /// §3.4), so a heavy recorded shape (e.g. a whole-graph algorithm) can dial its own
+    /// samples/warmup/concurrency/cache/timeouts down without perturbing the rest of the bundle.
+    /// Defaults to full inheritance — the value for every op recorded before this field existed —
+    /// and an inherit budget is omitted when serializing. Like [`Self::kind`]/[`Self::result_gated`]
+    /// it is **not** folded into the [`Manifest::workload_hash`] (replay policy, not workload
+    /// content).
+    #[serde(default, skip_serializing_if = "RecordedBudget::is_inherit")]
+    pub budget: RecordedBudget,
     pub count: usize,
 }
 
@@ -244,6 +253,8 @@ pub struct RecordedOp {
     /// Whether replay gates this op's result digest — see [`OpEntry::result_gated`]. `true` for
     /// every built-in catalog op and byte-stable shape; `false` marks a result-N/A shape.
     pub result_gated: bool,
+    /// Per-op replay budget — see [`OpEntry::budget`]. Inherit (the default) for every current op.
+    pub budget: RecordedBudget,
     pub commands: Vec<String>,
 }
 
@@ -296,6 +307,9 @@ pub fn record(
             key: OpKey::from(op),
             // Every built-in catalog op projects byte-stable scalars, so its result is gated.
             result_gated: true,
+            // Propagate the catalog's per-op budget (inherit for every current op) so replay
+            // applies the same overrides a generated run applies from the spec.
+            budget: spec(op).budget.into(),
             commands: render_commands(op, dataset, corpus_seed)?,
         });
     }
@@ -442,6 +456,7 @@ fn record_rendered_impl(
             name: name.to_string(),
             kind: op.key.kind(),
             result_gated: op.result_gated,
+            budget: op.budget.clone(),
             count: cyphers.len(),
         });
     }
@@ -781,6 +796,7 @@ mod tests {
         let ops = vec![RecordedOp {
             key: OpKey::dynamic("single_vertex_read", QueryType::Read),
             result_gated: true,
+            budget: RecordedBudget::default(),
             commands: vec![
                 "CYPHER id=1 MATCH (n:User {id:$id}) RETURN n".to_string(),
                 "CYPHER id=2 MATCH (n:User {id:$id}) RETURN n".to_string(),
@@ -817,6 +833,7 @@ mod tests {
             // Mirrors a fixture-dependent shape: a non-gated (result-N/A) read.
             key: OpKey::dynamic("vector_query_nodes_smoke", QueryType::Read),
             result_gated: false,
+            budget: RecordedBudget::default(),
             commands: vec![
                 "CALL db.idx.vector.queryNodes('User', 'embedding', 10, vecf32([0.1, 0.2, 0.3])) \
                  YIELD node, score RETURN id(node), score LIMIT 10"
@@ -869,6 +886,7 @@ mod tests {
         let ops = vec![RecordedOp {
             key: OpKey::dynamic("bulk_insert", QueryType::Write),
             result_gated: true,
+            budget: RecordedBudget::default(),
             commands: vec!["CYPHER x=1 CREATE (n:User {id:$x})".to_string()],
         }];
         let err = record_rendered(&spec, "g", &ops, 1, 8, &dir).unwrap_err();
@@ -887,6 +905,7 @@ mod tests {
         let ops = vec![RecordedOp {
             key: OpKey::dynamic("empty_shape", QueryType::Read),
             result_gated: true,
+            budget: RecordedBudget::default(),
             commands: vec![],
         }];
         let err = record_rendered(&spec, "g", &ops, 1, 8, &dir).unwrap_err();
@@ -906,11 +925,13 @@ mod tests {
             RecordedOp {
                 key: OpKey::dynamic("a_read", QueryType::Read),
                 result_gated: true,
+                budget: RecordedBudget::default(),
                 commands: vec!["CYPHER  RETURN 1".to_string()],
             },
             RecordedOp {
                 key: OpKey::dynamic("a_read", QueryType::Read),
                 result_gated: true,
+                budget: RecordedBudget::default(),
                 commands: vec!["CYPHER  RETURN 2".to_string()],
             },
         ];
@@ -942,6 +963,7 @@ mod tests {
         let ops = vec![RecordedOp {
             key: OpKey::dynamic("../escape", QueryType::Read),
             result_gated: true,
+            budget: RecordedBudget::default(),
             commands: vec!["CYPHER  RETURN 1".to_string()],
         }];
         let err = record_rendered(&spec, "g", &ops, 1, 8, &dir).unwrap_err();
@@ -963,11 +985,13 @@ mod tests {
             RecordedOp {
                 key: OpKey::dynamic("dup", QueryType::Read),
                 result_gated: true,
+                budget: RecordedBudget::default(),
                 commands: vec!["CYPHER  RETURN 1".to_string()],
             },
             RecordedOp {
                 key: OpKey::dynamic("dup", QueryType::Write),
                 result_gated: true,
+                budget: RecordedBudget::default(),
                 commands: vec!["CYPHER  CREATE (n)".to_string()],
             },
         ];
@@ -989,6 +1013,7 @@ mod tests {
         let ops = vec![RecordedOp {
             key: OpKey::dynamic("safe_read", QueryType::Read),
             result_gated: true,
+            budget: RecordedBudget::default(),
             commands: vec!["CYPHER  RETURN 1".to_string()],
         }];
         record_rendered(&spec, "g", &ops, 1, 8, &dir).unwrap();
@@ -1015,6 +1040,7 @@ mod tests {
         let ops = vec![RecordedOp {
             key: OpKey::dynamic("safe_read", QueryType::Read),
             result_gated: true,
+            budget: RecordedBudget::default(),
             commands: vec!["CYPHER  RETURN 1".to_string()],
         }];
         record_rendered(&spec, "g", &ops, 1, 8, &dir).unwrap();
@@ -1043,11 +1069,13 @@ mod tests {
             RecordedOp {
                 key: OpKey::dynamic("gated_read", QueryType::Read),
                 result_gated: true,
+                budget: RecordedBudget::default(),
                 commands: vec!["CYPHER  RETURN 1".to_string()],
             },
             RecordedOp {
                 key: OpKey::dynamic("na_read", QueryType::Read),
                 result_gated: false,
+                budget: RecordedBudget::default(),
                 commands: vec!["CYPHER  MATCH (n) RETURN n LIMIT 1".to_string()],
             },
         ];
@@ -1075,6 +1103,7 @@ mod tests {
             let ops = vec![RecordedOp {
                 key: OpKey::dynamic("shape", QueryType::Read),
                 result_gated: gated,
+                budget: RecordedBudget::default(),
                 commands: vec!["CYPHER  RETURN 1".to_string()],
             }];
             let m = record_rendered(&spec, "g", &ops, 1, 8, &dir).unwrap();
@@ -1092,6 +1121,81 @@ mod tests {
             serde_json::from_str(r#"{"name":"legacy_op","count":3}"#).unwrap();
         assert_eq!(entry.kind, QueryType::Read);
         assert!(entry.result_gated, "a pre-field op defaults to gated");
+        assert!(entry.budget.is_inherit(), "a pre-field op inherits every global knob");
+    }
+
+    #[test]
+    fn budget_is_not_folded_into_the_workload_hash() {
+        // Like `kind`/`result_gated`, the per-op budget is replay policy, not workload content: two
+        // bundles that differ ONLY in a budget must share a `workload_hash`, so budgeting an op
+        // never breaks A/B comparability with an unbudgeted recording of the same workload.
+        let spec = DatasetSpec {
+            seed: 5,
+            nodes: 20,
+            edges: 60,
+        };
+        let make = |budget: RecordedBudget| {
+            let dir = temp_bundle_dir(if budget.is_inherit() { "synthrec-bi" } else { "synthrec-bb" });
+            let ops = vec![RecordedOp {
+                key: OpKey::dynamic("shape", QueryType::Read),
+                result_gated: true,
+                budget,
+                commands: vec!["CYPHER  RETURN 1".to_string()],
+            }];
+            let m = record_rendered(&spec, "g", &ops, 1, 8, &dir).unwrap();
+            std::fs::remove_dir_all(&dir).ok();
+            m.workload_hash
+        };
+        let budgeted = RecordedBudget {
+            samples: Some(1),
+            concurrency: Some(vec![1]),
+            ..RecordedBudget::default()
+        };
+        assert_eq!(make(RecordedBudget::default()), make(budgeted));
+    }
+
+    #[test]
+    fn budget_round_trips_through_the_manifest_and_inherit_is_omitted() {
+        // A budgeted op's overrides survive record → load; an inherit budget is omitted from the
+        // manifest JSON entirely, so every pre-field bundle (and the docs' sample manifest) stays
+        // byte-compatible.
+        let dir = temp_bundle_dir("synthrec-budget");
+        let spec = DatasetSpec {
+            seed: 5,
+            nodes: 20,
+            edges: 60,
+        };
+        let budget = RecordedBudget {
+            samples: Some(2),
+            warmup: Some(1),
+            concurrency: Some(vec![1, 2]),
+            cache: Some(crate::synthetic::CacheSelection::Cached),
+            server_timeout_ms: Some(30_000),
+            client_deadline_ms: Some(31_000),
+        };
+        let ops = vec![
+            RecordedOp {
+                key: OpKey::dynamic("heavy_shape", QueryType::Read),
+                result_gated: false,
+                budget: budget.clone(),
+                commands: vec!["CYPHER  RETURN 1".to_string()],
+            },
+            RecordedOp {
+                key: OpKey::dynamic("plain_shape", QueryType::Read),
+                result_gated: true,
+                budget: RecordedBudget::default(),
+                commands: vec!["CYPHER  RETURN 2".to_string()],
+            },
+        ];
+        record_rendered(&spec, "g", &ops, 1, 8, &dir).unwrap();
+
+        let bundle = load(&dir).unwrap();
+        assert_eq!(bundle.manifest.ops[0].budget, budget);
+        assert!(bundle.manifest.ops[1].budget.is_inherit());
+        // The manifest text carries a `budget` key only for the budgeted op.
+        let manifest_json = std::fs::read_to_string(dir.join("manifest.json")).unwrap();
+        assert_eq!(manifest_json.matches("\"budget\"").count(), 1);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

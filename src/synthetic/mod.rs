@@ -39,7 +39,7 @@ use crate::falkor::falkor_endpoint_to_redis_url;
 use crate::queries_repository::QueryType;
 use crate::query::Query;
 use crate::synthetic::catalog::{
-    spec, DatasetHandle, DatasetRequirement, OpBudget, OperationSpec, CORPUS_SIZE,
+    spec, DatasetHandle, DatasetRequirement, OpBudget, OperationSpec, RecordedBudget, CORPUS_SIZE,
 };
 use crate::synthetic::dataset::DatasetSpec;
 use crate::synthetic::engine::{run_closed_loop, OpInvoker};
@@ -55,7 +55,7 @@ use futures::StreamExt;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 use serde::de::{self, Deserializer};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -363,7 +363,7 @@ impl Tier {
 }
 
 /// Which plan-cache condition to measure an operation under.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
 #[value(rename_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
 pub enum CacheSelection {
@@ -477,6 +477,13 @@ impl Config {
     /// record-once / replay-verbatim A/B comparability for every current op. Used per op by [`run`]
     /// to derive that op's effective knobs before measuring it.
     pub fn with_budget(&self, budget: &OpBudget) -> Config {
+        self.with_recorded_budget(&RecordedBudget::from(*budget))
+    }
+
+    /// [`Self::with_budget`] for the owned manifest form ([`RecordedBudget`], design §3.4): the
+    /// single overlay implementation, shared by the catalog path (via [`Self::with_budget`]) and
+    /// the recorded-bundle replay path, so the two can't drift.
+    pub fn with_recorded_budget(&self, budget: &RecordedBudget) -> Config {
         let mut cfg = self.clone();
         if let Some(samples) = budget.samples {
             cfg.samples = samples;
@@ -484,8 +491,8 @@ impl Config {
         if let Some(warmup) = budget.warmup {
             cfg.warmup = warmup;
         }
-        if let Some(concurrency) = budget.concurrency {
-            cfg.concurrency = concurrency.to_vec();
+        if let Some(concurrency) = &budget.concurrency {
+            cfg.concurrency = concurrency.clone();
         }
         if let Some(cache) = budget.cache {
             cfg.cache = cache;
@@ -678,7 +685,7 @@ pub async fn run(config: &Config) -> BenchmarkResult<Report> {
         // is unchanged. The corpus is still seeded from the global `config.seed` (never budgeted),
         // so the recorded query strings stay identical regardless of any budget.
         let op_config = config.with_budget(&op_spec.budget);
-        validate_op_config(op, &op_config)?;
+        validate_op_config(op.as_str(), &op_config)?;
         let op_concurrency = normalize_concurrency(&op_config.concurrency)?;
         let op_client_deadline = Duration::from_millis(op_config.client_deadline_ms);
         // Seed each op's corpus deterministically (same --seed ⇒ byte-identical corpus).
@@ -767,14 +774,14 @@ pub(crate) fn normalize_concurrency(concurrency: &[usize]) -> BenchmarkResult<Ve
 }
 
 /// Validate a per-op resolved [`Config`]: the global `run()` guard only checks the global knobs, so
-/// a per-op [`OpBudget`] that zeroed `samples` or set an invalid concurrency sweep would slip past
-/// it and fail later with a less actionable error. Reject it up front, naming the op. Concurrency
-/// reuses [`normalize_concurrency`]'s rules (kept the single source of truth) with the op prefixed.
-pub(crate) fn validate_op_config(op: OpName, cfg: &Config) -> BenchmarkResult<()> {
+/// a per-op budget — a catalog [`OpBudget`] or a recorded bundle's [`RecordedBudget`] — that zeroed
+/// `samples` or set an invalid concurrency sweep would slip past it and fail later with a less
+/// actionable error. Reject it up front, naming the op. Concurrency reuses
+/// [`normalize_concurrency`]'s rules (kept the single source of truth) with the op prefixed.
+pub(crate) fn validate_op_config(op: &str, cfg: &Config) -> BenchmarkResult<()> {
     if cfg.samples == 0 {
         return Err(OtherError(format!(
-            "operation '{}' resolved to a per-op budget with samples = 0; samples must be greater than 0",
-            op.as_str()
+            "operation '{op}' resolved to a per-op budget with samples = 0; samples must be greater than 0"
         )));
     }
     if let Err(e) = normalize_concurrency(&cfg.concurrency) {
@@ -783,7 +790,7 @@ pub(crate) fn validate_op_config(op: OpName, cfg: &Config) -> BenchmarkResult<()
             OtherError(m) => m,
             other => other.to_string(),
         };
-        return Err(OtherError(format!("operation '{}': {detail}", op.as_str())));
+        return Err(OtherError(format!("operation '{op}': {detail}")));
     }
     Ok(())
 }
@@ -2081,6 +2088,43 @@ mod tests {
     }
 
     #[test]
+    fn with_recorded_budget_matches_the_catalog_overlay() {
+        // `with_budget` delegates to `with_recorded_budget` (one overlay implementation), so a
+        // recorded bundle's owned budget must resolve exactly like the catalog's static form —
+        // replay and generated runs can't drift apart.
+        let base = Config {
+            samples: 100,
+            warmup: 20,
+            concurrency: vec![1, 8],
+            ..Config::default()
+        };
+        static SWEEP: [usize; 1] = [2];
+        let catalog_form = OpBudget {
+            samples: Some(1),
+            concurrency: Some(&SWEEP),
+            cache: Some(CacheSelection::Cached),
+            ..OpBudget::INHERIT
+        };
+        let via_catalog = base.with_budget(&catalog_form);
+        let via_recorded = base.with_recorded_budget(&RecordedBudget::from(catalog_form));
+        assert_eq!(via_catalog.samples, via_recorded.samples);
+        assert_eq!(via_catalog.warmup, via_recorded.warmup);
+        assert_eq!(via_catalog.concurrency, via_recorded.concurrency);
+        assert_eq!(via_catalog.cache, via_recorded.cache);
+        assert_eq!(via_catalog.server_timeout_ms, via_recorded.server_timeout_ms);
+        assert_eq!(via_catalog.client_deadline_ms, via_recorded.client_deadline_ms);
+        assert_eq!(via_recorded.samples, 1);
+        assert_eq!(via_recorded.concurrency, vec![2]);
+        assert_eq!(via_recorded.cache, CacheSelection::Cached);
+        // An inherit (default) recorded budget — every pre-field bundle — changes nothing.
+        let inherited = base.with_recorded_budget(&RecordedBudget::default());
+        assert_eq!(inherited.samples, base.samples);
+        assert_eq!(inherited.warmup, base.warmup);
+        assert_eq!(inherited.concurrency, base.concurrency);
+        assert_eq!(inherited.cache, base.cache);
+    }
+
+    #[test]
     fn validate_op_config_rejects_invalid_per_op_budgets() {
         // The global `run()` guard only checks the global knobs; a per-op budget that zeroed
         // samples or produced an invalid concurrency sweep must fail fast, naming the offending op.
@@ -2094,7 +2138,7 @@ mod tests {
             samples: Some(0),
             ..OpBudget::INHERIT
         });
-        let msg = validate_op_config(OpName::ReturnConst, &zeroed)
+        let msg = validate_op_config(OpName::ReturnConst.as_str(), &zeroed)
             .unwrap_err()
             .to_string();
         assert!(msg.contains("samples must be greater than 0"), "{msg}");
@@ -2104,7 +2148,7 @@ mod tests {
             concurrency: vec![],
             ..base.clone()
         };
-        let msg = validate_op_config(OpName::MatchByIndex, &empty)
+        let msg = validate_op_config(OpName::MatchByIndex.as_str(), &empty)
             .unwrap_err()
             .to_string();
         assert!(msg.contains("match_by_index"), "{msg}");
@@ -2114,13 +2158,13 @@ mod tests {
             concurrency: vec![0],
             ..base.clone()
         };
-        let msg = validate_op_config(OpName::MatchByIndex, &zero_level)
+        let msg = validate_op_config(OpName::MatchByIndex.as_str(), &zero_level)
             .unwrap_err()
             .to_string();
         assert!(msg.contains("match_by_index"), "{msg}");
         assert!(msg.contains(">= 1"), "{msg}");
         // A fully valid (inherited) config passes.
-        validate_op_config(OpName::ReturnConst, &base).unwrap();
+        validate_op_config(OpName::ReturnConst.as_str(), &base).unwrap();
     }
 
     #[test]

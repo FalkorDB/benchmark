@@ -466,12 +466,23 @@ just synthetic-compare-versions demo falkor://127.0.0.1:6379 falkor://127.0.0.1:
   bakes that fixture into the recorded graph **once**, so every replay endpoint gets the identical
   fixture. (That fixture uses FalkorDB-specific DDL/procedures, so these shapes are for the
   FalkorDB-vs-FalkorDB A/B — two FalkorDB versions — not cross-database runs.)
+  Each shape also pins a **per-op corpus size** (every current read shape uses the full 256-command
+  corpus) and an optional **per-op budget** — overrides for `samples`/`warmup`/`concurrency`/`cache`
+  and the timeouts, written into the manifest's `budget` field (omitted when fully inherited, so
+  existing bundles are unchanged). The budget is **replay policy, not workload content**: it is not
+  folded into the `workload_hash`. This is the plumbing that lets whole-graph algorithm shapes
+  (~40–80 ms/call) record a 1-command corpus with a tight budget instead of the default 256×sweep.
   `--repo-reads` is mutually exclusive with `--op`/`--all-reads`/`--tier`.
 - **`benchmark synthetic run --recording <dir> [--concurrency … --cache …]`** drops + loads +
   **count-verifies** the recorded graph, then measures the recorded commands across the concurrency
   sweep + cache modes, writing a report plus a per-op **`result_digest`** (a hash of the result
   values). It also **verifies results are identical at the highest concurrency** (an untimed
-  concurrent pass) so a wrong result under concurrency is a hard fail. `--no-load` skips the reload
+  concurrent pass) so a wrong result under concurrency is a hard fail. Ops whose manifest entry
+  carries a **`budget`** are measured under that budget (their own sweep/cache/samples/timeouts —
+  validated like the global config) while every other op uses the run's global knobs; the report's
+  `meta` echoes the global knobs. **Result-N/A** ops skip the full untimed reference capture — only
+  their first command is probed (fail-fast) — since no digest is ever gated on them. `--no-load`
+  skips the reload
   for a load-once / run-many flow (still count-verifying first). `just synthetic-replay <name>
   <endpoint>` wraps this. Pass **`--label <name>`** (e.g. `pr`/`main`) to name the run — the label
   becomes the column header in `report --diff`/`--regression`.

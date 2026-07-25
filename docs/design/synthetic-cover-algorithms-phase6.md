@@ -97,7 +97,11 @@ consulted**
 (`replay.rs:133-151`). Whole-graph algorithms are ~40–80 ms/call locally, so a 256-command reference
 pass is ~11–20 s **per op** — untenable. **Fix (prerequisite):** wire a per-shape **budget + corpus
 size** into the recorded-shape path (1 command for the parameterless pageRank/Harmonic/MSF; a small
-seeded pair set for maxFlow) and **skip the full reference capture for result-N/A shapes**.
+seeded pair set for maxFlow) and **skip the full reference capture for result-N/A shapes**. ✅
+implemented: `ShapeSpec` carries `corpus_size` + `budget`, `RecordedOp`/`OpEntry` carry an owned
+serde `RecordedBudget` (omitted from the manifest when fully inherited; **not** folded into the
+`workload_hash` — replay policy, not workload content), and replay overlays each op's budget
+(validated like the global config) and probes only the **first** command of a result-N/A op.
 
 ### 3.5 One coarse capability is wrong, and N/A does not skip execution
 FalkorDB capabilities are detected **per procedure** (`src/falkor/falkor_driver.rs:520-550`), and
@@ -147,8 +151,8 @@ digests across ≥2 runs on the per-PR image (the reads' bar). Never add a synth
 
 ## 7. Phasing (prerequisites first, each its own PR)
 1. ✅ **Simple-graph algorithm fixture** (§3.1) — deterministic, no parallel `:Friend` edges + tests.
-2. **Recorded-shape budget/corpus plumbing** (§3.4) — per-shape corpus size + budget on the dynamic
-   path; N/A shapes skip full reference capture.
+2. ✅ **Recorded-shape budget/corpus plumbing** (§3.4) — per-shape corpus size + budget on the
+   dynamic path; N/A shapes skip full reference capture.
 3. **Annotation + selection (all N/A):** synthetic-only family, `algorithm_read_shapes()`,
    `algorithm_read_names()` + drift-guard, `record_algorithm_reads()`, `--repo-algorithms`. Record +
    replay the 4 shapes end-to-end, opt-in.
