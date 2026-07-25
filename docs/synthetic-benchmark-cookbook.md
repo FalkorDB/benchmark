@@ -83,7 +83,7 @@ benchmark synthetic report --diff runA.json runB.json --out diff.md
 
 > ⚠ server image changed: falkordb/falkordb:v4.2.0 → falkordb/falkordb:v4.2.1
 
-## `aggregate_count`
+## <code>aggregate\_count</code>
 
 _cached (plan reused — execution only)_
 

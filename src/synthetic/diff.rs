@@ -102,7 +102,10 @@ pub fn diff_markdown(
         .collect();
     let (la, lb) = (col_label(baseline, "A"), col_label(candidate, "B"));
     for op in ops {
-        out.push_str(&format!("\n## `{op}`\n"));
+        // Op names are report content in an inline-Markdown context (unlike the regression
+        // renderer's raw-HTML <summary>, Markdown stays active here) — a backtick or newline in a
+        // name could terminate the span or the heading, so render <code> with the full chain.
+        out.push_str(&format!("\n## <code>{}</code>\n", md_cell(&md_inline(&html_escape(op)))));
         // A capability-skipped op has no levels, so its tables render empty — say why instead
         // (design Phase 6 §3.5), per side; reasons are manifest content, hence HTML-escaped.
         if let Some(note) = diff_skip_note(baseline, candidate, op, &la, &lb) {
@@ -872,7 +875,7 @@ mod tests {
         let md = diff_markdown(&a, &b, &["server image changed: x → y".to_string()]);
         assert!(md.contains("Synthetic benchmark diff"));
         assert!(md.contains("4.20.1") && md.contains("4.20.2"));
-        assert!(md.contains("## `match_by_index`"));
+        assert!(md.contains("## <code>match\\_by\\_index</code>"));
         assert!(md.contains("cached (plan reused"));
         // p50 delta +10.0%, throughput delta -10.0%.
         assert!(md.contains("+10.0%"), "expected latency +10%: {md}");
@@ -899,7 +902,7 @@ mod tests {
         // Drop B's only op so A-only ops render with "—".
         b.operations.clear();
         let md = diff_markdown(&a, &b, &[]);
-        assert!(md.contains("## `match_by_index`"));
+        assert!(md.contains("## <code>match\\_by\\_index</code>"));
         assert!(md.contains("| 1 | 1.000"), "A cell present");
         assert!(md.contains("| — |") || md.contains(" — "), "B cell missing marker: {md}");
     }
@@ -924,7 +927,7 @@ mod tests {
             o.skipped = Some("engine lacks procedure 'algo.maxFlow' <v2&up>".to_string());
         }
         let md = diff_markdown(&a, &b, &[]);
-        assert!(md.contains("## `match_by_index`"));
+        assert!(md.contains("## <code>match\\_by\\_index</code>"));
         assert!(
             md.contains(
                 "⏭ skipped on both sides — engine lacks procedure 'algo.maxFlow' &lt;v2&amp;up&gt;"
@@ -982,6 +985,20 @@ mod tests {
             Some("lacks `algo_x` *v2*".to_string());
         let md = diff_markdown(&a2, &b2, &[]);
         assert!(md.contains(r"lacks \`algo\_x\` \*v2\*"), "markdown specials not escaped: {md}");
+    }
+
+    #[test]
+    fn diff_op_headings_render_hostile_names_inert() {
+        // Op names are report content: a backtick or newline in a name must not terminate the
+        // heading's code styling or inject Markdown/HTML into the diff.
+        let a = report(42001, 1.0, 1000.0);
+        let mut b = report(42002, 1.0, 1000.0);
+        let hostile = "evil`op\nx*<b>&y";
+        let op = b.operations.remove("match_by_index").unwrap();
+        b.operations.insert(hostile.to_string(), op);
+        let md = diff_markdown(&a, &b, &[]);
+        assert!(md.contains("## <code>evil\\`op<br>x\\*&lt;b&gt;&amp;y</code>"), "{md}");
+        assert!(!md.contains(hostile), "raw hostile name leaked: {md}");
     }
 
     #[test]

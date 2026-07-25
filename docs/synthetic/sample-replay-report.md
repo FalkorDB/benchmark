@@ -15,7 +15,7 @@
 | dataset | seed 42 · 1000 nodes · 5000 edges |
 | workload_hash | `sha256:57ec47dffa81b5be2d39fba9b634ea93e79020e2a0ba9f578692d72b351c7606` |
 
-## `aggregate_count`
+## <code>aggregate\_count</code>
 
 _cached — plan reused, execution only_
 
@@ -38,7 +38,7 @@ compilation_ms (median uncached − cached server time):
 | 1 | 0.053 |
 | 4 | 0.071 |
 
-## `expand_1_hop`
+## <code>expand\_1\_hop</code>
 
 _cached — plan reused, execution only_
 
@@ -61,7 +61,7 @@ compilation_ms (median uncached − cached server time):
 | 1 | 0.049 |
 | 4 | 0.075 |
 
-## `match_by_index`
+## <code>match\_by\_index</code>
 
 _cached — plan reused, execution only_
 
