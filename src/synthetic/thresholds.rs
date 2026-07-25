@@ -15,7 +15,7 @@
 use crate::error::BenchmarkError::OtherError;
 use crate::error::BenchmarkResult;
 use crate::synthetic::OpName;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// Built-in default slowdown budget (percent) before a cell is flagged.
@@ -23,9 +23,45 @@ pub const DEFAULT_BUDGET_PCT: f64 = 10.0;
 /// Built-in default absolute p50 floor (ms): slowdowns below this are treated as noise.
 pub const DEFAULT_FLOOR_MS: f64 = 0.5;
 
+/// Which budget profile of a thresholds TOML to apply (design §A4 of
+/// `synthetic-three-way-report.md`). [`Strict`](Self::Strict) is the existing same-engine profile
+/// (the top-level `[default]`/`[op.*]` sections); [`CrossEngine`](Self::CrossEngine) selects the
+/// optional `[cross-engine.default]`/`[cross-engine.op.*]` sections — looser budgets for comparing
+/// different engines, and a **hard error** when the TOML has no `[cross-engine]` section.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum BudgetProfile {
+    /// The default same-engine profile: the TOML's top-level `[default]` + `[op.*]`.
+    #[default]
+    Strict,
+    /// The looser cross-engine profile: `[cross-engine.default]` + `[cross-engine.op.*]`.
+    CrossEngine,
+}
+
+impl BudgetProfile {
+    /// The stable lowercase id used in flags, JSON and reports.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BudgetProfile::Strict => "strict",
+            BudgetProfile::CrossEngine => "cross-engine",
+        }
+    }
+}
+
+impl std::str::FromStr for BudgetProfile {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "strict" => Ok(BudgetProfile::Strict),
+            "cross-engine" => Ok(BudgetProfile::CrossEngine),
+            other => Err(format!("unknown budget profile '{other}' (expected 'strict' or 'cross-engine')")),
+        }
+    }
+}
+
 /// The verdict metric. Only [`Metric::P50`] is implemented today; the others are reserved and
 /// **rejected at load time** so a config can't silently select an unimplemented rule.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Metric {
     /// Total-latency median (`total_ms` p50) — the implemented verdict metric.
@@ -49,7 +85,8 @@ impl Metric {
 }
 
 /// The per-cell verdict.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Verdict {
     /// Faster, or slower within budget/floor.
     Ok,
@@ -71,7 +108,7 @@ impl Verdict {
 }
 
 /// The budget resolved for one `(op, concurrency)` cell.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct ResolvedBudget {
     pub metric: Metric,
     pub budget_pct: f64,
@@ -151,6 +188,21 @@ struct RawConfig {
     default: RawDefault,
     #[serde(default)]
     op: BTreeMap<String, RawOp>,
+    /// Optional looser profile for cross-engine comparisons, mirroring the top-level shape
+    /// (`[cross-engine.default]` + `[cross-engine.op.<name>]`).
+    #[serde(default, rename = "cross-engine")]
+    cross_engine: Option<RawProfile>,
+}
+
+/// The raw shape of one named profile section (`[cross-engine.*]`) — the same `[default]` +
+/// singular `[op]` layout as the top level.
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RawProfile {
+    #[serde(default)]
+    default: RawDefault,
+    #[serde(default)]
+    op: BTreeMap<String, RawOp>,
 }
 
 // ---- Validated config --------------------------------------------------------------------------
@@ -194,26 +246,79 @@ impl Thresholds {
     }
 
     /// Load + validate thresholds from a TOML file, layering it over the built-in defaults.
+    /// Selects the top-level (strict) profile; use [`Self::from_file_with_profile`] to select
+    /// another profile.
     pub fn from_file(path: &str) -> BenchmarkResult<Self> {
+        Self::from_file_with_profile(path, BudgetProfile::Strict)
+    }
+
+    /// Load + validate thresholds from a TOML file, selecting `profile`'s sections. Selecting
+    /// [`BudgetProfile::CrossEngine`] when the file has no `[cross-engine]` section is a **hard
+    /// error** (no silent fallback to the strict budgets).
+    pub fn from_file_with_profile(
+        path: &str,
+        profile: BudgetProfile,
+    ) -> BenchmarkResult<Self> {
         let text = std::fs::read_to_string(path)
             .map_err(|e| OtherError(format!("could not read thresholds '{path}': {e}")))?;
-        Self::from_toml_str(&text)
+        Self::from_toml_str_with_profile(&text, profile)
             .map_err(|e| OtherError(format!("invalid thresholds '{path}': {e}")))
     }
 
-    /// Parse + validate thresholds from a TOML string (used by [`Self::from_file`] and tests).
+    /// Parse + validate thresholds from a TOML string (used by [`Self::from_file`] and tests),
+    /// selecting the top-level (strict) profile.
     /// Returns a bare message on error (the file path is added by the caller).
     pub fn from_toml_str(text: &str) -> Result<Self, String> {
-        let raw: RawConfig = toml::from_str(text).map_err(|e| e.to_string())?;
+        Self::from_toml_str_with_profile(text, BudgetProfile::Strict)
+    }
 
+    /// Parse + validate thresholds from a TOML string, selecting `profile`'s sections. **Every**
+    /// profile present in the file is validated (so a typo in an unselected section still fails
+    /// loudly), then the selected one is returned. Selecting [`BudgetProfile::CrossEngine`] when
+    /// the file has no `[cross-engine]` section is a **hard error**.
+    pub fn from_toml_str_with_profile(
+        text: &str,
+        profile: BudgetProfile,
+    ) -> Result<Self, String> {
+        let raw: RawConfig = toml::from_str(text).map_err(|e| e.to_string())?;
+        let strict = Self::validate_section(&raw.default, raw.op, "")?;
+        let cross_engine = raw
+            .cross_engine
+            .map(|p| Self::validate_section(&p.default, p.op, "cross-engine."))
+            .transpose()?;
+        match profile {
+            BudgetProfile::Strict => Ok(strict),
+            BudgetProfile::CrossEngine => cross_engine.ok_or_else(|| {
+                "budget profile 'cross-engine' selected, but the thresholds file has no \
+                 [cross-engine] section — add [cross-engine.default] (and optional \
+                 [cross-engine.op.<name>] overrides)"
+                    .to_string()
+            }),
+        }
+    }
+
+    /// Validate one profile section (a `[default]` + its `[op.*]` map) into a [`Thresholds`],
+    /// layering it over the built-in defaults. `section` prefixes the TOML paths in error messages
+    /// (`""` for the top level, `"cross-engine."` for the profile).
+    fn validate_section(
+        raw_default: &RawDefault,
+        raw_ops: BTreeMap<String, RawOp>,
+        section: &str,
+    ) -> Result<Self, String> {
         let default = ResolvedBudget {
-            metric: check_metric(raw.default.metric.unwrap_or_default())?,
-            budget_pct: check_budget(raw.default.budget_pct.unwrap_or(DEFAULT_BUDGET_PCT), "[default].budget_pct")?,
-            floor_ms: check_floor(raw.default.floor_ms.unwrap_or(DEFAULT_FLOOR_MS), "[default].floor_ms")?,
+            metric: check_metric(raw_default.metric.unwrap_or_default())?,
+            budget_pct: check_budget(
+                raw_default.budget_pct.unwrap_or(DEFAULT_BUDGET_PCT),
+                &format!("[{section}default].budget_pct"),
+            )?,
+            floor_ms: check_floor(
+                raw_default.floor_ms.unwrap_or(DEFAULT_FLOOR_MS),
+                &format!("[{section}default].floor_ms"),
+            )?,
         };
 
         let mut ops = BTreeMap::new();
-        for (name, raw_op) in raw.op {
+        for (name, raw_op) in raw_ops {
             // Validate the name maps to a known op — a legacy catalog tag or a recorded repo read
             // shape — but key the map by the **string name** so a dynamic (string-keyed) op
             // resolves exactly like a built-in one (design §3.1).
@@ -221,7 +326,7 @@ impl Thresholds {
                 || crate::synthetic::shapes::repo_read_tier(&name).is_some();
             if !known {
                 return Err(format!(
-                    "unknown operation '{name}' in [op.{name}] — not a catalog op (see \
+                    "unknown operation '{name}' in [{section}op.{name}] — not a catalog op (see \
                      `synthetic list-ops`) or a recorded repo read shape"
                 ));
             }
@@ -230,23 +335,23 @@ impl Thresholds {
             }
             let budget_pct = raw_op
                 .budget_pct
-                .map(|v| check_budget(v, &format!("[op.{name}].budget_pct")))
+                .map(|v| check_budget(v, &format!("[{section}op.{name}].budget_pct")))
                 .transpose()?;
             let floor_ms = raw_op
                 .floor_ms
-                .map(|v| check_floor(v, &format!("[op.{name}].floor_ms")))
+                .map(|v| check_floor(v, &format!("[{section}op.{name}].floor_ms")))
                 .transpose()?;
             let mut per_concurrency_budget_pct = BTreeMap::new();
             for (c_str, pct) in raw_op.concurrency {
                 let c: usize = c_str.parse().map_err(|_| {
-                    format!("[op.{name}].concurrency has a non-integer key '{c_str}'")
+                    format!("[{section}op.{name}].concurrency has a non-integer key '{c_str}'")
                 })?;
                 if c == 0 {
                     return Err(format!(
-                        "[op.{name}].concurrency has an invalid level 0 (must be ≥ 1)"
+                        "[{section}op.{name}].concurrency has an invalid level 0 (must be ≥ 1)"
                     ));
                 }
-                let pct = check_budget(pct, &format!("[op.{name}].concurrency.{c}"))?;
+                let pct = check_budget(pct, &format!("[{section}op.{name}].concurrency.{c}"))?;
                 per_concurrency_budget_pct.insert(c, pct);
             }
             ops.insert(
@@ -292,31 +397,88 @@ impl Thresholds {
         }
     }
 
+    /// A serializable echo of these thresholds — the `[default]` plus every per-op override — for
+    /// the analysis model (`report --cells`), so the report header can be rendered from the model
+    /// alone (via [`ThresholdsEcho::settings_markdown`]) and machine consumers see the settings
+    /// that were applied.
+    pub fn echo(&self) -> ThresholdsEcho {
+        ThresholdsEcho {
+            metric: self.default.metric.as_str().to_string(),
+            default_budget_pct: self.default.budget_pct,
+            default_floor_ms: self.default.floor_ms,
+            ops: self
+                .ops
+                .iter()
+                .map(|(op, o)| OpBudgetEcho {
+                    op: op.clone(),
+                    budget_pct: o.budget_pct,
+                    floor_ms: o.floor_ms,
+                    concurrency_budget_pct: o.per_concurrency_budget_pct.clone(),
+                })
+                .collect(),
+        }
+    }
+
     /// Render the resolved thresholds (`[default]` plus any per-op / per-op×concurrency overrides)
     /// and the pass/fail rule as Markdown, for the regression report header.
     pub fn settings_markdown(&self) -> String {
-        let metric = self.default.metric.as_str();
+        self.echo().settings_markdown()
+    }
+}
+
+/// A serializable snapshot of a [`Thresholds`] config: the resolved `[default]` plus the raw per-op
+/// overrides, in stable (sorted) op order. Carried in the analysis model so both the Markdown
+/// header and the interactive page render the exact settings that produced the verdicts.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ThresholdsEcho {
+    /// The gating metric id (always `"p50"` today).
+    pub metric: String,
+    /// The `[default]` budget (percent slower than baseline before a cell is flagged).
+    pub default_budget_pct: f64,
+    /// The `[default]` absolute floor (ms) below which a slowdown is treated as noise.
+    pub default_floor_ms: f64,
+    /// Per-op overrides, sorted by op name. Empty for the built-in defaults.
+    pub ops: Vec<OpBudgetEcho>,
+}
+
+/// One `[op.<name>]` override as configured (unset fields inherit the default at resolution time).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OpBudgetEcho {
+    pub op: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_pct: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub floor_ms: Option<f64>,
+    /// Per-concurrency `budget_pct` overrides, keyed by the concurrency level `C`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub concurrency_budget_pct: BTreeMap<usize, f64>,
+}
+
+impl ThresholdsEcho {
+    /// Render the settings table + pass/fail rule as Markdown, for the regression report header.
+    pub fn settings_markdown(&self) -> String {
+        let metric = &self.metric;
         let mut s = String::from("**Thresholds**\n\n");
         s.push_str("| scope | budget (slower than baseline) | floor (min Δ) |\n");
         s.push_str("|---|---|---|\n");
         s.push_str(&format!(
             "| _default_ | {}% | {} ms |\n",
-            fmt_threshold(self.default.budget_pct),
-            fmt_threshold(self.default.floor_ms)
+            fmt_threshold(self.default_budget_pct),
+            fmt_threshold(self.default_floor_ms)
         ));
-        for (op, o) in &self.ops {
-            let base = o.budget_pct.unwrap_or(self.default.budget_pct);
+        for o in &self.ops {
+            let base = o.budget_pct.unwrap_or(self.default_budget_pct);
             let mut budget = format!("{}%", fmt_threshold(base));
-            if !o.per_concurrency_budget_pct.is_empty() {
+            if !o.concurrency_budget_pct.is_empty() {
                 let per: Vec<String> = o
-                    .per_concurrency_budget_pct
+                    .concurrency_budget_pct
                     .iter()
                     .map(|(c, p)| format!("c{c} {}%", fmt_threshold(*p)))
                     .collect();
                 budget.push_str(&format!(" ({})", per.join(", ")));
             }
-            let floor = o.floor_ms.unwrap_or(self.default.floor_ms);
-            s.push_str(&format!("| `{op}` | {budget} | {} ms |\n", fmt_threshold(floor)));
+            let floor = o.floor_ms.unwrap_or(self.default_floor_ms);
+            s.push_str(&format!("| `{}` | {budget} | {} ms |\n", o.op, fmt_threshold(floor)));
         }
         s.push_str(&format!(
             "\n_Metric `{metric}`. A cell is 🔴 only when the candidate is **slower** than the \
@@ -592,5 +754,151 @@ concurrency = { 16 = 18.0, 32 = 25.0 }
         // A non-round budget must not be rounded away.
         let b2 = ResolvedBudget { metric: Metric::P50, budget_pct: 10.04, floor_ms: 0.05 };
         assert_eq!(b2.guard_cell(), "10.04% AND 0.05 ms");
+    }
+
+    // --- [cross-engine] profile (design §A4 of synthetic-three-way-report.md) -------------------
+
+    const CROSS_ENGINE_CFG: &str = r#"
+[default]
+budget_pct = 10.0
+floor_ms = 0.5
+
+[op.match_by_index]
+budget_pct = 15.0
+
+[cross-engine.default]
+budget_pct = 25.0
+floor_ms = 1.0
+
+[cross-engine.op.single_vertex_read]
+budget_pct = 40.0
+concurrency = { 32 = 60.0 }
+"#;
+
+    #[test]
+    fn cross_engine_profile_selects_its_own_sections() {
+        let t = Thresholds::from_toml_str_with_profile(
+            CROSS_ENGINE_CFG,
+            BudgetProfile::CrossEngine,
+        )
+        .unwrap();
+        // [cross-engine.default] applies, not the strict [default].
+        let d = t.resolve_by_name("expand_1_hop", 1);
+        assert_eq!(d.budget_pct, 25.0);
+        assert_eq!(d.floor_ms, 1.0);
+        // The STRICT per-op override does NOT leak into the cross-engine profile.
+        assert_eq!(t.resolve_by_name("match_by_index", 1).budget_pct, 25.0);
+        // Cross-engine per-op + per-op×concurrency overrides resolve with the same precedence.
+        assert_eq!(t.resolve_by_name("single_vertex_read", 1).budget_pct, 40.0);
+        assert_eq!(t.resolve_by_name("single_vertex_read", 32).budget_pct, 60.0);
+        // Unset fields inherit the cross-engine default, not the strict one.
+        assert_eq!(t.resolve_by_name("single_vertex_read", 1).floor_ms, 1.0);
+    }
+
+    #[test]
+    fn strict_profile_ignores_but_still_validates_cross_engine() {
+        // Selecting strict leaves today's behavior intact even with a [cross-engine] section…
+        let t = Thresholds::from_toml_str(CROSS_ENGINE_CFG).unwrap();
+        assert_eq!(t.resolve_by_name("match_by_index", 1).budget_pct, 15.0);
+        assert_eq!(t.resolve_by_name("single_vertex_read", 1).budget_pct, 10.0);
+        // …but an invalid [cross-engine] section still fails loudly (typo guard, no dormant junk).
+        let err = Thresholds::from_toml_str(
+            "[cross-engine.op.not_a_real_op]\nbudget_pct = 5.0\n",
+        )
+        .unwrap_err();
+        assert!(err.contains("unknown operation 'not_a_real_op' in [cross-engine.op.not_a_real_op]"), "{err}");
+        let err2 = Thresholds::from_toml_str("[cross-engine.default]\nbudget_pct = -3.0\n")
+            .unwrap_err();
+        assert!(err2.contains("[cross-engine.default].budget_pct"), "{err2}");
+    }
+
+    #[test]
+    fn cross_engine_layers_over_builtin_defaults() {
+        // A partial [cross-engine.default] inherits the missing field from the BUILT-IN defaults
+        // (mirroring how the top-level [default] layers), not from the strict [default].
+        let cfg = "[default]\nfloor_ms = 9.0\n\n[cross-engine.default]\nbudget_pct = 30.0\n";
+        let t = Thresholds::from_toml_str_with_profile(cfg, BudgetProfile::CrossEngine).unwrap();
+        let d = t.resolve_by_name("match_by_index", 1);
+        assert_eq!(d.budget_pct, 30.0);
+        assert_eq!(d.floor_ms, DEFAULT_FLOOR_MS);
+    }
+
+    #[test]
+    fn selecting_cross_engine_without_the_section_is_a_hard_error() {
+        let err = Thresholds::from_toml_str_with_profile(
+            "[default]\nbudget_pct = 10.0\n",
+            BudgetProfile::CrossEngine,
+        )
+        .unwrap_err();
+        assert!(err.contains("has no [cross-engine] section"), "{err}");
+        // from_file_with_profile surfaces the same hard error with the path attached.
+        let dir = std::env::temp_dir();
+        let p = dir.join(format!("thr-xe-{}.toml", std::process::id()));
+        std::fs::write(&p, "[default]\nbudget_pct = 10.0\n").unwrap();
+        let e = Thresholds::from_file_with_profile(p.to_str().unwrap(), BudgetProfile::CrossEngine)
+            .unwrap_err();
+        assert!(format!("{e}").contains("[cross-engine]"), "{e}");
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn cross_engine_rejects_unknown_keys() {
+        // deny_unknown_fields holds inside the profile section too.
+        assert!(Thresholds::from_toml_str("[cross-engine.default]\nbudjet_pct = 10.0\n").is_err());
+        assert!(Thresholds::from_toml_str("[cross-engine.unknown_section]\nx = 1\n").is_err());
+    }
+
+    #[test]
+    fn budget_profile_parses_and_round_trips() {
+        use std::str::FromStr;
+        assert_eq!(BudgetProfile::from_str("strict").unwrap(), BudgetProfile::Strict);
+        assert_eq!(BudgetProfile::from_str("cross-engine").unwrap(), BudgetProfile::CrossEngine);
+        assert!(BudgetProfile::from_str("loose").is_err());
+        assert_eq!(BudgetProfile::Strict.as_str(), "strict");
+        assert_eq!(BudgetProfile::CrossEngine.as_str(), "cross-engine");
+        assert_eq!(BudgetProfile::default(), BudgetProfile::Strict);
+        // Serde uses the same kebab-case ids as FromStr/as_str.
+        assert_eq!(serde_json::to_string(&BudgetProfile::CrossEngine).unwrap(), "\"cross-engine\"");
+        assert_eq!(
+            serde_json::from_str::<BudgetProfile>("\"strict\"").unwrap(),
+            BudgetProfile::Strict
+        );
+    }
+
+    // --- ThresholdsEcho --------------------------------------------------------------------------
+
+    #[test]
+    fn echo_serializes_and_renders_identically_to_thresholds() {
+        let cfg = r#"
+[default]
+budget_pct = 10.0
+floor_ms = 0.5
+
+[op.match_by_index]
+budget_pct = 15.0
+
+[op.expand_hops_5]
+budget_pct = 12.0
+concurrency = { 16 = 18.0, 32 = 25.0 }
+"#;
+        let t = Thresholds::from_toml_str(cfg).unwrap();
+        let echo = t.echo();
+        // The echo's Markdown is byte-identical to the Thresholds' own rendering.
+        assert_eq!(echo.settings_markdown(), t.settings_markdown());
+        // It round-trips through JSON (the cells-file path).
+        let json = serde_json::to_string(&echo).unwrap();
+        let back: ThresholdsEcho = serde_json::from_str(&json).unwrap();
+        assert_eq!(echo, back);
+        assert_eq!(back.settings_markdown(), t.settings_markdown());
+        // Structure sanity: metric, defaults and the sorted per-op overrides.
+        assert_eq!(echo.metric, "p50");
+        assert_eq!(echo.default_budget_pct, 10.0);
+        assert_eq!(echo.default_floor_ms, 0.5);
+        assert_eq!(echo.ops.len(), 2);
+        assert_eq!(echo.ops[0].op, "expand_hops_5");
+        assert_eq!(echo.ops[0].concurrency_budget_pct.get(&16), Some(&18.0));
+        assert_eq!(echo.ops[1].op, "match_by_index");
+        assert_eq!(echo.ops[1].budget_pct, Some(15.0));
+        assert_eq!(echo.ops[1].floor_ms, None);
     }
 }
