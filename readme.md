@@ -476,7 +476,7 @@ just synthetic-compare-versions demo falkor://127.0.0.1:6379 falkor://127.0.0.1:
   **`--repo-algorithms`** additionally records the **4 opt-in whole-graph algorithm read shapes**
   (`algo.pageRank` / `algo.maxFlow` / `algo.MSF` / `algo.HarmonicCentrality`), each with a tight
   per-op budget (25 samples, warm-up 2, C=1, cached-only, 60 s server timeout) and a reduced corpus
-  (1 command for the parameterless shapes; a small seeded `(source, target)` pair set for maxFlow).
+  (1 command for the parameterless shapes; a small seeded set of distinct `(source, target)` pairs for maxFlow).
   All four start **result-N/A** (their values aren't verified byte-stable yet — `max_flow`/`msf`
   are gating candidates pending that verification), so they add latency/trend coverage without
   joining the divergence gate. The selector is **orthogonal** to `--repo-reads` (combinable with it

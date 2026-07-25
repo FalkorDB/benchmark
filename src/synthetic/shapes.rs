@@ -348,9 +348,9 @@ pub fn repo_reads_need_fixture(tier: Tier) -> bool {
 /// information.
 static ALGORITHM_SWEEP: [usize; 1] = [1];
 
-/// The corpus size for `algo_max_flow_single_pair` — a small seeded set of distinct
-/// `(source, target)` pairs (design §3.4), instead of the [`CORPUS_SIZE`]-command corpus a cheap
-/// read records.
+/// The corpus size for `algo_max_flow_single_pair` — a small seeded set of **distinct**
+/// `(source, target)` pairs (design §3.4; duplicate draws re-render, bounded), instead of the
+/// [`CORPUS_SIZE`]-command corpus a cheap read records.
 const MAX_FLOW_CORPUS_SIZE: usize = 4;
 
 /// The per-op budget every algorithm shape records (design §3.4): whole-graph algorithms are
@@ -572,10 +572,34 @@ fn render_shapes(
         let key = OpKey::dynamic(shape.name.to_string(), QueryType::Read);
         let mut rng = StdRng::seed_from_u64(corpus_seed ^ key.salt());
         let mut commands = Vec::with_capacity(shape.corpus_size);
-        for _ in 0..shape.corpus_size {
+        // An Algorithm-family multi-command corpus is a seeded set of DISTINCT commands (the
+        // maxFlow pair set — measuring the same pair twice adds runtime without coverage), so
+        // duplicate draws re-render, bounded and deterministically (same seed ⇒ same skips ⇒ same
+        // corpus). Read corpora keep plain sequential draws: duplicates there are legitimate
+        // (a parameterless read renders CORPUS_SIZE identical commands by design).
+        let need_distinct = shape.family == CoverageFamily::Algorithm && shape.corpus_size > 1;
+        let mut seen = BTreeSet::new();
+        let max_attempts = shape.corpus_size * 16;
+        let mut attempts = 0usize;
+        while commands.len() < shape.corpus_size {
+            attempts += 1;
+            if attempts > max_attempts {
+                return Err(OtherError(format!(
+                    "shape '{}' rendered only {} distinct command(s) of the {} its corpus needs \
+                     within {max_attempts} attempts — its parameter space is too small for its \
+                     corpus_size (shrink corpus_size in src/synthetic/shapes.rs or enlarge the \
+                     dataset)",
+                    shape.name,
+                    commands.len(),
+                    shape.corpus_size
+                )));
+            }
             let prepared = repo.render_read_with_rng(shape.name, &mut rng).ok_or_else(|| {
                 OtherError(format!("shape '{}' failed to render", shape.name))
             })?;
+            if need_distinct && !seen.insert(prepared.cypher.clone()) {
+                continue;
+            }
             commands.push(prepared.cypher);
         }
         ops.push(RecordedOp {
@@ -838,6 +862,31 @@ mod tests {
         for (a, b) in ops.iter().zip(&again) {
             assert_eq!(a.commands, b.commands, "'{}' corpus must be seed-stable", a.key.name());
         }
+    }
+
+    #[test]
+    fn max_flow_corpus_stays_distinct_even_when_draws_collide() {
+        // With 3 vertices there are only 6 ordered (source, target) pairs, so 4 seeded draws are
+        // near-certain to collide — the bounded re-render must still deliver 4 DISTINCT maxFlow
+        // commands (deterministically: same seed ⇒ same skips ⇒ same corpus).
+        let ops = record_algorithm_reads(3, 6, 7).expect("record on a tiny pair space");
+        let max_flow = &ops[1];
+        assert_eq!(max_flow.key.name(), "algo_max_flow_single_pair");
+        assert_eq!(max_flow.commands.len(), MAX_FLOW_CORPUS_SIZE);
+        let unique: BTreeSet<&str> = max_flow.commands.iter().map(String::as_str).collect();
+        assert_eq!(unique.len(), MAX_FLOW_CORPUS_SIZE, "corpus must be distinct despite collisions");
+    }
+
+    #[test]
+    fn algorithm_corpus_fails_clearly_when_the_pair_space_is_too_small() {
+        // 2 vertices ⇒ only 2 ordered pairs < MAX_FLOW_CORPUS_SIZE: the bounded retry must give
+        // up with an actionable error instead of looping forever or silently recording dups.
+        let err = record_algorithm_reads(2, 2, 7).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("algo_max_flow_single_pair") && msg.contains("distinct"),
+            "unexpected error: {msg}"
+        );
     }
 
     #[test]
