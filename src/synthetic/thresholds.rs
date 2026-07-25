@@ -88,7 +88,9 @@ impl Metric {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Verdict {
-    /// Faster, or slower within budget/floor.
+    /// Faster, or slower within budget/floor. Serialized as `"pass"` — the cells-JSON contract
+    /// name (the Rust name stays `Ok` to match the render call sites).
+    #[serde(rename = "pass")]
     Ok,
     /// Slower than the budget (and beyond the noise floor).
     Regressed,
@@ -670,6 +672,19 @@ concurrency = { 32 = 40.0 }
         assert_eq!(Verdict::Ok.emoji(), "🟢");
         assert_eq!(Verdict::Regressed.emoji(), "🔴");
         assert_eq!(Verdict::NotApplicable.emoji(), "N/A");
+    }
+
+    #[test]
+    fn verdict_serializes_with_the_contract_names() {
+        // The cells-JSON contract: pass | regressed | not_applicable (`Ok` is a Rust-only name).
+        for (v, name) in [
+            (Verdict::Ok, "\"pass\""),
+            (Verdict::Regressed, "\"regressed\""),
+            (Verdict::NotApplicable, "\"not_applicable\""),
+        ] {
+            assert_eq!(serde_json::to_string(&v).unwrap(), name);
+            assert_eq!(serde_json::from_str::<Verdict>(name).unwrap(), v);
+        }
     }
 
     #[test]

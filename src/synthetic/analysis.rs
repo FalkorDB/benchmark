@@ -164,7 +164,22 @@ impl OverallVerdict {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ComparisonStatus {
     Comparable,
-    NotComparable { reason: String },
+    /// The workload/config guard failed: `workload_hash`, sampling (samples/warmup), the
+    /// concurrency sweep, or a known server setting differs between the two runs.
+    WorkloadMismatch { reason: String },
+    /// The runs are config-comparable but share no operation name — nothing to compare.
+    NoCommonOps { reason: String },
+}
+
+impl ComparisonStatus {
+    /// The not-comparable reason, if any — `None` exactly when the runs are comparable.
+    pub fn not_comparable_reason(&self) -> Option<&str> {
+        match self {
+            ComparisonStatus::Comparable => None,
+            ComparisonStatus::WorkloadMismatch { reason }
+            | ComparisonStatus::NoCommonOps { reason } => Some(reason),
+        }
+    }
 }
 
 /// Which cache mode a cell was measured in.
@@ -302,8 +317,9 @@ pub struct RegressionAnalysis {
     /// `--elapsed-secs`.
     pub elapsed_secs: Option<f64>,
     pub verdict: OverallVerdict,
-    /// Per-op outcome tallies over ops with ≥1 measured cell (a diverged op with no cell still
-    /// drives `verdict` and the diverged-ops list, but has nothing to tally).
+    /// Per-op outcome tallies. Every op with ≥1 measured cell is tallied; a **diverged** op is
+    /// tallied even with no cell (gate ⇒ `regressed`, advisory ⇒ `diverged` — every divergence
+    /// counts). Only a cell-less non-diverged op has nothing to tally.
     pub totals: OutcomeCounts,
     /// Cells with a real verdict (🟢 or 🔴) across all ops; a diverged op's cells are N/A and
     /// never counted.
@@ -329,10 +345,7 @@ impl RegressionAnalysis {
         let diverged = self.diverged_ops().len();
         let headline = match self.verdict {
             OverallVerdict::NotComparable => {
-                let reason = match &self.status {
-                    ComparisonStatus::NotComparable { reason } => reason.as_str(),
-                    ComparisonStatus::Comparable => "unknown reason",
-                };
+                let reason = self.status.not_comparable_reason().unwrap_or("unknown reason");
                 format!("not comparable — {reason}")
             }
             OverallVerdict::Regressed if self.regressed_cells > 0 => format!(
@@ -618,7 +631,7 @@ pub fn analyze(
     let (diverged, warnings) = match guard {
         RegressionGuard::NotComparable { reason } => {
             return RegressionAnalysis {
-                status: ComparisonStatus::NotComparable { reason: reason.clone() },
+                status: ComparisonStatus::WorkloadMismatch { reason: reason.clone() },
                 ..base
             };
         }
@@ -626,6 +639,18 @@ pub fn analyze(
             (diverged_ops, warnings.clone())
         }
     };
+
+    // Configs match, but a comparison still needs at least one op name present on both sides.
+    if !baseline.operations.keys().any(|op| candidate.operations.contains_key(op)) {
+        return RegressionAnalysis {
+            status: ComparisonStatus::NoCommonOps {
+                reason: "the two runs share no operation name — there is nothing to compare"
+                    .to_string(),
+            },
+            warnings,
+            ..base
+        };
+    }
 
     let mut ops = BTreeMap::new();
     let mut totals = OutcomeCounts::default();
@@ -655,9 +680,10 @@ pub fn analyze(
                 Verdict::NotApplicable => {}
             }
         }
-        // Ops with no measured cell still carry correctness (and drive the verdict below) but have
-        // nothing to tally in the outcome table.
-        if !oa.cells.is_empty() {
+        // Every op with a measured cell is tallied — and so is a cell-less **diverged** op
+        // (gate ⇒ `regressed`, advisory ⇒ `diverged`): every divergence counts in the outcome
+        // table. Only a cell-less non-diverged op has nothing to tally.
+        if !oa.cells.is_empty() || oa.correctness == Correctness::Diverged {
             totals.add(oa.op_outcome);
         }
         ops.insert(op.clone(), oa);
@@ -905,12 +931,39 @@ mod tests {
         b.meta.dataset.as_mut().unwrap().workload_hash = "sha256:zzz".to_string();
         let an = gate(&a, &b);
         assert_eq!(an.verdict, OverallVerdict::NotComparable);
-        assert!(matches!(an.status, ComparisonStatus::NotComparable { .. }));
+        assert!(matches!(an.status, ComparisonStatus::WorkloadMismatch { .. }));
         assert!(an.ops.is_empty());
         assert_eq!(an.totals, OutcomeCounts::default());
         let (emoji, headline) = an.verdict_line();
         assert_eq!(emoji, "⚠");
         assert!(headline.starts_with("not comparable — "), "{headline}");
+        // Contract: the discriminated status kind + its mismatch detail.
+        let value: serde_json::Value = serde_json::from_str(&an.to_json().unwrap()).unwrap();
+        assert_eq!(value["status"]["kind"], "workload_mismatch");
+        assert!(value["status"]["reason"].as_str().unwrap().contains("workload_hash"));
+    }
+
+    #[test]
+    fn disjoint_op_sets_are_no_common_ops() {
+        // Config-comparable runs that share no op name: nothing to compare — a NotComparable
+        // verdict with the `no_common_ops` status kind, warnings preserved.
+        let a = rpt("main", 42001, &[("match_by_index", 1.0, Some("d1"))]);
+        let b = rpt("pr", 42002, &[("expand_1_hop", 1.0, Some("d2"))]);
+        let an = gate(&a, &b);
+        assert_eq!(an.verdict, OverallVerdict::NotComparable);
+        assert!(matches!(an.status, ComparisonStatus::NoCommonOps { .. }));
+        assert!(an.ops.is_empty());
+        assert!(
+            an.warnings.iter().any(|w| w.contains("module version changed")),
+            "advisory warnings survive the short-circuit: {:?}",
+            an.warnings
+        );
+        let (emoji, headline) = an.verdict_line();
+        assert_eq!(emoji, "⚠");
+        assert!(headline.contains("share no operation name"), "{headline}");
+        let value: serde_json::Value = serde_json::from_str(&an.to_json().unwrap()).unwrap();
+        assert_eq!(value["status"]["kind"], "no_common_ops");
+        assert!(value["status"]["reason"].is_string());
     }
 
     #[test]
@@ -921,6 +974,11 @@ mod tests {
         let an = gate(&a, &b);
         assert_eq!(an.status, ComparisonStatus::Comparable);
         assert_eq!(an.verdict, OverallVerdict::Pass);
+        assert!(
+            an.warnings.iter().any(|w| w.contains("module version changed")),
+            "a real version delta is noted as an advisory warning: {:?}",
+            an.warnings
+        );
     }
 
     #[test]
@@ -946,20 +1004,30 @@ mod tests {
 
     #[test]
     fn no_cell_diverged_op_still_drives_the_verdict() {
-        // Op present on both sides with diverged digests but zero measured levels: nothing to
-        // tally, but the divergence must still gate (or warn, under advisory).
+        // Op present on both sides with diverged digests but zero measured levels: no cells, but
+        // the divergence still gates (or warns, under advisory) AND is tallied — every divergence
+        // counts in the outcome table (design v5).
         let mut a = rpt("main", 42001, &[("match_by_index", 1.0, Some("d1"))]);
         let mut b = rpt("pr", 42002, &[("match_by_index", 1.0, Some("d2"))]);
         a.operations.get_mut("match_by_index").unwrap().levels.clear();
         b.operations.get_mut("match_by_index").unwrap().levels.clear();
         let an = gate(&a, &b);
         assert_eq!(an.verdict, OverallVerdict::Regressed);
-        assert_eq!(an.totals, OutcomeCounts::default(), "no cell ⇒ nothing tallied");
+        assert_eq!(
+            an.totals,
+            OutcomeCounts { regressed: 1, ..OutcomeCounts::default() },
+            "a cell-less diverged op is tallied under gate"
+        );
         assert!(an.ops["match_by_index"].cells.is_empty());
         assert_eq!(an.ops["match_by_index"].op_outcome, OpOutcome::Regressed);
         let adv = advisory(&a, &b);
-        assert_eq!(adv.verdict, OverallVerdict::Advisory);
+        assert_eq!(adv.verdict, OverallVerdict::Advisory, "divergence caps at Advisory");
         assert_eq!(adv.ops["match_by_index"].op_outcome, OpOutcome::DivergedAdvisory);
+        assert_eq!(
+            adv.totals,
+            OutcomeCounts { diverged: 1, ..OutcomeCounts::default() },
+            "a cell-less diverged op is tallied under advisory"
+        );
     }
 
     #[test]
@@ -1015,8 +1083,16 @@ mod tests {
         // The cells JSON is a machine contract (schema v1). This test freezes the exact top-level
         // field set — adding/renaming/removing a field must bump ANALYSIS_SCHEMA_VERSION and
         // update this list deliberately.
-        let a = rpt("main", 42001, &[("match_by_index", 1.0, Some("d1"))]);
-        let b = rpt("pr", 42002, &[("match_by_index", 2.0, Some("d1"))]);
+        let a = rpt(
+            "main",
+            42001,
+            &[("match_by_index", 1.0, Some("d1")), ("aggregate_count", 1.0, Some("d2"))],
+        );
+        let b = rpt(
+            "pr",
+            42002,
+            &[("match_by_index", 2.0, Some("d1")), ("aggregate_count", 1.0, Some("d2"))],
+        );
         let an = gate(&a, &b);
         let value: serde_json::Value = serde_json::from_str(&an.to_json().unwrap()).unwrap();
         let mut keys: Vec<&str> = value.as_object().unwrap().keys().map(String::as_str).collect();
@@ -1062,6 +1138,8 @@ mod tests {
         );
         assert_eq!(cell["cache_mode"], "cached");
         assert_eq!(cell["perf_verdict"], "regressed");
+        // The contract names: a within-budget cell is "pass" (not the Rust variant name `Ok`).
+        assert_eq!(value["ops"]["aggregate_count"]["cells"][0]["perf_verdict"], "pass");
         assert_eq!(value["status"]["kind"], "comparable");
     }
 
@@ -1089,11 +1167,15 @@ mod tests {
 
     #[test]
     fn missing_side_yields_na_cell_with_context_only_where_present() {
-        // Op exists only in the baseline (ungated digest so the guard doesn't flag asymmetry):
-        // cells exist (union of levels) with the candidate side None.
-        let a = rpt("main", 42001, &[("match_by_index", 1.0, None)]);
-        let mut b = rpt("pr", 42002, &[("match_by_index", 1.0, None)]);
-        b.operations.clear();
+        // `match_by_index` exists only in the baseline (ungated digest so the guard doesn't flag
+        // asymmetry): cells exist (union of levels) with the candidate side None. A second,
+        // common op (zero baseline p50 ⇒ N/A too) keeps the pair off the no-common-ops path.
+        let a = rpt(
+            "main",
+            42001,
+            &[("match_by_index", 1.0, None), ("aggregate_count", 0.0, None)],
+        );
+        let b = rpt("pr", 42002, &[("aggregate_count", 1.0, None)]);
         let an = gate(&a, &b);
         let cell = &an.ops["match_by_index"].cells[0];
         assert_eq!(cell.baseline_p50_ms, Some(1.0));
@@ -1109,9 +1191,13 @@ mod tests {
     #[test]
     fn digest_present_only_in_baseline_of_a_missing_op_is_diverged() {
         // Baseline carries a digest; candidate lacks the op entirely ⇒ asymmetric ⇒ diverged.
-        let a = rpt("main", 42001, &[("match_by_index", 1.0, Some("d1"))]);
-        let mut b = rpt("pr", 42002, &[("match_by_index", 1.0, Some("d1"))]);
-        b.operations.clear();
+        // (A shared op keeps the pair comparable at all — off the no-common-ops path.)
+        let a = rpt(
+            "main",
+            42001,
+            &[("match_by_index", 1.0, Some("d1")), ("aggregate_count", 1.0, Some("dc"))],
+        );
+        let b = rpt("pr", 42002, &[("aggregate_count", 1.0, Some("dc"))]);
         let an = gate(&a, &b);
         assert_eq!(an.ops["match_by_index"].correctness, Correctness::Diverged);
         assert_eq!(an.verdict, OverallVerdict::Regressed);

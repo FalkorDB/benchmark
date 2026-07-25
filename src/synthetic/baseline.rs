@@ -284,6 +284,18 @@ fn advisory_warnings(
             ver_str(cv)
         ));
     }
+    // A *differing* module version is noted too — advisory only, never a comparability guard
+    // (design §A1). Placeholder sides are excluded: the placeholder warning below carries the
+    // signal, and a placeholder-to-real "change" is not a meaningful version delta.
+    if let (Some(a), Some(b)) = (bv, cv) {
+        if a != b && a != ServerInfo::PLACEHOLDER_VER && b != ServerInfo::PLACEHOLDER_VER {
+            warnings.push(format!(
+                "FalkorDB module version changed: {} → {}",
+                ver_str(bv),
+                ver_str(cv)
+            ));
+        }
+    }
     if bv == Some(ServerInfo::PLACEHOLDER_VER) || cv == Some(ServerInfo::PLACEHOLDER_VER) {
         warnings.push(
             "a FalkorDB module version is the dev placeholder — use tagged release images for a \
@@ -639,6 +651,34 @@ mod regression_guard_tests {
         match regression_guard(&pa, &pb) {
             RegressionGuard::Comparable { warnings, .. } => {
                 assert!(!warnings.iter().any(|w| w.contains("same FalkorDB module version")));
+                assert!(warnings.iter().any(|w| w.contains("dev placeholder")));
+            }
+            other => panic!("expected Comparable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn advisory_warnings_note_a_real_module_version_change() {
+        // Two differing *real* versions: an advisory "version changed" note — never a guard
+        // (design §A1; the comparison stays Comparable).
+        let a = rep("h", 100, 50, vec![1], Some(42001), None, &[]);
+        let b = rep("h", 100, 50, vec![1], Some(42002), None, &[]);
+        match regression_guard(&a, &b) {
+            RegressionGuard::Comparable { warnings, .. } => {
+                assert!(
+                    warnings.iter().any(|w| w.contains("module version changed")),
+                    "{warnings:?}"
+                );
+            }
+            other => panic!("expected Comparable, got {other:?}"),
+        }
+        // A placeholder on either side is not a meaningful delta: only the placeholder warning
+        // fires, never a "changed" note against a placeholder.
+        let pa = rep("h", 100, 50, vec![1], Some(ServerInfo::PLACEHOLDER_VER), None, &[]);
+        let pb = rep("h", 100, 50, vec![1], Some(42002), None, &[]);
+        match regression_guard(&pa, &pb) {
+            RegressionGuard::Comparable { warnings, .. } => {
+                assert!(!warnings.iter().any(|w| w.contains("module version changed")));
                 assert!(warnings.iter().any(|w| w.contains("dev placeholder")));
             }
             other => panic!("expected Comparable, got {other:?}"),
