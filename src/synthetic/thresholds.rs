@@ -214,11 +214,17 @@ impl Thresholds {
 
         let mut ops = BTreeMap::new();
         for (name, raw_op) in raw.op {
-            // Validate the name maps to a known op, but key the map by the **string name** so a
-            // dynamic (string-keyed) op resolves exactly like a built-in one (design §3.1).
-            OpName::from_tag(&name).ok_or_else(|| {
-                format!("unknown operation '{name}' in [op.{name}] — see `synthetic list-ops`")
-            })?;
+            // Validate the name maps to a known op — a legacy catalog tag or a recorded repo read
+            // shape — but key the map by the **string name** so a dynamic (string-keyed) op
+            // resolves exactly like a built-in one (design §3.1).
+            let known = OpName::from_tag(&name).is_some()
+                || crate::synthetic::shapes::repo_read_tier(&name).is_some();
+            if !known {
+                return Err(format!(
+                    "unknown operation '{name}' in [op.{name}] — not a catalog op (see \
+                     `synthetic list-ops`) or a recorded repo read shape"
+                ));
+            }
             if let Some(m) = raw_op.metric {
                 check_metric(m)?;
             }
@@ -445,6 +451,19 @@ concurrency = { 32 = 40.0 }
     fn rejects_unknown_op_key() {
         let err = Thresholds::from_toml_str("[op.not_a_real_op]\nbudget_pct = 5.0\n").unwrap_err();
         assert!(err.contains("unknown operation 'not_a_real_op'"), "{err}");
+    }
+
+    #[test]
+    fn accepts_repo_read_shape_op_key() {
+        // A dynamic repo read shape name (not a catalog `OpName`) is a valid `[op.*]` key and its
+        // override resolves through the same string-keyed lookup as a built-in op (design §4 A0 of
+        // synthetic-three-way-report.md).
+        let cfg = "[op.single_vertex_read]\nbudget_pct = 33.0\nfloor_ms = 0.2\n";
+        let t = Thresholds::from_toml_str(cfg).unwrap();
+        assert!(OpName::from_tag("single_vertex_read").is_none(), "shape must be dynamic");
+        let r = t.resolve_by_name("single_vertex_read", 4);
+        assert_eq!(r.budget_pct, 33.0);
+        assert_eq!(r.floor_ms, 0.2);
     }
 
     #[test]
