@@ -513,9 +513,10 @@ just synthetic-compare-versions demo falkor://127.0.0.1:6379 falkor://127.0.0.1:
   within budget, 🔴 if slower beyond it. The budget is a `budget_pct` plus an absolute `floor_ms`
   noise guard, defaulting to 10 % / 0.5 ms and overridable per-operation and per-operation×concurrency
   in a TOML file (`[default]` + `[op.<name>]` with a `concurrency` inline table). `<name>` may be a
-  catalog op (`synthetic list-ops`) **or** a recorded repo-read shape (e.g. `single_vertex_read`);
+  catalog op (`synthetic list-ops`) **or** any recorded shape — a repo read (e.g.
+  `single_vertex_read`) or an algorithm shape (e.g. `algo_max_flow_single_pair`);
   every measured op resolves a budget — string-keyed override first, else `[default]`; catalog ops
-  and recorded repo-read shapes also roll into their coverage tier. Unlike `--diff`,
+  and recorded shapes also roll into their coverage tier (algorithm shapes count as `full`). Unlike `--diff`,
   it **never aborts**: an op whose `result_digest` differs is shown 🔴 with a `⚠ results differ`
   note and a perf verdict of **N/A** (a mismatched workload/config renders the whole report
   *not comparable*). The report **header echoes the resolved thresholds** (the default budget/floor

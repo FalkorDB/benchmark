@@ -321,15 +321,15 @@ impl Thresholds {
 
         let mut ops = BTreeMap::new();
         for (name, raw_op) in raw_ops {
-            // Validate the name maps to a known op — a legacy catalog tag or a recorded repo read
-            // shape — but key the map by the **string name** so a dynamic (string-keyed) op
-            // resolves exactly like a built-in one (design §3.1).
+            // Validate the name maps to a known op — a legacy catalog tag or a recorded shape
+            // (repo read or algorithm) — but key the map by the **string name** so a dynamic
+            // (string-keyed) op resolves exactly like a built-in one (design §3.1).
             let known = OpName::from_tag(&name).is_some()
-                || crate::synthetic::shapes::repo_read_tier(&name).is_some();
+                || crate::synthetic::shapes::shape_tier(&name).is_some();
             if !known {
                 return Err(format!(
                     "unknown operation '{name}' in [{section}op.{name}] — not a catalog op (see \
-                     `synthetic list-ops`) or a recorded repo read shape"
+                     `synthetic list-ops`) or a recorded shape"
                 ));
             }
             if let Some(m) = raw_op.metric {
@@ -628,6 +628,22 @@ concurrency = { 32 = 40.0 }
         let r = t.resolve_by_name("single_vertex_read", 4);
         assert_eq!(r.budget_pct, 33.0);
         assert_eq!(r.floor_ms, 0.2);
+    }
+
+    #[test]
+    fn accepts_algorithm_shape_op_key_in_both_profiles() {
+        // Phase 6: an algorithm shape name is a valid `[op.*]` AND `[cross-engine.op.*]` key —
+        // the known-op validation is family-agnostic (`shape_tier`), so per-op budgets can be
+        // tuned for the heavy algorithm reads exactly like any repo read.
+        let cfg = "[op.algo_max_flow_single_pair]\nbudget_pct = 60.0\nfloor_ms = 2.0\n\
+                   [cross-engine.op.algo_msf_summary]\nbudget_pct = 80.0\n";
+        let t = Thresholds::from_toml_str(cfg).unwrap();
+        assert!(OpName::from_tag("algo_max_flow_single_pair").is_none(), "must be dynamic");
+        let r = t.resolve_by_name("algo_max_flow_single_pair", 1);
+        assert_eq!(r.budget_pct, 60.0);
+        assert_eq!(r.floor_ms, 2.0);
+        let ce = Thresholds::from_toml_str_with_profile(cfg, BudgetProfile::CrossEngine).unwrap();
+        assert_eq!(ce.resolve_by_name("algo_msf_summary", 1).budget_pct, 80.0);
     }
 
     #[test]

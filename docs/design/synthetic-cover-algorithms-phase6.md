@@ -164,7 +164,13 @@ digests across ≥2 runs on the per-PR image (the reads' bar). Never add a synth
    `record_algorithm_reads()` renders from an all-algorithms-enabled repository with its own
    drift-guard; `--repo-algorithms` composes orthogonally with `--repo-reads`, and tests pin that
    `repo_read_shapes()`/`--repo-reads full` remain exactly the 50 reads with the pinned
-   `workload_hash` golden. Capability variants are annotation-only until step 4.)*
+   `workload_hash` golden. Capability variants are annotation-only until step 4. Review hardening:
+   the shape→tier lookup is family-agnostic (`shape_tier`), so algorithm ops roll into the `full`
+   tier bucket of summaries/diffs and are valid `[op.*]`/`[cross-engine.op.*]` threshold keys —
+   selection stays per-family, untouched; and distinct-corpus completion (the maxFlow pair set) is
+   deterministic **and total**: bounded seeded draws byte-compatible with the original rejection
+   loop, then an exhaustive walk of the ordered-pair space, so it succeeds whenever the space
+   suffices and the too-small error is proven, never draw luck.)*
 4. **Per-procedure capability** (§3.5) — probe-before-capture + skipped-op reporting.
 5. **Promote deterministic shapes:** flip `max_flow`/`msf` to `Gated` once verified byte-stable.
 6. **Docs:** cookbook + readme.

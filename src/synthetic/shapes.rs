@@ -308,16 +308,20 @@ pub fn repo_read_shapes() -> Vec<ShapeSpec> {
     shapes
 }
 
-/// The coverage [`Tier`] of the repo read shape named `name`, or `None` when no repo read shape has
-/// that name. Lets string-keyed consumers (thresholds validation, report tier rollups) resolve a
-/// dynamic recorded op exactly like a static catalog op.
-pub fn repo_read_tier(name: &str) -> Option<Tier> {
-    // Chain the component lists (same order as `repo_read_shapes`) instead of materializing the
-    // combined Vec on every lookup; `repo_read_tier_covers_every_repo_read_shape` guards drift.
+/// The coverage [`Tier`] of the recorded shape named `name` — **family-agnostic**: repo read
+/// shapes and the Phase 6 algorithm shapes alike — or `None` when no shape has that name. Lets
+/// string-keyed consumers (thresholds validation, report tier rollups) resolve a dynamic recorded
+/// op exactly like a static catalog op. Selection stays per-family ([`record_repo_reads`] /
+/// [`record_algorithm_reads`]) — this is a lookup, not a selector.
+pub fn shape_tier(name: &str) -> Option<Tier> {
+    // Chain the component lists (same order as `repo_read_shapes`, then the algorithm family)
+    // instead of materializing the combined Vec on every lookup;
+    // `shape_tier_covers_every_shape` guards drift.
     baseline_read_shapes()
         .into_iter()
         .chain(extended_core_read_shapes())
         .chain(fixture_dependent_read_shapes())
+        .chain(algorithm_read_shapes())
         .find(|shape| shape.name == name)
         .map(|shape| shape.tier)
 }
@@ -502,7 +506,7 @@ fn record_selected_shapes(
         .iter()
         .map(String::as_str)
         .collect();
-    render_shapes(&repo, &available, "non-algorithm read", shapes, corpus_seed)
+    render_shapes(&repo, &available, "non-algorithm read", shapes, vertices, corpus_seed)
 }
 
 /// Render the 4 opt-in algorithm read shapes ([`algorithm_read_shapes`]) into [`RecordedOp`]s —
@@ -537,6 +541,7 @@ pub fn record_algorithm_reads(
         &available,
         "algorithm read",
         &algorithm_read_shapes(),
+        vertices,
         corpus_seed,
     )
 }
@@ -551,6 +556,7 @@ fn render_shapes(
     available: &BTreeSet<&str>,
     kind: &str,
     shapes: &[ShapeSpec],
+    vertices: i32,
     corpus_seed: u64,
 ) -> BenchmarkResult<Vec<RecordedOp>> {
     let mut ops = Vec::with_capacity(shapes.len());
@@ -581,19 +587,8 @@ fn render_shapes(
         let mut seen = BTreeSet::new();
         let max_attempts = shape.corpus_size * 16;
         let mut attempts = 0usize;
-        while commands.len() < shape.corpus_size {
+        while commands.len() < shape.corpus_size && attempts < max_attempts {
             attempts += 1;
-            if attempts > max_attempts {
-                return Err(OtherError(format!(
-                    "shape '{}' rendered only {} distinct command(s) of the {} its corpus needs \
-                     within {max_attempts} attempts — its parameter space is too small for its \
-                     corpus_size (shrink corpus_size in src/synthetic/shapes.rs or enlarge the \
-                     dataset)",
-                    shape.name,
-                    commands.len(),
-                    shape.corpus_size
-                )));
-            }
             let prepared = repo.render_read_with_rng(shape.name, &mut rng).ok_or_else(|| {
                 OtherError(format!("shape '{}' failed to render", shape.name))
             })?;
@@ -601,6 +596,43 @@ fn render_shapes(
                 continue;
             }
             commands.push(prepared.cypher);
+        }
+        if commands.len() < shape.corpus_size {
+            // Exhaustive fallback (the #259 dedup pattern): the bounded random draws above could
+            // not fill the distinct corpus, so walk the entire ordered-pair space in canonical
+            // order and take the first unused renders. This makes completion deterministic AND
+            // total — it succeeds whenever enough distinct commands exist, so the error below
+            // proves the space is genuinely too small (never draw luck). Only distinct corpora
+            // can be short here: a plain corpus keeps every draw and fills within its budget.
+            'walk: for source in 1..=vertices {
+                for target in 1..=vertices {
+                    if source == target {
+                        continue;
+                    }
+                    let prepared = repo
+                        .render_read_with_path(shape.name, &mut rng, (source, target))
+                        .ok_or_else(|| {
+                            OtherError(format!("shape '{}' failed to render", shape.name))
+                        })?;
+                    if !seen.insert(prepared.cypher.clone()) {
+                        continue;
+                    }
+                    commands.push(prepared.cypher);
+                    if commands.len() == shape.corpus_size {
+                        break 'walk;
+                    }
+                }
+            }
+        }
+        if commands.len() < shape.corpus_size {
+            return Err(OtherError(format!(
+                "shape '{}' can render only {} distinct command(s) of the {} its corpus needs — \
+                 exhaustively verified over every (source, target) pair of the {vertices}-vertex \
+                 dataset (shrink corpus_size in src/synthetic/shapes.rs or enlarge the dataset)",
+                shape.name,
+                commands.len(),
+                shape.corpus_size
+            )));
         }
         ops.push(RecordedOp {
             key,
@@ -623,19 +655,21 @@ mod tests {
     }
 
     #[test]
-    fn repo_read_tier_resolves_by_name() {
-        // String-keyed tier lookup over the registry: a core shape, a full shape, and a miss.
-        assert_eq!(repo_read_tier("single_vertex_read"), Some(Tier::Core));
-        assert_eq!(repo_read_tier("vector_query_nodes_smoke"), Some(Tier::Full));
-        assert_eq!(repo_read_tier("not_a_shape"), None);
+    fn shape_tier_resolves_by_name() {
+        // String-keyed tier lookup over the registry: a core read, a full read, an algorithm
+        // shape (family-agnostic — algorithm ops roll up into tier buckets too), and a miss.
+        assert_eq!(shape_tier("single_vertex_read"), Some(Tier::Core));
+        assert_eq!(shape_tier("vector_query_nodes_smoke"), Some(Tier::Full));
+        assert_eq!(shape_tier("algo_max_flow_single_pair"), Some(Tier::Full));
+        assert_eq!(shape_tier("not_a_shape"), None);
     }
 
     #[test]
-    fn repo_read_tier_covers_every_repo_read_shape() {
-        // Drift guard for the chained lookup: every shape in the combined registry must resolve
-        // to its own tier, so a new component list can't silently escape `repo_read_tier`.
-        for shape in repo_read_shapes() {
-            assert_eq!(repo_read_tier(shape.name), Some(shape.tier), "{}", shape.name);
+    fn shape_tier_covers_every_shape() {
+        // Drift guard for the chained lookup: every shape in every family registry must resolve
+        // to its own tier, so a new component list can't silently escape `shape_tier`.
+        for shape in repo_read_shapes().into_iter().chain(algorithm_read_shapes()) {
+            assert_eq!(shape_tier(shape.name), Some(shape.tier), "{}", shape.name);
         }
     }
 
@@ -813,9 +847,10 @@ mod tests {
         );
         for name in &algo_names {
             assert_eq!(
-                repo_read_tier(name),
-                None,
-                "'{name}' must not resolve to a repo read tier (algorithms are outside --repo-reads)"
+                shape_tier(name),
+                Some(Tier::Full),
+                "'{name}' stays outside --repo-reads selection but must still resolve a tier \
+                 for rollups/thresholds (family-agnostic shape_tier)"
             );
         }
     }
@@ -875,6 +910,53 @@ mod tests {
         assert_eq!(max_flow.commands.len(), MAX_FLOW_CORPUS_SIZE);
         let unique: BTreeSet<&str> = max_flow.commands.iter().map(String::as_str).collect();
         assert_eq!(unique.len(), MAX_FLOW_CORPUS_SIZE, "corpus must be distinct despite collisions");
+    }
+
+    #[test]
+    fn max_flow_distinct_corpus_is_total_when_the_pair_space_barely_fits() {
+        // 3 vertices ⇒ EXACTLY 6 ordered (source, target) pairs. A corpus needing all 6 can never
+        // be guaranteed by bounded random draws (coupon-collector tail) — the exhaustive fallback
+        // must deliver every pair, for ANY seed, twice-identically. (The real maxFlow corpus is 4;
+        // sizing it to the whole space exercises the totality property the random phase lacks.)
+        let mut shape = algorithm_read_shapes().remove(1);
+        assert_eq!(shape.name, "algo_max_flow_single_pair");
+        shape.corpus_size = 6;
+        let repo = UsersQueriesRepository::new(
+            3,
+            6,
+            Flavour::FalkorDB,
+            all_algorithms(),
+            QueryCoverageProfile::Baseline,
+        );
+        let available: BTreeSet<&str> =
+            repo.algorithm_read_names().iter().map(String::as_str).collect();
+        for seed in [7u64, 0, 42, u64::MAX] {
+            let shapes = std::slice::from_ref(&shape);
+            let ops = render_shapes(&repo, &available, "algorithm read", shapes, 3, seed)
+                .unwrap_or_else(|e| panic!("seed {seed}: the space suffices, must fill: {e}"));
+            let unique: BTreeSet<&str> = ops[0].commands.iter().map(String::as_str).collect();
+            assert_eq!(unique.len(), 6, "seed {seed}: all 6 ordered pairs — no draw luck");
+            let again = render_shapes(&repo, &available, "algorithm read", shapes, 3, seed)
+                .expect("re-render");
+            assert_eq!(ops[0].commands, again[0].commands, "seed {seed}: deterministic");
+        }
+    }
+
+    #[test]
+    fn seed7_max_flow_corpus_renders_the_historical_pair_sequence() {
+        // Golden for the exhaustive-fallback change: the bounded random phase stays
+        // byte-compatible with the pre-fallback rejection loop, so the seed=7 1000/5000 oracle
+        // corpus — `workload_hash`-relevant bytes in recorded bundles — must render exactly the
+        // historical (source, target) sequence, in order.
+        let ops = record_algorithm_reads(1000, 5000, 7).expect("record");
+        let max_flow = &ops[1];
+        assert_eq!(max_flow.key.name(), "algo_max_flow_single_pair");
+        let expected = [(834, 998), (251, 200), (243, 109), (916, 109)];
+        assert_eq!(max_flow.commands.len(), expected.len());
+        for (cmd, (source, target)) in max_flow.commands.iter().zip(expected) {
+            let prefix = format!("CYPHER source_id = {source} target_id = {target} ");
+            assert!(cmd.starts_with(&prefix), "expected `{prefix}…`, got: {cmd}");
+        }
     }
 
     #[test]
