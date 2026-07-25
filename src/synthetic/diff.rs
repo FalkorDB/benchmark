@@ -100,13 +100,40 @@ pub fn diff_markdown(
         .keys()
         .chain(candidate.operations.keys())
         .collect();
+    let (la, lb) = (col_label(baseline, "A"), col_label(candidate, "B"));
     for op in ops {
         out.push_str(&format!("\n## `{op}`\n"));
+        // A capability-skipped op has no levels, so its tables render empty — say why instead
+        // (design Phase 6 §3.5), per side; reasons are manifest content, hence HTML-escaped.
+        if let Some(note) = diff_skip_note(baseline, candidate, op, &la, &lb) {
+            out.push_str(&format!("\n_{}_\n", md_cell(&html_escape(&note))));
+        }
         for mode in [Mode::Cached, Mode::Uncached] {
             render_mode(&mut out, baseline, candidate, op, mode);
         }
     }
     out
+}
+
+/// The ⏭ note for a per-side capability skip in the plain diff — same four cases as the
+/// regression report's [`skip_note`], derived straight from the two [`Report`]s.
+fn diff_skip_note(
+    a: &Report,
+    b: &Report,
+    op: &str,
+    la: &str,
+    lb: &str,
+) -> Option<String> {
+    let side = |r: &Report| r.operations.get(op).and_then(|o| o.skipped.clone());
+    match (side(a), side(b)) {
+        (Some(ra), Some(rb)) if ra == rb => Some(format!("⏭ skipped on both sides — {ra}")),
+        (Some(ra), Some(rb)) => {
+            Some(format!("⏭ skipped on both sides — {la}: {ra}; {lb}: {rb}"))
+        }
+        (Some(ra), None) => Some(format!("⏭ skipped on {la} — {ra}; measured on {lb} only")),
+        (None, Some(rb)) => Some(format!("⏭ skipped on {lb} — {rb}; measured on {la} only")),
+        (None, None) => None,
+    }
 }
 
 /// The display name for a run's column: its `--label` if set, else the caller-supplied `fallback`
@@ -882,6 +909,74 @@ mod tests {
         assert_eq!(pct(0.0, 5.0), "n/a");
         assert_eq!(pct(2.0, 3.0), "+50.0%");
         assert_eq!(pct(2.0, 1.0), "-50.0%");
+    }
+
+    #[test]
+    fn diff_renders_a_both_sides_skip_note() {
+        // A both-skipped op has no levels on either side — the plain diff must say why instead of
+        // rendering a bare heading; reasons are manifest content, hence HTML-escaped.
+        let mut a = report(42001, 1.0, 1000.0);
+        let mut b = report(42002, 1.0, 1000.0);
+        for r in [&mut a, &mut b] {
+            let o = r.operations.get_mut("match_by_index").unwrap();
+            o.levels = vec![];
+            o.result_digest = None;
+            o.skipped = Some("engine lacks procedure 'algo.maxFlow' <v2&up>".to_string());
+        }
+        let md = diff_markdown(&a, &b, &[]);
+        assert!(md.contains("## `match_by_index`"));
+        assert!(
+            md.contains(
+                "⏭ skipped on both sides — engine lacks procedure 'algo.maxFlow' &lt;v2&amp;up&gt;"
+            ),
+            "{md}"
+        );
+        assert!(!md.contains("<v2&up>"), "raw HTML leaked: {md}");
+        // Different per-side reasons render both, labeled by run (A/B fallbacks — no --label).
+        b.operations.get_mut("match_by_index").unwrap().skipped =
+            Some("engine lacks procedure 'algo.MaxFlowV2'".to_string());
+        let md = diff_markdown(&a, &b, &[]);
+        assert!(
+            md.contains(
+                "⏭ skipped on both sides — A: engine lacks procedure 'algo.maxFlow' &lt;v2&amp;up&gt;; \
+                 B: engine lacks procedure 'algo.MaxFlowV2'"
+            ),
+            "{md}"
+        );
+    }
+
+    #[test]
+    fn diff_renders_a_one_sided_skip_note() {
+        // One-sided skip: the note names the skipping side and that the other side measured; the
+        // measured side's table still renders below the note.
+        let a = report(42001, 1.0, 1000.0);
+        let mut b = report(42002, 1.0, 1000.0);
+        {
+            let o = b.operations.get_mut("match_by_index").unwrap();
+            o.levels = vec![];
+            o.result_digest = None;
+            o.skipped = Some("engine lacks procedure 'algo.maxFlow'".to_string());
+        }
+        let md = diff_markdown(&a, &b, &[]);
+        assert!(
+            md.contains(
+                "⏭ skipped on B — engine lacks procedure 'algo.maxFlow'; measured on A only"
+            ),
+            "{md}"
+        );
+        assert!(md.contains("| 1 | 1.000"), "A's measured cells still render: {md}");
+        // The skipping side labels by --label when set.
+        let mut a2 = a.clone();
+        a2.meta.label = Some("main".to_string());
+        let mut b2 = b.clone();
+        b2.meta.label = Some("pr".to_string());
+        let md = diff_markdown(&a2, &b2, &[]);
+        assert!(
+            md.contains(
+                "⏭ skipped on pr — engine lacks procedure 'algo.maxFlow'; measured on main only"
+            ),
+            "{md}"
+        );
     }
 
     #[test]
