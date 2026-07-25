@@ -599,9 +599,32 @@ pub enum SyntheticCommands {
             long = "summary",
             value_name = "FILE",
             requires = "regression",
-            help = "with --diff --regression: also write a compact machine-usable SUMMARY (JSON: overall verdict + per-tier 🟢/🔴/N-A counts + worst offenders + a stable slug) to FILE — small enough for a PR comment, while the full report is hosted externally and linked by the slug"
+            help = "with --diff --regression: also write a compact machine-usable SUMMARY (JSON: overall verdict + per-tier 🟢/🔴/⚠/N-A counts + worst offenders + a stable slug) to FILE — small enough for a PR comment, while the full report is hosted externally and linked by the slug"
         )]
         summary: Option<String>,
+        #[arg(
+            long = "cells",
+            value_name = "FILE",
+            requires = "regression",
+            help = "with --diff --regression: also write the FULL analysis model (JSON: per-op × cache-mode × concurrency cells with medians, deltas, budgets and verdicts, plus the meta block) to FILE — source material for the interactive report page"
+        )]
+        cells: Option<String>,
+        #[arg(
+            long = "budget-profile",
+            value_name = "PROFILE",
+            value_parser = ["strict", "cross-engine"],
+            requires = "regression",
+            help = "with --diff --regression: which budget profile of the thresholds TOML to apply (default: strict, today's same-engine budgets). `cross-engine` selects the [cross-engine] sections and errors if the TOML doesn't define them"
+        )]
+        budget_profile: Option<String>,
+        #[arg(
+            long = "divergence-policy",
+            value_name = "POLICY",
+            value_parser = ["gate", "advisory"],
+            requires = "regression",
+            help = "with --diff --regression: how a result divergence affects the verdict. `gate` (default): diverged op is 🔴 and fails the comparison. `advisory`: diverged op is ⚠, perf cells stay N/A, overall verdict caps at advisory — for cross-engine runs where engines legitimately differ"
+        )]
+        divergence_policy: Option<String>,
     },
 }
 

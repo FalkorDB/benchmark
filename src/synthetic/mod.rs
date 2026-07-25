@@ -15,6 +15,7 @@
 //! modes cycle the same corpus in the same order, keeping the cached-vs-uncached medians comparable
 //! on a matched workload.
 
+pub mod analysis;
 pub mod catalog;
 pub mod config;
 pub mod baseline;
@@ -46,6 +47,7 @@ use crate::synthetic::op_runner::{run_and_drain, OpSample};
 use crate::synthetic::report::{
     DatasetInfo, LevelMetrics, LevelReport, Meta, OperationReport, Report,
 };
+use crate::synthetic::thresholds::BudgetProfile;
 use crate::synthetic::writes::{verify_mutation, WritePlan, WriteScratch};
 use clap::ValueEnum;
 use falkordb::{AsyncGraph, ConnectionStrategy, FalkorClientBuilder};
@@ -1519,10 +1521,59 @@ pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkRes
             );
             Ok(())
         }
-        crate::cli::SyntheticCommands::Report { input, diff, regression, thresholds, out, elapsed_secs, summary } => {
-            report_command(input, diff, regression, thresholds, out, elapsed_secs, summary).await
+        crate::cli::SyntheticCommands::Report {
+            input,
+            diff,
+            regression,
+            thresholds,
+            out,
+            elapsed_secs,
+            summary,
+            cells,
+            budget_profile,
+            divergence_policy,
+        } => {
+            // clap's value_parser restricts both to known names, so these parses cannot fail; map
+            // errors anyway so a future drift fails loudly instead of silently defaulting.
+            let budget_profile = budget_profile
+                .as_deref()
+                .map(str::parse::<BudgetProfile>)
+                .transpose()
+                .map_err(OtherError)?
+                .unwrap_or_default();
+            let divergence_policy = divergence_policy
+                .as_deref()
+                .map(str::parse::<analysis::DivergencePolicy>)
+                .transpose()
+                .map_err(OtherError)?
+                .unwrap_or_default();
+            report_command(
+                input,
+                diff,
+                regression,
+                out,
+                RegressionOpts {
+                    thresholds,
+                    elapsed_secs,
+                    summary,
+                    cells,
+                    budget_profile,
+                    divergence_policy,
+                },
+            )
+            .await
         }
     }
+}
+
+/// The regression-mode knobs of `synthetic report` (all ignored outside `--regression`).
+struct RegressionOpts {
+    thresholds: Option<String>,
+    elapsed_secs: Option<f64>,
+    summary: Option<String>,
+    cells: Option<String>,
+    budget_profile: BudgetProfile,
+    divergence_policy: analysis::DivergencePolicy,
 }
 
 /// `synthetic report`: re-render a saved report (`input`) to console + Markdown, or **diff** two
@@ -1533,10 +1584,8 @@ async fn report_command(
     input: Option<String>,
     diff: Vec<String>,
     regression: bool,
-    thresholds: Option<String>,
     out: Option<String>,
-    elapsed_secs: Option<f64>,
-    summary: Option<String>,
+    opts: RegressionOpts,
 ) -> BenchmarkResult<()> {
     let load = |path: &str| -> BenchmarkResult<crate::synthetic::report::Report> {
         let text = std::fs::read_to_string(path)
@@ -1551,22 +1600,53 @@ async fn report_command(
 
         // NON-FATAL regression mode: colored per-cell verdicts, never aborts on divergence.
         if regression {
-            let budgets = match thresholds {
-                Some(path) => crate::synthetic::thresholds::Thresholds::from_file(&path)?,
+            let budgets = match &opts.thresholds {
+                Some(path) => crate::synthetic::thresholds::Thresholds::from_file_with_profile(
+                    path,
+                    opts.budget_profile,
+                )?,
+                // The built-in defaults define only the strict profile; selecting another without
+                // a TOML that declares it is a config error, not something to silently fall back
+                // from (design §A4).
+                None if opts.budget_profile != BudgetProfile::Strict => {
+                    return Err(OtherError(format!(
+                        "--budget-profile {} requires --thresholds <file> with a [{}] section \
+                         (the built-in defaults define no such profile)",
+                        opts.budget_profile.as_str(),
+                        opts.budget_profile.as_str()
+                    )));
+                }
                 None => crate::synthetic::thresholds::Thresholds::builtin(),
             };
             let guard = baseline::regression_guard(&a, &b);
-            let md = diff::regression_markdown(&a, &b, &guard, &budgets, elapsed_secs);
+            // Analyze ONCE; every artifact (Markdown, summary, cells JSON) renders from this one
+            // model, so they can never disagree.
+            let analysis = analysis::analyze(
+                &a,
+                &b,
+                &guard,
+                &budgets,
+                &analysis::AnalysisOptions {
+                    budget_profile: opts.budget_profile,
+                    divergence_policy: opts.divergence_policy,
+                    elapsed_secs: opts.elapsed_secs,
+                },
+            );
+            let md = diff::regression_markdown(&analysis);
             let out_path = out.unwrap_or_else(|| "synthetic-regression.md".to_string());
             tokio::fs::write(&out_path, &md).await?;
             println!("{}", md);
             println!("regression report written to {}", out_path);
-            // Optionally also emit the compact machine-usable summary (Decision 5), derived from the
-            // SAME guard + thresholds so it can never disagree with the full report above.
-            if let Some(summary_path) = summary {
-                let compact = diff::summarize(&a, &b, &guard, &budgets);
+            // Optionally also emit the compact machine-usable summary (Decision 5).
+            if let Some(summary_path) = opts.summary {
+                let compact = diff::summarize(&analysis);
                 tokio::fs::write(&summary_path, compact.to_json()?).await?;
                 println!("summary written to {}", summary_path);
+            }
+            // Optionally emit the full analysis model — source material for the interactive page.
+            if let Some(cells_path) = opts.cells {
+                tokio::fs::write(&cells_path, analysis.to_json()?).await?;
+                println!("cells written to {}", cells_path);
             }
             return Ok(());
         }
@@ -2391,6 +2471,9 @@ mod tests {
             out: None,
             elapsed_secs: None,
             summary: None,
+            cells: None,
+            budget_profile: None,
+            divergence_policy: None,
         })
         .await
         .expect_err("report with no args ⇒ error");
@@ -2442,6 +2525,9 @@ mod tests {
             out: Some(diff_out.clone()),
             elapsed_secs: None,
             summary: None,
+            cells: None,
+            budget_profile: None,
+            divergence_policy: None,
         })
         .await
         .is_ok());
@@ -2455,6 +2541,9 @@ mod tests {
             out: Some(diff_out.clone()),
             elapsed_secs: None,
             summary: None,
+            cells: None,
+            budget_profile: None,
+            divergence_policy: None,
         })
         .await
         .expect_err("workload_hash mismatch must abort");
@@ -2503,6 +2592,9 @@ mod tests {
             out: Some(out.clone()),
             elapsed_secs: None,
             summary: Some(sum.clone()),
+            cells: None,
+            budget_profile: None,
+            divergence_policy: None,
         })
         .await
         .is_ok());
@@ -2513,7 +2605,7 @@ mod tests {
         // correctness divergence ⇒ Regressed verdict with the diverged op surfaced.
         let compact: diff::SyntheticSummary =
             serde_json::from_str(&std::fs::read_to_string(&sum).unwrap()).unwrap();
-        assert_eq!(compact.verdict, diff::SummaryVerdict::Regressed);
+        assert_eq!(compact.overall_verdict, analysis::OverallVerdict::Regressed);
         assert_eq!(compact.diverged_ops, vec!["match_by_index".to_string()]);
         for p in [a, b, out, sum] {
             let _ = std::fs::remove_file(p);
