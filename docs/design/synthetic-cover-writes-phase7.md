@@ -1,7 +1,10 @@
 # Design — cover the A/B benchmark's write shapes in the synthetic check (Phase 7)
 
-**Status:** proposal for review — **not implemented**. Draft for maintainer review before any code
-(per the workflow). **Rubber-duck reviewed**; this revision folds in the review's corrections — the
+**Status:** §6.1 **implemented** (write-capable record/replay, latency tier for all 10 write
+shapes — recording format v2 with kind-bound `workload_hash`, `--repo-writes` selector,
+`GRAPH.QUERY` C=1 measure path with per-cell base reset + verified error-safe final restore);
+§6.2–§6.5 (outcome model, online oracle / correctness tier, prepared-state variants, concurrency)
+**not implemented**. **Rubber-duck reviewed**; this revision folds in the review's corrections — the
 first draft's "counters are deterministic" thesis was wrong (see §10). Follows the reads-scope work
 (design [`synthetic-cover-ab-query-shapes.md`](./synthetic-cover-ab-query-shapes.md), Phases 1–5,
 merged in PRs #240–#250) and is the sibling of the algorithms design (Phase 6). The parent design
