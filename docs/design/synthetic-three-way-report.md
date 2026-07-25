@@ -1,6 +1,6 @@
 # Design: three-way synthetic PR report — PR vs main vs C engine, with an interactive page
 
-**Status: draft (v2, post rubber-duck review)**
+**Status: draft (v3, after two rubber-duck review rounds)**
 **Extends:** [`synthetic-pr-regression-report.md`](synthetic-pr-regression-report.md) (approved; Part A merged in this repo, Part B is falkordb-rs-next-gen PR #745).
 
 ## 1. Goal
@@ -8,168 +8,207 @@
 Every falkordb-rs-next-gen PR currently gets a synthetic per-op regression report comparing the
 **PR build vs Rust main** (`edge-rs`). Extend it to a **three-way comparison**:
 
-| # | Comparison (baseline → candidate) | Question it answers | Budget profile |
+| ID | Comparison (baseline → candidate) | Question it answers | Budget profile |
 |---|---|---|---|
-| 1 | main → PR | did this PR regress the Rust engine? | `[ops]` (strict, existing) |
-| 2 | C → PR | how does the PR stand vs the C engine? | `[cross-engine]` (looser) |
-| 3 | C → main | how does Rust main stand vs the C engine? | `[cross-engine]` (looser) |
+| `main-pr` | main → PR | did this PR regress the Rust engine? | strict (existing) |
+| `c-pr` | C → PR | how does the PR stand vs the C engine? | `cross-engine` (looser) |
+| `c-main` | C → main | how does Rust main stand vs the C engine? | `cross-engine` (looser) |
 
-plus an **interactive GitHub-Pages report** (metric selector like the
+The comparison IDs above are **stable identifiers** used in filenames, JSON, and the page's
+filter logic. Comparison `c-main` is intentionally included per user decision: the page must let
+us see the C engine compared against **both** the PR build and current Rust main.
+
+Also: an **interactive GitHub-Pages report** (metric selector like the
 [trend page](https://falkordb.github.io/falkordb-rs-next-gen/benchmark/trend/), per-comparison
-views, a green/red verdict matrix with filtering across all/C/main) and the **total benchmark
-wall-clock time in the report header** (already merged: `report --elapsed-secs`).
-
-Comparison 3 (C → main) is intentionally included per user decision: the page must let us see the
-C engine compared against **both** the PR build and current Rust main.
+views, a green/red verdict matrix with filtering) and the **total benchmark wall-clock time in
+the report header** (tool support already merged: `report --elapsed-secs`).
 
 ## 2. Decisions
 
 | Decision | Choice | Rationale |
 |---|---|---|
-| C-engine image | `falkordb/falkordb:edge` **with `-e BROWSER=0`** | User picked the `falkordb:edge` bundle deliberately — measure the image users actually run. Its `run.sh` starts a Node browser server in the same container by default (verified: `BROWSER:-1` → `node server.js &`), which would contaminate latency, so the C leg passes `-e BROWSER=0` (supported by the image's `run.sh`) to run it server-only. `falkordb/falkordb-server:edge` (the A/B benchmark's C leg) was considered but rejected: user preference is the bundle image, and with `BROWSER=0` the delta is negligible. |
+| C-engine image | `falkordb/falkordb:edge` **run with `--env BROWSER=0`** | User picked the bundle image deliberately. Its entrypoint starts a Node browser server in-container when `BROWSER == 1` (the default; verified in FalkorDB/FalkorDB `build/docker/run.sh:3-7`), so the C leg hardcodes `--env BROWSER=0` in the `docker run` line — no pass-through env var (shell-fragile, per review) — to keep the measured container server-only. |
 | Where the new next-gen work lands | Stacked PR on `barakb/synthetic-pr-regression` (#745's branch) | #745 is unmerged; stacking avoids conflicts and reviews only the delta. |
-| Cross-engine budgets | Separate `[cross-engine]` section in the thresholds TOML, same shape as `[ops]` | Engines legitimately differ; strict same-engine budgets would drown the report in red. Separate profile keeps PR-gating strict while cross-engine stays informative. |
-| Verdict computation | Rust tool emits per-cell verdicts as JSON (`report --cells`); the page's JS only renders | Single source of truth — no reimplementation drift between Markdown, summary, and page. |
-| Page hosting | gh-pages, same isolated subtree as #745 (`synthetic-benchmark/…`) | Pages runs JS; sibling-JSON + self-contained HTML is the proven trend-page pattern. |
-| Divergence vs perf | Split `correctness` from `perf` per cell/op (see §4.3): same-engine divergence stays 🔴; **cross-engine divergence is ⚠ (informative), not red** | Cross-engine result differences are routine (feature gaps, ordering); flagging them red would make every C comparison permanently red and useless as a signal. |
+| Cross-engine budgets | New `[cross-engine]` profile in the thresholds TOML, mirroring the existing `[default]`/`[op.*]` syntax | Engines legitimately differ; strict same-engine budgets would drown the report in red. |
+| Verdict computation | The Rust tool emits per-cell **and per-op and overall** verdicts as JSON (`report --cells`); page JS only renders, never computes | Single source of truth; no drift between Markdown, summary, and page. |
+| Divergence policy | Explicit `--divergence-policy <gate\|advisory>` flag (not inferred from the budget profile): `gate` (same-engine) = correctness 🔴, perf cells N/A; `advisory` (cross-engine) = correctness ⚠, perf cells N/A | Diverged results mean the engines did **different work**, so a latency verdict would be meaningless — perf is N/A under both policies; only the severity of the correctness signal differs. A separate flag means a budget-profile typo can never silently downgrade a same-engine correctness failure. A divergence-only comparison is never green. |
+| Page hosting | gh-pages, same isolated subtree as #745 (`synthetic-benchmark/…`) | Pages serves static files + JS; sibling-JSON + self-contained HTML is the proven trend-page pattern. |
+| Canonical/nightly runs | **Explicitly out of scope** — the synthetic pipeline stays PR-only | #745's runner/cleanup/publisher are PR-only end to end (`IMAGE_PR` required, `IS_CANONICAL=false` hardcoded). Wiring a canonical C→main mode is a separate feature (measurement mode, job conditions, cleanup, publish flow); the page still renders any subset of comparisons defensively (§B3), which is a robustness property, not canonical support. |
 
 ## 3. Verified current state (what exists vs what's missing)
 
-Verified against benchmark `master` (ff1d459) and next-gen PR #745.
+Verified against benchmark `master` (ff1d459) and next-gen PR #745 (`cb52b36`).
 
 **Already merged in this repo (Part A of the parent design):** `run --label`,
 `report --diff --regression --thresholds --elapsed-secs --out --summary`, per-op×C×cache p50
-verdicts with budget precedence (op×C > op > default), `SyntheticSummary` schema v1, slug,
-divergence detection via `result_digest`.
+verdicts with budget precedence (op×C > op > default; built-in defaults 10% / 0.5 ms),
+`SyntheticSummary` schema v1, slug, divergence detection via order-independent `result_digest`
+(asymmetric missing digest = diverged; both missing = no correctness info, still timed).
 
 **Already in next-gen PR #745 (Part B):** `synthetic-run.sh` (record once → measure `pr`,
-`main`, optional third `IMAGE_RELEASE` leg → one report per baseline + summaries in a
-trap-surviving `SUMMARY_DIR`), `synthetic-publish.sh` (isolated gh-pages subtree,
-`latest|branch/<view>` leaves), `render-synthetic-comment.py` (lean sticky comment from
-summaries), `render-report-html.py` (static pre-rendered page), `_benchmark.yml` synthetic jobs
-(pinned `SYNTHETIC_BENCHMARK_REF`), thresholds + workload TOMLs.
+`main`, optional third `IMAGE_RELEASE` leg — verified unused by every caller → one report per
+baseline + summaries in a trap-surviving `SUMMARY_DIR`), `synthetic-publish.sh` (isolated
+gh-pages subtree, `latest|branch/<view>` leaves), `render-synthetic-comment.py` (lean sticky
+comment; skips-with-warning on unknown summary `schema_version`), `render-report-html.py`
+(static pre-rendered page), `_benchmark.yml` synthetic jobs (pinned `SYNTHETIC_BENCHMARK_REF`),
+thresholds + workload TOMLs.
 
 **Gaps this design closes:**
 
 | # | Gap | Where |
 |---|---|---|
 | G1 | **Dynamic op names get no budget/tier** — `diff.rs` resolves budgets via `OpName::from_tag` (legacy catalog enum); every `--repo-reads` shape (e.g. `single_vertex_read`) resolves to `None` → guard `—`, verdict N/A, tier `None`. #745 records `--repo-reads full`, so ~49/50 ops would render N/A. A string-keyed `Thresholds::resolve_by_name` already exists (tested with dynamic shapes) but is never called from the regression path; the TOML parser also rejects dynamic op keys. | benchmark `src/synthetic/diff.rs:339,:443,:623,:788`, `thresholds.rs:219,:270` |
-| G2 | No machine-readable **per-cell** verdicts (only per-op summary counts); Markdown and summary independently re-enumerate cells. | benchmark `diff.rs` |
-| G3 | Verdict conflates correctness + perf: diverged ops are unconditionally 🔴, wrong for cross-engine. | benchmark `diff.rs:354-400` |
+| G2 | No machine-readable **per-cell** verdicts; Markdown and summary independently re-enumerate cells. | benchmark `diff.rs` |
+| G3 | Verdict conflates correctness + perf: diverged ops are unconditionally 🔴 — wrong severity for cross-engine. | benchmark `diff.rs:354-400` |
 | G4 | No cross-engine budget profile in the thresholds format. | benchmark `thresholds.rs` |
-| G5 | No C leg, no per-comparison failure isolation, digest resolution breaks on Docker Hub images (`docker.io/` prefix never matches `RepoDigests`' normalized `falkordb/falkordb@sha256:…`). | next-gen `synthetic-run.sh` |
-| G6 | Page is static pre-render, one comparison; no metric selector, no verdict matrix, no filters. | next-gen `render-report-html.py` |
-| G7 | Summary JSON lacks budget-profile/elapsed metadata; comment can't distinguish profiles. | benchmark `diff.rs` (schema), next-gen comment renderer |
+| G5 | No C leg; no per-comparison failure isolation; digest resolution breaks on Docker Hub refs (`docker.io/` prefix never matches `RepoDigests`' normalized `falkordb/falkordb@sha256:…`). | next-gen `synthetic-run.sh` |
+| G6 | Page is a static pre-render of one comparison; no metric selector, no verdict matrix, no filters. | next-gen `render-report-html.py` |
+| G7 | Summary JSON lacks budget-profile/divergence-policy/elapsed metadata. | benchmark `diff.rs` (schema) |
 
 ## 4. Part A — benchmark repo (the tool)
 
 ### A0. Prerequisite fix: budgets + tiers for dynamic op names (G1)
 
-This is a **latent bug fix** independent of the three-way feature, delivered first:
+A **latent bug fix** independent of the three-way feature, delivered first as its own PR:
 
 - `diff.rs`: replace every `OpName::from_tag(op)`-based budget resolution with
-  `Thresholds::resolve_by_name(op, c)` (already implemented + tested); budgets then apply to
-  recorded repo-read shapes exactly as to legacy catalog ops.
-- Tier lookup by **name**: `shapes.rs` owns the repo-read shapes with their `Tier`; add a
-  string-keyed tier lookup (legacy catalog names keep resolving via `OpName::from_tag`; repo-read
-  shape names resolve via the shapes registry; unknown names stay `None`).
-- `thresholds.rs::from_toml_str`: accept `[ops.<name>]` keys that match either a legacy catalog
-  tag **or** a known repo-read shape name; keep rejecting truly unknown keys (typo guard).
+  `Thresholds::resolve_by_name(op, c)` (already implemented + tested), in the regression render,
+  the summary counts, and the tier rollup.
+- Tier lookup by **name**: `shapes.rs` owns the repo-read shape registry (name + `Tier`,
+  enumerable without a recording — verified feasible at `shapes.rs:93-107,254-261`); add a
+  string-keyed tier lookup consulting the legacy catalog first, then the shape registry, else
+  `None`.
+- `thresholds.rs::from_toml_str`: accept `[op.<name>]` keys naming either a legacy catalog tag
+  **or** a known repo-read shape; keep rejecting unknown keys (typo guard).
 - Tests: end-to-end regression-render test where a dynamic op (`single_vertex_read`) gets a real
   budget from TOML and a tier in the summary; TOML parse accepts shape names, rejects typos.
+- **No schema/format change** — #745 stays pinned to its current `SYNTHETIC_BENCHMARK_REF` and
+  simply picks this up at the next ref bump (verified: no compat trap).
 
 ### A1. One analysis model, three consumers (G2)
 
-Build the comparison **once** into a `RegressionAnalysis` and render everything from it:
+Build the comparison **once** into a serializable `RegressionAnalysis` and render everything
+from it. Sketch (field names final at implementation; serde snake_case):
 
 ```text
 RegressionAnalysis {
-  baseline_label, candidate_label, slug, elapsed_secs: Option<u64>,
-  budget_profile: String,              // "ops" | "cross-engine"
-  ops: BTreeMap<String, OpAnalysis>,   // op → analysis
+  schema_version: 1,
+  comparison: { baseline_label, candidate_label, slug },
+  budget_profile: "strict" | "cross-engine",
+  divergence_policy: "gate" | "advisory",
+  gated_metric: "total_ms.p50",
+  status: Comparable | NotComparable { reason },     // workload-hash guard, version checks
+  warnings: [String],                                 // advisory lines (placeholder-aware, §A6)
+  elapsed_secs: Option<f64>,                          // as passed via --elapsed-secs (f64 kept)
+  verdict: OverallVerdict,                            // 🟢/🔴/⚠/N-A — Rust-computed
+  ops: BTreeMap<String, OpAnalysis>,
 }
 OpAnalysis {
-  tier: Option<Tier>,
-  correctness: Correctness,            // Match | Diverged | Unknown (a side missing digests)
-  cells: Vec<CellAnalysis>,
+  tier: Option<"core"|"full">,
+  correctness: Match | Diverged | NotGated,           // NotGated = neither side recorded digests
+                                                      // (still timed); asymmetric = Diverged
+                                                      // (matches today's semantics)
+  op_outcome: Pass | Regressed | DivergedAdvisory | NotApplicable,   // Rust-computed rollup
+  cells: [CellAnalysis],
 }
 CellAnalysis {
-  concurrency, cache_mode,
+  concurrency, cache_mode: "cached"|"uncached",
   baseline_p50_ms / candidate_p50_ms: Option<f64>,
   delta_pct / delta_ms: Option<f64>,
-  budget: Option<ResolvedBudget { pct, floor_ms, source }>,
-  perf_verdict: PerfVerdict,           // Ok | Regressed | NotApplicable
-  context: {p90, p99, throughput for both sides},   // informational, never gated
+  budget: Option<{ metric: "p50", budget_pct, floor_ms }>,   // serialized ResolvedBudget
+  perf_verdict: Ok | Regressed | NotApplicable,
+  context: { baseline/candidate p90_ms, p95_ms, p99_ms, throughput_ops_per_sec },  // informational
 }
 ```
 
-`regression_markdown`, `summarize` (summary JSON) and the new `--cells` export all **consume**
-this model; `op_cell_counts` (today's duplicate enumeration) is deleted. A unit test asserts
-Markdown cell verdicts equal the model's (no drift by construction).
+Notes locked by review round 2:
 
-### A2. `--cells <path>`: machine-readable per-cell verdicts
+- `correctness` truth table matches **today's** behavior exactly: both digests present + equal =
+  `Match`; present + different **or asymmetric** = `Diverged`; both absent = `NotGated`
+  (comparable, timed, no correctness claim). Summary v2 counts `NotGated` ops inside the normal
+  pass/fail buckets (as today), never as diverged.
+- p95 **is included** in `context` (the report schema already carries it; v2 of this design had
+  dropped it by accident).
+- `op_outcome` and the overall `verdict` are **computed in Rust** and serialized — the page
+  never derives them. If a future page wants per-cache-mode op rollups, that is a schema rev;
+  v1 defines `op_outcome` across all modes (worst-cell-wins: Regressed > DivergedAdvisory >
+  Pass > NotApplicable).
+- `regression_markdown` and `summarize` become pure renderers of this model; `op_cell_counts`
+  (today's duplicate enumeration) is deleted. Because both consume the same in-memory value,
+  drift is impossible by construction (a golden test still pins Markdown output).
 
-`report --diff A B --regression … --cells cells.json` writes the full `RegressionAnalysis` as
-JSON (`schema_version: 1`, serde snake_case; example in §5.3's page data). `--cells`, like
-`--summary`, is only valid with `--diff --regression` (clap `requires`); a doc-tested example
-lands in the readme. This is the page's only data source — JS never computes a verdict.
+### A2. `--cells <path>`: machine-readable analysis export
 
-### A3. Correctness/perf split + divergence policy (G3)
+`report --diff A B --regression … --cells cells.json` serializes the `RegressionAnalysis` to
+JSON. `--cells`, `--budget-profile` and `--divergence-policy` are only valid with
+`--diff --regression` (clap `requires`, like `--summary`; plain `--diff --cells` is rejected).
+Readme gains a doc-tested example. This is the page's only data source.
 
-- Per-op `correctness` (Match/Diverged/Unknown) is separated from per-cell `perf_verdict`
-  (already in the A1 model). Markdown and summary keep today's **same-engine** behavior: a
-  diverged op is 🔴 and its perf cells are N/A.
-- New: divergence **presentation policy** comes from the budget profile. Under
-  `--budget-profile cross-engine`, a diverged op renders **⚠ diverged (informative)** — not 🔴 —
-  and is counted in a separate `diverged` bucket, never in `regressed`. Top-line verdict for a
-  cross-engine comparison is driven by perf cells only, with the ⚠ count shown beside it.
-- `OpOutcome` gains `Diverged` (today divergence is folded into `Regressed`); summary schema
-  bumps to v2 (see A5).
+### A3. Divergence policy (G3)
 
-### A4. `[cross-engine]` budget profile (G4)
+New flag `--divergence-policy <gate|advisory>` (default `gate`, requires `--regression`):
 
-Thresholds TOML gains an optional section with the same shape as the strict defaults +
-`[ops.*]` overrides:
+- **`gate`** (same-engine, today's behavior): diverged op ⇒ op 🔴, all its perf cells N/A,
+  overall verdict red on any divergence.
+- **`advisory`** (cross-engine): diverged op ⇒ op ⚠ (`DivergedAdvisory`), perf cells **still
+  N/A** — diverged results mean the engines did different work, so a latency comparison would
+  be meaningless; raw measurements stay visible in `context` for diagnosis. Diverged ops count
+  in a new `diverged` bucket of `OutcomeCounts`, never in `regressed`; the overall verdict is
+  driven by perf cells, shown as ⚠-annotated (e.g. `🟢 (3 ⚠ diverged)`); a comparison whose
+  every op diverged is ⚠ overall, never green.
+
+`OpOutcome` gains the `DivergedAdvisory` variant; summary schema bumps to v2 (§A5).
+
+### A4. `cross-engine` budget profile (G4)
+
+The thresholds TOML gains an optional profile section, **mirroring the existing singular-`[op]`
+syntax** (`deny_unknown_fields` stays):
 
 ```toml
-[default]                 # existing strict same-engine profile
-budget_pct = 5.0
-floor_ms   = 0.3
+[default]                              # existing strict profile (unchanged, incl. its defaults)
+budget_pct = 10.0
+floor_ms   = 0.5
 
-[cross-engine]            # new: looser cross-engine profile
+[cross-engine.default]                 # new: looser cross-engine profile
 budget_pct = 25.0
 floor_ms   = 1.0
-[cross-engine.ops.single_vertex_read]   # optional per-op overrides, same precedence rules
+
+[cross-engine.op.single_vertex_read]   # optional per-op overrides, same precedence rules
 budget_pct = 40.0
 ```
 
-`report` gains `--budget-profile <ops|cross-engine>` (default `ops`, requires `--regression`).
-Profile name is recorded in the analysis/summary/cells output (G7). Missing `[cross-engine]`
-section + `--budget-profile cross-engine` is a hard error (no silent fallback to strict).
+`report` gains `--budget-profile <strict|cross-engine>` (default `strict`, requires
+`--regression`). The profile name is recorded in analysis/summary/cells output (G7). Selecting
+`cross-engine` when the TOML has no `[cross-engine]` section is a **hard error** (no silent
+fallback). Existing built-in defaults (10% / 0.5 ms) are unchanged.
 
 ### A5. Summary schema v2 (G7)
 
-`SyntheticSummary` bumps `schema_version` to 2, adding: `budget_profile`, `elapsed_secs:
-Option<u64>`, `gated_metric: "total_ms.p50"`, and `diverged` as a first-class outcome count
-(`OutcomeCounts` gains it; `OpOutcome::Diverged` from A3). The comment renderer (Part B) is the
-only consumer and ships in the same stacked PR, so no compat shim is needed — but the renderer
-still hard-checks `schema_version` and fails loudly on mismatch.
+`SyntheticSummary` bumps `schema_version` to 2, adding `budget_profile`, `divergence_policy`,
+`gated_metric`, `elapsed_secs: Option<f64>`, and a `diverged` count in `OutcomeCounts` (+ the
+`DivergedAdvisory` op outcome). Rollout is safe (verified): #745's renderer warns-and-skips on
+unknown versions rather than failing, and the renderer update ships in the same stacked PR as
+the pin bump, so old-pin→v1 and new-pin→v2 are the only combinations that can occur.
 
 ### A6. Small fixes folded in
 
-- **`--elapsed-secs` single emission**: it is run-level metadata, not per-comparison. The header
-  line moves to the *caller-assembled* comment/page header; `report` keeps accepting the flag
-  (renders "benchmark wall-clock" only when passed) so single-diff use keeps working. The CI
-  script passes it **once** (to the cells/summary metadata), not to all three Markdown reports.
-- **Placeholder-version warning suppression**: edge/RC images report version `999999`; the
-  "same version on both sides" warning is suppressed when the version is the known placeholder.
+- **Elapsed-time ownership**: `run-meta.json` (written by the CI script, §B2) is the
+  authoritative wall-clock record for the run; the comment/page header renders from it. The
+  tool's `--elapsed-secs` stays as-is (`f64`, fractional contract preserved) for standalone
+  single-diff use; CI passes it only where a header line is wanted and never sums per-comparison
+  values.
+- **Placeholder-version warning suppression**: edge/RC images report placeholder version
+  `999999`; suppress the "same version on both sides" warning when the version equals the known
+  placeholder (warnings live in the analysis model, so Markdown and page render identically).
 
 ### A7. Release + docs
 
-Readme (synthetic section) documents `--cells`, `--budget-profile`, the `[cross-engine]` TOML
-section and the dynamic-op-name budget behavior; `copilot-instructions` recipe table untouched
-(no recipe changes). Tag a new release (post-v2.2) once merged so next-gen can pin
-`SYNTHETIC_BENCHMARK_REF` to a released SHA.
+Readme (synthetic section) documents `--cells`, `--budget-profile`, `--divergence-policy`, the
+`[cross-engine]` TOML profile and the dynamic-op-name budget behavior. `just synthetic-sanity`
+is extended to round-trip `--cells` + `--budget-profile cross-engine` +
+`--divergence-policy advisory`; its Justfile doc-comment and the recipe tables in
+`.github/copilot-instructions.md` are updated accordingly. Tag a new release (post-v2.2) once
+merged so next-gen can pin `SYNTHETIC_BENCHMARK_REF` to a released SHA.
 
 ## 5. Part B — falkordb-rs-next-gen (CI + interactive page)
 
@@ -178,110 +217,163 @@ Stacked PR on `barakb/synthetic-pr-regression`. All scripts stay under
 
 ### B1. C-engine leg in `synthetic-run.sh` (G5)
 
-- New env: `IMAGE_CENGINE` (default `docker.io/falkordb/falkordb:edge`), `CENGINE_DOCKER_ARGS`
-  (default `-e BROWSER=0`). The existing optional `IMAGE_RELEASE` third-leg pattern is replaced
-  by the C leg (release comparison was never wired by any caller).
-- **Digest resolution fix**: `resolve_digest` currently prefix-matches the requested ref against
-  `RepoDigests`, which fails for `docker.io/…` refs (Docker normalizes to
-  `falkordb/falkordb@sha256:…`). Normalize the ref (strip `docker.io/`, add `library/` only for
-  official images) before matching; covered by a bats-style shell test or an inline self-test
-  mode, and by the sanity run.
-- **Failure isolation / ordering** (a C-engine hiccup must never cost the PR-vs-main signal):
-  1. record once; measure `pr`, then `main`; **immediately** produce and persist the
-     main→pr report + summary + cells into the trap-surviving dirs;
-  2. only then resolve + measure the C leg under `set +e` guards; on any failure, write a
-     `summary-cengine-unavailable.json` stub (`verdict: not_comparable`,
-     `not_comparable_reason`) for **both** C comparisons and continue;
-  3. on success, produce C→pr and C→main reports/summaries/cells.
-- Both cross-engine diffs run with `--budget-profile cross-engine`; main→pr keeps the strict
-  default profile. `ELAPSED_SECS` measured once after all measuring, passed once (A6).
+- New env: `IMAGE_CENGINE` (default `docker.io/falkordb/falkordb:edge`). The C measurement's
+  `docker run` line hardcodes `--env BROWSER=0` (no arg-string pass-through; §2). The unused
+  `IMAGE_RELEASE` leg is removed.
+- **Digest resolution fix**: normalize Docker Hub refs before matching `RepoDigests` (strip
+  `docker.io/`, add `library/` only for official single-name images); keep GHCR and pinned
+  `@sha256:` refs working. Covered by a self-test mode exercised in `synthetic-sanity`-style CI
+  (Docker Hub, GHCR, port-qualified registry, pre-pinned digest).
+- **Failure isolation without masking** (a C hiccup must never cost the `main-pr` signal, and a
+  C failure must still be *visible*):
+  1. record once; measure `pr`, then `main` (all under `set -e`, as today);
+  2. **immediately** produce and persist every `main-pr` artifact (report + summary + cells)
+     into the trap-surviving output dir;
+  3. run the C leg via explicit `if c_leg; then … else …` branching (not blanket `set +e`):
+     `measure` is refactored to capture the benchmark's exit status and return it (so trailing
+     cleanup `echo`s can't mask a failure), and the C leg is wrapped in `timeout` bounded well
+     below the job timeout so a hang cannot prevent the artifact upload;
+  4. on C failure: write **two** stub summaries (`summary-c-pr.json`, `summary-c-main.json`,
+     `verdict: not_comparable`, `not_comparable_reason` = the failure stage) and mark both
+     comparisons `unavailable` in `data.json` (§B2) — the comment and page show *why* C is
+     missing; the job itself stays green (the `main-pr` signal is intact);
+  5. on success: produce `c-pr` and `c-main` reports/summaries/cells with
+     `--budget-profile cross-engine --divergence-policy advisory`.
+- `main-pr` keeps the strict profile + `gate` policy. `ELAPSED_SECS` measured once after all
+  measuring; recorded in `run-meta.json` (not passed to the three Markdown reports).
 
-### B2. Artifact flow (who writes what)
+### B2. Artifact flow (one owner, one directory)
 
-The **measure job** owns all data artifacts: `SUMMARY_DIR` (exists today) gains a sibling
-`CELLS_DIR`, both surviving the `WORKDIR` cleanup trap and uploaded as one artifact. Per run:
-`summary-{main,cengine-pr,cengine-main}.json`, `cells-{main,cengine-pr,cengine-main}.json`,
-`report-{…}.md`, `run-meta.json` (elapsed, arch, images, profile names, PR number, head SHA).
-The **publish job** only assembles and pushes: page HTML + the JSONs, never recomputing.
+The **measure job** owns every data artifact in one persistent output dir (the existing
+trap-surviving `SUMMARY_DIR` pattern, renamed `SYNTHETIC_OUT`):
+`report-{main-pr,c-pr,c-main}.md`, `summary-{main-pr,c-pr,c-main}.json`,
+`cells-{main-pr,c-pr,c-main}.json`, `run-meta.json` (elapsed, arch, image refs + digests,
+profile/policy per comparison, PR number, head SHA), and **`data.json`** — the page's single
+input, assembled by the measure job:
+
+```json
+{ "schema_version": 1,
+  "meta": { …run-meta fields… },
+  "comparisons": {
+    "main-pr": { "status": "ok", "analysis": { …cells-main-pr.json… } },
+    "c-pr":    { "status": "unavailable", "reason": "image pull failed" },
+    "c-main":  { "status": "unavailable", "reason": "image pull failed" } } }
+```
+
+The **publish job** only copies `data.json` + the page HTML + the reports into the gh-pages
+leaf — it never assembles or recomputes anything.
 
 ### B3. Interactive page (G6)
 
-`render-report-html.py` is replaced by `build-synthetic-page.py` + `synthetic-report.html`
-(template): a **single dependency-free HTML file** (inline CSS/JS, no external libs, no build
-step) that fetches its **sibling `data.json`** (the three cells files + run-meta merged by the
-builder). This copies the trend page's *visual* pattern (segmented metric buttons, cards,
-light/dark) — not its innerHTML string-building: the page renders via `createElement` /
-`textContent` only, so op labels/engine labels are inert (builder-side test injects
-`<script>`-shaped labels and asserts they render as text).
+`render-report-html.py` is replaced by a **static template** `synthetic-report.html` committed
+as-is (no build step): a single dependency-free HTML file (inline CSS/JS, no external libs)
+that fetches its **sibling `data.json`**. It copies the trend page's *visual* pattern
+(segmented buttons, cards, light/dark) — not its `innerHTML` string-building: all dynamic
+content renders via `createElement`/`textContent` only.
 
 Page model (all client-side, driven only by `data.json`):
 
-- **Comparison selector** (segmented): `PR vs main` · `PR vs C` · `main vs C` · `matrix`.
-- **Metric selector** (segmented, like trend): `p50` · `p90` · `p99` · `throughput`. p50 is the
-  gated metric (verdict badge); other metrics render values/deltas labeled *informational* —
-  throughput deltas render with reversed better-direction arrows.
-- **Cache-mode selector** when both modes exist in the data (`uncached` default, per current CI
-  sweep); hidden when only one mode is present.
-- **Matrix view** (the summary the user asked for): rows = ops, columns = the three comparisons,
-  cell = op verdict emoji (🟢/🔴/⚠/N-A from the Rust cells data, worst-cell-wins per op:
-  🔴 > ⚠ > 🟢 > N/A). **Filter chips**: `all` · `any red` (OR across selected comparisons) ·
-  `all green` (AND) · comparison-scoped `red in C-comparisons only` · `red vs main only`;
-  a text filter narrows by op name.
-- **Card/table view** per comparison: per-op collapsible tables (C × cache-mode × metric),
-  verdict column straight from `perf_verdict`, ⚠ correctness banner per A3 policy.
-- **Header**: PR number/SHA, arch, images (with digests), budget profiles, and **total
-  benchmark wall-clock** from `run-meta.json`.
-- **Two-way degradation**: the page renders whatever comparisons exist in `data.json` — the
-  canonical/nightly publish path (only C→main available) and the C-unavailable stub both render
-  correctly with absent comparisons greyed out (`not_comparable_reason` shown). This closes the
-  canonical-path gap without a separate page.
+- **Comparison selector** (segmented): `PR vs main` (`main-pr`) · `PR vs C` (`c-pr`) ·
+  `main vs C` (`c-main`) · `matrix`. Unavailable comparisons render greyed out with their
+  `reason` — the page renders **any subset** of comparisons defensively.
+- **Metric selector** (segmented, like trend): `p50` · `p90` · `p95` · `p99` · `throughput`.
+  p50 is the only gated metric — its column carries the verdict badge; every other metric
+  renders values/deltas **neutrally labeled "informational — not gated"** (no red/green), and
+  throughput deltas render with the direction convention stated inline (`higher is better`).
+- **Cache-mode selector** shown when both modes exist in the data (`uncached` default); hidden
+  otherwise. Cell tables follow the selected mode; the **matrix op verdict does not** — it is
+  the Rust-emitted all-modes `op_outcome` (v1 schema has no per-mode rollup; the matrix header
+  says "all cache modes").
+- **Matrix view**: rows = ops, columns = the three comparisons, cell = the Rust-emitted
+  `op_outcome` emoji (🟢/🔴/⚠/N-A). **Filter chips** (predicates over comparison IDs, absent
+  comparisons excluded from quantifiers):
+  - `all` — no filter;
+  - `any red` — 🔴 in ≥ 1 available comparison (OR);
+  - `all green` — 🟢 in **every** available comparison (AND; an op with any N-A/⚠ cell in some
+    comparison does not qualify);
+  - `red vs C` — 🔴 in `c-pr` or `c-main` (regardless of `main-pr`);
+  - `red vs main` — 🔴 in `main-pr` (regardless of the C comparisons);
+  - free-text op-name filter composes (AND) with the selected chip.
+- **Card/table view** per comparison: per-op collapsible tables (C × selected cache-mode ×
+  metric), verdict column straight from `perf_verdict`, ⚠/🔴 correctness banner per the
+  comparison's `divergence_policy`.
+- **Header**: PR number/SHA, arch, images (ref + digest), per-comparison profile/policy, and
+  **total benchmark wall-clock** from `meta`.
+- **Tests**: a Python builder-side test asserts the template contains no `innerHTML` and that
+  `data.json` embedding is sound; a **Playwright DOM test** (next-gen already runs browser
+  tests) loads the page with a `data.json` containing `<script>`-shaped op/engine labels and
+  asserts they render inert as text and the selectors/filters behave (this is the only claim a
+  browser can actually prove).
 
 ### B4. Sticky comment
 
-`render-synthetic-comment.py` renders **three** verdict lines (one per comparison, from the v2
-summaries; ⚠ diverged counts shown for cross-engine), the total wall-clock, worst offenders for
-the main→pr comparison only (the gating signal), and one link to the interactive page. Markers
-(`<!-- synthetic-benchmark -->` / `-arm`) unchanged.
+`render-synthetic-comment.py` renders **three** verdict lines (one per comparison ID, from the
+v2 summaries; ⚠ diverged counts shown for cross-engine lines; `not_comparable_reason` shown for
+unavailable ones), the total wall-clock from `run-meta.json`, worst offenders for `main-pr`
+only (the gating signal), and one link to the interactive page. Markers
+(`<!-- synthetic-benchmark -->` / `-arm`) unchanged. The renderer hard-checks
+`schema_version == 2` per summary and warns-and-skips otherwise (existing behavior).
 
-### B5. Workflow wiring (`_benchmark.yml`)
+### B5. Workflow wiring (`_benchmark.yml` / `benchmark.yml`)
 
 - Pass `IMAGE_CENGINE`; bump `SYNTHETIC_BENCHMARK_REF` to the new benchmark release SHA;
-  upload `SUMMARY_DIR`+`CELLS_DIR` artifact; `timeout-minutes: 90` (three measured legs ≈ +50%
-  over two; 60→90 gives real headroom).
-- **Closed-PR race**: `synthetic-publish` re-checks PR state (`gh pr view --json state`) and
-  skips publishing when closed, so a close event racing the arm leg can't resurrect a leaf the
-  cleanup job just removed.
-- **Fork PRs**: explicitly out of scope (the existing prepare job already excludes fork heads —
-  images aren't pushed for forks); the design states this rather than pretending otherwise.
+  upload the single `SYNTHETIC_OUT` artifact; `timeout-minutes: 90` (three measured legs vs
+  two, plus C image pull; 60→90 is deliberate headroom, and the C leg's own `timeout` bound
+  keeps a hang from eating the margin).
+- **Closed-PR race**: cleanup and both arch publishers move into the **same repository-wide
+  per-PR concurrency group** (serialization first), and each publisher re-checks PR state
+  (`gh pr view --json state`) inside that group, skipping fail-closed when the PR is closed.
+  The state re-check alone is insufficient (close can land between check and push) — the
+  concurrency group is what closes the race; the check handles the cleanup-already-ran case.
+- **Fork PRs**: same-repository PRs only (the existing prepare job already excludes fork
+  heads — images aren't pushed for forks). Supporting forks would need a separate trusted
+  workflow design; explicitly out of scope.
 
-## 6. What the rubber-duck review corrected (v1 → v2)
+## 6. What the rubber-duck reviews corrected (v1 → v2 → v3)
 
-An independent review (two-repo verification) found 6 blocking, 8 important, 3 nit issues in v1;
-all are folded in above: dynamic-op budgets/tiers were silently N/A (→ A0, new prerequisite);
-per-cell verdicts had no single source (→ A1); divergence semantics conflated correctness with
-perf and would render cross-engine permanently red (→ A3, ⚠ policy); `docker.io/` digests never
-matched `RepoDigests` (→ B1 normalization); the bundle image's browser server would contaminate
-measurements (→ `-e BROWSER=0`, decisions table); a C failure aborted the whole run losing the
-PR-vs-main signal (→ B1 ordering/isolation); cells artifacts would die with the workdir trap
-(→ B2 `CELLS_DIR`); summary lacked profile/elapsed metadata (→ A5); triple-emitted elapsed line
-(→ A6); undefined card view under two cache modes (→ B3 cache selector); undefined filter
-algebra and throughput direction (→ B3); canonical two-way path unrendered (→ B3 degradation);
-closed-PR/arm publish race (→ B5); fork PRs unstated (→ B5); timeout 80 was not the claimed
-+50% (→ 90); placeholder-version warning noise (→ A6); "CSP-friendly like the trend page" was
-false — the trend page uses innerHTML (→ B3 `textContent`-only + escaping test).
+Round 1 (17 findings) — folded into v2: dynamic-op budgets/tiers silently N/A (→ A0); no
+single verdict source (→ A1); divergence conflated with perf (→ A3); `docker.io/` digest
+mismatch (→ B1); bundle image's browser server contaminating measurements (→ `BROWSER=0`);
+C failure losing the `main-pr` signal (→ B1 ordering); cells artifacts dying with the workdir
+trap (→ B2); summary metadata gaps (→ A5); triple-emitted elapsed line (→ A6); undefined
+cache-mode card view, filter algebra, throughput direction (→ B3); canonical two-way page,
+closed-PR race, fork PRs (→ §2/B5); timeout arithmetic (→ 90); placeholder-version noise
+(→ A6); false CSP claim (→ B3).
+
+Round 2 (17 findings) — folded into v3: TOML syntax was wrong (`[ops.*]` vs the real singular
+`[op.*]` + `deny_unknown_fields`; invented 5%/0.3ms defaults vs the real 10%/0.5ms — → A4);
+`RegressionAnalysis` lacked schema_version/status/warnings and used a nonexistent
+`ResolvedBudget` shape (→ A1); p95 silently dropped (→ restored); matrix verdict was still
+JS-computed (→ Rust `op_outcome`/`verdict`, A1/B3); divergence policy split from the budget
+profile into `--divergence-policy` with perf N/A under both policies (→ A3, §2); `Unknown`
+correctness conflated cases — replaced by a truth table matching today's asymmetric=diverged /
+both-missing=comparable semantics (→ A1); blanket `set +e` could mask C failures (→ explicit
+`if` + status-preserving `measure` + `timeout`, B1); a single C-unavailable stub couldn't feed
+two comparisons and the page had no per-comparison status (→ two stubs + `data.json` with
+per-comparison `{status, reason}`, B1/B2); elapsed ownership contradiction (→ `run-meta.json`
+authoritative, `f64` kept, A6); canonical mode was presentation-only wishful thinking (→
+explicitly out of scope, §2); PR-state re-check alone doesn't close the race (→ shared
+concurrency group + fail-closed check, B5); `CENGINE_DOCKER_ARGS` shell-fragility (→ hardcoded
+`--env BROWSER=0`, B1); filter/cache semantics under-specified (→ explicit predicates over
+comparison IDs + all-modes matrix rollup, B3); recipe-doc contradiction (→ A7 updates the
+Justfile doc-comment + instruction tables); "old renderer breaks" wording (→ warns-and-skips,
+A5); unverified "negligible delta" claim removed (→ §2); XSS test overclaim (→ builder test +
+Playwright DOM test, B3).
 
 ## 7. Deliverables & order
 
-1. **benchmark PR 1 (A0)** — dynamic-op budgets/tiers bug fix. Small, independently valuable.
-2. **benchmark PR 2 (A1–A7)** — analysis model, `--cells`, profiles, summary v2, docs; then tag.
+1. **benchmark PR 1 (A0)** — dynamic-op budgets/tiers bug fix. Small, independently valuable,
+   no schema change (safe under #745's pin).
+2. **benchmark PR 2 (A1–A7)** — analysis model, `--cells`, profiles, divergence policy,
+   summary v2, sanity-recipe + docs; then tag post-v2.2.
 3. **next-gen PR (B1–B5)** — stacked on #745, pinned to the new tag.
-4. `just synthetic-sanity` extended to exercise `--cells` + `--budget-profile cross-engine`
-   round-trip; CI (`synthetic-verify`) unchanged (still two identical-build runs).
 
 Each PR: design-first (this doc), ≥90% patch coverage on Rust changes, `just ci` +
 `just coverage` green locally, docs synced. next-gen PRs await human review (no self-merge).
 
 ## 8. Out of scope
 
-- Gating (red stays non-blocking); historical trend storage for synthetic results; comparing
-  more than the three fixed images; fork-PR support; changing the A/B (non-synthetic) benchmark.
+- Gating (red stays non-blocking); canonical/nightly/manual synthetic runs (§2); historical
+  trend storage for synthetic results; comparing more than the three fixed images; fork-PR
+  support; per-cache-mode op rollups in the cells schema (future rev); changing the A/B
+  (non-synthetic) benchmark.
