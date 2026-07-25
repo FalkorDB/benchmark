@@ -218,8 +218,9 @@ benchmark synthetic record --repo-algorithms --nodes 1000 --edges 5000 --seed 7 
 
 Each algorithm shape records a tight per-op `budget` (25 samples, warm-up 2, C=1, cached-only,
 60 s server timeout) and a reduced corpus (1 command each; a small seeded set of distinct
-`(source, target)` pairs for maxFlow), and starts **result-N/A** — latency/trend coverage, not
-divergence gating.
+`(source, target)` pairs for maxFlow). The deterministic pair (`max_flow`/`msf` — unique values,
+byte-stable digests verified across independent replays) is **digest-gated**; `pagerank`/`harmonic`
+stay **result-N/A** (arbitrary/iterative floats) — latency/trend coverage, not divergence gating.
 Each also records its required procedure as a `capability` (replay policy like `budget`, outside
 the `workload_hash`): at replay, one `CALL dbms.procedures()` probe **skips** any op whose
 procedure the engine lacks — reported as `skipped: <reason>` (⏭ in the diff, its own `skipped`

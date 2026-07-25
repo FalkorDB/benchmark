@@ -390,27 +390,30 @@ const ALGORITHM_BUDGET: OpBudget = OpBudget {
 /// [`UsersQueriesRepository::algorithm_read_names`] of an all-algorithms-enabled repository, so
 /// adding/removing an algorithm read there fails the build until this table is updated.
 ///
-/// All four start [`ResultPolicy::NotApplicable`] per the design's §6 determinism table;
-/// `max_flow`/`msf` are gating **candidates**, promoted only after byte-stability across ≥2
-/// independent record runs on the same image is verified (design §7.5). Never force determinism
-/// with a synthetic-only `ORDER BY`. Each carries the per-procedure [`ShapeCapability`] it
-/// exercises (annotation in this phase; probe-before-capture is design §3.5).
+/// Result policies follow the design's §6 determinism table: `max_flow`/`msf` are **Gated** —
+/// their values are unique (a max-flow of a fixed simple graph + capacities + seeded pair; an
+/// MSF's `edge_count`/minimum `total_weight`, which tie-breaking cannot change) and their digests
+/// verified byte-stable across ≥2 independent replays on the same image, including across a
+/// server restart (design §7.5; `record_and_replay_algorithm_shapes_end_to_end` re-verifies on
+/// every coverage run). `pagerank`/`harmonic` stay **N/A** — arbitrary/iterative float values.
+/// Never force determinism with a synthetic-only `ORDER BY`. Each shape carries the
+/// per-procedure [`ShapeCapability`] replay probes before capture (design §3.5).
 pub fn algorithm_read_shapes() -> Vec<ShapeSpec> {
     use ShapeCapability::{AlgoHarmonic, AlgoMaxFlow, AlgoMsf, AlgoPageRank};
     // Every row is an Algorithm-family, Full-tier shape with the algorithm budget; only the
     // corpus size (1 for parameterless shapes, a small seeded pair set for maxFlow), capability
-    // and N/A reason vary.
+    // and result policy vary.
     fn s(
         name: &'static str,
         capability: ShapeCapability,
         corpus_size: usize,
-        not_applicable_reason: &'static str,
+        result_policy: ResultPolicy,
     ) -> ShapeSpec {
         ShapeSpec {
             name,
             family: CoverageFamily::Algorithm,
             tier: Tier::Full,
-            result_policy: ResultPolicy::NotApplicable(not_applicable_reason),
+            result_policy,
             capability: Some(capability),
             corpus_size,
             budget: ALGORITHM_BUDGET,
@@ -421,25 +424,24 @@ pub fn algorithm_read_shapes() -> Vec<ShapeSpec> {
             "algo_pagerank_summary",
             AlgoPageRank,
             1,
-            "RETURN score LIMIT 1 without ORDER BY — arbitrary single float",
+            ResultPolicy::NotApplicable(
+                "RETURN score LIMIT 1 without ORDER BY — arbitrary single float",
+            ),
         ),
         s(
             "algo_max_flow_single_pair",
             AlgoMaxFlow,
             MAX_FLOW_CORPUS_SIZE,
-            "gating candidate — pending byte-stable digests across >=2 record runs (design §7.5)",
+            ResultPolicy::Gated,
         ),
-        s(
-            "algo_msf_summary",
-            AlgoMsf,
-            1,
-            "gating candidate — pending byte-stable digests across >=2 record runs (design §7.5)",
-        ),
+        s("algo_msf_summary", AlgoMsf, 1, ResultPolicy::Gated),
         s(
             "algo_harmonic_summary",
             AlgoHarmonic,
             1,
-            "avg/max over all nodes — iterative float value stability unproven",
+            ResultPolicy::NotApplicable(
+                "avg/max over all nodes — iterative float value stability unproven",
+            ),
         ),
     ]
 }
@@ -802,18 +804,30 @@ mod tests {
     }
 
     #[test]
-    fn algorithm_shapes_are_all_result_na_full_tier_with_per_procedure_capabilities() {
-        // Design §6: all four start result-N/A (max_flow/msf promote only after §7.5 byte-stability
-        // verification); §3.5: each carries its per-procedure capability; §3.4: each records a
-        // reduced corpus (1, or the small seeded maxFlow pair set) under the algorithm budget.
+    fn algorithm_shapes_gate_only_the_deterministic_pair() {
+        // Design §6 determinism table + §7.5 promotion: max_flow/msf are Gated (byte-stability
+        // verified across independent replays — the e2e live test re-verifies it continuously);
+        // pagerank/harmonic stay result-N/A (arbitrary/iterative floats). §3.5: each carries its
+        // per-procedure capability; §3.4: each records a reduced corpus (1, or the small seeded
+        // maxFlow pair set) under the algorithm budget.
         let shapes = algorithm_read_shapes();
         assert_eq!(shapes.len(), 4);
         for shape in &shapes {
             assert_eq!(shape.family, CoverageFamily::Algorithm, "'{}'", shape.name);
             assert_eq!(shape.tier, Tier::Full, "'{}'", shape.name);
-            assert!(!shape.result_policy.is_gated(), "'{}' must start result-N/A", shape.name);
             assert_eq!(shape.budget, ALGORITHM_BUDGET, "'{}'", shape.name);
         }
+        let gated: Vec<(&str, bool)> =
+            shapes.iter().map(|s| (s.name, s.result_policy.is_gated())).collect();
+        assert_eq!(
+            gated,
+            vec![
+                ("algo_pagerank_summary", false),
+                ("algo_max_flow_single_pair", true),
+                ("algo_msf_summary", true),
+                ("algo_harmonic_summary", false),
+            ]
+        );
         let caps: Vec<Option<ShapeCapability>> = shapes.iter().map(|s| s.capability).collect();
         assert_eq!(
             caps,
@@ -886,7 +900,6 @@ mod tests {
             ]
         );
         for op in &ops {
-            assert!(!op.result_gated, "'{}' starts result-N/A (design §6)", op.key.name());
             assert_eq!(
                 op.budget,
                 RecordedBudget::from(ALGORITHM_BUDGET),
@@ -894,6 +907,9 @@ mod tests {
                 op.key.name()
             );
         }
+        // Gating mirrors the shape table (§6): the deterministic pair is digest-gated.
+        let gated: Vec<bool> = ops.iter().map(|op| op.result_gated).collect();
+        assert_eq!(gated, vec![false, true, true, false]);
         // Each op records its per-procedure capability string (design §3.5), so replay can
         // probe-and-skip on an engine that lacks the procedure.
         let capabilities: Vec<Option<&str>> =

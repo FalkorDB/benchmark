@@ -2581,7 +2581,13 @@ mod tests {
             "exactly the 4 algorithm shapes, in definition order"
         );
         for entry in &bundle.manifest.ops {
-            assert!(!entry.result_gated, "{} must start result-N/A (design §6)", entry.name);
+            let expect_gated =
+                matches!(entry.name.as_str(), "algo_max_flow_single_pair" | "algo_msf_summary");
+            assert_eq!(
+                entry.result_gated, expect_gated,
+                "{} gating must follow the §6 determinism table",
+                entry.name
+            );
             assert!(
                 !entry.budget.is_inherit(),
                 "{} must carry its recorded per-op budget",
