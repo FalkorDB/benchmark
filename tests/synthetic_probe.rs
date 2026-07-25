@@ -1560,10 +1560,9 @@ async fn record_and_replay_algorithm_shapes_end_to_end() {
 
     // §7.5 byte-stability, verified continuously: an independent second replay of the same bundle
     // must reproduce the gated digests byte-identically (this is what keeps max_flow/msf gated).
+    // The recorded per-op algorithm budget pins samples/warmup — the helper's globals are inert.
     let out2 = dir.join("algos2.json").to_string_lossy().into_owned();
-    let mut config2 = replay_config(&dir, graph, &out2, true);
-    config2.samples = 3;
-    config2.warmup = 1;
+    let config2 = replay_config(&dir, graph, &out2, true);
     let report2 = replay::run(&config2).await.expect("second independent replay");
     for name in ["algo_max_flow_single_pair", "algo_msf_summary"] {
         let second = report2
