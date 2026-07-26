@@ -501,9 +501,10 @@ just synthetic-compare-versions demo falkor://127.0.0.1:6379 falkor://127.0.0.1:
   (design §6.4: every `User` gains `rpc_social_credit` + `:TemporaryLabel`, deterministically) so
   the `REMOVE` shape mutates state that actually exists — re-established by every base restore and
   hash-bound like every other load statement. Every write shape pins a **C=1 budget**
-  (100 samples, warm-up 10) — recorded write replay is **C=1 permanently** (design §6.5 decision:
-  a recorded corpus replays verbatim on one shared graph and cannot be partitioned across workers;
-  enforced at record *and* replay, while concurrent write **scaling** remains the live
+  (100 samples, warm-up 10) — recorded write replay is **C=1 by policy** (design §6.5 decision:
+  the recorded corpora interleave on shared node ids across any contiguous worker split, and a
+  partitioned-correct C>1 replay would take corpus-partitioning engineering that is deliberately
+  not built; enforced at record *and* replay, while concurrent write **scaling** remains the live
   `--write-ops` probe's job via per-worker scratch partitioning) — and is **result-N/A by
   design** — this is the **latency tier** of the
   writes design: mutation outcomes (result stats/counters) are state- and value-dependent, so

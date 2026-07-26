@@ -650,17 +650,19 @@ fn record_rendered_impl(
             op.capability.as_deref().unwrap_or_default()
         )));
     }
-    // Recorded write replay is C=1 by decision (§6.5): the corpus is replayed verbatim on one
-    // shared graph, so a concurrency split races on duplicate targets and cross-band edges —
-    // measured on the pinned dev image, racing MERGEs of one edge both fire ON CREATE and
-    // duplicate it. Replay enforces the effective sweep; fail the explicit pin early here too.
+    // Recorded write replay is C=1 by policy (§6.5): the corpus is replayed verbatim on one
+    // shared graph, and its commands interleave on shared node ids across any contiguous worker
+    // split — measured on the pinned dev image, racing MERGEs of one colliding edge both fire
+    // ON CREATE and duplicate it. A partitioned-correct C>1 replay would take corpus-partitioning
+    // engineering (id-band-clean corpora, per-worker assignment) that is deliberately not built.
+    // Replay enforces the effective sweep; fail the explicit pin early here too.
     if let Some(op) = ops.iter().find(|op| {
         op.key.kind() == QueryType::Write
             && op.budget.concurrency.as_deref().is_some_and(|sweep| sweep != [1])
     }) {
         return Err(OtherError(format!(
             "write op '{}' pins concurrency sweep {:?} — recorded write replay is C=1 only \
-             (design §6.5: a recorded corpus cannot be partitioned across workers)",
+             (design §6.5 policy: the recorded corpus is not partitioned across workers)",
             op.key.name(),
             op.budget.concurrency.as_deref().unwrap_or_default()
         )));
@@ -1751,7 +1753,7 @@ mod tests {
 
     #[test]
     fn record_rejects_a_write_op_pinning_a_non_c1_sweep() {
-        // §6.5: recorded write replay is C=1 permanently. Replay enforces the *effective* sweep
+        // §6.5 policy: recorded write replay stays C=1. Replay enforces the *effective* sweep
         // (budgets are outside workload_hash), but an explicitly pinned C>1 budget is caught at
         // record time too — fail before writing a bundle replay can only reject.
         let spec = DatasetSpec {

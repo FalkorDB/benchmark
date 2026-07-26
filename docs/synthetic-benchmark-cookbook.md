@@ -240,9 +240,10 @@ benchmark synthetic run --recording rec-writes --endpoint falkor://127.0.0.1:637
 ```
 
 This is the **latency tier** of the writes design: replay measures each write shape via
-`GRAPH.QUERY` at its pinned **C=1 budget** (100 samples, warm-up 10; C=1 is **permanent** for
-recorded write replay per the design's §6.5 decision — a recorded corpus replays verbatim on one
-shared graph, so a worker split races on duplicate targets, and concurrent write *scaling* stays
+`GRAPH.QUERY` at its pinned **C=1 budget** (100 samples, warm-up 10; C=1 is **policy** for
+recorded write replay per the design's §6.5 decision — the recorded commands interleave on shared
+node ids across any contiguous worker split, so a naive split races mutations of the same node,
+and concurrent write *scaling* stays
 the live probe's job), **resets the base graph
 before every measured cell** (op × cache mode) so mutation drift stays bounded, and asserts
 **nothing** about results or mutation counters (`result_digest` stays `null` — outcomes are state-
