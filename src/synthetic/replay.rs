@@ -394,63 +394,61 @@ pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
             );
         }
         // ONE connection for the whole verify pass (like the capture pass): a per-command fresh
-        // socket exhausts the ephemeral-port/proxy budget — see `restore_base_on`.
-        let mut verify_conn = if bundle.oracle.is_empty() {
-            None
-        } else {
-            Some(open_graph(&config.endpoint, &graph_name).await?)
-        };
-        for (op, cyphers) in &bundle.commands {
-            let Some(expected) = bundle.oracle.get(op.name()) else { continue };
-            if let Some(reason) = skipped.get(op.name()) {
-                // Fail closed: unreachable through load() (write bundles can never be
-                // capability-gated, and only write ops carry oracles), but a skip must never
-                // bypass the correctness tier.
-                return Err(OtherError(format!(
-                    "op '{}' carries {} recorded oracle outcome(s) but was skipped ({}) — a \
-                     skip cannot bypass the correctness tier",
-                    op.name(),
-                    expected.len(),
-                    reason
-                )));
-            }
-            let entry = entry_for(op.name());
-            let op_st = entry.budget.server_timeout_ms.unwrap_or(config.server_timeout_ms);
-            let op_deadline = entry
-                .budget
-                .client_deadline_ms
-                .map(Duration::from_millis)
-                .unwrap_or(client_deadline);
-            for (seq, want) in expected.iter().enumerate() {
-                let g = verify_conn.as_mut().expect("verify connection opened above");
-                restore_base_on(g, config, &bundle, &graph_name, &dataset_spec).await?;
-                let sample =
-                    run_and_drain(g, QueryType::Write, &cyphers[seq], op_st, op_deadline)
-                        .await
-                        .map_err(|e| {
+        // socket exhausts the ephemeral-port/proxy budget — see `restore_base_on`. Scoping the
+        // connection to the non-empty-oracle branch makes "oracle outcomes without a verify
+        // connection" unrepresentable (no fallible unwrap).
+        if !bundle.oracle.is_empty() {
+            let mut verify_conn = open_graph(&config.endpoint, &graph_name).await?;
+            for (op, cyphers) in &bundle.commands {
+                let Some(expected) = bundle.oracle.get(op.name()) else { continue };
+                if let Some(reason) = skipped.get(op.name()) {
+                    // Fail closed: unreachable through load() (write bundles can never be
+                    // capability-gated, and only write ops carry oracles), but a skip must never
+                    // bypass the correctness tier.
+                    return Err(OtherError(format!(
+                        "op '{}' carries {} recorded oracle outcome(s) but was skipped ({}) — a \
+                         skip cannot bypass the correctness tier",
+                        op.name(),
+                        expected.len(),
+                        reason
+                    )));
+                }
+                let entry = entry_for(op.name());
+                let op_st = entry.budget.server_timeout_ms.unwrap_or(config.server_timeout_ms);
+                let op_deadline = entry
+                    .budget
+                    .client_deadline_ms
+                    .map(Duration::from_millis)
+                    .unwrap_or(client_deadline);
+                for (seq, want) in expected.iter().enumerate() {
+                    let g = &mut verify_conn;
+                    restore_base_on(g, config, &bundle, &graph_name, &dataset_spec).await?;
+                    let sample =
+                        run_and_drain(g, QueryType::Write, &cyphers[seq], op_st, op_deadline)
+                            .await
+                            .map_err(|e| {
+                                OtherError(format!(
+                                    "oracle verify: op '{}' seq {}: {}",
+                                    op.name(),
+                                    seq,
+                                    e
+                                ))
+                            })?;
+                    verify_mutation(ExpectedOutcome::exactly(*want), &sample.mutations).map_err(
+                        |e| {
                             OtherError(format!(
-                                "oracle verify: op '{}' seq {}: {}",
+                                "oracle mismatch for op '{}' seq {} (command: {}): {} — the \
+                                 engine diverged from the recorded outcome, so its write \
+                                 latencies would measure different work",
                                 op.name(),
                                 seq,
+                                cyphers[seq],
                                 e
                             ))
-                        })?;
-                verify_mutation(ExpectedOutcome::exactly(*want), &sample.mutations).map_err(
-                    |e| {
-                        OtherError(format!(
-                            "oracle mismatch for op '{}' seq {} (command: {}): {} — the engine \
-                             diverged from the recorded outcome, so its write latencies would \
-                             measure different work",
-                            op.name(),
-                            seq,
-                            cyphers[seq],
-                            e
-                        ))
-                    },
-                )?;
+                        },
+                    )?;
+                }
             }
-        }
-        if !bundle.oracle.is_empty() {
             let outcomes: usize = bundle.oracle.values().map(Vec::len).sum();
             info!(
                 "oracle verified: {} recorded outcome(s) across {} op(s) reproduced exactly",
