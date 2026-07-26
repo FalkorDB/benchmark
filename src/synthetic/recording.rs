@@ -1083,7 +1083,8 @@ impl Bundle {
 /// `oracle/<op>.jsonl` for every op in `oracle`, mark each op's manifest entry
 /// with its record count, and recompute the [`Manifest::workload_hash`] under oracle rules (the
 /// oracle records are hash-bound — see [`WorkloadHasher::oracle_record`]). The bundle must carry
-/// the §6.4 prepared load phase (every write bundle recorded by this build does); the frozen
+/// the §6.4 prepared load phase (the `--repo-writes` recorder always emits it; a bundle
+/// rendered without it — stale or hand-crafted — is refused with re-record guidance); the frozen
 /// legacy v3 layout is load/replay-only and can never be minted again. The upgraded bundle is
 /// re-[`load`]ed as the final step, so the function returns exactly what every future load will
 /// verify — any inconsistency this function could write fails here, at record time.

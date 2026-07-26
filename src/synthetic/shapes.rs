@@ -188,7 +188,8 @@ const ORACLE_NOT_A_WRITE: OracleEligibility =
 /// prepared-state/variable-count shapes) — the single source of truth for which ops a format-v4
 /// bundle **must** carry outcomes for: capture targets exactly this set, and `recording::load` +
 /// replay enforce it exactly (no subset, no strays), so oracle coverage can never silently shrink.
-/// Frozen legacy v3 bundles are checked against `recording::LEGACY_V3_ORACLE_OPS` instead.
+/// Frozen legacy v3 bundles are checked against the recording module's frozen seven-op §6.3 list
+/// instead.
 pub fn oracle_eligible_names() -> std::collections::BTreeSet<&'static str> {
     write_shapes()
         .iter()
