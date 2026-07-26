@@ -180,6 +180,9 @@ pub struct GraphRecord {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommandRecord {
     pub seq: usize,
+    /// The op's read/write kind tag (`"read"`/`"write"`). Informational on disk and **not** part
+    /// of the workload hash, so [`load`] validates it against the op's declared kind instead — a
+    /// contradicting tag means a hand-edited/corrupt bundle.
     pub kind: String,
     pub cypher: String,
 }
@@ -653,6 +656,20 @@ pub fn load(dir: &Path) -> BenchmarkResult<Bundle> {
                 entry.count
             )));
         }
+        // The per-command `kind` tag is informational and unhashed, so a hand-edited tag would
+        // survive the workload-hash gate below — validate it against the op's declared kind here
+        // to keep the bundle self-consistent.
+        if let Some(rec) = recs.iter().find(|r| r.kind != command_kind(entry.kind)) {
+            return Err(OtherError(format!(
+                "{}: command seq {} declares kind '{}' but op '{}' is a {} op — the bundle is \
+                 corrupted or was edited",
+                path.display(),
+                rec.seq,
+                rec.kind,
+                entry.name,
+                command_kind(entry.kind)
+            )));
+        }
         commands.push((op, recs.into_iter().map(|r| r.cypher).collect::<Vec<_>>()));
     }
 
@@ -1016,8 +1033,9 @@ mod tests {
 
     #[test]
     fn write_bundle_workload_hash_binds_the_op_kind() {
-        // Flipping a v2 bundle's op kind in the manifest must fail the hash recompute on `load` —
-        // the kind is hashed (v2), so a bundle's read/write nature can't be silently flipped.
+        // Flipping a v2 bundle's op kind must fail the hash recompute on `load` — the kind is
+        // hashed (v2), so a bundle's read/write nature can't be silently flipped even by a
+        // self-consistent edit that also flips every unhashed per-command kind tag.
         let dir = temp_bundle_dir("synthrec-kindflip");
         let spec = DatasetSpec {
             seed: 1,
@@ -1037,8 +1055,48 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         manifest["ops"][0]["kind"] = serde_json::json!("Read");
         std::fs::write(&path, serde_json::to_string_pretty(&manifest).unwrap()).unwrap();
+        let cmd_path = dir.join("commands").join("w.jsonl");
+        let retagged: String = std::fs::read_to_string(&cmd_path)
+            .unwrap()
+            .lines()
+            .map(|line| {
+                let mut rec: CommandRecord = serde_json::from_str(line).unwrap();
+                rec.kind = "read".to_string();
+                serde_json::to_string(&rec).unwrap() + "\n"
+            })
+            .collect();
+        std::fs::write(&cmd_path, retagged).unwrap();
         let err = load(&dir).unwrap_err();
         assert!(format!("{err}").contains("workload_hash mismatch"), "got: {err}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_rejects_a_command_record_with_a_contradicting_kind() {
+        // The per-command `kind` tag is informational and unhashed, so flipping it on disk keeps
+        // the workload hash valid — `load` must still reject the contradiction against the op's
+        // declared kind (and via the kind gate, not the hash gate).
+        let (dir, manifest) = record_to_temp(19);
+        let name = manifest.ops[0].name.clone();
+        let path = dir.join("commands").join(format!("{name}.jsonl"));
+        let flipped: String = std::fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .map(|line| {
+                let mut rec: CommandRecord = serde_json::from_str(line).unwrap();
+                rec.kind = "write".to_string();
+                serde_json::to_string(&rec).unwrap() + "\n"
+            })
+            .collect();
+        std::fs::write(&path, flipped).unwrap();
+        let err = load(&dir).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("declares kind 'write'"), "got: {msg}");
+        assert!(msg.contains(&format!("op '{name}' is a read op")), "got: {msg}");
+        assert!(
+            !msg.contains("workload_hash"),
+            "the unhashed tag must be caught by the kind gate, not the hash gate: {msg}"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
