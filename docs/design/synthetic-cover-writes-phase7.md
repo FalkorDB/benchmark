@@ -134,7 +134,8 @@ so a mixed bundle cannot express C=1 writes alongside C=1,8 reads).
 4. ⛔ **Prepared-state + removal shapes** (`remove_user_property_and_label`) and variable-count
    `detach_delete_user`.
 5. ⛔ **Concurrency** — decide C>1 (per-worker id partitioning) or keep C=1 for correctness.
-6. ⛔ **Docs.**
+6. 🚧 **Docs** — folded into each phase's PR (doc sync is part of each phase's definition of
+   done): §6.1's readme + cookbook updates shipped with phase 1.
 
 ## 7. Risks & open questions
 1. **Reset cost / throughput accounting (§3.3)** — per-invocation restore is expensive and pollutes
