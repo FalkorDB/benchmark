@@ -1413,6 +1413,7 @@ async fn record_and_replay_via_run_command() {
         tier: None,
         repo_reads: None,
         repo_algorithms: false,
+        repo_writes: false,
         seed: Some(11),
         nodes: Some(400),
         edges: Some(1200),
@@ -1486,6 +1487,7 @@ async fn record_and_replay_algorithm_shapes_end_to_end() {
         tier: None,
         repo_reads: None,
         repo_algorithms: true,
+        repo_writes: false,
         seed: Some(7),
         nodes: Some(300),
         edges: Some(900),
@@ -1589,6 +1591,181 @@ async fn record_and_replay_algorithm_shapes_end_to_end() {
             "{name} digest must be byte-stable across independent replays"
         );
     }
+
+    std::fs::remove_dir_all(&dir).ok();
+    drop_graph(graph).await;
+}
+
+/// Phase 7 §6.1 acceptance: `record --repo-writes` (offline, via the CLI arm) then a live replay
+/// measures all 10 write shapes end-to-end via `GRAPH.QUERY` (empirics E1: `RO_QUERY` rejects
+/// writes) at the budgeted C=1, under BOTH cache modes with a base reset before every measured
+/// cell (§3.3 latency tier), asserting nothing about results (`result_digest: None`) while
+/// persisting each op's effective policy. The replay's error-safe final restore (§3.5) must leave
+/// the endpoint's graph content-identical to the recorded base — re-verified here by raw counts
+/// and by a second full replay of the same bundle.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires a running FalkorDB server"]
+async fn record_and_replay_write_shapes_end_to_end() {
+    use benchmark::cli::SyntheticCommands;
+    use benchmark::synthetic::run_command;
+
+    let graph = "syn_it_repo_writes";
+    drop_graph(graph).await;
+    let dir = temp_bundle_dir("syn-it-writes");
+    let out_dir = dir.to_string_lossy().into_owned();
+
+    run_command(SyntheticCommands::Record {
+        config: None,
+        graph: Some(graph.to_string()),
+        ops: vec![],
+        all_reads: false,
+        tier: None,
+        repo_reads: None,
+        repo_algorithms: false,
+        repo_writes: true,
+        seed: Some(7),
+        nodes: Some(300),
+        edges: Some(900),
+        out_dir: out_dir.clone(),
+    })
+    .await
+    .expect("record --repo-writes via run_command");
+
+    let bundle = recording::load(&dir).expect("load the recorded write bundle");
+    assert_eq!(bundle.manifest.format_version, 2, "write bundles are recording format v2");
+
+    let out = dir.join("writes.json").to_string_lossy().into_owned();
+    let mut config = replay_config(&dir, graph, &out, true);
+    // Global knobs the per-op write budget must override (samples/warmup/sweep) or inherit
+    // (cache: WRITE_BUDGET leaves it None, so the global Both applies — two cells per op).
+    config.samples = 3;
+    config.warmup = 1;
+    config.concurrency = vec![1, 2];
+    config.cache = benchmark::synthetic::CacheSelection::Both;
+    let report = replay::run(&config).await.expect("replay the 10 write shapes");
+
+    let expected: Vec<String> = bundle.manifest.ops.iter().map(|e| e.name.clone()).collect();
+    assert_eq!(expected.len(), 10, "the write family is exactly 10 shapes");
+    assert_eq!(
+        report.operations.len(),
+        10,
+        "every write shape must be measured: {:?}",
+        report.operations.keys().collect::<Vec<_>>()
+    );
+    for name in &expected {
+        let op = report
+            .operations
+            .get(name)
+            .unwrap_or_else(|| panic!("{name} missing from the replay report"));
+        assert!(op.skipped.is_none(), "{name} is plain Cypher — never capability-skipped");
+        let level = only_level(op);
+        assert_eq!(level.concurrency, 1, "{name} must measure only the budgeted C=1");
+        assert!(level.cached.is_some(), "{name} measures the cached cell");
+        assert!(level.uncached.is_some(), "{name} measures the uncached cell (inherited Both)");
+        assert!(
+            level.compilation_ms_median.is_some(),
+            "{name} derives compilation cost from the merged cells"
+        );
+        assert!(
+            op.result_digest.is_none(),
+            "{name} is latency-tier: nothing asserted about results (§4.1)"
+        );
+        let policy = op.policy.as_ref().unwrap_or_else(|| panic!("{name} must persist policy"));
+        assert_eq!(policy.samples, 100, "{name} budgeted samples");
+        assert_eq!(policy.warmup, 10, "{name} budgeted warmup");
+        assert_eq!(policy.concurrency, vec![1], "{name} budgeted sweep");
+    }
+
+    // §3.5 error-safe final restore: the replay's own content verification passed (or run()
+    // would have failed); double-check from a fresh connection that the graph is EXACTLY the
+    // 300-node / 900-edge recorded base — no residue from ~2200 measured mutations.
+    let mut g = open_graph(&endpoint(), graph).await.expect("open restored graph");
+    assert_eq!(scalar_i64(&mut g, "MATCH (n) RETURN count(n)").await, 300);
+    assert_eq!(scalar_i64(&mut g, "MATCH ()-[r]->() RETURN count(r)").await, 900);
+    drop(g);
+
+    // A second full replay of the same bundle proves the restored graph state is reusable
+    // end-to-end (fresh load, fresh resets, same invariants).
+    let out2 = dir.join("writes2.json").to_string_lossy().into_owned();
+    let mut config2 = replay_config(&dir, graph, &out2, true);
+    config2.samples = 3;
+    config2.warmup = 1;
+    let report2 = replay::run(&config2).await.expect("second write replay");
+    assert_eq!(report2.operations.len(), 10);
+
+    std::fs::remove_dir_all(&dir).ok();
+    drop_graph(graph).await;
+}
+
+/// Phase 7 §3.5 — a write replay that fails **during the reference pass** (a broken recorded
+/// command caught by the write fail-fast probe) must still run the error-safe final restore: an
+/// earlier op's probe has already mutated the graph by then, so skipping the restore would leave
+/// the endpoint polluted for the next recording/replay.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires a running FalkorDB server"]
+async fn failed_write_probe_still_restores_the_recorded_base() {
+    use benchmark::synthetic::catalog::RecordedBudget;
+    use benchmark::synthetic::recording::RecordedOp;
+    use benchmark::synthetic::OpKey;
+
+    let graph = "syn_it_write_probe_fail";
+    drop_graph(graph).await;
+    let dir = temp_bundle_dir("syn-it-probe-fail");
+    let spec = DatasetSpec {
+        seed: 7,
+        nodes: 50,
+        edges: 100,
+    };
+    // Op order matters: the first op's probe mutates the graph, then the second op's broken
+    // command fails its probe mid-reference-pass.
+    let ops = vec![
+        RecordedOp {
+            key: OpKey::dynamic("w_marker", QueryType::Write),
+            result_gated: false,
+            budget: RecordedBudget {
+                concurrency: Some(vec![1]),
+                ..RecordedBudget::default()
+            },
+            capability: None,
+            commands: vec!["CREATE (:ProbeMarker)".to_string()],
+        },
+        RecordedOp {
+            key: OpKey::dynamic("w_broken", QueryType::Write),
+            result_gated: false,
+            budget: RecordedBudget {
+                concurrency: Some(vec![1]),
+                ..RecordedBudget::default()
+            },
+            capability: None,
+            commands: vec!["CREAT (:Broken)".to_string()],
+        },
+    ];
+    recording::record_rendered(&spec, graph, &ops, spec.seed, 256, &dir).expect("record");
+
+    let out = dir.join("r.json").to_string_lossy().into_owned();
+    let config = replay_config(&dir, graph, &out, true);
+    let err = replay::run(&config)
+        .await
+        .expect_err("a broken write command must fail the replay at its probe");
+    assert!(
+        format!("{err:?}").contains("probing write 'w_broken'"),
+        "error should name the failing probe, got: {err:?}"
+    );
+
+    // The final restore ran despite the reference-pass failure: the marker probe's mutation is
+    // gone and the graph is exactly the recorded base again.
+    let mut g = open_graph(&endpoint(), graph).await.expect("open restored graph");
+    assert_eq!(
+        scalar_i64(&mut g, "MATCH (m:ProbeMarker) RETURN count(m)").await,
+        0,
+        "probe mutation must be erased by the final restore"
+    );
+    assert_eq!(
+        scalar_i64(&mut g, "MATCH (n) RETURN count(n)").await,
+        50,
+        "restored graph must be the recorded base"
+    );
+    drop(g);
 
     std::fs::remove_dir_all(&dir).ok();
     drop_graph(graph).await;

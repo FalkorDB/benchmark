@@ -1,7 +1,10 @@
 # Design — cover the A/B benchmark's write shapes in the synthetic check (Phase 7)
 
-**Status:** proposal for review — **not implemented**. Draft for maintainer review before any code
-(per the workflow). **Rubber-duck reviewed**; this revision folds in the review's corrections — the
+**Status:** §6.1 **implemented** (write-capable record/replay, latency tier for all 10 write
+shapes — recording format v2 with kind-bound `workload_hash`, `--repo-writes` selector,
+`GRAPH.QUERY` C=1 measure path with per-cell base reset + verified error-safe final restore);
+§6.2–§6.5 (outcome model, online oracle / correctness tier, prepared-state variants, concurrency)
+**not implemented**. **Rubber-duck reviewed**; this revision folds in the review's corrections — the
 first draft's "counters are deterministic" thesis was wrong (see §10). Follows the reads-scope work
 (design [`synthetic-cover-ab-query-shapes.md`](./synthetic-cover-ab-query-shapes.md), Phases 1–5,
 merged in PRs #240–#250) and is the sibling of the algorithms design (Phase 6). The parent design
@@ -122,16 +125,17 @@ so a mixed bundle cannot express C=1 writes alongside C=1,8 reads).
   gate or the A/B `--query-profile`.
 
 ## 6. Phasing (each its own PR)
-1. **Write-capable record/replay (latency-only):** versioned bundle with hashed write kind,
+1. ✅ **Write-capable record/replay (latency-only):** versioned bundle with hashed write kind,
    recorded-write worker, `GRAPH.QUERY` measure path, periodic base reset. Latency tier for all 10.
-2. **Generalized outcome model + full `MutationStats`** (`relationships_deleted`/`properties_removed`/
+2. ⛔ **Generalized outcome model + full `MutationStats`** (`relationships_deleted`/`properties_removed`/
    `labels_removed`); per-invocation restore primitive.
-3. **Online outcome oracle** at record time (capture per-command stats+result), C=1 correctness tier
+3. ⛔ **Online outcome oracle** at record time (capture per-command stats+result), C=1 correctness tier
    for the deterministic subset.
-4. **Prepared-state + removal shapes** (`remove_user_property_and_label`) and variable-count
+4. ⛔ **Prepared-state + removal shapes** (`remove_user_property_and_label`) and variable-count
    `detach_delete_user`.
-5. **Concurrency** — decide C>1 (per-worker id partitioning) or keep C=1 for correctness.
-6. **Docs.**
+5. ⛔ **Concurrency** — decide C>1 (per-worker id partitioning) or keep C=1 for correctness.
+6. 🚧 **Docs** — folded into each phase's PR (doc sync is part of each phase's definition of
+   done): §6.1's readme + cookbook updates shipped with phase 1.
 
 ## 7. Risks & open questions
 1. **Reset cost / throughput accounting (§3.3)** — per-invocation restore is expensive and pollutes

@@ -296,6 +296,12 @@ impl QueriesRepository {
         &self.algorithm_read_query_names
     }
 
+    /// The write shape names, in definition order — the mutation shapes the synthetic check
+    /// records via [`Self::render_write_with_rng`] (Phase 7 §1, selected by `--repo-writes`).
+    pub fn write_names(&self) -> &[String] {
+        &self.write_query_names
+    }
+
     /// Render the read shape `name` from a caller-supplied RNG, so a fixed seed yields a
     /// byte-identical Cypher+params corpus (design §4.1 — the seedable entry the record-once /
     /// replay-verbatim synthetic path renders each shape's corpus with). Returns `None` if `name`
@@ -332,6 +338,25 @@ impl QueriesRepository {
             name.to_string(),
             generator.query_type,
             generator.generate_with_path(rng, path),
+        ))
+    }
+
+    /// Render the write shape `name` from a caller-supplied RNG — [`Self::render_read_with_rng`]
+    /// for the write pool (Phase 7 §3.1: the seedable entry the record-once / replay-verbatim
+    /// synthetic path renders each write shape's corpus with). Returns `None` if `name` is not a
+    /// known write shape.
+    pub fn render_write_with_rng(
+        &self,
+        name: &str,
+        rng: &mut dyn Rng,
+    ) -> Option<PreparedQuery> {
+        let generator = self.write_queries.get(name)?;
+        let q_id = *self.name_to_id.get(name)?;
+        Some(PreparedQuery::new(
+            q_id,
+            name.to_string(),
+            generator.query_type,
+            generator.generate_with_rng(rng),
         ))
     }
 
@@ -426,6 +451,12 @@ impl UsersQueriesRepository {
         self.queries_repository.algorithm_read_names()
     }
 
+    /// The write shape names, in definition order (Phase 7 §1) — the 10 mutation shapes the
+    /// synthetic check records via [`Self::render_write_with_rng`].
+    pub fn write_names(&self) -> &[String] {
+        self.queries_repository.write_names()
+    }
+
     /// Render the read shape `name` from a caller-supplied RNG (record-once determinism, §4.1).
     /// Returns `None` if `name` is not a known read shape.
     pub fn render_read_with_rng(
@@ -445,6 +476,16 @@ impl UsersQueriesRepository {
         path: (i32, i32),
     ) -> Option<PreparedQuery> {
         self.queries_repository.render_read_with_path(name, rng, path)
+    }
+
+    /// Render the write shape `name` from a caller-supplied RNG (Phase 7 §3.1 — record-once
+    /// determinism for the write corpus). Returns `None` if `name` is not a known write shape.
+    pub fn render_write_with_rng(
+        &self,
+        name: &str,
+        rng: &mut dyn Rng,
+    ) -> Option<PreparedQuery> {
+        self.queries_repository.render_write_with_rng(name, rng)
     }
 
     pub fn random_queries(
@@ -1507,5 +1548,82 @@ mod tests {
         assert!(repo.render_read_with_rng("no_such_shape", &mut rand::rng()).is_none());
         // A write shape is not a read and must not render through the read seam.
         assert!(repo.render_read_with_rng("single_vertex_write", &mut rand::rng()).is_none());
+    }
+
+    #[test]
+    fn write_names_are_the_ten_write_shapes_in_definition_order() {
+        let repo = UsersQueriesRepository::new(
+            100,
+            1000,
+            Flavour::FalkorDB,
+            AlgorithmQuerySelection::default(),
+            QueryCoverageProfile::Baseline,
+        );
+        // The write pool is profile-independent (registered unconditionally), so the Baseline
+        // profile sees all 10 writes — in definition order (Phase 7 §1).
+        let names: Vec<&str> = repo.write_names().iter().map(String::as_str).collect();
+        assert_eq!(
+            names,
+            vec![
+                "single_vertex_write",
+                "single_vertex_update",
+                "single_edge_update",
+                "single_edge_write",
+                "merge_user_insert_path",
+                "merge_user_upsert_existing",
+                "merge_friend_edge_upsert",
+                "detach_delete_user",
+                "remove_user_property_and_label",
+                "foreach_loop_mutation",
+            ]
+        );
+        // Every name resolves to a Write shape through the write render seam.
+        for name in &names {
+            let prepared = repo
+                .render_write_with_rng(name, &mut rand::rng())
+                .unwrap_or_else(|| panic!("write shape '{name}' must be renderable"));
+            assert_eq!(prepared.q_type, QueryType::Write, "'{name}' must render as a write");
+        }
+    }
+
+    #[test]
+    fn render_write_with_rng_is_byte_identical_for_a_fixed_seed() {
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
+
+        let repo = UsersQueriesRepository::new(
+            1000,
+            5000,
+            Flavour::FalkorDB,
+            AlgorithmQuerySelection::default(),
+            QueryCoverageProfile::Baseline,
+        );
+        // Same record-once / replay-verbatim property as the read seam, for a randomised write.
+        let corpus = |seed: u64| -> Vec<String> {
+            let mut rng = StdRng::seed_from_u64(seed);
+            (0..64)
+                .map(|_| {
+                    repo.render_write_with_rng("merge_friend_edge_upsert", &mut rng)
+                        .expect("shape present")
+                        .cypher
+                })
+                .collect()
+        };
+        assert_eq!(corpus(0xA11CE), corpus(0xA11CE));
+        assert_ne!(corpus(0xA11CE), corpus(0xB0B));
+    }
+
+    #[test]
+    fn render_write_with_rng_rejects_unknown_and_non_write_shapes() {
+        let repo = UsersQueriesRepository::new(
+            100,
+            1000,
+            Flavour::FalkorDB,
+            AlgorithmQuerySelection::default(),
+            QueryCoverageProfile::Baseline,
+        );
+        assert!(repo.render_write_with_rng("no_such_shape", &mut rand::rng()).is_none());
+        // A read shape is not a write and must not render through the write seam.
+        assert!(repo.render_write_with_rng("single_vertex_read", &mut rand::rng()).is_none());
     }
 }

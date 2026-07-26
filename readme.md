@@ -492,6 +492,18 @@ just synthetic-compare-versions demo falkor://127.0.0.1:6379 falkor://127.0.0.1:
   **never** part of `--repo-reads full` nor the per-PR `synthetic-verify` gate. They need no extra
   fixture — every generated graph is **simple** (no parallel `:Friend` edges, which `algo.maxFlow`
   rejects) and every `:Friend` edge carries the `bench_capacity` property the flow/MSF shapes use.
+  **`--repo-writes`** records the A/B benchmark's **10 write shapes** from `queries_repository`
+  (`CREATE`/`SET`/`MERGE`/`DETACH DELETE`/`REMOVE`/`FOREACH` — e.g. `single_vertex_write`,
+  `merge_friend_edge_upsert`, `detach_delete_user`) as a **single-kind write bundle** in
+  **recording format v2**, whose `workload_hash` additionally binds each op's read/write **kind**
+  (v1 read bundles hash byte-identically to before). Same render-once discipline and full
+  256-command corpora as the reads; no fixture. Every write shape pins a **C=1 budget**
+  (100 samples, warm-up 10) and is **result-N/A by design** — this is the **latency tier** of the
+  writes design: mutation outcomes (result stats/counters) are state- and value-dependent, so
+  nothing is asserted about them. Write bundles are single-kind, so `--repo-writes` is mutually
+  exclusive with **every** read selector (`--op`/`--all-reads`/`--tier`/`--repo-reads`/
+  `--repo-algorithms`); writes never enter `--repo-reads`, any tier, or the per-PR
+  `synthetic-verify` gate.
 - **`benchmark synthetic run --recording <dir> [--concurrency … --cache …]`** drops + loads +
   **count-verifies** the recorded graph, then measures the recorded commands across the concurrency
   sweep + cache modes, writing a report plus a per-op **`result_digest`** (a hash of the result
@@ -514,6 +526,18 @@ just synthetic-compare-versions demo falkor://127.0.0.1:6379 falkor://127.0.0.1:
   for a load-once / run-many flow (still count-verifying first). `just synthetic-replay <name>
   <endpoint>` wraps this. Pass **`--label <name>`** (e.g. `pr`/`main`) to name the run — the label
   becomes the column header in `report --diff`/`--regression`.
+  A **write bundle** (recorded with `--repo-writes`) replays through `GRAPH.QUERY` (writes are
+  rejected by the read path's `GRAPH.RO_QUERY`) at **C=1 only** — the guard refuses any other
+  effective sweep, since budgets sit outside the `workload_hash` and could otherwise be tampered
+  wider — and the base graph is **reset (drop + reload + count-verify) before every measured
+  cell** (op × cache mode), bounding mutation drift to one cell's invocations. Nothing is asserted
+  about write results or counters (`result_digest` stays `null`; latency tier). The replay ends
+  with an **error-safe final restore** — on success *and* failure the recorded base is reloaded
+  and its node/edge **content digests** are verified against the pristine post-load capture, so a
+  write replay never silently leaves a mutated graph behind (a dual measurement+restore failure
+  surfaces **both** errors). `--no-load` is refused for write bundles, a bundle can never mix
+  reads with writes, and a write op can never be capability-gated (capabilities are unhashed, so
+  a crafted one could otherwise skip-shrink the ten-shape coverage).
 - **`benchmark synthetic report --diff <A.json> <B.json> [--out diff.md]`** **guards** the pair (it
   aborts unless the `workload_hash` **and** every op's `result_digest` match, so a version returning
   wrong/empty results faster can't masquerade as an improvement — the version difference itself is

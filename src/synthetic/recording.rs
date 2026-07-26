@@ -38,8 +38,19 @@ use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// On-disk bundle format version. Bumped when the bundle layout changes incompatibly.
+/// On-disk bundle format version for **read-only** bundles — the original format, kept
+/// byte-identical (including [`Manifest::workload_hash`]) so existing read bundles and their
+/// goldens never change (Phase 7 §7.5).
 pub const RECORDING_FORMAT_VERSION: u32 = 1;
+
+/// On-disk bundle format version for bundles containing **write** ops (Phase 7 §3.1): the op
+/// **kind** is folded into the `workload_hash` (a v1 hash never covered kind — every v1 op is a
+/// read), so a bundle's read/write nature cannot be silently flipped. The version is
+/// content-determined at record time: any write op ⇒ v2, all-reads ⇒ v1.
+pub const RECORDING_FORMAT_VERSION_WRITES: u32 = 2;
+
+/// The newest bundle format this build can [`load`].
+const RECORDING_FORMAT_VERSION_MAX: u32 = RECORDING_FORMAT_VERSION_WRITES;
 
 /// The dataset knobs a bundle was recorded from (mirrors [`DatasetSpec`], but owned + serde).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -65,15 +76,20 @@ pub struct OpEntry {
     pub name: String,
     /// The op's read/write kind, so [`load`] can rebuild its [`OpKey`] — a built-in [`OpName`] or a
     /// string-keyed dynamic op. Defaults to `Read` for bundles written before this field existed
-    /// (v1 records reads only), and is **not** folded into the [`Manifest::workload_hash`].
+    /// (v1 records reads only). Under format v2+ (write bundles, Phase 7 §3.1) the kind **is**
+    /// folded into the [`Manifest::workload_hash`], so a bundle's read/write nature can't be
+    /// silently flipped; v1 (read-only) hashes never covered it and stay byte-identical. In both
+    /// formats [`load`] also rejects an entry whose declared kind contradicts its built-in name's
+    /// catalog kind — the hash is computable by anyone, so a crafted-but-hash-valid manifest must
+    /// not reinterpret a built-in op (e.g. declare the write `create_node` as a read).
     #[serde(default = "default_op_kind")]
     pub kind: QueryType,
     /// Whether this op's result is compared across the A/B (record-once / replay-verbatim) gate.
     /// `true` (the default, and the value for every built-in catalog op) means replay computes and
     /// gates a `result_digest`; `false` marks the op **result-N/A** — still recorded and timed, but
     /// its result is *not* gated, for shapes whose result set isn't byte-stable (LIMIT-without-
-    /// ORDER, top-k, float scores — design §3.2 / Decision 4). Like [`Self::kind`] it is **not**
-    /// folded into the [`Manifest::workload_hash`] (it's replay-gating policy, not workload content)
+    /// ORDER, top-k, float scores — design §3.2 / Decision 4). It is **not** folded into the
+    /// [`Manifest::workload_hash`] (it's replay-gating policy, not workload content)
     /// and defaults to `true` for bundles written before this field existed.
     #[serde(default = "default_result_gated")]
     pub result_gated: bool,
@@ -81,7 +97,7 @@ pub struct OpEntry {
     /// §3.4), so a heavy recorded shape (e.g. a whole-graph algorithm) can dial its own
     /// samples/warmup/concurrency/cache/timeouts down without perturbing the rest of the bundle.
     /// Defaults to full inheritance — the value for every op recorded before this field existed —
-    /// and an inherit budget is omitted when serializing. Like [`Self::kind`]/[`Self::result_gated`]
+    /// and an inherit budget is omitted when serializing. Like [`Self::result_gated`]
     /// it is **not** folded into the [`Manifest::workload_hash`] (replay policy, not workload
     /// content).
     #[serde(default, skip_serializing_if = "RecordedBudget::is_inherit")]
@@ -164,6 +180,9 @@ pub struct GraphRecord {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommandRecord {
     pub seq: usize,
+    /// The op's read/write kind tag (`"read"`/`"write"`). Informational on disk and **not** part
+    /// of the workload hash, so [`load`] validates it against the op's declared kind instead — a
+    /// contradicting tag means a hand-edited/corrupt bundle.
     pub kind: String,
     pub cypher: String,
 }
@@ -182,8 +201,9 @@ pub struct Bundle {
 /// Length-framed workload hasher. Every part is prefixed with its byte length (u64 LE) before the
 /// bytes, so no concatenation of parts can collide with a different split (e.g. `["ab","c"]` and
 /// `["a","bc"]` hash differently). Record (streaming) and [`load`] (from memory) feed it in the
-/// same order, so they agree iff the content matches.
-struct WorkloadHasher(Sha256);
+/// same order, so they agree iff the content matches. Under format v2+ each op header also feeds
+/// the op's read/write **kind** (v1 hashes stay byte-identical: every v1 op is a read).
+struct WorkloadHasher(Sha256, u32);
 
 impl WorkloadHasher {
     /// Start a hasher seeded with the bundle header (everything but the graph/command bodies).
@@ -194,7 +214,7 @@ impl WorkloadHasher {
         graph: &str,
         corpus_seed: u64,
     ) -> Self {
-        let mut h = WorkloadHasher(Sha256::new());
+        let mut h = WorkloadHasher(Sha256::new(), format_version);
         h.part(b"synthbench-recording");
         h.part(&format_version.to_le_bytes());
         h.part(generator_version.as_bytes());
@@ -226,15 +246,21 @@ impl WorkloadHasher {
         self.part(cypher.as_bytes());
     }
 
-    /// Feed one operation header (name + command count, tagged `O`).
+    /// Feed one operation header (name + command count, tagged `O`). Under format v2+ the op's
+    /// read/write `kind` follows (tagged `K`) — absent from v1 hashes, whose ops are all reads.
     fn op_header(
         &mut self,
         name: &str,
         count: usize,
+        kind: QueryType,
     ) {
         self.part(b"O");
         self.part(name.as_bytes());
         self.part(&(count as u64).to_le_bytes());
+        if self.1 >= RECORDING_FORMAT_VERSION_WRITES {
+            self.part(b"K");
+            self.part(command_kind(kind).as_bytes());
+        }
     }
 
     /// Feed one measured command (tagged `C`).
@@ -248,6 +274,14 @@ impl WorkloadHasher {
 
     fn finalize(self) -> String {
         format!("sha256:{:x}", self.0.finalize())
+    }
+}
+
+/// The `kind` string a [`CommandRecord`] (and the v2 hash) carries for the given [`QueryType`].
+fn command_kind(kind: QueryType) -> &'static str {
+    match kind {
+        QueryType::Read => "read",
+        QueryType::Write => "write",
     }
 }
 
@@ -294,7 +328,10 @@ pub fn render_commands(
 
 /// Record a workload bundle to `out_dir` (created if absent) for the given built-in catalog read
 /// `ops`. **Offline** — no server is contacted. Renders each op's corpus via [`render_commands`]
-/// then delegates to [`record_rendered`]; **write ops are rejected** (v1 records read ops only).
+/// then delegates to [`record_rendered`]; **catalog write ops are rejected** — their semantics
+/// depend on live scratch state ([`WritePlan`](crate::synthetic::catalog::OperationSpec) hooks),
+/// so they cannot be replayed verbatim. Recordable writes are the repo write *shapes*
+/// (`--repo-writes`, Phase 7 §1).
 pub fn record(
     dataset: &DatasetSpec,
     graph: &str,
@@ -303,11 +340,12 @@ pub fn record(
     batch_size: usize,
     out_dir: &Path,
 ) -> BenchmarkResult<Manifest> {
-    // Reject writes up-front — before rendering — so we never build a write op's corpus (v1 records
-    // reads only). [`record_rendered`] re-checks by kind for string-keyed callers.
+    // Reject catalog writes up-front — before rendering — so we never build a corpus whose
+    // semantics depend on the live write worker's scratch/reset hooks.
     if let Some(op) = ops.iter().find(|op| spec(**op).kind == QueryType::Write) {
         return Err(OtherError(format!(
-            "recording write op '{}' is not supported yet (v1 records read ops only)",
+            "catalog write op '{}' cannot be recorded (its scratch/reset hooks don't replay \
+             verbatim) — record the repo write shapes with --repo-writes instead",
             op.as_str()
         )));
     }
@@ -334,7 +372,10 @@ pub fn record(
 ///
 /// Writes `graph.jsonl` (the [`load_statements`] for `dataset`), `commands/<op>.jsonl` for each op,
 /// and `manifest.json` with the [`Manifest::workload_hash`]. `ops` are de-duplicated by name (first
-/// occurrence wins); **write ops are rejected** (v1 records read ops only). Returns the manifest.
+/// occurrence wins). Write ops are supported (Phase 7 §3.1) but **not mixed with reads** — replay
+/// has one global concurrency sweep, so a mixed bundle cannot express C=1 writes alongside swept
+/// reads (design §4); an all-write bundle is stamped format v2 (kind folded into the hash), an
+/// all-read bundle stays byte-identical v1. Returns the manifest.
 pub fn record_rendered(
     dataset: &DatasetSpec,
     graph: &str,
@@ -382,17 +423,54 @@ fn record_rendered_impl(
     if batch_size == 0 {
         return Err(OtherError("record batch_size must be greater than 0".to_string()));
     }
-    // Reject writes on the *original* ops (before dedup) so a duplicate-name write can't be dropped
-    // by dedup and slip through, and validate every name up-front (a name becomes a file stem).
+    // Validate every name up-front (a name becomes a file stem), and reject a mixed read+write
+    // bundle on the *original* ops (before dedup) so a duplicate name can't hide a kind. Replay
+    // has one global concurrency sweep — a mixed bundle cannot express C=1 writes alongside swept
+    // reads (Phase 7 §4), so read and write recordings stay separate bundles.
     for op in ops {
         validate_op_name(op.key.name())?;
-        if op.key.kind() == QueryType::Write {
-            return Err(OtherError(format!(
-                "recording write op '{}' is not supported yet (v1 records read ops only)",
-                op.key.name()
-            )));
-        }
     }
+    let has_writes = ops.iter().any(|op| op.key.kind() == QueryType::Write);
+    let has_reads = ops.iter().any(|op| op.key.kind() == QueryType::Read);
+    if has_writes && has_reads {
+        return Err(OtherError(
+            "cannot record a mixed read+write bundle — record writes (--repo-writes) separately \
+             from reads (replay measures the two under different policies)"
+            .to_string(),
+        ));
+    }
+    // The write latency tier asserts nothing (Phase 7 §4.1), so a result-gated write op could be
+    // recorded but never replayed (replay hard-rejects it) — fail early here instead.
+    if let Some(op) =
+        ops.iter().find(|op| op.key.kind() == QueryType::Write && op.result_gated)
+    {
+        return Err(OtherError(format!(
+            "write op '{}' is marked result-gated — the write latency tier asserts nothing \
+             (Phase 7 §4.1), so a result-gated write bundle could never be replayed",
+            op.key.name()
+        )));
+    }
+    // The write latency tier is algorithm-free plain Cypher (Phase 7 §4.1): no engine procedure to
+    // probe for, so a capability on a write op is meaningless — and `capability` is outside the
+    // workload hash, so replay independently re-rejects it (a capability-skip would silently
+    // shrink the all-ten write coverage).
+    if let Some(op) =
+        ops.iter().find(|op| op.key.kind() == QueryType::Write && op.capability.is_some())
+    {
+        return Err(OtherError(format!(
+            "write op '{}' declares capability '{}' — write ops are plain Cypher and never \
+             capability-gated (Phase 7 §4.1)",
+            op.key.name(),
+            op.capability.as_deref().unwrap_or_default()
+        )));
+    }
+    // Content-determined format version: any write op ⇒ v2 (kind folded into the workload hash);
+    // an all-read bundle stays v1, byte-identical to every bundle recorded before writes existed.
+    let format_version = if has_writes {
+        RECORDING_FORMAT_VERSION_WRITES
+    } else {
+        RECORDING_FORMAT_VERSION
+    };
     let ops = dedup_recorded(ops);
     if ops.is_empty() {
         return Err(OtherError(
@@ -410,7 +488,7 @@ fn record_rendered_impl(
         .map_err(|e| OtherError(format!("creating {}: {}", commands_dir.display(), e)))?;
 
     let mut hasher = WorkloadHasher::new(
-        RECORDING_FORMAT_VERSION,
+        format_version,
         GENERATOR_VERSION,
         &knobs,
         graph,
@@ -450,14 +528,14 @@ fn record_rendered_impl(
         if cyphers.is_empty() {
             return Err(OtherError(format!("operation '{}' produced an empty corpus", name)));
         }
-        hasher.op_header(name, cyphers.len());
+        hasher.op_header(name, cyphers.len(), op.key.kind());
         let path = commands_dir.join(format!("{}.jsonl", name));
         let mut w = BufWriter::new(create_file(&path)?);
         for (seq, cypher) in cyphers.iter().enumerate() {
             hasher.command(cypher);
             let rec = CommandRecord {
                 seq,
-                kind: "read".to_string(),
+                kind: command_kind(op.key.kind()).to_string(),
                 cypher: cypher.clone(),
             };
             write_jsonl(&mut w, &path, &rec)?;
@@ -475,7 +553,7 @@ fn record_rendered_impl(
     }
 
     let manifest = Manifest {
-        format_version: RECORDING_FORMAT_VERSION,
+        format_version,
         generator_version: GENERATOR_VERSION.to_string(),
         tool_version: env!("CARGO_PKG_VERSION").to_string(),
         dataset: knobs,
@@ -509,11 +587,25 @@ pub fn load(dir: &Path) -> BenchmarkResult<Bundle> {
         serde_json::from_slice(&bytes)
             .map_err(|e| OtherError(format!("parsing {}: {}", path.display(), e)))?
     };
-    if manifest.format_version != RECORDING_FORMAT_VERSION {
+    if manifest.format_version < RECORDING_FORMAT_VERSION
+        || manifest.format_version > RECORDING_FORMAT_VERSION_MAX
+    {
         return Err(OtherError(format!(
-            "unsupported recording format_version {} (this build expects {})",
-            manifest.format_version, RECORDING_FORMAT_VERSION
+            "unsupported recording format_version {} (this build supports {}..={})",
+            manifest.format_version, RECORDING_FORMAT_VERSION, RECORDING_FORMAT_VERSION_MAX
         )));
+    }
+    // A v1 bundle predates write support: every v1 op is a read and v1 hashes never covered kind,
+    // so a v1 manifest naming a write op is crafted/corrupt — reject it before the (kind-blind)
+    // v1 hash recompute could pass it.
+    if manifest.format_version < RECORDING_FORMAT_VERSION_WRITES {
+        if let Some(entry) = manifest.ops.iter().find(|e| e.kind == QueryType::Write) {
+            return Err(OtherError(format!(
+                "format_version {} bundle names write op '{}' — v1 bundles are read-only \
+                 (write bundles are format_version {}+)",
+                manifest.format_version, entry.name, RECORDING_FORMAT_VERSION_WRITES
+            )));
+        }
     }
 
     // graph.jsonl → ordered (phase, cypher).
@@ -551,6 +643,20 @@ pub fn load(dir: &Path) -> BenchmarkResult<Bundle> {
         // name back to its `OpName` (keeping the built-in salt/kind); a name with no `OpName`
         // becomes a string-keyed dynamic op. Either way the bundle round-trips by name.
         let op = OpKey::dynamic(entry.name.clone(), entry.kind);
+        // …but that canonicalization IGNORES the manifest kind for a built-in name, so a crafted
+        // manifest declaring a built-in under the wrong kind (e.g. the write op `create_node` as a
+        // `read`) would be silently reinterpreted with the catalog kind — sidestepping the v1
+        // read-only gate above and, under v1's kind-blind hash, the integrity check too. Reject
+        // the mismatch instead of reinterpreting it.
+        if op.kind() != entry.kind {
+            return Err(OtherError(format!(
+                "manifest declares op '{}' as kind '{}', but that name is the built-in '{}' op — \
+                 a bundle cannot reinterpret a built-in op's kind (crafted/corrupt manifest)",
+                entry.name,
+                command_kind(entry.kind),
+                command_kind(op.kind()),
+            )));
+        }
         let path = dir.join("commands").join(format!("{}.jsonl", entry.name));
         let recs: Vec<CommandRecord> = read_jsonl(&path)?;
         if recs.len() != entry.count {
@@ -559,6 +665,20 @@ pub fn load(dir: &Path) -> BenchmarkResult<Bundle> {
                 path.display(),
                 recs.len(),
                 entry.count
+            )));
+        }
+        // The per-command `kind` tag is informational and unhashed, so a hand-edited tag would
+        // survive the workload-hash gate below — validate it against the op's declared kind here
+        // to keep the bundle self-consistent.
+        if let Some(rec) = recs.iter().find(|r| r.kind != command_kind(entry.kind)) {
+            return Err(OtherError(format!(
+                "{}: command seq {} declares kind '{}' but op '{}' is a {} op — the bundle is \
+                 corrupted or was edited",
+                path.display(),
+                rec.seq,
+                rec.kind,
+                entry.name,
+                command_kind(entry.kind)
             )));
         }
         commands.push((op, recs.into_iter().map(|r| r.cypher).collect::<Vec<_>>()));
@@ -576,7 +696,7 @@ pub fn load(dir: &Path) -> BenchmarkResult<Bundle> {
         hasher.graph_record(phase.tag(), cypher);
     }
     for ((_, cyphers), entry) in commands.iter().zip(&manifest.ops) {
-        hasher.op_header(&entry.name, cyphers.len());
+        hasher.op_header(&entry.name, cyphers.len(), entry.kind);
         for cypher in cyphers {
             hasher.command(cypher);
         }
@@ -756,7 +876,8 @@ mod tests {
             edges: 20,
         };
         let err = record(&spec, "g", &[OpName::CreateNode], 1, 8, &dir).unwrap_err();
-        assert!(format!("{}", err).contains("write op"), "got: {err}");
+        assert!(format!("{}", err).contains("catalog write op"), "got: {err}");
+        assert!(format!("{}", err).contains("--repo-writes"), "got: {err}");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -891,7 +1012,9 @@ mod tests {
     }
 
     #[test]
-    fn record_rendered_rejects_write_kind_ops() {
+    fn record_rendered_writes_a_format_v2_write_bundle_that_round_trips() {
+        // A write-only bundle is stamped format v2 (Phase 7 §3.1): the op kind lands in the
+        // manifest, in every CommandRecord, and in the workload hash; `load` verifies it intact.
         let dir = temp_bundle_dir("synthrec-dynwrite");
         let spec = DatasetSpec {
             seed: 1,
@@ -900,13 +1023,128 @@ mod tests {
         };
         let ops = vec![RecordedOp {
             key: OpKey::dynamic("bulk_insert", QueryType::Write),
-            result_gated: true,
+            result_gated: false,
             budget: RecordedBudget::default(),
             capability: None,
             commands: vec!["CYPHER x=1 CREATE (n:User {id:$x})".to_string()],
         }];
-        let err = record_rendered(&spec, "g", &ops, 1, 8, &dir).unwrap_err();
-        assert!(format!("{}", err).contains("write op"), "got: {err}");
+        let manifest = record_rendered(&spec, "g", &ops, 1, 8, &dir).unwrap();
+        assert_eq!(manifest.format_version, RECORDING_FORMAT_VERSION_WRITES);
+        assert_eq!(manifest.ops[0].kind, QueryType::Write);
+        // The on-disk command record carries the write kind.
+        let raw = std::fs::read_to_string(dir.join("commands").join("bulk_insert.jsonl")).unwrap();
+        let rec: CommandRecord = serde_json::from_str(raw.lines().next().unwrap()).unwrap();
+        assert_eq!(rec.kind, "write");
+        // And the bundle loads back with the kind preserved + the integrity gate green.
+        let bundle = load(&dir).unwrap();
+        assert_eq!(bundle.commands.len(), 1);
+        assert_eq!(bundle.commands[0].0.kind(), QueryType::Write);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn write_bundle_workload_hash_binds_the_op_kind() {
+        // Flipping a v2 bundle's op kind must fail the hash recompute on `load` — the kind is
+        // hashed (v2), so a bundle's read/write nature can't be silently flipped even by a
+        // self-consistent edit that also flips every unhashed per-command kind tag.
+        let dir = temp_bundle_dir("synthrec-kindflip");
+        let spec = DatasetSpec {
+            seed: 1,
+            nodes: 10,
+            edges: 20,
+        };
+        let ops = vec![RecordedOp {
+            key: OpKey::dynamic("w", QueryType::Write),
+            result_gated: false,
+            budget: RecordedBudget::default(),
+            capability: None,
+            commands: vec!["CYPHER  CREATE (n)".to_string()],
+        }];
+        record_rendered(&spec, "g", &ops, 1, 8, &dir).unwrap();
+        let path = dir.join("manifest.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        manifest["ops"][0]["kind"] = serde_json::json!("Read");
+        std::fs::write(&path, serde_json::to_string_pretty(&manifest).unwrap()).unwrap();
+        let cmd_path = dir.join("commands").join("w.jsonl");
+        let retagged: String = std::fs::read_to_string(&cmd_path)
+            .unwrap()
+            .lines()
+            .map(|line| {
+                let mut rec: CommandRecord = serde_json::from_str(line).unwrap();
+                rec.kind = "read".to_string();
+                serde_json::to_string(&rec).unwrap() + "\n"
+            })
+            .collect();
+        std::fs::write(&cmd_path, retagged).unwrap();
+        let err = load(&dir).unwrap_err();
+        assert!(format!("{err}").contains("workload_hash mismatch"), "got: {err}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_rejects_a_command_record_with_a_contradicting_kind() {
+        // The per-command `kind` tag is informational and unhashed, so flipping it on disk keeps
+        // the workload hash valid — `load` must still reject the contradiction against the op's
+        // declared kind (and via the kind gate, not the hash gate).
+        let (dir, manifest) = record_to_temp(19);
+        let name = manifest.ops[0].name.clone();
+        let path = dir.join("commands").join(format!("{name}.jsonl"));
+        let flipped: String = std::fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .map(|line| {
+                let mut rec: CommandRecord = serde_json::from_str(line).unwrap();
+                rec.kind = "write".to_string();
+                serde_json::to_string(&rec).unwrap() + "\n"
+            })
+            .collect();
+        std::fs::write(&path, flipped).unwrap();
+        let err = load(&dir).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("declares kind 'write'"), "got: {msg}");
+        assert!(msg.contains(&format!("op '{name}' is a read op")), "got: {msg}");
+        assert!(
+            !msg.contains("workload_hash"),
+            "the unhashed tag must be caught by the kind gate, not the hash gate: {msg}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_rejects_a_v1_bundle_naming_a_write_op() {
+        // A v1 manifest naming a write op is crafted/corrupt (v1 predates writes, and its hash
+        // never covered kind) — rejected explicitly, before the kind-blind v1 hash recompute.
+        let dir = temp_bundle_dir("synthrec-v1write");
+        let spec = DatasetSpec {
+            seed: 1,
+            nodes: 10,
+            edges: 20,
+        };
+        let ops = vec![RecordedOp {
+            key: OpKey::dynamic("w", QueryType::Write),
+            result_gated: false,
+            budget: RecordedBudget::default(),
+            capability: None,
+            commands: vec!["CYPHER  CREATE (n)".to_string()],
+        }];
+        record_rendered(&spec, "g", &ops, 1, 8, &dir).unwrap();
+        let path = dir.join("manifest.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        manifest["format_version"] = serde_json::json!(1);
+        std::fs::write(&path, serde_json::to_string_pretty(&manifest).unwrap()).unwrap();
+        let err = load(&dir).unwrap_err();
+        assert!(format!("{err}").contains("v1 bundles are read-only"), "got: {err}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn read_bundles_stay_format_v1() {
+        // The format version is content-determined: an all-read bundle must keep writing v1 so
+        // every pre-Phase-7 read bundle, hash and golden stays byte-identical (§7.5).
+        let (dir, manifest) = record_to_temp(17);
+        assert_eq!(manifest.format_version, RECORDING_FORMAT_VERSION);
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -992,9 +1230,10 @@ mod tests {
     }
 
     #[test]
-    fn record_rendered_rejects_a_write_hidden_behind_a_duplicate_read() {
-        // The write check runs on the original ops (before dedup), so a later same-named write is
-        // caught rather than dropped by first-occurrence dedup.
+    fn record_rendered_rejects_a_mixed_read_write_bundle() {
+        // The kind check runs on the original ops (before dedup), so a same-named write behind a
+        // read is caught rather than dropped by first-occurrence dedup. Mixed bundles are rejected
+        // outright: replay measures reads and writes under different policies (Phase 7 §4).
         let dir = temp_bundle_dir("synthrec-dupwrite");
         let spec = DatasetSpec {
             seed: 1,
@@ -1018,7 +1257,177 @@ mod tests {
             },
         ];
         let err = record_rendered(&spec, "g", &ops, 1, 8, &dir).unwrap_err();
-        assert!(format!("{err}").contains("write op"), "got: {err}");
+        assert!(format!("{err}").contains("mixed read+write bundle"), "got: {err}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn record_rendered_rejects_a_capability_on_a_write_op() {
+        // Phase 7 §4.1: the write latency tier is algorithm-free plain Cypher — a capability on a
+        // write op is meaningless at record time (and unhashed, so replay re-rejects it too).
+        let dir = temp_bundle_dir("synthrec-writecap");
+        let spec = DatasetSpec {
+            seed: 1,
+            nodes: 10,
+            edges: 20,
+        };
+        let ops = vec![RecordedOp {
+            key: OpKey::dynamic("w_cap", QueryType::Write),
+            result_gated: false,
+            budget: RecordedBudget::default(),
+            capability: Some("algo.maxFlow".to_string()),
+            commands: vec!["CREATE (n)".to_string()],
+        }];
+        let err = record_rendered(&spec, "g", &ops, 1, 8, &dir).unwrap_err();
+        assert!(format!("{err}").contains("never capability-gated"), "got: {err}");
+        assert!(format!("{err}").contains("algo.maxFlow"), "must name the capability: {err}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn record_rendered_rejects_a_result_gated_write_op() {
+        // Phase 7 §4.1: the write latency tier asserts nothing, and replay hard-rejects a
+        // result-gated write — so recording one would produce a bundle that can never be
+        // replayed. Fail early, naming the op.
+        let dir = temp_bundle_dir("synthrec-writegated");
+        let spec = DatasetSpec {
+            seed: 1,
+            nodes: 10,
+            edges: 20,
+        };
+        let ops = vec![RecordedOp {
+            key: OpKey::dynamic("w_gated", QueryType::Write),
+            result_gated: true,
+            budget: RecordedBudget::default(),
+            capability: None,
+            commands: vec!["CREATE (n)".to_string()],
+        }];
+        let err = record_rendered(&spec, "g", &ops, 1, 8, &dir).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("could never be replayed"), "got: {msg}");
+        assert!(msg.contains("w_gated"), "must name the op: {msg}");
+        assert!(!dir.join("manifest.json").exists(), "nothing may be written");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Rewrite the bundle's single op to `new_name`/`new_kind` (renaming its commands file to
+    /// match) and **recompute a valid `workload_hash`** over the tampered content — modeling an
+    /// attacker who can rewrite the whole bundle (the hash is computable by anyone; it is an
+    /// integrity check, not a MAC) but cannot change what a built-in op name *means*.
+    fn tamper_op_identity_with_valid_hash(
+        dir: &Path,
+        new_name: &str,
+        new_kind: QueryType,
+    ) {
+        let manifest_path = dir.join("manifest.json");
+        let mut manifest: Manifest =
+            serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
+        let old_name = manifest.ops[0].name.clone();
+        manifest.ops[0].name = new_name.to_string();
+        manifest.ops[0].kind = new_kind;
+        if old_name != new_name {
+            std::fs::rename(
+                dir.join("commands").join(format!("{old_name}.jsonl")),
+                dir.join("commands").join(format!("{new_name}.jsonl")),
+            )
+            .unwrap();
+        }
+        let graph_records: Vec<GraphRecord> = read_jsonl(&dir.join("graph.jsonl")).unwrap();
+        let mut hasher = WorkloadHasher::new(
+            manifest.format_version,
+            &manifest.generator_version,
+            &manifest.dataset,
+            &manifest.graph,
+            manifest.corpus_seed,
+        );
+        for rec in &graph_records {
+            hasher.graph_record(&rec.phase, &rec.cypher);
+        }
+        for entry in &manifest.ops {
+            let recs: Vec<CommandRecord> =
+                read_jsonl(&dir.join("commands").join(format!("{}.jsonl", entry.name))).unwrap();
+            hasher.op_header(&entry.name, recs.len(), entry.kind);
+            for rec in &recs {
+                hasher.command(&rec.cypher);
+            }
+        }
+        manifest.workload_hash = hasher.finalize();
+        std::fs::write(&manifest_path, serde_json::to_string(&manifest).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn load_rejects_a_v1_bundle_reinterpreting_a_builtin_write_as_read() {
+        // The reinterpretation attack, v1 flavor: every v1 entry claims kind read (passing the
+        // v1 read-only gate) and the v1 hash is kind-blind — but `OpKey::dynamic` canonicalizes
+        // 'create_node' to the built-in WRITE op, ignoring the manifest kind. Before the kind
+        // guard, this hash-valid bundle silently became a write workload.
+        let dir = temp_bundle_dir("synthrec-kindv1");
+        let spec = DatasetSpec {
+            seed: 3,
+            nodes: 10,
+            edges: 20,
+        };
+        let ops = vec![RecordedOp {
+            key: OpKey::dynamic("plain_read", QueryType::Read),
+            result_gated: true,
+            budget: RecordedBudget::default(),
+            capability: None,
+            commands: vec!["RETURN 1".to_string()],
+        }];
+        let manifest = record_rendered(&spec, "g", &ops, 3, 8, &dir).unwrap();
+        assert_eq!(manifest.format_version, RECORDING_FORMAT_VERSION, "reads record as v1");
+
+        tamper_op_identity_with_valid_hash(&dir, "create_node", QueryType::Read);
+        let err = load(&dir).unwrap_err();
+        assert!(
+            format!("{err}").contains("cannot reinterpret a built-in op's kind"),
+            "got: {err}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_rejects_a_v2_bundle_reinterpreting_a_builtin_kind() {
+        // The v2 flavor: v2 hashes the kind, but the hash is computable by anyone — a crafted
+        // bundle can declare the built-in write 'create_node' as a read with a perfectly valid
+        // recomputed hash. The kind guard, not the hash gate, must reject it.
+        let dir = temp_bundle_dir("synthrec-kindv2");
+        let spec = DatasetSpec {
+            seed: 3,
+            nodes: 10,
+            edges: 20,
+        };
+        let ops = vec![RecordedOp {
+            key: OpKey::dynamic("w_op", QueryType::Write),
+            result_gated: false,
+            budget: RecordedBudget::default(),
+            capability: None,
+            commands: vec!["CREATE (n:X)".to_string()],
+        }];
+        let manifest = record_rendered(&spec, "g", &ops, 3, 8, &dir).unwrap();
+        assert_eq!(manifest.format_version, RECORDING_FORMAT_VERSION_WRITES, "writes are v2");
+
+        // Sanity: renaming to the built-in with the CORRECT kind loads fine — proving the
+        // tamper helper produces hash-valid bundles, so the rejection below is the kind guard
+        // alone, not the hash gate.
+        tamper_op_identity_with_valid_hash(&dir, "create_node", QueryType::Write);
+        load(&dir).expect("correct-kind rename with a recomputed hash must load");
+
+        // The attack: same built-in name, kind flipped to read (hash recomputed over 'read').
+        tamper_op_identity_with_valid_hash(&dir, "create_node", QueryType::Read);
+        let err = load(&dir).unwrap_err();
+        assert!(
+            format!("{err}").contains("cannot reinterpret a built-in op's kind"),
+            "got: {err}"
+        );
+
+        // The reverse direction is equally rejected: a built-in READ name declared as a write.
+        tamper_op_identity_with_valid_hash(&dir, "match_by_index", QueryType::Write);
+        let err = load(&dir).unwrap_err();
+        assert!(
+            format!("{err}").contains("cannot reinterpret a built-in op's kind"),
+            "got: {err}"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1303,13 +1712,32 @@ mod tests {
     #[test]
     fn workload_hash_is_length_framed() {
         // ["ab","c"] and ["a","bc"] must not collide — the length prefix disambiguates.
-        let mut h1 = WorkloadHasher(Sha256::new());
+        let mut h1 = WorkloadHasher(Sha256::new(), RECORDING_FORMAT_VERSION);
         h1.part(b"ab");
         h1.part(b"c");
-        let mut h2 = WorkloadHasher(Sha256::new());
+        let mut h2 = WorkloadHasher(Sha256::new(), RECORDING_FORMAT_VERSION);
         h2.part(b"a");
         h2.part(b"bc");
         assert_ne!(h1.finalize(), h2.finalize());
+    }
+
+    #[test]
+    fn op_header_hashes_the_kind_only_under_v2() {
+        // v1 op headers are kind-blind (byte-compat with every pre-Phase-7 bundle); v2 headers
+        // fold the kind in, so read- and write-kinded ops hash differently under v2 only.
+        let hash = |version: u32, kind: QueryType| {
+            let mut h = WorkloadHasher(Sha256::new(), version);
+            h.op_header("op", 1, kind);
+            h.finalize()
+        };
+        assert_eq!(
+            hash(RECORDING_FORMAT_VERSION, QueryType::Read),
+            hash(RECORDING_FORMAT_VERSION, QueryType::Write)
+        );
+        assert_ne!(
+            hash(RECORDING_FORMAT_VERSION_WRITES, QueryType::Read),
+            hash(RECORDING_FORMAT_VERSION_WRITES, QueryType::Write)
+        );
     }
 
     #[test]
