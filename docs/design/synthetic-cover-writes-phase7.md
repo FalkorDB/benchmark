@@ -19,7 +19,9 @@ not-comparable; **stats only** — write result *values* stay un-captured per §
 tier — minting **recording format v4**; **amendment (post-review):** v4 requires the prepared
 phase and the nine-op exact set, while **format v3 is frozen** as the §6.3-era layout — the
 seven-op eligible set, no prepared phase — so pre-§6.4 v3 bundles keep loading and replaying
-under their own exact-set rule; cross-version rehash flips v3↔v4 are refused); §6.5 (concurrency) **not implemented**. **Rubber-duck reviewed**; this revision folds in the review's corrections — the
+under their own exact-set rule; cross-version rehash flips v3↔v4 are refused); §6.5 (concurrency) **decided — recorded write replay stays C=1 permanently** (phasing
+item 5: verbatim replay of a fixed corpus on one shared graph cannot be partitioned across
+workers; enforced at record and replay). **Rubber-duck reviewed**; this revision folds in the review's corrections — the
 first draft's "counters are deterministic" thesis was wrong (see §10). Follows the reads-scope work
 (design [`synthetic-cover-ab-query-shapes.md`](./synthetic-cover-ab-query-shapes.md), Phases 1–5,
 merged in PRs #240–#250) and is the sibling of the algorithms design (Phase 6). The parent design
@@ -140,8 +142,10 @@ so a mixed bundle cannot express C=1 writes alongside C=1,8 reads).
   create/update, the create-once MERGEs, `foreach_loop_mutation`) via the online oracle at C=1;
   since §6.4 also `remove_user_property_and_label` (against the recorded prepared state) and
   `detach_delete_user` (variable counts, reproducible per-command from the restored base).
-- **Deferred:** `single_edge_update` (server `rand()`, §3.4 — outside any oracle); C>1 writes.
-- **Out:** Neo4j/Memgraph variants; any digest gating of write results; any change to the per-PR read
+- **Deferred:** `single_edge_update` (server `rand()`, §3.4 — outside any oracle).
+- **Out:** C>1 recorded writes (decided by §6.5 — see phasing item 5's evidence; the **live**
+  probe's partitioned scratch shapes remain the write concurrency-scaling story); Neo4j/Memgraph
+  variants; any digest gating of write results; any change to the per-PR read
   gate or the A/B `--query-profile`.
 
 ## 6. Phasing (each its own PR)
@@ -195,7 +199,36 @@ so a mixed bundle cannot express C=1 writes alongside C=1,8 reads).
    per-command loops opened two fresh TCP connections per command (~9 200 rapid connects per
    capture), which stalls macOS Docker port-forwarding into a spurious send timeout — the §6.3
    loops now reuse **one connection per pass** (`restore_base_on`).
-5. ⛔ **Concurrency** — decide C>1 (per-worker id partitioning) or keep C=1 for correctness.
+5. ✅ **Concurrency — decided: recorded write replay stays C=1, permanently (both tiers).**
+   The design's option (a), per-worker id partitioning, already exists in the **live** probe
+   (`synthetic run` without `--recording`): each worker mutates its own id band of a run-unique
+   scratch label (`writes.rs` `WriteScratch`), so concurrent write *scaling* stays the live
+   probe's job. That mechanism does **not** transfer to recorded replay — a bundle replays its
+   pre-rendered command text verbatim on one shared recorded graph, and re-rendering per worker
+   would break the record-once/replay-verbatim `workload_hash` contract. Splitting a recorded
+   corpus across workers instead was measured and rejected empirically (all evidence on
+   `falkordb/falkordb@sha256:e47e0fb112ff29764965a1c25e2f983dd269de33367ca3f2fba61368b735f38c`,
+   the digest behind the `:edge` tag used throughout Phase 7):
+   - *Corpus collisions (engine-independent, primary):* in the 9 write corpora of a
+     1 000-node/5 000-edge seed-42 bundle (`workload_hash`
+     `sha256:b998ea3b8b769bb987e367c795f9af0680bda3109dc1b46071dd8fc18365111f`), 27–107 of each
+     op's 256 commands hit a duplicate target id, and 25–101 of those pairs land on *different*
+     workers under an 8-way contiguous split — racing mutations of the same node/edge.
+   - *Topology (engine-independent, primary):* 35 068 of 50 000 edges (70%) in the 10 k/50 k
+     seed-42 graph cross an 8-way contiguous id-band partition, so edge-touching shapes cannot be
+     band-isolated at all.
+   - *MERGE races corrupt the graph (measured on the pinned engine):* two barrier-synced
+     connections MERGE-ing the same edge both fired `ON CREATE` in 200/200 trials, leaving two
+     duplicate edges each time — a C>1 split replay would *nondeterministically mutate the
+     recorded graph itself*, invalidating both latency comparison and the §6.3 oracle (whose
+     recorded outcomes are sequential by construction).
+   - *Control:* the engine itself scales partitioned point writes fine — indexed disjoint-band
+     `SET`s reached 3.2× throughput at C=8 vs C=1 — confirming the constraint is the recorded
+     corpus, not a global engine write lock.
+   Enforcement: replay has always validated the effective sweep (`validate_write_replay`,
+   `replay.rs`); record now also fails fast on a write op whose budget explicitly pins a non-`[1]`
+   sweep (`recording.rs`), so such a bundle can no longer be written. Budgets stay outside
+   `workload_hash`; no schema, format, or hash change.
 6. 🚧 **Docs** — folded into each phase's PR (doc sync is part of each phase's definition of
    done): §6.1's readme + cookbook updates shipped with phase 1.
 
