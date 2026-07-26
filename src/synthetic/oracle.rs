@@ -1,7 +1,9 @@
-//! Record-side §6.3 **outcome-oracle capture**: run each oracle-eligible write command against the
+//! Record-side §6.3/§6.4 **outcome-oracle capture**: run each oracle-eligible write command
+//! against the
 //! recorded **pristine base** on a live engine, capture the [`MutationStats`] it effects, prove the
 //! outcomes are deterministic with a second independent pass, and fold them into the bundle
-//! ([`recording::attach_oracle`], format v4).
+//! ([`recording::attach_oracle`], format v4 — the §6.4 nine-op eligible set over the recorded
+//! prepared state).
 //!
 //! This is the one deliberate departure from the offline read recorder (design §3.2 / risk §7.2):
 //! write counters are state/value/order-dependent — MERGE create-vs-match, SET-same-value counting
@@ -88,6 +90,21 @@ pub async fn capture(
              oracle-eligible set) — nothing to capture"
                 .to_string(),
         ));
+    }
+    // Preflight the §6.4 prepared-phase requirement `attach_oracle` enforces at the END of the
+    // capture, so a stale/hand-crafted bundle fails here in milliseconds instead of after the
+    // two full online passes.
+    if !bundle
+        .graph_statements
+        .iter()
+        .any(|(p, _)| *p == crate::synthetic::dataset::LoadPhase::Prepared)
+    {
+        return Err(OtherError(format!(
+            "{} lacks the §6.4 prepared load phase — a v{} oracle bundle records the prepared \
+             state; re-record the bundle with this build instead of capturing over a stale one",
+            dir.display(),
+            recording::RECORDING_FORMAT_VERSION_ORACLE_PREPARED
+        )));
     }
 
     // A minimal replay-shaped config: `restore_base` needs only the endpoint + timeouts.
@@ -290,6 +307,32 @@ mod tests {
         recording::attach_oracle(&dir, &oracle).unwrap();
         let err = capture("falkor://127.0.0.1:1", &dir, 5_000, 6_000).await.unwrap_err();
         assert!(format!("{err}").contains("already carries"), "got: {err}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn capture_rejects_a_bundle_without_the_prepared_phase_offline() {
+        // A stale/hand-crafted v2 bundle without the §6.4 prepared phase would only fail at the
+        // END of the (expensive) online capture, in attach_oracle — the preflight must refuse it
+        // immediately, before any connection (closed port ⇒ the error is the preflight's).
+        let dir = temp_bundle_dir("synthorc-noprep");
+        let spec = DatasetSpec {
+            seed: 1,
+            nodes: 10,
+            edges: 20,
+        };
+        let ops = vec![RecordedOp {
+            key: OpKey::dynamic("single_vertex_write", crate::queries_repository::QueryType::Write),
+            result_gated: false,
+            budget: Default::default(),
+            capability: None,
+            commands: vec!["CYPHER x=1 CREATE (n:User {id:$x})".to_string()],
+        }];
+        crate::synthetic::recording::record_rendered(&spec, "g", &ops, 1, 8, &dir).unwrap();
+        let err = capture("falkor://127.0.0.1:1", &dir, 5_000, 6_000).await.unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("lacks the §6.4 prepared load phase"), "got: {msg}");
+        assert!(msg.contains("re-record the bundle"), "got: {msg}");
         std::fs::remove_dir_all(&dir).ok();
     }
 
