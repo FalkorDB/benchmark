@@ -24,8 +24,9 @@
 //! outcomes are state/value-dependent (§10), so the latency tier records `result_digest: None`
 //! and leaves correctness to the deferred oracle tier. The replay ends with an **error-safe final
 //! restore**: the recorded base is reloaded (on success *and* failure) and its node/edge content
-//! digests are verified against the pristine post-load capture, so a write replay can never leave
-//! a mutated graph behind on the endpoint.
+//! digests are verified against the pristine post-load capture, so a write replay never silently
+//! leaves a mutated graph behind — if the restore itself fails, that failure is surfaced
+//! (combined with the measurement error when both fail).
 
 use crate::error::BenchmarkError::OtherError;
 use crate::error::BenchmarkResult;
@@ -96,7 +97,8 @@ pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
     let bundle = recording::load(&config.recording_dir)?;
     // A bundle is single-kind: reads replay through RO_QUERY exactly as before; a write bundle
     // (format v2) takes the Phase 7 write path. Its invariants — no mixed kinds, no --no-load,
-    // C=1 only, nothing result-gated — are guarded up front, offline, before any connection.
+    // C=1 only, nothing result-gated, nothing capability-gated — are guarded up front, offline,
+    // before any connection.
     let has_writes = bundle.commands.iter().any(|(op, _)| op.kind() == QueryType::Write);
     if has_writes {
         validate_write_replay(&bundle, config, &concurrency)?;
@@ -392,19 +394,14 @@ pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
     .await;
 
     // Phase 7 §3.5: a write replay must leave the endpoint's graph exactly as recorded — final
-    // restore + content verification on success AND failure. On the failure path the restore is
-    // best-effort (logged, never masking the measurement error).
-    if let Some(pristine) = &pristine {
-        let restored = restore_and_verify(&bundle, &graph_name, &dataset_spec, config, pristine).await;
-        match (&measured, restored) {
-            (Ok(()), Err(e)) => return Err(e),
-            (Err(original), Err(e)) => warn!(
-                "final restore after failed write replay also failed: {} (measurement error: {})",
-                e, original
-            ),
-            _ => {}
-        }
-    }
+    // restore + content verification on success AND failure.
+    let measured = if let Some(pristine) = &pristine {
+        let restored =
+            restore_and_verify(&bundle, &graph_name, &dataset_spec, config, pristine).await;
+        reconcile_measure_and_restore(measured, restored, &graph_name)
+    } else {
+        measured
+    };
     measured?;
 
     // The corpus size is what the bundle actually recorded per op (not the compile-time constant) —
@@ -466,7 +463,10 @@ pub async fn run_and_report(config: &ReplayConfig) -> BenchmarkResult<()> {
 /// - **C=1 only**: every write op's *effective* sweep (its recorded budget's, else the run's)
 ///   must be exactly `[1]` (§5 defers concurrent writes);
 /// - **never result-gated**: the latency tier asserts nothing (§4.1) — a gated write would imply
-///   a correctness capture the write path deliberately skips.
+///   a correctness capture the write path deliberately skips;
+/// - **never capability-gated**: write shapes are algorithm-free plain Cypher (§4.1), and
+///   `capability` is outside `workload_hash` — a crafted capability would otherwise let the probe
+///   silently skip an op, shrinking the all-ten coverage while the replay still "succeeds".
 fn validate_write_replay(
     bundle: &Bundle,
     config: &ReplayConfig,
@@ -504,6 +504,15 @@ fn validate_write_replay(
                 "write op '{}' is marked result-gated — the write latency tier asserts nothing \
                  (design §4.1), so a write op can never gate on a result digest",
                 op.name()
+            )));
+        }
+        if let Some(capability) = entry.and_then(|e| e.capability.as_deref()) {
+            return Err(OtherError(format!(
+                "write op '{}' declares capability '{}' — write ops are plain Cypher and never \
+                 capability-gated (design §4.1; capability is outside workload_hash, so this is \
+                 enforced at replay: a crafted capability must not skip-shrink the write coverage)",
+                op.name(),
+                capability
             )));
         }
     }
@@ -619,6 +628,27 @@ async fn capture_graph_content(
         );
     }
     Ok(shapes)
+}
+
+/// Reconcile a write replay's measurement outcome with its §3.5 final-restore outcome. A restore
+/// failure surfaces even when the measurement succeeded, and a **dual** failure returns a
+/// combined error naming both — the caller must learn that the endpoint's graph may be left
+/// polluted, not just that the measurement failed.
+fn reconcile_measure_and_restore(
+    measured: BenchmarkResult<()>,
+    restored: BenchmarkResult<()>,
+    graph_name: &str,
+) -> BenchmarkResult<()> {
+    match (measured, restored) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Ok(()), Err(restore)) => Err(restore),
+        (Err(original), Ok(())) => Err(original),
+        (Err(original), Err(restore)) => Err(OtherError(format!(
+            "write replay failed AND its final restore failed — graph '{}' may be left polluted \
+             (measurement error: {}; restore error: {})",
+            graph_name, original, restore
+        ))),
+    }
 }
 
 /// The write replay's final restore (§3.5): reload the recorded base graph, then verify its
@@ -952,5 +982,95 @@ mod tests {
             ("w2", QueryType::Write, false, RecordedBudget::default()),
         ]);
         validate_write_replay(&bundle, &replay_config(true, vec![1]), &[1]).unwrap();
+    }
+
+    #[test]
+    fn validate_write_replay_rejects_a_capability_on_a_write_op() {
+        // §4.1: writes are plain Cypher — and `capability` is outside workload_hash, so a crafted
+        // capability naming a procedure the engine lacks would otherwise make the probe skip the
+        // op, silently shrinking the all-ten coverage while the replay still "succeeds".
+        let mut bundle = bundle_of(vec![("w", QueryType::Write, false, write_budget())]);
+        bundle.manifest.ops[0].capability = Some("algo.nonexistent".to_string());
+        let err = validate_write_replay(&bundle, &replay_config(true, vec![1]), &[1]).unwrap_err();
+        assert!(format!("{err}").contains("never capability-gated"), "got: {err}");
+        assert!(format!("{err}").contains("algo.nonexistent"), "must name the capability: {err}");
+    }
+
+    #[tokio::test]
+    async fn run_rejects_a_tampered_capability_on_a_write_bundle() {
+        // The full disk-level attack: `capability` is not folded into workload_hash, so adding a
+        // nonexistent capability to a recorded write bundle survives `recording::load`'s hash
+        // gate. The offline write guard must then fail the replay closed — before this guard the
+        // replay "succeeded" with the op capability-skipped.
+        use crate::synthetic::recording::{record_rendered, temp_bundle_dir, RecordedOp};
+
+        let dir = temp_bundle_dir("replay-cap-tamper");
+        let spec = DatasetSpec {
+            seed: 7,
+            nodes: 10,
+            edges: 20,
+        };
+        let ops = vec![RecordedOp {
+            key: OpKey::dynamic("w_op", QueryType::Write),
+            result_gated: false,
+            budget: write_budget(),
+            capability: None,
+            commands: vec!["CREATE (n:X)".to_string()],
+        }];
+        record_rendered(&spec, "g", &ops, 7, 64, &dir).expect("record a legit write bundle");
+
+        let manifest_path = dir.join("manifest.json");
+        let mut manifest: Manifest =
+            serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
+        manifest.ops[0].capability = Some("algo.nonexistent".to_string());
+        std::fs::write(&manifest_path, serde_json::to_string(&manifest).unwrap()).unwrap();
+        recording::load(&dir)
+            .expect("capability is unhashed, so the tamper must survive the load hash gate");
+
+        let mut config = replay_config(true, vec![1]);
+        config.recording_dir = dir.clone();
+        let err = run(&config).await.unwrap_err();
+        assert!(format!("{err}").contains("never capability-gated"), "got: {err}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn reconcile_measure_and_restore_combines_a_dual_failure() {
+        // §3.5: when the measurement AND the final restore both fail, the caller must see both —
+        // the restore failure means the endpoint's graph may be left polluted, which the
+        // measurement error alone would hide.
+        let err = reconcile_measure_and_restore(
+            Err(OtherError("probe exploded".to_string())),
+            Err(OtherError("content diverged".to_string())),
+            "g7",
+        )
+        .unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("may be left polluted"), "got: {msg}");
+        assert!(msg.contains("g7"), "must name the graph: {msg}");
+        assert!(msg.contains("probe exploded"), "must surface the measurement error: {msg}");
+        assert!(msg.contains("content diverged"), "must surface the restore error: {msg}");
+    }
+
+    #[test]
+    fn reconcile_measure_and_restore_passes_single_outcomes_through() {
+        assert!(reconcile_measure_and_restore(Ok(()), Ok(()), "g").is_ok());
+        let err = reconcile_measure_and_restore(
+            Ok(()),
+            Err(OtherError("restore only".to_string())),
+            "g",
+        )
+        .unwrap_err();
+        assert!(format!("{err}").contains("restore only"), "got: {err}");
+        let err = reconcile_measure_and_restore(
+            Err(OtherError("measure only".to_string())),
+            Ok(()),
+            "g",
+        )
+        .unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("measure only"), "got: {msg}");
+        assert!(!msg.contains("polluted"), "a successful restore is not a dual failure: {msg}");
     }
 }

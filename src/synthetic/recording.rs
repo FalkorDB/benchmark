@@ -78,7 +78,10 @@ pub struct OpEntry {
     /// string-keyed dynamic op. Defaults to `Read` for bundles written before this field existed
     /// (v1 records reads only). Under format v2+ (write bundles, Phase 7 §3.1) the kind **is**
     /// folded into the [`Manifest::workload_hash`], so a bundle's read/write nature can't be
-    /// silently flipped; v1 (read-only) hashes never covered it and stay byte-identical.
+    /// silently flipped; v1 (read-only) hashes never covered it and stay byte-identical. In both
+    /// formats [`load`] also rejects an entry whose declared kind contradicts its built-in name's
+    /// catalog kind — the hash is computable by anyone, so a crafted-but-hash-valid manifest must
+    /// not reinterpret a built-in op (e.g. declare the write `create_node` as a read).
     #[serde(default = "default_op_kind")]
     pub kind: QueryType,
     /// Whether this op's result is compared across the A/B (record-once / replay-verbatim) gate.
@@ -433,6 +436,20 @@ fn record_rendered_impl(
             .to_string(),
         ));
     }
+    // The write latency tier is algorithm-free plain Cypher (Phase 7 §4.1): no engine procedure to
+    // probe for, so a capability on a write op is meaningless — and `capability` is outside the
+    // workload hash, so replay independently re-rejects it (a capability-skip would silently
+    // shrink the all-ten write coverage).
+    if let Some(op) =
+        ops.iter().find(|op| op.key.kind() == QueryType::Write && op.capability.is_some())
+    {
+        return Err(OtherError(format!(
+            "write op '{}' declares capability '{}' — write ops are plain Cypher and never \
+             capability-gated (Phase 7 §4.1)",
+            op.key.name(),
+            op.capability.as_deref().unwrap_or_default()
+        )));
+    }
     // Content-determined format version: any write op ⇒ v2 (kind folded into the workload hash);
     // an all-read bundle stays v1, byte-identical to every bundle recorded before writes existed.
     let format_version = if has_writes {
@@ -612,6 +629,20 @@ pub fn load(dir: &Path) -> BenchmarkResult<Bundle> {
         // name back to its `OpName` (keeping the built-in salt/kind); a name with no `OpName`
         // becomes a string-keyed dynamic op. Either way the bundle round-trips by name.
         let op = OpKey::dynamic(entry.name.clone(), entry.kind);
+        // …but that canonicalization IGNORES the manifest kind for a built-in name, so a crafted
+        // manifest declaring a built-in under the wrong kind (e.g. the write op `create_node` as a
+        // `read`) would be silently reinterpreted with the catalog kind — sidestepping the v1
+        // read-only gate above and, under v1's kind-blind hash, the integrity check too. Reject
+        // the mismatch instead of reinterpreting it.
+        if op.kind() != entry.kind {
+            return Err(OtherError(format!(
+                "manifest declares op '{}' as kind '{}', but that name is the built-in '{}' op — \
+                 a bundle cannot reinterpret a built-in op's kind (crafted/corrupt manifest)",
+                entry.name,
+                command_kind(entry.kind),
+                command_kind(op.kind()),
+            )));
+        }
         let path = dir.join("commands").join(format!("{}.jsonl", entry.name));
         let recs: Vec<CommandRecord> = read_jsonl(&path)?;
         if recs.len() != entry.count {
@@ -1158,6 +1189,150 @@ mod tests {
         ];
         let err = record_rendered(&spec, "g", &ops, 1, 8, &dir).unwrap_err();
         assert!(format!("{err}").contains("mixed read+write bundle"), "got: {err}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn record_rendered_rejects_a_capability_on_a_write_op() {
+        // Phase 7 §4.1: the write latency tier is algorithm-free plain Cypher — a capability on a
+        // write op is meaningless at record time (and unhashed, so replay re-rejects it too).
+        let dir = temp_bundle_dir("synthrec-writecap");
+        let spec = DatasetSpec {
+            seed: 1,
+            nodes: 10,
+            edges: 20,
+        };
+        let ops = vec![RecordedOp {
+            key: OpKey::dynamic("w_cap", QueryType::Write),
+            result_gated: false,
+            budget: RecordedBudget::default(),
+            capability: Some("algo.maxFlow".to_string()),
+            commands: vec!["CREATE (n)".to_string()],
+        }];
+        let err = record_rendered(&spec, "g", &ops, 1, 8, &dir).unwrap_err();
+        assert!(format!("{err}").contains("never capability-gated"), "got: {err}");
+        assert!(format!("{err}").contains("algo.maxFlow"), "must name the capability: {err}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Rewrite the bundle's single op to `new_name`/`new_kind` (renaming its commands file to
+    /// match) and **recompute a valid `workload_hash`** over the tampered content — modeling an
+    /// attacker who can rewrite the whole bundle (the hash is computable by anyone; it is an
+    /// integrity check, not a MAC) but cannot change what a built-in op name *means*.
+    fn tamper_op_identity_with_valid_hash(
+        dir: &Path,
+        new_name: &str,
+        new_kind: QueryType,
+    ) {
+        let manifest_path = dir.join("manifest.json");
+        let mut manifest: Manifest =
+            serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
+        let old_name = manifest.ops[0].name.clone();
+        manifest.ops[0].name = new_name.to_string();
+        manifest.ops[0].kind = new_kind;
+        if old_name != new_name {
+            std::fs::rename(
+                dir.join("commands").join(format!("{old_name}.jsonl")),
+                dir.join("commands").join(format!("{new_name}.jsonl")),
+            )
+            .unwrap();
+        }
+        let graph_records: Vec<GraphRecord> = read_jsonl(&dir.join("graph.jsonl")).unwrap();
+        let mut hasher = WorkloadHasher::new(
+            manifest.format_version,
+            &manifest.generator_version,
+            &manifest.dataset,
+            &manifest.graph,
+            manifest.corpus_seed,
+        );
+        for rec in &graph_records {
+            hasher.graph_record(&rec.phase, &rec.cypher);
+        }
+        for entry in &manifest.ops {
+            let recs: Vec<CommandRecord> =
+                read_jsonl(&dir.join("commands").join(format!("{}.jsonl", entry.name))).unwrap();
+            hasher.op_header(&entry.name, recs.len(), entry.kind);
+            for rec in &recs {
+                hasher.command(&rec.cypher);
+            }
+        }
+        manifest.workload_hash = hasher.finalize();
+        std::fs::write(&manifest_path, serde_json::to_string(&manifest).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn load_rejects_a_v1_bundle_reinterpreting_a_builtin_write_as_read() {
+        // The reinterpretation attack, v1 flavor: every v1 entry claims kind read (passing the
+        // v1 read-only gate) and the v1 hash is kind-blind — but `OpKey::dynamic` canonicalizes
+        // 'create_node' to the built-in WRITE op, ignoring the manifest kind. Before the kind
+        // guard, this hash-valid bundle silently became a write workload.
+        let dir = temp_bundle_dir("synthrec-kindv1");
+        let spec = DatasetSpec {
+            seed: 3,
+            nodes: 10,
+            edges: 20,
+        };
+        let ops = vec![RecordedOp {
+            key: OpKey::dynamic("plain_read", QueryType::Read),
+            result_gated: true,
+            budget: RecordedBudget::default(),
+            capability: None,
+            commands: vec!["RETURN 1".to_string()],
+        }];
+        let manifest = record_rendered(&spec, "g", &ops, 3, 8, &dir).unwrap();
+        assert_eq!(manifest.format_version, RECORDING_FORMAT_VERSION, "reads record as v1");
+
+        tamper_op_identity_with_valid_hash(&dir, "create_node", QueryType::Read);
+        let err = load(&dir).unwrap_err();
+        assert!(
+            format!("{err}").contains("cannot reinterpret a built-in op's kind"),
+            "got: {err}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_rejects_a_v2_bundle_reinterpreting_a_builtin_kind() {
+        // The v2 flavor: v2 hashes the kind, but the hash is computable by anyone — a crafted
+        // bundle can declare the built-in write 'create_node' as a read with a perfectly valid
+        // recomputed hash. The kind guard, not the hash gate, must reject it.
+        let dir = temp_bundle_dir("synthrec-kindv2");
+        let spec = DatasetSpec {
+            seed: 3,
+            nodes: 10,
+            edges: 20,
+        };
+        let ops = vec![RecordedOp {
+            key: OpKey::dynamic("w_op", QueryType::Write),
+            result_gated: false,
+            budget: RecordedBudget::default(),
+            capability: None,
+            commands: vec!["CREATE (n:X)".to_string()],
+        }];
+        let manifest = record_rendered(&spec, "g", &ops, 3, 8, &dir).unwrap();
+        assert_eq!(manifest.format_version, RECORDING_FORMAT_VERSION_WRITES, "writes are v2");
+
+        // Sanity: renaming to the built-in with the CORRECT kind loads fine — proving the
+        // tamper helper produces hash-valid bundles, so the rejection below is the kind guard
+        // alone, not the hash gate.
+        tamper_op_identity_with_valid_hash(&dir, "create_node", QueryType::Write);
+        load(&dir).expect("correct-kind rename with a recomputed hash must load");
+
+        // The attack: same built-in name, kind flipped to read (hash recomputed over 'read').
+        tamper_op_identity_with_valid_hash(&dir, "create_node", QueryType::Read);
+        let err = load(&dir).unwrap_err();
+        assert!(
+            format!("{err}").contains("cannot reinterpret a built-in op's kind"),
+            "got: {err}"
+        );
+
+        // The reverse direction is equally rejected: a built-in READ name declared as a write.
+        tamper_op_identity_with_valid_hash(&dir, "match_by_index", QueryType::Write);
+        let err = load(&dir).unwrap_err();
+        assert!(
+            format!("{err}").contains("cannot reinterpret a built-in op's kind"),
+            "got: {err}"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

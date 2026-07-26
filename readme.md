@@ -534,8 +534,10 @@ just synthetic-compare-versions demo falkor://127.0.0.1:6379 falkor://127.0.0.1:
   about write results or counters (`result_digest` stays `null`; latency tier). The replay ends
   with an **error-safe final restore** — on success *and* failure the recorded base is reloaded
   and its node/edge **content digests** are verified against the pristine post-load capture, so a
-  write replay never leaves a mutated graph behind. `--no-load` is refused for write bundles, and
-  a bundle can never mix reads with writes.
+  write replay never silently leaves a mutated graph behind (a dual measurement+restore failure
+  surfaces **both** errors). `--no-load` is refused for write bundles, a bundle can never mix
+  reads with writes, and a write op can never be capability-gated (capabilities are unhashed, so
+  a crafted one could otherwise skip-shrink the ten-shape coverage).
 - **`benchmark synthetic report --diff <A.json> <B.json> [--out diff.md]`** **guards** the pair (it
   aborts unless the `workload_hash` **and** every op's `result_digest` match, so a version returning
   wrong/empty results faster can't masquerade as an improvement — the version difference itself is
