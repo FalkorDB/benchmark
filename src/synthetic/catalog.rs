@@ -12,7 +12,7 @@ use crate::error::BenchmarkError::OtherError;
 use crate::error::BenchmarkResult;
 use crate::queries_repository::QueryType;
 use crate::query::{Query, QueryBuilder};
-use crate::synthetic::writes::{ExpectedMutation, WritePlan, WriteScratch};
+use crate::synthetic::writes::{ExpectedOutcome, WritePlan, WriteScratch};
 use crate::synthetic::{CacheSelection, OpName, Tier};
 use rand::{Rng, RngExt};
 use serde::{Deserialize, Serialize};
@@ -327,7 +327,7 @@ pub fn spec(op: OpName) -> OperationSpec {
             budget: OpBudget::INHERIT,
             corpus: write_corpus_stub,
             write: Some(WritePlan {
-                expected: ExpectedMutation::NodeCreated,
+                expected: ExpectedOutcome::node_created(),
                 plan_tag: "create_node.v1",
                 default_reset_every: DEFAULT_RESET_EVERY,
                 setup: write_clear_band,
@@ -345,7 +345,7 @@ pub fn spec(op: OpName) -> OperationSpec {
             budget: OpBudget::INHERIT,
             corpus: write_corpus_stub,
             write: Some(WritePlan {
-                expected: ExpectedMutation::NodeCreated,
+                expected: ExpectedOutcome::node_created(),
                 plan_tag: "merge_miss.v1",
                 default_reset_every: DEFAULT_RESET_EVERY,
                 setup: write_clear_band,
@@ -363,7 +363,7 @@ pub fn spec(op: OpName) -> OperationSpec {
             budget: OpBudget::INHERIT,
             corpus: write_corpus_stub,
             write: Some(WritePlan {
-                expected: ExpectedMutation::RelationshipCreated,
+                expected: ExpectedOutcome::relationship_created(),
                 plan_tag: "create_edge.v1",
                 default_reset_every: DEFAULT_RESET_EVERY,
                 setup: write_reset_populated,
@@ -381,7 +381,7 @@ pub fn spec(op: OpName) -> OperationSpec {
             budget: OpBudget::INHERIT,
             corpus: write_corpus_stub,
             write: Some(WritePlan {
-                expected: ExpectedMutation::PropertySet,
+                expected: ExpectedOutcome::property_set(),
                 plan_tag: "set_property.v1",
                 default_reset_every: DEFAULT_RESET_EVERY,
                 setup: write_reset_populated,
@@ -399,7 +399,7 @@ pub fn spec(op: OpName) -> OperationSpec {
             budget: OpBudget::INHERIT,
             corpus: write_corpus_stub,
             write: Some(WritePlan {
-                expected: ExpectedMutation::NodeDeleted,
+                expected: ExpectedOutcome::node_deleted(),
                 plan_tag: "delete_node.v1",
                 default_reset_every: DEFAULT_RESET_EVERY,
                 setup: write_reset_populated,
@@ -417,7 +417,7 @@ pub fn spec(op: OpName) -> OperationSpec {
             budget: OpBudget::INHERIT,
             corpus: write_corpus_stub,
             write: Some(WritePlan {
-                expected: ExpectedMutation::NodeMatched,
+                expected: ExpectedOutcome::node_matched(),
                 plan_tag: "merge_hit.v1",
                 default_reset_every: DEFAULT_RESET_EVERY,
                 setup: write_reset_populated,
@@ -879,20 +879,19 @@ mod tests {
 
     #[test]
     fn write_ops_carry_a_write_plan_and_write_kind() {
-        use ExpectedMutation::*;
         let expected = [
-            (OpName::CreateNode, NodeCreated),
-            (OpName::MergeMiss, NodeCreated),
-            (OpName::CreateEdge, RelationshipCreated),
-            (OpName::SetProperty, PropertySet),
-            (OpName::DeleteNode, NodeDeleted),
-            (OpName::MergeHit, NodeMatched),
+            (OpName::CreateNode, ExpectedOutcome::node_created()),
+            (OpName::MergeMiss, ExpectedOutcome::node_created()),
+            (OpName::CreateEdge, ExpectedOutcome::relationship_created()),
+            (OpName::SetProperty, ExpectedOutcome::property_set()),
+            (OpName::DeleteNode, ExpectedOutcome::node_deleted()),
+            (OpName::MergeHit, ExpectedOutcome::node_matched()),
         ];
-        for (op, mutation) in expected {
+        for (op, outcome) in expected {
             let s = spec(op);
             assert_eq!(s.kind, QueryType::Write, "{} is a write op", op.as_str());
             let plan = s.write.expect("write op carries a WritePlan");
-            assert_eq!(plan.expected, mutation, "{} expected mutation", op.as_str());
+            assert_eq!(plan.expected, outcome, "{} expected outcome", op.as_str());
             assert_eq!(plan.default_reset_every, DEFAULT_RESET_EVERY);
         }
         // Every catalog op agrees on kind vs. the presence of a write plan.

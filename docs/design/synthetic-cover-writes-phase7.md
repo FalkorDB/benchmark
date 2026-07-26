@@ -3,8 +3,9 @@
 **Status:** §6.1 **implemented** (write-capable record/replay, latency tier for all 10 write
 shapes — recording format v2 with kind-bound `workload_hash`, `--repo-writes` selector,
 `GRAPH.QUERY` C=1 measure path with per-cell base reset + verified error-safe final restore);
-§6.2–§6.5 (outcome model, online oracle / correctness tier, prepared-state variants, concurrency)
-**not implemented**. **Rubber-duck reviewed**; this revision folds in the review's corrections — the
+§6.2 **implemented** (generalized `ExpectedOutcome` model, full 7-counter `MutationStats`,
+`restore_base` per-invocation restore primitive); §6.3–§6.5 (online oracle / correctness tier,
+prepared-state variants, concurrency) **not implemented**. **Rubber-duck reviewed**; this revision folds in the review's corrections — the
 first draft's "counters are deterministic" thesis was wrong (see §10). Follows the reads-scope work
 (design [`synthetic-cover-ab-query-shapes.md`](./synthetic-cover-ab-query-shapes.md), Phases 1–5,
 merged in PRs #240–#250) and is the sibling of the algorithms design (Phase 6). The parent design
@@ -43,12 +44,14 @@ first draft listed 8 and mis-described several:
 The synthetic **live** path benchmarks *synthetic-owned* writes with isolation
 (`src/synthetic/writes.rs`, `src/synthetic/catalog.rs:272-370`), but the primitives **do not** transfer cleanly:
 
-- **`ExpectedMutation`** is **5 rigid unit variants** and **`MutationStats` has only 4 counters**
-  (`src/synthetic/writes.rs:221-287`): `nodes_created`/`nodes_deleted`/`relationships_created`/`properties_set` —
+- **`ExpectedMutation`** *was* **5 rigid unit variants** and **`MutationStats` had only 4 counters**:
+  `nodes_created`/`nodes_deleted`/`relationships_created`/`properties_set` —
   **no** `relationships_deleted`, `properties_removed`, or `labels_removed` (the client exposes them,
   `vendor/falkordb-rs/src/response/mod.rs:109-156`). So `detach_delete_user` and
-  `remove_user_property_and_label` are **unrepresentable** today, and `NodeMatched` (which requires
-  `properties_set == 0`) cannot model an upsert that matches *and* updates.
+  `remove_user_property_and_label` were **unrepresentable**, and `NodeMatched` (which required
+  `properties_set == 0`) could not model an upsert that matches *and* updates. *Resolved by §6.2
+  (phasing item 2): `MutationStats` now carries all 7 counters and the generalized `ExpectedOutcome`
+  (`src/synthetic/writes.rs`) replaces the variants with per-counter `Exactly(n)`/`Any` expectations.*
 - **`verify_mutation` is value-dependent, not value-independent** — FalkorDB counts *actual* changes,
   so `single_vertex_update`/`merge_user_upsert_existing`/`single_edge_update` flap between
   `properties_set` 1 and 0 when a repeated value is already set (observed even at C=1).
@@ -120,15 +123,16 @@ so a mixed bundle cannot express C=1 writes alongside C=1,8 reads).
 - **In (correctness tier, staged):** the deterministic fixed-outcome subset (the two plain
   create/update, the create-once MERGEs, `foreach_loop_mutation`) via the online oracle at C=1.
 - **Deferred:** `single_edge_update` (server `rand()`), `remove_user_property_and_label` (prepared
-  state), `detach_delete_user`'s variable counts until `relationships_deleted` is added; C>1 writes.
+  state), `detach_delete_user`'s variable counts until the §6.3 online oracle records per-invocation
+  expected values (the `relationships_deleted` counter itself landed with §6.2); C>1 writes.
 - **Out:** Neo4j/Memgraph variants; any digest gating of write results; any change to the per-PR read
   gate or the A/B `--query-profile`.
 
 ## 6. Phasing (each its own PR)
 1. ✅ **Write-capable record/replay (latency-only):** versioned bundle with hashed write kind,
    recorded-write worker, `GRAPH.QUERY` measure path, periodic base reset. Latency tier for all 10.
-2. ⛔ **Generalized outcome model + full `MutationStats`** (`relationships_deleted`/`properties_removed`/
-   `labels_removed`); per-invocation restore primitive.
+2. ✅ **Generalized outcome model + full `MutationStats`** (`relationships_deleted`/`properties_removed`/
+   `labels_removed`); per-invocation restore primitive (`replay::restore_base`).
 3. ⛔ **Online outcome oracle** at record time (capture per-command stats+result), C=1 correctness tier
    for the deterministic subset.
 4. ⛔ **Prepared-state + removal shapes** (`remove_user_property_and_label`) and variable-count
