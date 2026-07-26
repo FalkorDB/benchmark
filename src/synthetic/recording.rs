@@ -76,8 +76,9 @@ pub const RECORDING_FORMAT_VERSION_WRITES: u32 = 2;
 pub const RECORDING_FORMAT_VERSION_ORACLE: u32 = 3;
 
 /// On-disk bundle format version for §6.4 **prepared oracle** bundles — what
-/// [`attach_oracle`] mints today: the oracle covers exactly the **live** oracle-eligible set
-/// (nine ops, [`shapes::oracle_eligible_names`](crate::synthetic::shapes::oracle_eligible_names))
+/// [`attach_oracle`] mints today: the oracle covers exactly the **frozen** nine-op §6.4 set
+/// ([`V4_ORACLE_OPS`]; a drift-guard test pins it to the live
+/// [`shapes::oracle_eligible_names`](crate::synthetic::shapes::oracle_eligible_names) registry)
 /// and the recorded graph **must** end with the §6.4 prepared load phase (the state the
 /// `REMOVE` shape mutates). Same hash rules as v3 (oracle records hash-bound); the version
 /// byte differs, so a v3↔v4 rehash flip is caught by the layout gates even before content.
@@ -87,9 +88,9 @@ pub const RECORDING_FORMAT_VERSION_ORACLE_PREPARED: u32 = 4;
 const RECORDING_FORMAT_VERSION_MAX: u32 = RECORDING_FORMAT_VERSION_ORACLE_PREPARED;
 
 /// The §6.3-era oracle-eligible write ops — **frozen** as recorded history: this is the exact
-/// set a format-v3 bundle must carry oracles for. Never derive it from the live shape registry
-/// (that is what [`RECORDING_FORMAT_VERSION_ORACLE_PREPARED`] uses); v3's meaning never changes
-/// again, or every existing v3 bundle would retroactively become "corrupt".
+/// set a format-v3 bundle must carry oracles for. Never derive a version's required set from
+/// the live shape registry; a version's meaning never changes again, or every existing bundle
+/// of that version would retroactively become "corrupt".
 const LEGACY_V3_ORACLE_OPS: [&str; 7] = [
     "single_vertex_write",
     "single_vertex_update",
@@ -100,13 +101,29 @@ const LEGACY_V3_ORACLE_OPS: [&str; 7] = [
     "foreach_loop_mutation",
 ];
 
+/// The §6.4 oracle-eligible write ops — **frozen** exactly like [`LEGACY_V3_ORACLE_OPS`]: the
+/// exact set a format-v4 bundle must carry oracles for. A future eligibility change must mint a
+/// new format version, never edit this list (a drift-guard test pins it to the live registry so
+/// the divergence is loud at build time, not at load time on existing bundles).
+const V4_ORACLE_OPS: [&str; 9] = [
+    "single_vertex_write",
+    "single_vertex_update",
+    "single_edge_write",
+    "merge_user_insert_path",
+    "merge_user_upsert_existing",
+    "merge_friend_edge_upsert",
+    "foreach_loop_mutation",
+    "detach_delete_user",
+    "remove_user_property_and_label",
+];
+
 /// The oracle-eligible op names a bundle of `format_version` is required to cover exactly:
-/// the frozen [`LEGACY_V3_ORACLE_OPS`] for v3, the live registry for v4+.
+/// the frozen [`LEGACY_V3_ORACLE_OPS`] for v3, the frozen [`V4_ORACLE_OPS`] for v4.
 pub(crate) fn oracle_required_ops(
     format_version: u32,
 ) -> std::collections::BTreeSet<&'static str> {
     if format_version >= RECORDING_FORMAT_VERSION_ORACLE_PREPARED {
-        crate::synthetic::shapes::oracle_eligible_names()
+        V4_ORACLE_OPS.iter().copied().collect()
     } else {
         LEGACY_V3_ORACLE_OPS.iter().copied().collect()
     }
@@ -3078,6 +3095,19 @@ mod tests {
         let msg = format!("{err}");
         assert!(msg.contains("records no write ops"), "got: {msg}");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_frozen_v4_set_matches_the_live_registry() {
+        // Drift-guard: v4's required set is FROZEN (V4_ORACLE_OPS) so future eligibility edits
+        // can't retroactively corrupt existing v4 bundles. If this fails, the live shape
+        // registry changed — mint a NEW recording format version for the new set (as v4 did for
+        // §6.4) instead of editing the frozen list.
+        assert_eq!(
+            oracle_required_ops(RECORDING_FORMAT_VERSION_ORACLE_PREPARED),
+            crate::synthetic::shapes::oracle_eligible_names(),
+            "the live oracle-eligible set diverged from frozen v4 — mint a new format version"
+        );
     }
 
     #[test]
