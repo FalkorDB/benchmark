@@ -1928,8 +1928,9 @@ async fn restore_base_returns_the_recorded_base_per_invocation() {
             );
         } else {
             // Count-changing pollution: add a marker node and detach-delete a connected user.
+            let marker = format!("CREATE (:RestoreMarker {{round: {round}}})");
             for cypher in [
-                &format!("CREATE (:RestoreMarker {{round: {round}}})") as &str,
+                marker.as_str(),
                 "MATCH (u:User)-[]->() WITH u LIMIT 1 DETACH DELETE u",
             ] {
                 run_and_drain(&mut g, QueryType::Write, cypher, 5_000, deadline)
