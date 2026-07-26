@@ -2330,7 +2330,8 @@ async fn oracle_paths_name_the_op_and_seq_on_engine_failures() {
 
     // Record-time: capture must fail with the op/seq context and leave the base restored.
     let dir = temp_bundle_dir("syn-it-oracle-capfail");
-    recording::record_rendered(&spec, graph, &[broken_op()], 7, 1_000, &dir).expect("record v2");
+    recording::record_rendered_with_prepared(&spec, graph, &[broken_op()], 7, 1_000, &dir)
+        .expect("record with prepared");
     let err = oracle::capture(&endpoint(), &dir, 5_000, 6_000)
         .await
         .expect_err("capturing an engine-rejected command must fail");
