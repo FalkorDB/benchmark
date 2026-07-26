@@ -325,6 +325,48 @@ pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
         // must scream — and an oracle-bearing op that got skipped fails closed rather than
         // silently bypassing the tier.) Untimed, single-flight, per-invocation restore — sample
         // latencies stay clean because restores run between invocations, never inside one.
+        //
+        // Exact-set re-check (belt-and-braces over the identical load() gate): every eligible
+        // write op must carry an oracle covering its complete corpus — replay never proceeds on
+        // a bundle whose oracle coverage silently shrank.
+        let eligible = crate::synthetic::shapes::oracle_eligible_names();
+        if bundle.manifest.format_version >= recording::RECORDING_FORMAT_VERSION_ORACLE {
+            for (op, cyphers) in &bundle.commands {
+                if op.kind() != QueryType::Write || !eligible.contains(op.name()) {
+                    continue;
+                }
+                match bundle.oracle.get(op.name()) {
+                    None => {
+                        return Err(OtherError(format!(
+                            "oracle-eligible op '{}' carries no outcome oracle — the bundle's \
+                             correctness coverage shrank below what format v{} promises",
+                            op.name(),
+                            recording::RECORDING_FORMAT_VERSION_ORACLE
+                        )));
+                    }
+                    Some(outcomes) if outcomes.len() != cyphers.len() => {
+                        return Err(OtherError(format!(
+                            "op '{}' has {} recorded outcome(s) for {} command(s) — the §6.3 \
+                             oracle covers the complete corpus",
+                            op.name(),
+                            outcomes.len(),
+                            cyphers.len()
+                        )));
+                    }
+                    Some(_) => {}
+                }
+            }
+        } else if has_writes {
+            // Downgrade visibility: a write bundle WITHOUT an oracle is legitimate (pre-§6.3
+            // latency tier) but must say so loudly, so a v3→v2 strip can't pass as the real
+            // thing unnoticed. The report's `meta.oracle_verified` stays absent for the same
+            // reason.
+            info!(
+                "write bundle carries no outcome oracle (recording format v{}) — latency tier \
+                 only, no correctness verification",
+                bundle.manifest.format_version
+            );
+        }
         for (op, cyphers) in &bundle.commands {
             let Some(expected) = bundle.oracle.get(op.name()) else { continue };
             if let Some(reason) = skipped.get(op.name()) {
@@ -513,6 +555,11 @@ pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
                 workload_hash: bundle.manifest.workload_hash.clone(),
             }),
             label: config.label.clone(),
+            oracle_verified: if bundle.oracle.is_empty() {
+                None
+            } else {
+                Some(bundle.oracle.iter().map(|(op, v)| (op.clone(), v.len())).collect())
+            },
         },
         operations,
     })
@@ -727,7 +774,7 @@ fn reconcile_measure_and_restore(
 /// The write replay's final restore (§3.5): reload the recorded base graph, then verify its
 /// **content** — not just its counts — matches the pristine post-load capture, so the replay
 /// provably leaves the endpoint's graph exactly as recorded.
-async fn restore_and_verify(
+pub(crate) async fn restore_and_verify(
     bundle: &Bundle,
     graph_name: &str,
     dataset_spec: &DatasetSpec,

@@ -5,11 +5,13 @@ shapes — recording format v2 with kind-bound `workload_hash`, `--repo-writes` 
 `GRAPH.QUERY` C=1 measure path with per-cell base reset + verified error-safe final restore);
 §6.2 **implemented** (generalized `ExpectedOutcome` model, full 7-counter `MutationStats`,
 `restore_base` per-invocation restore primitive); §6.3 **implemented** (online outcome oracle:
-`record --oracle <endpoint> [--oracle-samples K]` captures per-command `MutationStats` for the
-deterministic subset — twice, determinism proven at record time — into **recording format v3**
-with the outcomes bound into the `workload_hash`; replay re-verifies every recorded outcome
-against the engine as an untimed C=1 correctness pass and hard-fails on divergence; **stats
-only** — write result *values* stay un-captured per §3.4/§5-Out);
+`record --oracle <endpoint>` captures per-command `MutationStats` for the deterministic subset
+over each eligible op's **complete command corpus** — twice, determinism proven at record time —
+into **recording format v3** with the outcomes bound into the `workload_hash`; a v3 bundle must
+carry the oracle for **exactly** the eligible set, full corpus per op — enforced at load, attach
+and replay — and the replay report attests the verified coverage (`meta.oracle_verified`); replay
+re-verifies every recorded outcome against the engine as an untimed C=1 correctness pass and
+hard-fails on divergence; **stats only** — write result *values* stay un-captured per §3.4/§5-Out);
 §6.4–§6.5 (prepared-state variants, concurrency) **not implemented**. **Rubber-duck reviewed**; this revision folds in the review's corrections — the
 first draft's "counters are deterministic" thesis was wrong (see §10). Follows the reads-scope work
 (design [`synthetic-cover-ab-query-shapes.md`](./synthetic-cover-ab-query-shapes.md), Phases 1–5,
@@ -141,10 +143,15 @@ so a mixed bundle cannot express C=1 writes alongside C=1,8 reads).
 3. ✅ **Online outcome oracle** at record time (capture per-command stats), C=1 correctness tier
    for the deterministic subset — 7 of the 10 shapes eligible; `single_edge_update` excluded
    (server `rand()`, §3.4), `detach_delete_user` + `remove_user_property_and_label` excluded
-   until §6.4. *Deviation from the sketch above:* per-command **result values** are **not**
-   captured — §5-Out rules out digest-gating write results and §3.4 makes returned values
-   irreproducible (`rand()`, engine-internal ids), so the oracle records the `MutationStats`
-   counters only.
+   until §6.4. The capture covers each eligible op's **complete command corpus** (per-command
+   outcomes, no sampling), and a v3 bundle must carry the oracle for **exactly** the eligible
+   set — full corpus per op, none anywhere else — enforced at load, attach and replay, with the
+   replay report attesting verified coverage (`meta.oracle_verified`), so oracle coverage can
+   never silently shrink. Capture is a record-time-only cost (~13½ min for the two full passes
+   over the 1 000/5 000 repo-writes bundle on the pinned dev image). *Deviation from the sketch
+   above:* per-command **result values** are **not** captured — §5-Out rules out digest-gating
+   write results and §3.4 makes returned values irreproducible (`rand()`, engine-internal ids),
+   so the oracle records the `MutationStats` counters only.
 4. ⛔ **Prepared-state + removal shapes** (`remove_user_property_and_label`) and variable-count
    `detach_delete_user`.
 5. ⛔ **Concurrency** — decide C>1 (per-worker id partitioning) or keep C=1 for correctness.

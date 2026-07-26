@@ -505,16 +505,20 @@ just synthetic-compare-versions demo falkor://127.0.0.1:6379 falkor://127.0.0.1:
   `--repo-algorithms`); writes never enter `--repo-reads`, any tier, or the per-PR
   `synthetic-verify` gate.
   Adding **`--oracle <endpoint>`** (write bundles only) additionally captures the **§6.3 outcome
-  oracle**: each **oracle-eligible** write command (the deterministic subset — 7 of the 10 shapes;
+  oracle**: every **oracle-eligible** write command (the deterministic subset — 7 of the 10 shapes;
   excluded: `single_edge_update` (server `rand()`), `detach_delete_user` and
   `remove_user_property_and_label` (deferred)) runs once against the recorded **pristine base** on
   that live FalkorDB endpoint — restored before every invocation — recording the mutation counters
   it reports; a **second full pass** must reproduce every outcome exactly (determinism is proven at
-  record time, or the record fails naming the op/seq). The outcomes are folded into the bundle as
-  **recording format v3** with the oracle records **bound into the `workload_hash`**, and the
-  endpoint's graph is left restored (on failure too; a dual capture+restore failure surfaces both
-  errors). `--oracle-samples <K>` (default 8) bounds how many leading commands per eligible op are
-  captured. Plain (oracle-free) v1/v2 bundles stay byte-identical.
+  record time, or the record fails naming the op/seq). The capture covers each eligible op's
+  **complete command corpus** (per-command outcomes, no sampling), and the resulting **format v3**
+  bundle must carry an oracle for **exactly** the eligible set — full corpus per op, none anywhere
+  else — enforced at load, attach and replay, so oracle coverage can never silently shrink. The
+  outcomes are **bound into the `workload_hash`**, and the endpoint's graph is left restored — on
+  failure too, with the restored **content** verified against the pristine post-load digests (a
+  dual capture+restore failure surfaces both errors). Capture is a record-time-only cost (the two
+  full passes over the 1 000-node/5 000-edge repo-writes bundle take ~13½ min); plain (oracle-free)
+  v1/v2 bundles stay byte-identical.
 - **`benchmark synthetic run --recording <dir> [--concurrency … --cache …]`** drops + loads +
   **count-verifies** the recorded graph, then measures the recorded commands across the concurrency
   sweep + cache modes, writing a report plus a per-op **`result_digest`** (a hash of the result
@@ -554,8 +558,10 @@ just synthetic-compare-versions demo falkor://127.0.0.1:6379 falkor://127.0.0.1:
   each invocation, command run once, engine counters required to **equal** the recorded stats —
   and any divergence **hard-fails the replay** naming the op/seq/command (an engine that no
   longer effects the recorded outcome is doing *different work*, so measuring its latency would
-  poison the A/B trend silently). Only then are latencies measured, exactly as for a plain write
-  bundle.
+  poison the A/B trend silently). The pass re-checks the exact-set rule (every eligible op, full
+  corpus) and the report's `meta.oracle_verified` attests the verified coverage (op → outcome
+  count) — absent for oracle-less runs — so a v3→v2 downgrade is visible when comparing runs.
+  Only then are latencies measured, exactly as for a plain write bundle.
 - **`benchmark synthetic report --diff <A.json> <B.json> [--out diff.md]`** **guards** the pair (it
   aborts unless the `workload_hash` **and** every op's `result_digest` match, so a version returning
   wrong/empty results faster can't masquerade as an improvement — the version difference itself is

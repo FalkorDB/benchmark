@@ -10,8 +10,14 @@
 //! exact outcome per invocation (per-invocation restore, C=1). Capture never times anything: it is
 //! a correctness pass, run once at record time.
 //!
+//! Capture is **per-command over the complete corpus**: every command of every eligible op gets
+//! its outcome recorded (a sampled prefix would leave later commands — e.g. a MERGE that first
+//! matches deep into the corpus — unverified, silently shrinking the tier below what the design
+//! requires).
+//!
 //! Restore discipline mirrors replay's §3.5: every command runs from a freshly restored base
-//! ([`replay::restore_base`]), and a final restore runs on success **and** failure — a dual
+//! ([`replay::restore_base`]), and a final restore runs on success **and** failure with the
+//! restored **content digests** verified against the pristine post-load capture — a dual
 //! failure surfaces both errors, never just the first.
 
 use crate::error::BenchmarkError::OtherError;
@@ -19,8 +25,8 @@ use crate::error::BenchmarkResult;
 use crate::queries_repository::QueryType;
 use crate::synthetic::op_runner::run_and_drain;
 use crate::synthetic::recording::{self, Bundle};
-use crate::synthetic::replay::{restore_base, ReplayConfig};
-use crate::synthetic::shapes::{write_shapes, OracleEligibility};
+use crate::synthetic::replay::{capture_graph_content, restore_and_verify, restore_base, ReplayConfig};
+use crate::synthetic::shapes::oracle_eligible_names;
 use crate::synthetic::writes::MutationStats;
 use crate::synthetic::{open_graph, CacheSelection};
 use std::collections::BTreeMap;
@@ -28,22 +34,16 @@ use std::path::Path;
 use std::time::Duration;
 use tracing::info;
 
-/// Default per-op oracle sample count (`--oracle-samples`): how many leading commands of each
-/// eligible op are captured and later re-verified. 8 balances coverage of the corpus's parameter
-/// variety against capture/verify cost (each sample is a full base restore + one command, twice at
-/// record time and once per replay).
-pub const DEFAULT_ORACLE_SAMPLES: usize = 8;
-
 /// Capture the §6.3 outcome oracle for the (already-recorded) write bundle in `dir` against the
 /// live engine at `endpoint`, and fold it into the bundle (upgrading it to format v3).
 ///
 /// For every **oracle-eligible** write op (the deterministic subset —
-/// [`ShapeSpec::oracle`](crate::synthetic::shapes::ShapeSpec::oracle)), the first
-/// `samples_per_op` commands (capped at the corpus size) each run **once from a freshly restored
-/// pristine base**, recording the [`MutationStats`] the engine reports. A second full pass then
-/// repeats the capture; any difference is a hard error naming the op/seq — determinism is proven
-/// at record time, not assumed (design §3.2: the recorded outcome is only an oracle if it is
-/// reproducible). Ineligible write ops stay latency-only.
+/// [`ShapeSpec::oracle`](crate::synthetic::shapes::ShapeSpec::oracle)), **every command of the
+/// full corpus** runs **once from a freshly restored pristine base**, recording the
+/// [`MutationStats`] the engine reports. A second full pass then repeats the capture; any
+/// difference is a hard error naming the op/seq — determinism is proven at record time, not
+/// assumed (design §3.2: the recorded outcome is only an oracle if it is reproducible).
+/// Ineligible write ops stay latency-only.
 ///
 /// `server_timeout_ms`/`client_deadline_ms` budget each **measured write command** (one small
 /// CREATE/SET/MERGE — the resolved CLI defaults are ample and match what a replay-time verify
@@ -51,17 +51,16 @@ pub const DEFAULT_ORACLE_SAMPLES: usize = 8;
 /// replay restore ([`load_recorded_graph`](crate::synthetic::replay) applies it internally).
 ///
 /// The bundle's graph on `endpoint` is left restored to the pristine base on success **and**
-/// failure (§3.5 discipline); a dual failure reports both errors.
+/// failure, with the restored **content digests** verified against the pristine post-load
+/// capture (§3.5 discipline); a dual failure reports both errors.
 pub async fn capture(
     endpoint: &str,
     dir: &Path,
-    samples_per_op: usize,
     server_timeout_ms: i64,
     client_deadline_ms: u64,
 ) -> BenchmarkResult<recording::Manifest> {
-    if samples_per_op == 0 {
-        return Err(OtherError("--oracle-samples must be greater than 0".to_string()));
-    }
+    // Heal an interrupted previous attach BEFORE the load gate, or a retry could never get here.
+    recording::heal_orphaned_oracle(dir)?;
     let bundle = recording::load(dir)?;
     if bundle.manifest.format_version >= recording::RECORDING_FORMAT_VERSION_ORACLE {
         return Err(OtherError(format!(
@@ -72,20 +71,14 @@ pub async fn capture(
         )));
     }
     // The §6.3 eligibility table (single source of truth: the annotated write-shape table).
-    let eligible: BTreeMap<&str, ()> = write_shapes()
-        .iter()
-        .filter(|s| s.oracle == OracleEligibility::Eligible)
-        .map(|s| (s.name, ()))
-        .collect();
+    // Every eligible op is captured over its COMPLETE corpus — the exact set + exact counts that
+    // `recording::attach_oracle`/`load` enforce on the resulting v3 bundle.
+    let eligible = oracle_eligible_names();
     let targets: Vec<(String, Vec<String>)> = bundle
         .commands
         .iter()
-        .filter(|(op, _)| op.kind() == QueryType::Write && eligible.contains_key(op.name()))
-        .map(|(op, cyphers)| {
-            // Only the first `samples_per_op` commands are ever executed — don't clone the rest.
-            let take = samples_per_op.min(cyphers.len());
-            (op.name().to_string(), cyphers[..take].to_vec())
-        })
+        .filter(|(op, _)| op.kind() == QueryType::Write && eligible.contains(op.name()))
+        .map(|(op, cyphers)| (op.name().to_string(), cyphers.clone()))
         .collect();
     if targets.is_empty() {
         return Err(OtherError(
@@ -114,11 +107,19 @@ pub async fn capture(
     let graph_name = bundle.manifest.graph.clone();
     let dataset_spec = bundle.spec();
 
+    // Establish the pristine base and capture its CONTENT digests first (§3.5: the final restore
+    // is verified against these, not just count-checked). If this fails, no measured command has
+    // run yet — the load either failed outright or the read-only content scan did — so the error
+    // propagates directly with nothing to reconcile.
+    restore_base(&config, &bundle, &graph_name, &dataset_spec).await?;
+    let pristine = {
+        let mut graph = open_graph(&config.endpoint, &graph_name).await?;
+        capture_graph_content(&mut graph, &config).await?
+    };
+
     let captured: BenchmarkResult<BTreeMap<String, Vec<MutationStats>>> = async {
-        let first =
-            capture_pass(&config, &bundle, &graph_name, &targets, samples_per_op).await?;
-        let second =
-            capture_pass(&config, &bundle, &graph_name, &targets, samples_per_op).await?;
+        let first = capture_pass(&config, &bundle, &graph_name, &targets).await?;
+        let second = capture_pass(&config, &bundle, &graph_name, &targets).await?;
         for (name, first_outcomes) in &first {
             let second_outcomes = &second[name];
             for (seq, (a, b)) in first_outcomes.iter().zip(second_outcomes).enumerate() {
@@ -136,35 +137,35 @@ pub async fn capture(
     }
     .await;
     // §3.5 at record time: leave the endpoint's graph restored to the pristine base whether the
-    // capture succeeded or not, and surface BOTH errors on a dual failure.
-    let restored = restore_base(&config, &bundle, &graph_name, &dataset_spec).await;
+    // capture succeeded or not — verifying the restored CONTENT against the pristine digests,
+    // exactly like replay's final restore — and surface BOTH errors on a dual failure.
+    let restored = restore_and_verify(&bundle, &graph_name, &dataset_spec, &config, &pristine).await;
     let captured = reconcile_capture_and_restore(captured, restored, &graph_name)?;
 
     let ops = captured.len();
     let outcomes: usize = captured.values().map(Vec::len).sum();
     let manifest = recording::attach_oracle(dir, &captured)?;
     info!(
-        "oracle captured: {} outcome(s) across {} op(s), determinism proven by a second pass",
+        "oracle captured: {} outcome(s) across {} op(s) (complete corpus), determinism proven \
+         by a second pass",
         outcomes, ops
     );
     Ok(manifest)
 }
 
 /// One full capture pass: for each target op, restore the pristine base, run command `seq` once,
-/// and record the [`MutationStats`] the engine reports — for `seq` in `0..min(k, corpus)`.
+/// and record the [`MutationStats`] the engine reports — for every `seq` in the corpus.
 async fn capture_pass(
     config: &ReplayConfig,
     bundle: &Bundle,
     graph_name: &str,
     targets: &[(String, Vec<String>)],
-    samples_per_op: usize,
 ) -> BenchmarkResult<BTreeMap<String, Vec<MutationStats>>> {
     let client_deadline = Duration::from_millis(config.client_deadline_ms);
     let mut out = BTreeMap::new();
     for (name, cyphers) in targets {
-        let n = samples_per_op.min(cyphers.len());
-        let mut outcomes = Vec::with_capacity(n);
-        for (seq, cypher) in cyphers.iter().take(n).enumerate() {
+        let mut outcomes = Vec::with_capacity(cyphers.len());
+        for (seq, cypher) in cyphers.iter().enumerate() {
             restore_base(config, bundle, graph_name, &bundle.spec()).await?;
             let mut graph = open_graph(&config.endpoint, graph_name).await?;
             let sample = run_and_drain(
@@ -233,34 +234,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn capture_rejects_zero_samples_offline() {
-        let err = capture("falkor://127.0.0.1:1", Path::new("/nonexistent"), 0, 5_000, 6_000)
-            .await
-            .unwrap_err();
-        assert!(format!("{err}").contains("--oracle-samples"), "got: {err}");
-    }
-
-    #[tokio::test]
     async fn capture_rejects_a_bundle_with_no_eligible_op_offline() {
         // A write bundle whose only op is not in the §6.3 deterministic subset has nothing to
         // capture — fail offline, before any connection (the endpoint is unroutable).
         let dir = record_write_bundle("synthorc-inel", "w_custom");
-        let err = capture("falkor://127.0.0.1:1", &dir, 2, 5_000, 6_000).await.unwrap_err();
+        let err = capture("falkor://127.0.0.1:1", &dir, 5_000, 6_000).await.unwrap_err();
         assert!(format!("{err}").contains("no oracle-eligible write op"), "got: {err}");
         std::fs::remove_dir_all(&dir).ok();
     }
 
     #[tokio::test]
     async fn a_failed_capture_leaves_the_bundle_valid_and_pre_oracle() {
-        // An eligible op but an unreachable endpoint: the capture fails at connect time, AFTER
-        // the offline validation — and must leave the recorded v2 bundle exactly as it was
-        // (attach only runs on a successful, determinism-proven capture).
+        // An eligible op but an unreachable endpoint: the capture fails while establishing the
+        // pristine base, AFTER the offline validation — and must leave the recorded v2 bundle
+        // exactly as it was (attach only runs on a successful, determinism-proven capture).
         let dir = record_write_bundle("synthorc-conn", "single_vertex_write");
         let before = recording::load(&dir).unwrap().manifest;
-        let err = capture("falkor://127.0.0.1:1", &dir, 1, 1_000, 1_500).await.unwrap_err();
-        // Both the capture and the §3.5 final restore hit the same unreachable endpoint — the
-        // combined error must surface the pollution risk rather than hide the restore failure.
-        assert!(format!("{err}").contains("restore failed"), "got: {err}");
+        capture("falkor://127.0.0.1:1", &dir, 1_000, 1_500).await.unwrap_err();
         let after = recording::load(&dir).unwrap().manifest;
         assert_eq!(after, before, "a failed capture must not touch the bundle");
         assert_eq!(after.format_version, recording::RECORDING_FORMAT_VERSION_WRITES);
@@ -273,8 +263,25 @@ mod tests {
         let mut oracle = BTreeMap::new();
         oracle.insert("single_vertex_write".to_string(), vec![MutationStats::default()]);
         recording::attach_oracle(&dir, &oracle).unwrap();
-        let err = capture("falkor://127.0.0.1:1", &dir, 1, 5_000, 6_000).await.unwrap_err();
+        let err = capture("falkor://127.0.0.1:1", &dir, 5_000, 6_000).await.unwrap_err();
         assert!(format!("{err}").contains("already carries"), "got: {err}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn capture_self_heals_an_orphaned_oracle_dir_before_the_load_gate() {
+        // Finding-1 regression: an interrupted attach leaves oracle/ next to a v2 manifest; a
+        // retrying capture must clear it and proceed to the (offline-failing) eligibility check
+        // rather than brick on load()'s stray-file gate.
+        let dir = record_write_bundle("synthorc-heal", "w_custom");
+        std::fs::create_dir_all(dir.join("oracle")).unwrap();
+        std::fs::write(dir.join("oracle").join("w_custom.jsonl"), "junk").unwrap();
+        let err = capture("falkor://127.0.0.1:1", &dir, 5_000, 6_000).await.unwrap_err();
+        assert!(
+            format!("{err}").contains("no oracle-eligible write op"),
+            "must get past the stray-file gate to the eligibility check: {err}"
+        );
+        assert!(!dir.join("oracle").exists(), "orphan cleared");
         std::fs::remove_dir_all(&dir).ok();
     }
 

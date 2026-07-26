@@ -863,6 +863,7 @@ mod tests {
                     workload_hash: "sha256:abc".to_string(),
                 }),
                 label: None,
+                oracle_verified: None,
             },
             operations,
         }
@@ -1369,6 +1370,7 @@ mod tests {
                     workload_hash: "sha256:abc".to_string(),
                 }),
                 label: Some(label.to_string()),
+                oracle_verified: None,
             },
             operations,
         }

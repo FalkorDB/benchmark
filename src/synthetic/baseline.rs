@@ -760,6 +760,7 @@ mod regression_guard_tests {
                     workload_hash: hash.to_string(),
                 }),
                 label: None,
+                oracle_verified: None,
             },
             operations,
         }

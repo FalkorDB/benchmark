@@ -565,16 +565,9 @@ pub enum SyntheticCommands {
             long,
             requires = "repo_writes",
             value_name = "ENDPOINT",
-            help = "capture the write outcome ORACLE while recording (write bundles only): run each oracle-eligible write command (the deterministic subset — 7 of the 10 shapes) once against the recorded pristine base on this live FalkorDB endpoint (falkor://host:port), per-invocation restore, capture its mutation counters, prove determinism with a second full pass, and fold the outcomes into the bundle (format v3; hash-bound). Replay then re-verifies every recorded outcome at C=1 before measuring latency; any divergence is a hard replay error naming the op/seq/command."
+            help = "capture the write outcome ORACLE while recording (write bundles only): run EVERY command of each oracle-eligible write shape (the deterministic subset — 7 of the 10 shapes, complete corpus) once against the recorded pristine base on this live FalkorDB endpoint (falkor://host:port), per-invocation restore, capture its mutation counters, prove determinism with a second full pass, and fold the outcomes into the bundle (format v3; hash-bound; the oracle must cover every eligible op exactly — no subset). Replay then re-verifies every recorded outcome at C=1 before measuring latency; any divergence is a hard replay error naming the op/seq/command."
         )]
         oracle: Option<String>,
-        #[arg(
-            long = "oracle-samples",
-            requires = "oracle",
-            value_name = "K",
-            help = "with --oracle: how many leading commands per eligible op to capture and re-verify (default 8, capped at the op's corpus size; each sample costs a full base restore at capture and at every replay)"
-        )]
-        oracle_samples: Option<usize>,
         #[arg(
             long = "out-dir",
             help = "directory to write the recording bundle into (manifest.json + graph.jsonl + commands/)"

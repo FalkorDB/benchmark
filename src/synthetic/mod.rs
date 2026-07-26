@@ -771,6 +771,7 @@ pub async fn run(config: &Config) -> BenchmarkResult<Report> {
             host: host::collect(),
             dataset: dataset_info,
             label: config.label.clone(),
+            oracle_verified: None,
         },
         operations,
     })
@@ -1478,15 +1479,11 @@ pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkRes
             nodes,
             edges,
             oracle,
-            oracle_samples,
             out_dir,
         } => {
             // clap enforces `--oracle requires --repo-writes`; re-validate here so a directly
             // constructed command (tests, future callers) can't capture an oracle for a read
             // bundle either.
-            if oracle.is_none() && oracle_samples.is_some() {
-                return Err(OtherError("--oracle-samples requires --oracle".to_string()));
-            }
             if oracle.is_some() && !repo_writes {
                 return Err(OtherError(
                     "--oracle requires --repo-writes: the outcome oracle records mutation \
@@ -1614,14 +1611,12 @@ pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkRes
             // §6.3: capture the outcome oracle ONLINE against the given endpoint and fold it into
             // the just-written bundle (upgrading it to format v3 with a new workload_hash).
             if let Some(endpoint) = &oracle {
-                let samples = oracle_samples.unwrap_or(oracle::DEFAULT_ORACLE_SAMPLES);
                 // The resolved defaults budget only the single measured write per sample; the
                 // per-sample base restores are bulk loads and get replay's ≥60 s floor inside
                 // `load_recorded_graph`, so no capture-specific budget is needed.
                 let manifest = oracle::capture(
                     endpoint,
                     std::path::Path::new(&out_dir),
-                    samples,
                     resolved.server_timeout_ms,
                     resolved.client_deadline_ms,
                 )
@@ -1629,8 +1624,9 @@ pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkRes
                 let oracle_ops = manifest.ops.iter().filter(|e| e.oracle.is_some()).count();
                 let outcomes: usize = manifest.ops.iter().filter_map(|e| e.oracle).sum();
                 println!(
-                    "captured outcome oracle: {} outcome(s) across {} op(s), determinism proven \
-                     by a second pass (format v{}, workload_hash {})",
+                    "captured outcome oracle: {} outcome(s) across {} op(s) — the complete \
+                     corpus of every eligible shape, determinism proven by a second pass \
+                     (format v{}, workload_hash {})",
                     outcomes, oracle_ops, manifest.format_version, manifest.workload_hash
                 );
             }
@@ -2415,7 +2411,6 @@ mod tests {
             nodes: Some(200),
             edges: Some(600),
             oracle: None,
-            oracle_samples: None,
             out_dir: out_dir.to_string_lossy().into_owned(),
         };
         run_command(command).await.expect("offline record succeeds without a server");
@@ -2457,7 +2452,6 @@ mod tests {
             nodes: Some(300),
             edges: Some(900),
             oracle: None,
-            oracle_samples: None,
             out_dir: out_dir.to_string_lossy().into_owned(),
         };
         run_command(command)
@@ -2526,7 +2520,6 @@ mod tests {
             nodes: Some(300),
             edges: Some(900),
             oracle: None,
-            oracle_samples: None,
             out_dir: out_dir.to_string_lossy().into_owned(),
         };
         run_command(command)
@@ -2608,7 +2601,6 @@ mod tests {
             nodes: Some(300),
             edges: Some(900),
             oracle: None,
-            oracle_samples: None,
             out_dir: out_dir.to_string_lossy().into_owned(),
         };
         run_command(command)
@@ -2678,7 +2670,6 @@ mod tests {
             nodes: Some(1000),
             edges: Some(5000),
             oracle: None,
-            oracle_samples: None,
             out_dir: out_dir.to_string_lossy().into_owned(),
         };
         run_command(command).await.expect("offline full repo-reads record succeeds");
@@ -2719,7 +2710,6 @@ mod tests {
             nodes: Some(300),
             edges: Some(900),
             oracle: None,
-            oracle_samples: None,
             out_dir: out_dir.to_string_lossy().into_owned(),
         };
         run_command(command)
@@ -2787,7 +2777,6 @@ mod tests {
             nodes: Some(300),
             edges: Some(900),
             oracle: None,
-            oracle_samples: None,
             out_dir: out_dir.to_string_lossy().into_owned(),
         };
         run_command(command).await.expect("offline combined record succeeds");
@@ -2816,10 +2805,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_command_record_rejects_oracle_flags_without_their_prerequisites() {
-        // The clap layer enforces `--oracle requires --repo-writes` (and `--oracle-samples
-        // requires --oracle`); these runtime guards keep directly-constructed commands honest
-        // too — both fail offline, before any file or network use.
+    async fn run_command_record_rejects_an_oracle_without_repo_writes() {
+        // The clap layer enforces `--oracle requires --repo-writes`; this runtime guard keeps
+        // directly-constructed commands honest too — failing offline, before any file or
+        // network use.
         let base = crate::cli::SyntheticCommands::Record {
             config: None,
             graph: None,
@@ -2833,33 +2822,11 @@ mod tests {
             nodes: Some(10),
             edges: Some(20),
             oracle: Some("falkor://127.0.0.1:1".to_string()),
-            oracle_samples: None,
             out_dir: "unused".to_string(),
         };
         let err = run_command(base).await.unwrap_err();
         assert!(
             format!("{err}").contains("--oracle requires --repo-writes"),
-            "got: {err}"
-        );
-        let samples_only = crate::cli::SyntheticCommands::Record {
-            config: None,
-            graph: None,
-            ops: vec![],
-            all_reads: true,
-            tier: None,
-            repo_reads: None,
-            repo_algorithms: false,
-            repo_writes: false,
-            seed: Some(1),
-            nodes: Some(10),
-            edges: Some(20),
-            oracle: None,
-            oracle_samples: Some(4),
-            out_dir: "unused".to_string(),
-        };
-        let err = run_command(samples_only).await.unwrap_err();
-        assert!(
-            format!("{err}").contains("--oracle-samples requires --oracle"),
             "got: {err}"
         );
     }

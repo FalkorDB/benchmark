@@ -17,6 +17,9 @@
 //! - `commands/<op>.jsonl` — one [`CommandRecord`] per line: the fully-rendered measured queries.
 //! - `oracle/<op>.jsonl` (format v3+ only) — one [`OracleRecord`] per line: the §6.3 per-command
 //!   mutation outcomes captured online at record time ([`attach_oracle`]), re-verified at replay.
+//!   A v3 bundle carries the oracle for **exactly** the oracle-eligible write ops it records —
+//!   complete command corpus per op, none anywhere else — enforced at [`load`], [`attach_oracle`]
+//!   and replay, so oracle coverage can never silently shrink.
 //!
 //! The [`Manifest::workload_hash`] is a **length-framed** SHA-256 over the header, every graph
 //! record, every op's commands (in order), and — under format v3 — every oracle record, so any
@@ -553,6 +556,15 @@ fn record_rendered_impl(
     let commands_dir = out_dir.join("commands");
     std::fs::create_dir_all(&commands_dir)
         .map_err(|e| OtherError(format!("creating {}: {}", commands_dir.display(), e)))?;
+    // Recording replaces the bundle wholesale with a v1/v2 manifest that can never reference an
+    // oracle — clear any stale oracle/ left by a previous v3 recording (or an interrupted attach)
+    // in the same directory, or the fresh bundle would fail load()'s stray-file gate.
+    let stale_oracle = out_dir.join("oracle");
+    if stale_oracle.is_dir() {
+        std::fs::remove_dir_all(&stale_oracle).map_err(|e| {
+            OtherError(format!("removing stale {}: {}", stale_oracle.display(), e))
+        })?;
+    }
 
     let mut hasher = WorkloadHasher::new(
         format_version,
@@ -696,6 +708,50 @@ pub fn load(dir: &Path) -> BenchmarkResult<Bundle> {
             RECORDING_FORMAT_VERSION_WRITES
         )));
     }
+    // Exact-set enforcement (§6.3): a v3 bundle must carry an oracle for EVERY recorded
+    // oracle-eligible write op, covering its COMPLETE command corpus, and for nothing else — so
+    // oracle coverage can never silently shrink (a crafted 1-of-7 subset, or a padded oracle on
+    // an op outside the deterministic subset, is rejected here rather than replayed).
+    if manifest.format_version >= RECORDING_FORMAT_VERSION_ORACLE {
+        let eligible = crate::synthetic::shapes::oracle_eligible_names();
+        for entry in &manifest.ops {
+            let is_eligible =
+                entry.kind == QueryType::Write && eligible.contains(entry.name.as_str());
+            match (is_eligible, entry.oracle) {
+                (true, None) => {
+                    return Err(OtherError(format!(
+                        "oracle-eligible op '{}' carries no outcome oracle — a v{} bundle must \
+                         cover every eligible op (§6.3 exact-set rule; crafted/corrupt manifest)",
+                        entry.name, RECORDING_FORMAT_VERSION_ORACLE
+                    )));
+                }
+                (true, Some(n)) if n != entry.count => {
+                    return Err(OtherError(format!(
+                        "op '{}' declares {} oracle record(s) for {} command(s) — the §6.3 \
+                         oracle covers the complete corpus (crafted/corrupt manifest)",
+                        entry.name, n, entry.count
+                    )));
+                }
+                (false, Some(_)) if entry.kind != QueryType::Write => {
+                    return Err(OtherError(format!(
+                        "manifest declares an outcome oracle for read op '{}' — the oracle \
+                         records mutation counters, which only write ops produce \
+                         (crafted/corrupt manifest)",
+                        entry.name
+                    )));
+                }
+                (false, Some(_)) => {
+                    return Err(OtherError(format!(
+                        "manifest declares an outcome oracle for op '{}', which is not \
+                         oracle-eligible (§6.3 deterministic subset only; crafted/corrupt \
+                         manifest)",
+                        entry.name
+                    )));
+                }
+                _ => {}
+            }
+        }
+    }
 
     // graph.jsonl → ordered (phase, cypher).
     let graph_path = dir.join("graph.jsonl");
@@ -773,27 +829,14 @@ pub fn load(dir: &Path) -> BenchmarkResult<Bundle> {
         commands.push((op, recs.into_iter().map(|r| r.cypher).collect::<Vec<_>>()));
     }
 
-    // oracle/<op>.jsonl for each oracle-bearing op (§6.3, v3+): validate the entry structurally
-    // (write-kind only, 1..=count records, contiguous seq) BEFORE the hash recompute below, so a
-    // malformed oracle fails with an actionable error naming the op instead of a bare hash
-    // mismatch. The stats themselves are hash-bound — see [`WorkloadHasher::oracle_record`].
+    // oracle/<op>.jsonl for each oracle-bearing op (§6.3, v3+): the manifest-level shape was
+    // validated by the exact-set pass above; here validate the files structurally (record count,
+    // contiguous seq) BEFORE the hash recompute below, so a malformed oracle fails with an
+    // actionable error naming the op instead of a bare hash mismatch. The stats themselves are
+    // hash-bound — see [`WorkloadHasher::oracle_record`].
     let mut oracle: BTreeMap<String, Vec<MutationStats>> = BTreeMap::new();
     for entry in &manifest.ops {
         let Some(count) = entry.oracle else { continue };
-        if entry.kind != QueryType::Write {
-            return Err(OtherError(format!(
-                "manifest declares an outcome oracle for read op '{}' — the oracle records \
-                 mutation counters, which only write ops produce (crafted/corrupt manifest)",
-                entry.name
-            )));
-        }
-        if count == 0 || count > entry.count {
-            return Err(OtherError(format!(
-                "op '{}' declares {} oracle record(s) but has {} command(s) — an oracle covers \
-                 1..=count leading commands (crafted/corrupt manifest)",
-                entry.name, count, entry.count
-            )));
-        }
         let path = dir.join("oracle").join(format!("{}.jsonl", entry.name));
         let recs: Vec<OracleRecord> = read_jsonl(&path)?;
         if recs.len() != count {
@@ -906,14 +949,11 @@ impl Bundle {
 ///
 /// The capture itself (running commands against a live engine) lives in
 /// [`oracle::capture`](crate::synthetic::oracle::capture); this function is the offline half.
-pub fn attach_oracle(
-    dir: &Path,
-    oracle: &BTreeMap<String, Vec<MutationStats>>,
-) -> BenchmarkResult<Manifest> {
-    // Self-heal an interrupted previous attach before the integrity gate: a pre-v3 manifest
-    // cannot declare oracle entries, so an oracle/ directory next to one is provably orphaned
-    // (files written, manifest never upgraded) — remove it so a retry never bricks on load()'s
-    // stray-file check. A v3+ manifest is left untouched (attach rejects it below anyway).
+/// Remove an orphaned `oracle/` directory left by an **interrupted attach**: a pre-v3 manifest
+/// cannot reference oracle entries, so an `oracle/` directory sitting next to one is provably
+/// dead content that would otherwise brick every retry on [`load`]'s stray-file gate. A v3+
+/// manifest (or an unreadable one) is left untouched — [`load`] stays the arbiter there.
+pub(crate) fn heal_orphaned_oracle(dir: &Path) -> BenchmarkResult<()> {
     let manifest_path = dir.join("manifest.json");
     if let Ok(bytes) = std::fs::read(&manifest_path) {
         if let Ok(peek) = serde_json::from_slice::<Manifest>(&bytes) {
@@ -929,6 +969,14 @@ pub fn attach_oracle(
             }
         }
     }
+    Ok(())
+}
+
+pub fn attach_oracle(
+    dir: &Path,
+    oracle: &BTreeMap<String, Vec<MutationStats>>,
+) -> BenchmarkResult<Manifest> {
+    heal_orphaned_oracle(dir)?;
     // Verify the bundle as it stands before touching it (hash gate included).
     let bundle = load(dir)?;
     if bundle.manifest.format_version >= RECORDING_FORMAT_VERSION_ORACLE {
@@ -942,28 +990,47 @@ pub fn attach_oracle(
     if oracle.is_empty() {
         return Err(OtherError("no oracle outcomes to attach (empty capture)".to_string()));
     }
-    for (name, outcomes) in oracle {
-        let Some(entry) = bundle.manifest.ops.iter().find(|e| &e.name == name) else {
-            return Err(OtherError(format!(
-                "oracle captured for op '{}', which the bundle does not record",
-                name
-            )));
-        };
-        if entry.kind != QueryType::Write {
-            return Err(OtherError(format!(
-                "oracle captured for read op '{}' — only write ops have mutation outcomes",
-                name
-            )));
+    // Exact-set enforcement (§6.3): the oracle must cover every recorded oracle-eligible write op
+    // with its COMPLETE command corpus — no subset, no strays — so v3 coverage can never silently
+    // shrink below the tier the format version promises.
+    let eligible = crate::synthetic::shapes::oracle_eligible_names();
+    for entry in &bundle.manifest.ops {
+        let is_eligible =
+            entry.kind == QueryType::Write && eligible.contains(entry.name.as_str());
+        match (is_eligible, oracle.get(&entry.name)) {
+            (true, None) => {
+                return Err(OtherError(format!(
+                    "no oracle captured for oracle-eligible op '{}' — a v{} bundle must cover \
+                     every eligible op (§6.3 exact-set rule)",
+                    entry.name, RECORDING_FORMAT_VERSION_ORACLE
+                )));
+            }
+            (true, Some(outcomes)) if outcomes.len() != entry.count => {
+                return Err(OtherError(format!(
+                    "oracle for op '{}' has {} outcome(s) but the op records {} command(s) — \
+                     the §6.3 oracle covers the complete corpus",
+                    entry.name,
+                    outcomes.len(),
+                    entry.count
+                )));
+            }
+            (false, Some(_)) => {
+                return Err(OtherError(format!(
+                    "oracle captured for op '{}', which is not oracle-eligible (§6.3 \
+                     deterministic subset only)",
+                    entry.name
+                )));
+            }
+            _ => {}
         }
-        if outcomes.is_empty() || outcomes.len() > entry.count {
-            return Err(OtherError(format!(
-                "oracle for op '{}' has {} outcome(s) but the op records {} command(s) — an \
-                 oracle covers 1..=count leading commands",
-                name,
-                outcomes.len(),
-                entry.count
-            )));
-        }
+    }
+    if let Some(name) =
+        oracle.keys().find(|name| !bundle.manifest.ops.iter().any(|e| &e.name == *name))
+    {
+        return Err(OtherError(format!(
+            "oracle captured for op '{}', which the bundle does not record",
+            name
+        )));
     }
 
     // oracle/<op>.jsonl.
@@ -1008,6 +1075,7 @@ pub fn attach_oracle(
     }
     manifest.workload_hash = hasher.finalize();
 
+    let manifest_path = dir.join("manifest.json");
     let json = serde_json::to_string_pretty(&manifest)
         .map_err(|e| OtherError(format!("serializing manifest: {}", e)))?;
     std::fs::write(&manifest_path, json)
@@ -2054,7 +2122,10 @@ mod tests {
 
     // ---- §6.3 outcome oracle (format v3) ----
 
-    /// A recorded two-op write bundle (2 + 3 commands) for oracle tests.
+    /// A recorded two-op write bundle (2 + 3 commands) for oracle tests. The ops carry REAL
+    /// oracle-eligible shape names (`OpKey::dynamic` resolves built-ins by name) because the
+    /// §6.3 exact-set rule pins v3 oracles to exactly the eligible set — custom rendered names
+    /// could never be attached.
     fn record_write_bundle_to_temp(prefix: &str) -> PathBuf {
         let dir = temp_bundle_dir(prefix);
         let spec = DatasetSpec {
@@ -2071,7 +2142,15 @@ mod tests {
                 .map(|i| format!("CYPHER x={} CREATE (n:User {{id:$x}})", i))
                 .collect(),
         };
-        record_rendered(&spec, "g", &[op("w_alpha", 2), op("w_beta", 3)], 1, 8, &dir).unwrap();
+        record_rendered(
+            &spec,
+            "g",
+            &[op("single_vertex_write", 2), op("single_vertex_update", 3)],
+            1,
+            8,
+            &dir,
+        )
+        .unwrap();
         dir
     }
 
@@ -2083,23 +2162,28 @@ mod tests {
         }
     }
 
+    /// The exact-set oracle for [`record_write_bundle_to_temp`]: every eligible op, full corpus.
+    fn full_oracle() -> BTreeMap<String, Vec<MutationStats>> {
+        let mut oracle = BTreeMap::new();
+        oracle.insert("single_vertex_write".to_string(), vec![stats(1), stats(2)]);
+        oracle.insert("single_vertex_update".to_string(), vec![stats(3), stats(4), stats(5)]);
+        oracle
+    }
+
     #[test]
     fn attach_oracle_upgrades_a_v2_bundle_to_v3_and_round_trips() {
         let dir = record_write_bundle_to_temp("synthrec-oracle-rt");
         let v2_hash = load(&dir).unwrap().manifest.workload_hash.clone();
-        let mut oracle = BTreeMap::new();
-        oracle.insert("w_alpha".to_string(), vec![stats(1), stats(2)]);
-        oracle.insert("w_beta".to_string(), vec![stats(3)]);
-        let manifest = attach_oracle(&dir, &oracle).unwrap();
+        let manifest = attach_oracle(&dir, &full_oracle()).unwrap();
         assert_eq!(manifest.format_version, RECORDING_FORMAT_VERSION_ORACLE);
         assert_ne!(manifest.workload_hash, v2_hash, "the oracle must land in the hash");
-        let alpha = manifest.ops.iter().find(|e| e.name == "w_alpha").unwrap();
-        let beta = manifest.ops.iter().find(|e| e.name == "w_beta").unwrap();
-        assert_eq!((alpha.oracle, beta.oracle), (Some(2), Some(1)));
+        let write = manifest.ops.iter().find(|e| e.name == "single_vertex_write").unwrap();
+        let update = manifest.ops.iter().find(|e| e.name == "single_vertex_update").unwrap();
+        assert_eq!((write.oracle, update.oracle), (Some(2), Some(3)));
         // The upgraded bundle loads through the standard gate with the outcomes intact.
         let bundle = load(&dir).unwrap();
-        assert_eq!(bundle.oracle["w_alpha"], vec![stats(1), stats(2)]);
-        assert_eq!(bundle.oracle["w_beta"], vec![stats(3)]);
+        assert_eq!(bundle.oracle["single_vertex_write"], vec![stats(1), stats(2)]);
+        assert_eq!(bundle.oracle["single_vertex_update"], vec![stats(3), stats(4), stats(5)]);
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -2109,9 +2193,7 @@ mod tests {
         // workload_hash — the record-once/attach-once flow stays reproducible end to end.
         let hash_of = |prefix: &str| {
             let dir = record_write_bundle_to_temp(prefix);
-            let mut oracle = BTreeMap::new();
-            oracle.insert("w_alpha".to_string(), vec![stats(1)]);
-            let h = attach_oracle(&dir, &oracle).unwrap().workload_hash;
+            let h = attach_oracle(&dir, &full_oracle()).unwrap().workload_hash;
             std::fs::remove_dir_all(&dir).ok();
             h
         };
@@ -2124,10 +2206,8 @@ mod tests {
         // is workload content — replay hard-fails on divergence from it — so it must be
         // tamper-evident like the commands themselves.
         let dir = record_write_bundle_to_temp("synthrec-oracle-tamper");
-        let mut oracle = BTreeMap::new();
-        oracle.insert("w_alpha".to_string(), vec![stats(1)]);
-        attach_oracle(&dir, &oracle).unwrap();
-        let path = dir.join("oracle").join("w_alpha.jsonl");
+        attach_oracle(&dir, &full_oracle()).unwrap();
+        let path = dir.join("oracle").join("single_vertex_write.jsonl");
         let text = std::fs::read_to_string(&path).unwrap();
         let bad = text.replacen("\"nodes_created\":1", "\"nodes_created\":2", 1);
         assert_ne!(text, bad, "expected the counter to rewrite");
@@ -2142,10 +2222,8 @@ mod tests {
         // A reordered/renumbered oracle file fails STRUCTURALLY (before the hash recompute), with
         // an error naming the record — more actionable than a bare hash mismatch.
         let dir = record_write_bundle_to_temp("synthrec-oracle-seq");
-        let mut oracle = BTreeMap::new();
-        oracle.insert("w_alpha".to_string(), vec![stats(1), stats(2)]);
-        attach_oracle(&dir, &oracle).unwrap();
-        let path = dir.join("oracle").join("w_alpha.jsonl");
+        attach_oracle(&dir, &full_oracle()).unwrap();
+        let path = dir.join("oracle").join("single_vertex_write.jsonl");
         let text = std::fs::read_to_string(&path).unwrap();
         let bad = text.replacen("\"seq\":1", "\"seq\":5", 1);
         assert_ne!(text, bad);
@@ -2159,10 +2237,8 @@ mod tests {
     #[test]
     fn load_rejects_an_oracle_count_mismatch() {
         let dir = record_write_bundle_to_temp("synthrec-oracle-count");
-        let mut oracle = BTreeMap::new();
-        oracle.insert("w_alpha".to_string(), vec![stats(1), stats(2)]);
-        attach_oracle(&dir, &oracle).unwrap();
-        let path = dir.join("oracle").join("w_alpha.jsonl");
+        attach_oracle(&dir, &full_oracle()).unwrap();
+        let path = dir.join("oracle").join("single_vertex_write.jsonl");
         let text = std::fs::read_to_string(&path).unwrap();
         let first_line = text.lines().next().unwrap().to_string();
         std::fs::write(&path, first_line).unwrap();
@@ -2177,9 +2253,7 @@ mod tests {
         // An oracle file not named by the manifest would be dead, UNHASHED content in a bundle
         // that claims integrity — reject it.
         let dir = record_write_bundle_to_temp("synthrec-oracle-stray");
-        let mut oracle = BTreeMap::new();
-        oracle.insert("w_alpha".to_string(), vec![stats(1)]);
-        attach_oracle(&dir, &oracle).unwrap();
+        attach_oracle(&dir, &full_oracle()).unwrap();
         std::fs::write(dir.join("oracle").join("ghost.jsonl"), "{}").unwrap();
         let err = load(&dir).unwrap_err();
         let msg = format!("{err}");
@@ -2214,15 +2288,42 @@ mod tests {
         // succeed rather than brick on load()'s stray-file gate.
         let dir = record_write_bundle_to_temp("synthrec-oracle-selfheal");
         std::fs::create_dir_all(dir.join("oracle")).unwrap();
-        std::fs::write(dir.join("oracle").join("w_alpha.jsonl"), "not even json").unwrap();
+        std::fs::write(dir.join("oracle").join("single_vertex_write.jsonl"), "not even json")
+            .unwrap();
         std::fs::write(dir.join("oracle").join("ghost.jsonl"), "{}").unwrap();
-        let mut oracle = BTreeMap::new();
-        oracle.insert("w_alpha".to_string(), vec![stats(1), stats(2)]);
-        let manifest = attach_oracle(&dir, &oracle).unwrap();
+        let manifest = attach_oracle(&dir, &full_oracle()).unwrap();
         assert_eq!(manifest.format_version, RECORDING_FORMAT_VERSION_ORACLE);
         assert!(!dir.join("oracle").join("ghost.jsonl").exists(), "orphan cleared");
         let bundle = load(&dir).unwrap();
-        assert_eq!(bundle.oracle["w_alpha"], vec![stats(1), stats(2)]);
+        assert_eq!(bundle.oracle["single_vertex_write"], vec![stats(1), stats(2)]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn re_recording_over_a_v3_bundle_clears_the_stale_oracle() {
+        // §6.3 lifecycle: `record` replaces the bundle wholesale. Re-recording into a directory
+        // holding a v3 bundle must not leave the old oracle/ files behind — the fresh manifest is
+        // v2 and can't reference them, so a stale directory would brick every subsequent load.
+        let dir = record_write_bundle_to_temp("synthrec-oracle-rerecord");
+        attach_oracle(&dir, &full_oracle()).unwrap();
+        assert!(dir.join("oracle").is_dir(), "precondition: v3 bundle with oracle/");
+        // Re-record (same shape as the helper, fresh corpus) into the SAME directory.
+        let spec = DatasetSpec {
+            seed: 1,
+            nodes: 10,
+            edges: 20,
+        };
+        let op = RecordedOp {
+            key: OpKey::dynamic("single_vertex_write", QueryType::Write),
+            result_gated: false,
+            budget: RecordedBudget::default(),
+            capability: None,
+            commands: vec!["CREATE (n:User)".to_string()],
+        };
+        let manifest = record_rendered(&spec, "g", &[op], 1, 8, &dir).unwrap();
+        assert_eq!(manifest.format_version, RECORDING_FORMAT_VERSION_WRITES);
+        assert!(!dir.join("oracle").exists(), "stale oracle/ must be cleared by record");
+        load(&dir).expect("the re-recorded v2 bundle must load cleanly");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -2282,11 +2383,10 @@ mod tests {
     #[test]
     fn load_rejects_an_oracle_longer_than_the_corpus() {
         // Manifest declares more oracle records than the op has commands: replay would index past
-        // the corpus. Craft it by editing an attached bundle's counts (structural gate, pre-hash).
+        // the corpus. Craft it by editing an attached bundle's counts — the §6.3 exact-set pass
+        // rejects it at manifest level (pre-hash).
         let dir = record_write_bundle_to_temp("synthrec-oracle-onlylong");
-        let mut oracle = BTreeMap::new();
-        oracle.insert("w_alpha".to_string(), vec![stats(1), stats(2)]);
-        attach_oracle(&dir, &oracle).unwrap();
+        attach_oracle(&dir, &full_oracle()).unwrap();
         let path = dir.join("manifest.json");
         let text = std::fs::read_to_string(&path).unwrap();
         let bad = text.replacen("\"oracle\": 2", "\"oracle\": 9", 1);
@@ -2294,7 +2394,110 @@ mod tests {
         std::fs::write(&path, bad).unwrap();
         let err = load(&dir).unwrap_err();
         let msg = format!("{err}");
-        assert!(msg.contains("declares 9 oracle record(s)") && msg.contains("1..=count"), "got: {msg}");
+        assert!(
+            msg.contains("declares 9 oracle record(s) for 2 command(s)")
+                && msg.contains("complete corpus"),
+            "got: {msg}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_rejects_a_hash_valid_oracle_subset() {
+        // A v3 bundle whose oracle covers only SOME eligible ops must be rejected even when the
+        // workload_hash is recomputed to match (the duck exploit: strip one op's oracle, rehash).
+        // Coverage is part of what "format v3" promises — the exact-set gate, not the hash, is
+        // what stops a silent shrink.
+        let dir = record_write_bundle_to_temp("synthrec-oracle-subset");
+        attach_oracle(&dir, &full_oracle()).unwrap();
+        let bundle = load(&dir).unwrap();
+        // Strip single_vertex_update's oracle and REHASH so only the exact-set gate can object.
+        let mut manifest = bundle.manifest.clone();
+        for entry in &mut manifest.ops {
+            if entry.name == "single_vertex_update" {
+                entry.oracle = None;
+            }
+        }
+        let mut hasher = WorkloadHasher::new(
+            manifest.format_version,
+            &manifest.generator_version,
+            &manifest.dataset,
+            &manifest.graph,
+            manifest.corpus_seed,
+        );
+        for (phase, cypher) in &bundle.graph_statements {
+            hasher.graph_record(phase.tag(), cypher);
+        }
+        for ((_, cyphers), entry) in bundle.commands.iter().zip(&manifest.ops) {
+            hasher.op_header(&entry.name, cyphers.len(), entry.kind);
+            for cypher in cyphers {
+                hasher.command(cypher);
+            }
+            if entry.oracle.is_some() {
+                for (seq, s) in bundle.oracle[&entry.name].iter().enumerate() {
+                    hasher.oracle_record(seq, s);
+                }
+            }
+        }
+        manifest.workload_hash = hasher.finalize();
+        std::fs::write(
+            dir.join("manifest.json"),
+            serde_json::to_string_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+        std::fs::remove_file(dir.join("oracle").join("single_vertex_update.jsonl")).unwrap();
+        let err = load(&dir).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("oracle-eligible op 'single_vertex_update' carries no outcome oracle")
+                && msg.contains("exact-set"),
+            "got: {msg}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_rejects_an_oracle_on_a_non_eligible_write_op() {
+        // Mixed bundle (one eligible + one custom write op): attach the valid exact-set oracle,
+        // then hand-edit the manifest to declare an oracle on the non-eligible op — the §6.3
+        // exact-set pass must reject it at manifest level (a padded oracle outside the
+        // deterministic subset is as much a coverage lie as a shrunken one).
+        let dir = temp_bundle_dir("synthrec-oracle-noneligible");
+        let spec = DatasetSpec {
+            seed: 1,
+            nodes: 10,
+            edges: 20,
+        };
+        let op = |name: &str, n: usize| RecordedOp {
+            key: OpKey::dynamic(name, QueryType::Write),
+            result_gated: false,
+            budget: RecordedBudget::default(),
+            capability: None,
+            commands: (0..n).map(|i| format!("CYPHER x={} CREATE (:User)", i)).collect(),
+        };
+        record_rendered(
+            &spec,
+            "g",
+            &[op("single_vertex_write", 2), op("w_custom", 1)],
+            1,
+            8,
+            &dir,
+        )
+        .unwrap();
+        let mut oracle = BTreeMap::new();
+        oracle.insert("single_vertex_write".to_string(), vec![stats(1), stats(2)]);
+        attach_oracle(&dir, &oracle).unwrap();
+        let path = dir.join("manifest.json");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let bad = text.replacen("\"count\": 1", "\"oracle\": 1,\n      \"count\": 1", 1);
+        assert_ne!(text, bad);
+        std::fs::write(&path, bad).unwrap();
+        let err = load(&dir).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("'w_custom'") && msg.contains("not oracle-eligible"),
+            "got: {msg}"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -2304,19 +2507,27 @@ mod tests {
         // Empty capture.
         let err = attach_oracle(&dir, &BTreeMap::new()).unwrap_err();
         assert!(format!("{err}").contains("empty capture"), "got: {err}");
-        // Unknown op.
-        let mut unknown = BTreeMap::new();
+        // Unknown op alongside the exact set: the bundle does not record it.
+        let mut unknown = full_oracle();
         unknown.insert("nope".to_string(), vec![stats(1)]);
         let err = attach_oracle(&dir, &unknown).unwrap_err();
         assert!(format!("{err}").contains("does not record"), "got: {err}");
-        // Empty outcome vector.
-        let mut empty = BTreeMap::new();
-        empty.insert("w_alpha".to_string(), Vec::new());
+        // Missing eligible op (§6.3 exact-set rule: no subsets).
+        let mut partial = full_oracle();
+        partial.remove("single_vertex_update");
+        let err = attach_oracle(&dir, &partial).unwrap_err();
+        assert!(
+            format!("{err}").contains("no oracle captured for oracle-eligible op"),
+            "got: {err}"
+        );
+        // Empty outcome vector (an incomplete corpus).
+        let mut empty = full_oracle();
+        empty.insert("single_vertex_write".to_string(), Vec::new());
         let err = attach_oracle(&dir, &empty).unwrap_err();
-        assert!(format!("{err}").contains("0 outcome(s)"), "got: {err}");
+        assert!(format!("{err}").contains("has 0 outcome(s)"), "got: {err}");
         // More outcomes than commands.
-        let mut long = BTreeMap::new();
-        long.insert("w_alpha".to_string(), vec![stats(1), stats(2), stats(3)]);
+        let mut long = full_oracle();
+        long.insert("single_vertex_write".to_string(), vec![stats(1), stats(2), stats(3)]);
         let err = attach_oracle(&dir, &long).unwrap_err();
         assert!(format!("{err}").contains("has 3 outcome(s)"), "got: {err}");
         // The failed attempts must not have corrupted the bundle.
@@ -2326,20 +2537,33 @@ mod tests {
 
     #[test]
     fn attach_oracle_rejects_a_read_op_and_an_already_oracled_bundle() {
-        // Read op: a v1 read bundle's ops have no mutation outcome to attach.
+        // Read op: a v1 read bundle's ops have no mutation outcome to attach (and no read op is
+        // oracle-eligible).
         let (read_dir, man) = record_to_temp(13);
         let mut on_read = BTreeMap::new();
         on_read.insert(man.ops[0].name.clone(), vec![stats(1)]);
         let err = attach_oracle(&read_dir, &on_read).unwrap_err();
-        assert!(format!("{err}").contains("read op"), "got: {err}");
+        assert!(format!("{err}").contains("not oracle-eligible"), "got: {err}");
         std::fs::remove_dir_all(&read_dir).ok();
         // Double attach: the second must refuse (re-record instead).
         let dir = record_write_bundle_to_temp("synthrec-oracle-double");
-        let mut oracle = BTreeMap::new();
-        oracle.insert("w_alpha".to_string(), vec![stats(1)]);
-        attach_oracle(&dir, &oracle).unwrap();
-        let err = attach_oracle(&dir, &oracle).unwrap_err();
+        attach_oracle(&dir, &full_oracle()).unwrap();
+        let err = attach_oracle(&dir, &full_oracle()).unwrap_err();
         assert!(format!("{err}").contains("already carries"), "got: {err}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn attach_oracle_heals_an_orphaned_oracle_from_an_interrupted_attach() {
+        // A crash between attach's oracle/ write and its manifest rewrite leaves a v2 manifest
+        // with an oracle/ directory next to it. The retry must clear the orphan and succeed.
+        let dir = record_write_bundle_to_temp("synthrec-oracle-orphan");
+        let orphan = dir.join("oracle");
+        std::fs::create_dir_all(&orphan).unwrap();
+        std::fs::write(orphan.join("single_vertex_write.jsonl"), b"junk\n").unwrap();
+        let man = attach_oracle(&dir, &full_oracle()).unwrap();
+        assert_eq!(man.format_version, RECORDING_FORMAT_VERSION_ORACLE);
+        load(&dir).unwrap();
         std::fs::remove_dir_all(&dir).ok();
     }
 

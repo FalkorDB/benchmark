@@ -255,18 +255,22 @@ to also capture what each write **does** — not just how fast it is:
 ```bash
 # Record + capture the outcome oracle on a live FalkorDB (format v3; hash binds the outcomes):
 benchmark synthetic record --repo-writes --nodes 1000 --edges 5000 --seed 7 \
-  --oracle falkor://127.0.0.1:6379 --oracle-samples 8 --out-dir rec-writes-v3
+  --oracle falkor://127.0.0.1:6379 --out-dir rec-writes-v3
 benchmark synthetic run --recording rec-writes-v3 --endpoint falkor://127.0.0.1:6379 --out writes.json
 ```
 
-Record-time capture runs each **oracle-eligible** command (the deterministic subset — 7 of the
+Record-time capture runs every **oracle-eligible** command (the deterministic subset — 7 of the
 10 shapes; `single_edge_update` is excluded for server `rand()`, the two §6.4 prepared-state
 shapes stay latency-only) once against the freshly restored pristine base and records the
-engine's mutation counters, then a **second pass** must reproduce every outcome exactly. Replay
-of a v3 bundle re-verifies each recorded outcome the same way (untimed, C=1, restore before
-every invocation) **before** measuring latency and **hard-fails on any divergence** — an engine
-that no longer creates/updates what was recorded is doing different work, so its latency would
-be meaningless. `--oracle-samples <K>` (default 8) caps the per-op sample count.
+engine's mutation counters, then a **second pass** must reproduce every outcome exactly. The
+capture covers each eligible op's **complete command corpus**, and a v3 bundle must carry an
+oracle for **exactly** the eligible set (full corpus per op, none anywhere else — enforced at
+load, attach and replay), so coverage can never silently shrink. Capture is a record-time-only
+cost: the two full passes over this 1 000/5 000 bundle take ~13½ min. Replay of a v3 bundle
+re-verifies each recorded outcome the same way (untimed, C=1, restore before every invocation)
+**before** measuring latency and **hard-fails on any divergence** — an engine that no longer
+creates/updates what was recorded is doing different work, so its latency would be meaningless —
+and the report's `meta.oracle_verified` attests the verified coverage.
 
 ---
 
