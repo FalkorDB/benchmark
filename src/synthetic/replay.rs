@@ -36,6 +36,7 @@ use crate::synthetic::catalog::DEFAULT_RESET_EVERY;
 use crate::synthetic::dataset::{self, DatasetSpec};
 use crate::synthetic::op_runner::{capture_result, run_and_drain, ResultShape};
 use crate::synthetic::recording::{self, Bundle};
+use crate::synthetic::writes::{verify_mutation, ExpectedOutcome};
 use crate::synthetic::report::{
     DatasetInfo, LevelReport, Meta, OperationReport, Report, ServerInfo, SCHEMA_VERSION,
 };
@@ -314,6 +315,64 @@ pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
         }
         // Setup connection done; drop it so it isn't an idle extra connection during the sweep.
         drop(graph);
+
+        // §6.3 correctness pass: when the bundle carries an outcome oracle, re-verify every
+        // recorded outcome BEFORE any latency measurement — restore the pristine base, run the
+        // command once, and require the engine's mutation counters to EQUAL the recorded stats
+        // (`ExpectedOutcome::exactly`). A mismatch is a hard replay error naming the op, seq and
+        // command: the engine no longer effects the recorded outcome, so it is doing *different
+        // work* — measuring its latency anyway would poison the A/B trend silently. (Divergence
+        // must scream; skips never gate.) Untimed, single-flight, per-invocation restore — sample
+        // latencies stay clean because restores run between invocations, never inside one.
+        for (op, cyphers) in &bundle.commands {
+            let Some(expected) = bundle.oracle.get(op.name()) else { continue };
+            if skipped.contains_key(op.name()) {
+                continue;
+            }
+            let entry = entry_for(op.name());
+            let op_st = entry.budget.server_timeout_ms.unwrap_or(config.server_timeout_ms);
+            let op_deadline = entry
+                .budget
+                .client_deadline_ms
+                .map(Duration::from_millis)
+                .unwrap_or(client_deadline);
+            for (seq, want) in expected.iter().enumerate() {
+                restore_base(config, &bundle, &graph_name, &dataset_spec).await?;
+                let mut g = open_graph(&config.endpoint, &graph_name).await?;
+                let sample =
+                    run_and_drain(&mut g, QueryType::Write, &cyphers[seq], op_st, op_deadline)
+                        .await
+                        .map_err(|e| {
+                            OtherError(format!(
+                                "oracle verify: op '{}' seq {}: {}",
+                                op.name(),
+                                seq,
+                                e
+                            ))
+                        })?;
+                verify_mutation(ExpectedOutcome::exactly(*want), &sample.mutations).map_err(
+                    |e| {
+                        OtherError(format!(
+                            "oracle mismatch for op '{}' seq {} (command: {}): {} — the engine \
+                             diverged from the recorded outcome, so its write latencies would \
+                             measure different work",
+                            op.name(),
+                            seq,
+                            cyphers[seq],
+                            e
+                        ))
+                    },
+                )?;
+            }
+        }
+        if !bundle.oracle.is_empty() {
+            let outcomes: usize = bundle.oracle.values().map(Vec::len).sum();
+            info!(
+                "oracle verified: {} recorded outcome(s) across {} op(s) reproduced exactly",
+                outcomes,
+                bundle.oracle.len()
+            );
+        }
 
         for (op, corpus, shapes) in &reference {
             let entry = entry_for(op.name());
@@ -884,6 +943,7 @@ mod tests {
                 result_gated: *gated,
                 budget: budget.clone(),
                 capability: None,
+                oracle: None,
                 count: 1,
             })
             .collect();
@@ -912,6 +972,7 @@ mod tests {
             },
             graph_statements: Vec::new(),
             commands,
+            oracle: std::collections::BTreeMap::new(),
         }
     }
 

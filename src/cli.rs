@@ -549,7 +549,7 @@ pub enum SyntheticCommands {
         #[arg(
             long = "repo-writes",
             conflicts_with_all = ["ops", "all_reads", "tier", "repo_reads", "repo_algorithms"],
-            help = "record the A/B benchmark's 10 WRITE shapes from queries_repository (CREATE/SET/MERGE/DELETE/REMOVE/FOREACH) as a write bundle (recording format v2; the workload_hash binds each op's read/write kind). Replay measures them via GRAPH.QUERY at C=1 only, resetting the base graph before every measured cell and restoring + content-verifying it afterwards; results/counters are NOT asserted (latency tier). Write bundles are single-kind: mutually exclusive with every read selector."
+            help = "record the A/B benchmark's 10 WRITE shapes from queries_repository (CREATE/SET/MERGE/DELETE/REMOVE/FOREACH) as a write bundle (recording format v2; the workload_hash binds each op's read/write kind). Replay measures them via GRAPH.QUERY at C=1 only, resetting the base graph before every measured cell and restoring + content-verifying it afterwards; results/counters are NOT asserted (latency tier) unless the bundle carries the --oracle outcomes. Write bundles are single-kind: mutually exclusive with every read selector."
         )]
         repo_writes: bool,
         #[arg(
@@ -561,6 +561,20 @@ pub enum SyntheticCommands {
         nodes: Option<usize>,
         #[arg(long, help = "dataset edge count, must be >= nodes")]
         edges: Option<usize>,
+        #[arg(
+            long,
+            requires = "repo_writes",
+            value_name = "ENDPOINT",
+            help = "capture the write outcome ORACLE while recording (write bundles only): run each oracle-eligible write command (the deterministic subset — 7 of the 10 shapes) once against the recorded pristine base on this live FalkorDB endpoint (falkor://host:port), per-invocation restore, capture its mutation counters, prove determinism with a second full pass, and fold the outcomes into the bundle (format v3; hash-bound). Replay then re-verifies every recorded outcome at C=1 before measuring latency; any divergence is a hard replay error naming the op/seq/command."
+        )]
+        oracle: Option<String>,
+        #[arg(
+            long = "oracle-samples",
+            requires = "oracle",
+            value_name = "K",
+            help = "with --oracle: how many leading commands per eligible op to capture and re-verify (default 8, capped at the op's corpus size; each sample costs a full base restore at capture and at every replay)"
+        )]
+        oracle_samples: Option<usize>,
         #[arg(
             long = "out-dir",
             help = "directory to write the recording bundle into (manifest.json + graph.jsonl + commands/)"

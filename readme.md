@@ -504,6 +504,17 @@ just synthetic-compare-versions demo falkor://127.0.0.1:6379 falkor://127.0.0.1:
   exclusive with **every** read selector (`--op`/`--all-reads`/`--tier`/`--repo-reads`/
   `--repo-algorithms`); writes never enter `--repo-reads`, any tier, or the per-PR
   `synthetic-verify` gate.
+  Adding **`--oracle <endpoint>`** (write bundles only) additionally captures the **§6.3 outcome
+  oracle**: each **oracle-eligible** write command (the deterministic subset — 7 of the 10 shapes;
+  excluded: `single_edge_update` (server `rand()`), `detach_delete_user` and
+  `remove_user_property_and_label` (deferred)) runs once against the recorded **pristine base** on
+  that live FalkorDB endpoint — restored before every invocation — recording the mutation counters
+  it reports; a **second full pass** must reproduce every outcome exactly (determinism is proven at
+  record time, or the record fails naming the op/seq). The outcomes are folded into the bundle as
+  **recording format v3** with the oracle records **bound into the `workload_hash`**, and the
+  endpoint's graph is left restored (on failure too; a dual capture+restore failure surfaces both
+  errors). `--oracle-samples <K>` (default 8) bounds how many leading commands per eligible op are
+  captured. Plain (oracle-free) v1/v2 bundles stay byte-identical.
 - **`benchmark synthetic run --recording <dir> [--concurrency … --cache …]`** drops + loads +
   **count-verifies** the recorded graph, then measures the recorded commands across the concurrency
   sweep + cache modes, writing a report plus a per-op **`result_digest`** (a hash of the result
@@ -537,7 +548,14 @@ just synthetic-compare-versions demo falkor://127.0.0.1:6379 falkor://127.0.0.1:
   write replay never silently leaves a mutated graph behind (a dual measurement+restore failure
   surfaces **both** errors). `--no-load` is refused for write bundles, a bundle can never mix
   reads with writes, and a write op can never be capability-gated (capabilities are unhashed, so
-  a crafted one could otherwise skip-shrink the ten-shape coverage).
+  a crafted one could otherwise skip-shrink the ten-shape coverage). When the bundle carries a
+  **§6.3 outcome oracle** (format v3, recorded with `--oracle`), replay first runs an untimed
+  **correctness pass**: every recorded outcome is re-verified — pristine base restored before
+  each invocation, command run once, engine counters required to **equal** the recorded stats —
+  and any divergence **hard-fails the replay** naming the op/seq/command (an engine that no
+  longer effects the recorded outcome is doing *different work*, so measuring its latency would
+  poison the A/B trend silently). Only then are latencies measured, exactly as for a plain write
+  bundle.
 - **`benchmark synthetic report --diff <A.json> <B.json> [--out diff.md]`** **guards** the pair (it
   aborts unless the `workload_hash` **and** every op's `result_digest` match, so a version returning
   wrong/empty results faster can't masquerade as an improvement — the version difference itself is

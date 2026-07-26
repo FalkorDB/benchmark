@@ -1515,6 +1515,8 @@ async fn record_and_replay_via_run_command() {
         seed: Some(11),
         nodes: Some(400),
         edges: Some(1200),
+        oracle: None,
+        oracle_samples: None,
         out_dir: out_dir.clone(),
     })
     .await
@@ -1589,6 +1591,8 @@ async fn record_and_replay_algorithm_shapes_end_to_end() {
         seed: Some(7),
         nodes: Some(300),
         edges: Some(900),
+        oracle: None,
+        oracle_samples: None,
         out_dir: out_dir.clone(),
     })
     .await
@@ -1724,6 +1728,8 @@ async fn record_and_replay_write_shapes_end_to_end() {
         seed: Some(7),
         nodes: Some(300),
         edges: Some(900),
+        oracle: None,
+        oracle_samples: None,
         out_dir: out_dir.clone(),
     })
     .await
@@ -2121,5 +2127,214 @@ async fn max_flow_runs_on_the_generated_simple_graph() {
         .expect("max_flow is a float");
     assert!(flow > 0.0, "ring backbone connects every pair, got max_flow = {flow}");
 
+    drop_graph(graph).await;
+}
+
+/// Phase 7 §6.3 — the full oracle flow end to end: `record --repo-writes --oracle` captures each
+/// eligible write's per-command outcomes online (double-pass determinism proven at record time),
+/// upgrades the bundle to format v3 with the outcomes hash-bound, and `replay::run` re-verifies
+/// every recorded outcome from a pristine base before measuring latency.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires a running FalkorDB server"]
+async fn record_with_oracle_captures_verifies_and_replays_end_to_end() {
+    use benchmark::cli::SyntheticCommands;
+    use benchmark::synthetic::run_command;
+    use benchmark::synthetic::shapes::{write_shapes, OracleEligibility};
+
+    let graph = "syn_it_oracle";
+    drop_graph(graph).await;
+    let dir = temp_bundle_dir("syn-it-oracle");
+    let out_dir = dir.to_string_lossy().into_owned();
+
+    run_command(SyntheticCommands::Record {
+        config: None,
+        graph: Some(graph.to_string()),
+        ops: vec![],
+        all_reads: false,
+        tier: None,
+        repo_reads: None,
+        repo_algorithms: false,
+        repo_writes: true,
+        seed: Some(7),
+        nodes: Some(300),
+        edges: Some(900),
+        oracle: Some(endpoint()),
+        oracle_samples: Some(2),
+        out_dir: out_dir.clone(),
+    })
+    .await
+    .expect("record --repo-writes --oracle via run_command");
+
+    let bundle = recording::load(&dir).expect("load the oracle bundle");
+    assert_eq!(bundle.manifest.format_version, 3, "oracle bundles are recording format v3");
+    let mut eligible: Vec<&str> = write_shapes()
+        .iter()
+        .filter(|s| s.oracle == OracleEligibility::Eligible)
+        .map(|s| s.name)
+        .collect();
+    eligible.sort_unstable(); // bundle.oracle is a BTreeMap — compare in key order
+    assert_eq!(
+        bundle.oracle.keys().map(String::as_str).collect::<Vec<_>>(),
+        eligible,
+        "exactly the §6.3 deterministic subset is oracle-captured"
+    );
+    for entry in &bundle.manifest.ops {
+        if eligible.contains(&entry.name.as_str()) {
+            assert_eq!(entry.oracle, Some(2), "{}: --oracle-samples 2", entry.name);
+            assert_eq!(bundle.oracle[&entry.name].len(), 2, "{}", entry.name);
+        } else {
+            assert_eq!(entry.oracle, None, "{} is excluded from the oracle", entry.name);
+        }
+    }
+    // The first outcome of the plain CREATE shape is knowable a priori — pin it as a smoke check
+    // that the oracle recorded real counters (everything else is engine-reported).
+    let svw = &bundle.oracle["single_vertex_write"][0];
+    assert_eq!(svw.nodes_created, 1, "CREATE makes one node: {svw:?}");
+
+    // Replay: the oracle verify pass runs before measurement and the whole run stays green.
+    let out = dir.join("oracle.json").to_string_lossy().into_owned();
+    let mut config = replay_config(&dir, graph, &out, true);
+    config.samples = 2;
+    config.warmup = 0;
+    config.cache = benchmark::synthetic::CacheSelection::Cached;
+    let report = replay::run(&config).await.expect("replay a v3 oracle bundle");
+    assert_eq!(report.operations.len(), 10, "all 10 write shapes still measured");
+
+    // §3.5: the endpoint's graph is left exactly at the recorded base.
+    let mut g = open_graph(&endpoint(), graph).await.expect("open restored graph");
+    assert_eq!(scalar_i64(&mut g, "MATCH (n) RETURN count(n)").await, 300);
+    assert_eq!(scalar_i64(&mut g, "MATCH ()-[r]->() RETURN count(r)").await, 900);
+
+    std::fs::remove_dir_all(&dir).ok();
+    drop_graph(graph).await;
+}
+
+/// Phase 7 §6.3 — a recorded outcome the engine no longer reproduces must HARD-FAIL the replay
+/// (naming the op, seq and command), and the §3.5 error-safe final restore must still leave the
+/// recorded base behind. A diverged write means the engine is doing different work — measuring
+/// its latency anyway would silently poison the A/B trend.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires a running FalkorDB server"]
+async fn replay_hard_fails_on_a_diverged_oracle_outcome() {
+    use benchmark::cli::SyntheticCommands;
+    use benchmark::synthetic::run_command;
+    use benchmark::synthetic::writes::MutationStats;
+    use std::collections::BTreeMap;
+
+    let graph = "syn_it_oracle_diverged";
+    drop_graph(graph).await;
+    let dir = temp_bundle_dir("syn-it-oracle-div");
+
+    run_command(SyntheticCommands::Record {
+        config: None,
+        graph: Some(graph.to_string()),
+        ops: vec![],
+        all_reads: false,
+        tier: None,
+        repo_reads: None,
+        repo_algorithms: false,
+        repo_writes: true,
+        seed: Some(7),
+        nodes: Some(300),
+        edges: Some(900),
+        oracle: None,
+        oracle_samples: None,
+        out_dir: dir.to_string_lossy().into_owned(),
+    })
+    .await
+    .expect("record a plain v2 write bundle");
+
+    // Attach a hash-valid but WRONG oracle: the plain CREATE reports nodes_created=1, so
+    // expecting 7 is a guaranteed, deterministic divergence.
+    let mut wrong = BTreeMap::new();
+    wrong.insert(
+        "single_vertex_write".to_string(),
+        vec![MutationStats {
+            nodes_created: 7,
+            ..MutationStats::default()
+        }],
+    );
+    recording::attach_oracle(&dir, &wrong).expect("attach the crafted oracle");
+
+    let out = dir.join("diverged.json").to_string_lossy().into_owned();
+    let mut config = replay_config(&dir, graph, &out, true);
+    config.samples = 2;
+    config.warmup = 0;
+    config.cache = benchmark::synthetic::CacheSelection::Cached;
+    let err = replay::run(&config).await.expect_err("a diverged oracle outcome must fail");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("oracle mismatch for op 'single_vertex_write' seq 0"),
+        "must name the op and seq: {msg}"
+    );
+    assert!(msg.contains("nodes_created"), "must name the diverged counter: {msg}");
+    assert!(msg.contains("expected exactly 7"), "must show the recorded expectation: {msg}");
+
+    // The hard failure still ran the §3.5 final restore.
+    let mut g = open_graph(&endpoint(), graph).await.expect("open restored graph");
+    assert_eq!(scalar_i64(&mut g, "MATCH (n) RETURN count(n)").await, 300);
+    assert_eq!(scalar_i64(&mut g, "MATCH ()-[r]->() RETURN count(r)").await, 900);
+
+    std::fs::remove_dir_all(&dir).ok();
+    drop_graph(graph).await;
+}
+
+/// Phase 7 §6.3 — capture determinism end to end: two independent record+capture flows over the
+/// same seed produce byte-identical v3 bundles (same `workload_hash`, engine outcomes included),
+/// and a completed capture leaves the endpoint's graph content-identical to a fresh restore of
+/// the recorded base (§3.5 at record time).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires a running FalkorDB server"]
+async fn oracle_capture_is_deterministic_and_leaves_the_base_restored() {
+    use benchmark::synthetic::oracle;
+    use benchmark::synthetic::replay::capture_graph_content;
+    use benchmark::synthetic::shapes::record_repo_writes;
+
+    let graph = "syn_it_oracle_det";
+    drop_graph(graph).await;
+
+    let record_one = |prefix: &str| {
+        let dir = temp_bundle_dir(prefix);
+        let spec = DatasetSpec {
+            seed: 7,
+            nodes: 300,
+            edges: 900,
+        };
+        let ops = record_repo_writes(300, 900, 7).expect("render the write shapes");
+        recording::record_rendered(&spec, graph, &ops, 7, 1_000, &dir).expect("record v2");
+        dir
+    };
+
+    let dir_a = record_one("syn-it-oracle-det-a");
+    let manifest_a = oracle::capture(&endpoint(), &dir_a, 2, 10_000, 60_000)
+        .await
+        .expect("capture oracle for bundle A");
+
+    // Post-capture, BEFORE any further restore: the graph must already be the pristine base.
+    let bundle_a = recording::load(&dir_a).expect("reload bundle A");
+    let cfg = replay_config(&dir_a, graph, "unused.json", true);
+    let mut g = open_graph(&endpoint(), graph).await.expect("open post-capture graph");
+    let post_capture = capture_graph_content(&mut g, &cfg).await.expect("digest post-capture");
+    replay::restore_base(&cfg, &bundle_a, graph, &bundle_a.spec())
+        .await
+        .expect("explicit fresh restore");
+    let pristine = capture_graph_content(&mut g, &cfg).await.expect("digest fresh restore");
+    assert_eq!(
+        post_capture, pristine,
+        "capture must leave the base content-identical to a fresh restore"
+    );
+    drop(g);
+
+    let dir_b = record_one("syn-it-oracle-det-b");
+    let manifest_b = oracle::capture(&endpoint(), &dir_b, 2, 10_000, 60_000)
+        .await
+        .expect("capture oracle for bundle B");
+    assert_eq!(
+        manifest_a.workload_hash, manifest_b.workload_hash,
+        "same seed + same engine ⇒ identical v3 bundles, oracle outcomes included"
+    );
+
+    std::fs::remove_dir_all(&dir_a).ok();
+    std::fs::remove_dir_all(&dir_b).ok();
     drop_graph(graph).await;
 }
