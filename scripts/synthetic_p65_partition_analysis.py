@@ -12,15 +12,19 @@ on-disk files only (no server):
 - `corpus <bundle-dir>` — E4, collisions: per write-op corpus (the K=256 rendered commands),
   how commands collide on the node ids they target. Each command *touches* the node ids in
   its rendered params — node-targeted shapes touch `{id}`, edge-MERGE shapes touch
-  `{from, to}`; `single_edge_update` (rand()-targeted, no param target) is skipped. Reported
-  per op, for a W-way contiguous split of the corpus into `K/W`-command chunks
-  (`worker(seq) = seq // (K / W)`):
+  `{from, to}`; `single_edge_update` (rand()-targeted, no param target) is skipped, and any
+  other command without a recognizable target is an error (fail closed — a format change
+  must not silently drop collision evidence). Reported per op, for a W-way contiguous split
+  of the corpus into `K/W`-command chunks (`worker(seq) = seq // (K / W)`):
     - `repeat-touches`: touches of an id already touched by an earlier command,
       `sum(touches(id) - 1)` over ids touched >= 2 times;
     - `cross-worker`: the subset of repeat touches landing on a *different* worker than an
       earlier touch of the same id — mutations of one node racing across workers;
     - for edge-MERGE shapes, whether any directed `(from, to)` pair repeats within the
       corpus (in the seed-42 bundles it never does — every MERGE targets a distinct edge).
+
+W must be >= 1 and divide the node count (`edges`) / corpus size (`corpus`) exactly, so
+bands/chunks are equal — the split the figures are defined over; anything else is rejected.
 
 Usage:
     python3 scripts/synthetic_p65_partition_analysis.py edges  <bundle-dir> [workers]
@@ -39,6 +43,22 @@ from typing import Dict, List, Optional, Tuple
 EDGE_PAIR = re.compile(r"\{src:(\d+),dst:(\d+)")
 PARAMS = re.compile(r"(\w+)\s*=\s*(\d+)")
 
+# Ops with no deterministic param target (the server picks the row via rand()) — the only
+# corpora the collision analysis may skip; anything else unparsable is an error.
+RAND_TARGETED = {"single_edge_update"}
+
+
+def split_size(total: int, workers: int, what: str) -> int:
+    """The per-worker share of an exact W-way contiguous split, validating the split exists."""
+    if workers < 1:
+        sys.exit(f"workers must be >= 1, got {workers}")
+    if total == 0 or total % workers != 0:
+        sys.exit(
+            f"{what} ({total}) must be a non-zero multiple of workers ({workers}) — the "
+            f"figures are defined over equal contiguous bands/chunks"
+        )
+    return total // workers
+
 
 def load_edges(bundle: Path) -> List[Tuple[int, int]]:
     pairs = []
@@ -52,8 +72,11 @@ def load_edges(bundle: Path) -> List[Tuple[int, int]]:
 
 def edges_report(bundle: Path, workers: int) -> None:
     pairs = load_edges(bundle)
-    nodes = json.load(open(bundle / "manifest.json"))["dataset"]["nodes"]
-    band_size = nodes // workers
+    with open(bundle / "manifest.json") as fh:
+        nodes = json.load(fh)["dataset"]["nodes"]
+    band_size = split_size(nodes, workers, "node count")
+    if not pairs:
+        sys.exit("no edges found in the bundle's graph.jsonl edges phase")
 
     def band(node_id: int) -> int:
         return (node_id - 1) // band_size
@@ -66,10 +89,13 @@ def edges_report(bundle: Path, workers: int) -> None:
 
 def corpus_targets(bundle: Path, op: str) -> Optional[List[tuple]]:
     """Per-command rendered param targets: `(from, to)` for edge shapes, `(id,)` for node
-    shapes, or None when the op has no deterministic param target (rand()-picked)."""
-    targets = []
+    shapes, or None for the known rand()-targeted ops. A command without a recognizable
+    target in any other op — or a mix of target shapes within one op — is an error."""
+    if op in RAND_TARGETED:
+        return None
+    targets: List[tuple] = []
     with open(bundle / "commands" / f"{op}.jsonl") as fh:
-        for line in fh:
+        for seq, line in enumerate(fh):
             record = json.loads(line)
             params = dict(PARAMS.findall(record["cypher"].split(" MATCH", 1)[0].split(" MERGE", 1)[0]))
             if "from" in params and "to" in params:
@@ -77,7 +103,9 @@ def corpus_targets(bundle: Path, op: str) -> Optional[List[tuple]]:
             elif "id" in params:
                 targets.append((int(params["id"]),))
             else:
-                return None
+                sys.exit(f"{op} seq {seq}: no `id` or `from`/`to` param target — fail closed")
+            if len(targets[0]) != len(targets[-1]):
+                sys.exit(f"{op} seq {seq}: mixed target shapes within one op — fail closed")
     return targets
 
 
@@ -89,7 +117,7 @@ def corpus_report(bundle: Path, workers: int) -> None:
             print(f"{op:32} skipped (no param target — rand()-picked)")
             continue
         k = len(targets)
-        chunk = k // workers
+        chunk = split_size(k, workers, f"{op} corpus size")
         touch_seqs: Dict[int, List[int]] = {}
         for seq, target in enumerate(targets):
             for node_id in set(target):
