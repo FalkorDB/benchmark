@@ -749,7 +749,7 @@ pub fn load(dir: &Path) -> BenchmarkResult<Bundle> {
     // Exact-set enforcement (§6.3): a v3 bundle must carry an oracle for EVERY recorded
     // oracle-eligible write op, covering its COMPLETE command corpus, and for nothing else — so
     // oracle coverage can never silently shrink (a crafted 1-of-7 subset, or a padded oracle on
-    // an op outside the deterministic subset, is rejected here rather than replayed).
+    // an op outside the eligible set, is rejected here rather than replayed).
     if manifest.format_version >= RECORDING_FORMAT_VERSION_ORACLE {
         let eligible = crate::synthetic::shapes::oracle_eligible_names();
         for entry in &manifest.ops {
@@ -781,7 +781,7 @@ pub fn load(dir: &Path) -> BenchmarkResult<Bundle> {
                 (false, Some(_)) => {
                     return Err(OtherError(format!(
                         "manifest declares an outcome oracle for op '{}', which is not \
-                         oracle-eligible (§6.3 deterministic subset only; crafted/corrupt \
+                         oracle-eligible (§6.3 + §6.4 eligible set only; crafted/corrupt \
                          manifest)",
                         entry.name
                     )));
@@ -1054,8 +1054,8 @@ pub fn attach_oracle(
             }
             (false, Some(_)) => {
                 return Err(OtherError(format!(
-                    "oracle captured for op '{}', which is not oracle-eligible (§6.3 \
-                     deterministic subset only)",
+                    "oracle captured for op '{}', which is not oracle-eligible (§6.3 + §6.4 \
+                     eligible set only)",
                     entry.name
                 )));
             }
@@ -2627,7 +2627,7 @@ mod tests {
         // Mixed bundle (one eligible + one custom write op): attach the valid exact-set oracle,
         // then hand-edit the manifest to declare an oracle on the non-eligible op — the §6.3
         // exact-set pass must reject it at manifest level (a padded oracle outside the
-        // deterministic subset is as much a coverage lie as a shrunken one).
+        // eligible set is as much a coverage lie as a shrunken one).
         let dir = temp_bundle_dir("synthrec-oracle-noneligible");
         let spec = DatasetSpec {
             seed: 1,

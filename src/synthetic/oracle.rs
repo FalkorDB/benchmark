@@ -72,7 +72,7 @@ pub async fn capture(
             bundle.manifest.format_version
         )));
     }
-    // The §6.3 eligibility table (single source of truth: the annotated write-shape table).
+    // The §6.3 + §6.4 eligibility table (single source of truth: the annotated write-shape table).
     // Every eligible op is captured over its COMPLETE corpus — the exact set + exact counts that
     // `recording::attach_oracle`/`load` enforce on the resulting v3 bundle.
     let eligible = oracle_eligible_names();
@@ -84,8 +84,8 @@ pub async fn capture(
         .collect();
     if targets.is_empty() {
         return Err(OtherError(
-            "--oracle: the bundle records no oracle-eligible write op (the §6.3 deterministic \
-             subset) — nothing to capture"
+            "--oracle: the bundle records no oracle-eligible write op (the §6.3 + §6.4 \
+             oracle-eligible set) — nothing to capture"
                 .to_string(),
         ));
     }
@@ -260,7 +260,7 @@ mod tests {
 
     #[tokio::test]
     async fn capture_rejects_a_bundle_with_no_eligible_op_offline() {
-        // A write bundle whose only op is not in the §6.3 deterministic subset has nothing to
+        // A write bundle whose only op is not in the §6.3 + §6.4 oracle-eligible set has nothing to
         // capture — fail offline, before any connection (the endpoint is unroutable).
         let dir = record_write_bundle("synthorc-inel", "w_custom");
         let err = capture("falkor://127.0.0.1:1", &dir, 5_000, 6_000).await.unwrap_err();

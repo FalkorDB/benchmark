@@ -121,9 +121,10 @@ not live state. **Fix:** error-safe final restore, forbid `--no-load` for writes
    This alone delivers per-op **trend** coverage for all 10 write shapes — the A/B trend goal.
 2. **Correctness tier (harder, partial, staged):** an **online-recorded per-command outcome oracle**
    (full `MutationStats` incl. deleted/removed counters) + **per-invocation pristine restore** + C=1,
-   initially for the **deterministic subset only** — excluding `single_edge_update` (server
-   `rand()`, permanently) and deferring `remove_user_property_and_label` (needs prepared state) +
-   `detach_delete_user` (variable counts) to §6.4, which delivered both (phasing item 4).
+   covering **9 of the 10 write shapes** — every shape except `single_edge_update` (server
+   `rand()`, permanently excluded per §3.4). Delivered in two stages: §6.3 shipped the initial
+   7-shape deterministic subset, then §6.4 (phasing item 4) added `remove_user_property_and_label`
+   (via the prepared load phase) and `detach_delete_user` (variable counts, exact per-command).
    Replaces the 5-variant `ExpectedMutation` with a **generalized per-invocation expected outcome**.
 
 Selection is an **orthogonal** `--repo-writes` axis (like Phase 6's `--repo-algorithms`), initially
