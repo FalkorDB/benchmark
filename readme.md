@@ -497,17 +497,22 @@ just synthetic-compare-versions demo falkor://127.0.0.1:6379 falkor://127.0.0.1:
   `merge_friend_edge_upsert`, `detach_delete_user`) as a **single-kind write bundle** in
   **recording format v2**, whose `workload_hash` additionally binds each op's read/write **kind**
   (v1 read bundles hash byte-identically to before). Same render-once discipline and full
-  256-command corpora as the reads; no fixture. Every write shape pins a **C=1 budget**
+  256-command corpora as the reads. The recorded graph ends with a **prepared-state statement**
+  (design §6.4: every `User` gains `rpc_social_credit` + `:TemporaryLabel`, deterministically) so
+  the `REMOVE` shape mutates state that actually exists — re-established by every base restore and
+  hash-bound like every other load statement. Every write shape pins a **C=1 budget**
   (100 samples, warm-up 10) and is **result-N/A by design** — this is the **latency tier** of the
   writes design: mutation outcomes (result stats/counters) are state- and value-dependent, so
   nothing is asserted about them. Write bundles are single-kind, so `--repo-writes` is mutually
   exclusive with **every** read selector (`--op`/`--all-reads`/`--tier`/`--repo-reads`/
   `--repo-algorithms`); writes never enter `--repo-reads`, any tier, or the per-PR
   `synthetic-verify` gate.
-  Adding **`--oracle <endpoint>`** (write bundles only) additionally captures the **§6.3 outcome
-  oracle**: every **oracle-eligible** write command (the deterministic subset — 7 of the 10 shapes;
-  excluded: `single_edge_update` (server `rand()`), `detach_delete_user` and
-  `remove_user_property_and_label` (deferred)) runs once against the recorded **pristine base** on
+  Adding **`--oracle <endpoint>`** (write bundles only) additionally captures the **§6.3/§6.4
+  outcome oracle**: every **oracle-eligible** write command (9 of the 10 shapes — the §6.3
+  deterministic subset plus, since §6.4, `detach_delete_user` (variable per-command delete counts,
+  reproducible from the restored base) and `remove_user_property_and_label` (real removals against
+  the prepared state); only `single_edge_update` stays excluded (server `rand()`)) runs once
+  against the recorded **pristine base** on
   that live FalkorDB endpoint — restored before every invocation — recording the mutation counters
   it reports; a **second full pass** must reproduce every outcome exactly (determinism is proven at
   record time, or the record fails naming the op/seq). The capture covers each eligible op's
@@ -519,7 +524,7 @@ just synthetic-compare-versions demo falkor://127.0.0.1:6379 falkor://127.0.0.1:
   dual capture+restore failure surfaces both errors; the *initial* setup load is under the same
   discipline — a mid-load failure triggers one recovery restore and a combined error when that
   fails too). Capture is a record-time-only cost (the two
-  full passes over the 1 000-node/5 000-edge repo-writes bundle take ~13½ min); plain (oracle-free)
+  full passes over the 1 000-node/5 000-edge repo-writes bundle take ~18 min); plain (oracle-free)
   v1/v2 bundles stay byte-identical.
 - **`benchmark synthetic run --recording <dir> [--concurrency … --cache …]`** drops + loads +
   **count-verifies** the recorded graph, then measures the recorded commands across the concurrency

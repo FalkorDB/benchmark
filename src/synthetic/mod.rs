@@ -1537,16 +1537,18 @@ pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkRes
             })?;
             let manifest = if repo_writes {
                 // Phase 7: record the 10 opt-in write shapes as a single-kind write bundle
-                // (recording format v2 — the workload_hash binds each op's kind). Same
-                // render-once discipline as the read shapes; no fixture (writes address the plain
-                // generated dataset). `--repo-writes` conflicts with every read selector, so a
-                // bundle is never mixed.
+                // (recording format v2+ — the workload_hash binds each op's kind). Same
+                // render-once discipline as the read shapes. The prepared-state statement (§6.4)
+                // is baked into the recorded graph so `remove_user_property_and_label` removes a
+                // property/label that exists, and the oracle's per-invocation restore re-prepares
+                // it before every captured command. `--repo-writes` conflicts with every read
+                // selector, so a bundle is never mixed.
                 let recorded = crate::synthetic::shapes::record_repo_writes(
                     spec.nodes as i32,
                     spec.edges as i32,
                     resolved.seed,
                 )?;
-                recording::record_rendered(
+                recording::record_rendered_with_prepared(
                     &spec,
                     &resolved.graph,
                     &recorded,
@@ -2544,6 +2546,12 @@ mod tests {
             crate::synthetic::shapes::write_shapes().iter().map(|s| s.name).collect();
         let recorded: Vec<&str> = bundle.manifest.ops.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(recorded, expected, "exactly the 10 write shapes, in definition order");
+        // §6.4: the CLI arm records via `record_rendered_with_prepared`, so the graph ends with
+        // exactly the prepared-state statement (hash-bound; re-established by every restore).
+        let prepared: Vec<(dataset::LoadPhase, String)> =
+            crate::synthetic::dataset::prepared_statements().collect();
+        let tail = &bundle.graph_statements[bundle.graph_statements.len() - prepared.len()..];
+        assert_eq!(tail, prepared.as_slice(), "write bundles bake the §6.4 prepared state last");
         for entry in &bundle.manifest.ops {
             assert_eq!(entry.kind, QueryType::Write, "{}", entry.name);
             assert!(!entry.result_gated, "{} is latency-tier (§4.1)", entry.name);

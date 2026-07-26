@@ -14,7 +14,9 @@ re-verifies every recorded outcome against the engine as an untimed C=1 correctn
 hard-fails on divergence, `--require-oracle` refuses oracle-less write bundles (v3→v2 downgrade
 guard) and the diff/regression guards treat a one-sided or differing attestation as
 not-comparable; **stats only** — write result *values* stay un-captured per §3.4/§5-Out);
-§6.4–§6.5 (prepared-state variants, concurrency) **not implemented**. **Rubber-duck reviewed**; this revision folds in the review's corrections — the
+§6.4 **implemented** (prepared state as a recorded load phase + `detach_delete_user` /
+`remove_user_property_and_label` oracle-eligible — 9 of the 10 shapes covered by the correctness
+tier); §6.5 (concurrency) **not implemented**. **Rubber-duck reviewed**; this revision folds in the review's corrections — the
 first draft's "counters are deterministic" thesis was wrong (see §10). Follows the reads-scope work
 (design [`synthetic-cover-ab-query-shapes.md`](./synthetic-cover-ab-query-shapes.md), Phases 1–5,
 merged in PRs #240–#250) and is the sibling of the algorithms design (Phase 6). The parent design
@@ -117,10 +119,11 @@ not live state. **Fix:** error-safe final restore, forbid `--no-load` for writes
    recorded-write worker, versioned bundle) that **measures write latency/throughput** with periodic
    base-graph reset to bound drift, and **asserts no correctness** (result + counters both untracked).
    This alone delivers per-op **trend** coverage for all 10 write shapes — the A/B trend goal.
-2. **Correctness tier (harder, partial, deferred):** an **online-recorded per-command outcome oracle**
+2. **Correctness tier (harder, partial, staged):** an **online-recorded per-command outcome oracle**
    (full `MutationStats` incl. deleted/removed counters) + **per-invocation pristine restore** + C=1,
-   for the **deterministic subset only** — excludes `single_edge_update` (server `rand()`) and defers
-   `remove_user_property_and_label` (needs prepared state) until the counter model is generalized.
+   initially for the **deterministic subset only** — excluding `single_edge_update` (server
+   `rand()`, permanently) and deferring `remove_user_property_and_label` (needs prepared state) +
+   `detach_delete_user` (variable counts) to §6.4, which delivered both (phasing item 4).
    Replaces the 5-variant `ExpectedMutation` with a **generalized per-invocation expected outcome**.
 
 Selection is an **orthogonal** `--repo-writes` axis (like Phase 6's `--repo-algorithms`), initially
@@ -130,10 +133,10 @@ so a mixed bundle cannot express C=1 writes alongside C=1,8 reads).
 ## 5. Scope: in / out
 - **In (latency tier):** all 10 shapes, latency/throughput, periodic reset, opt-in nightly.
 - **In (correctness tier, staged):** the deterministic fixed-outcome subset (the two plain
-  create/update, the create-once MERGEs, `foreach_loop_mutation`) via the online oracle at C=1.
-- **Deferred:** `single_edge_update` (server `rand()`, §3.4 — outside any oracle),
-  `remove_user_property_and_label` (prepared state — from the pristine base the removal is a
-  degenerate no-op) and `detach_delete_user`'s variable counts (both §6.4); C>1 writes.
+  create/update, the create-once MERGEs, `foreach_loop_mutation`) via the online oracle at C=1;
+  since §6.4 also `remove_user_property_and_label` (against the recorded prepared state) and
+  `detach_delete_user` (variable counts, reproducible per-command from the restored base).
+- **Deferred:** `single_edge_update` (server `rand()`, §3.4 — outside any oracle); C>1 writes.
 - **Out:** Neo4j/Memgraph variants; any digest gating of write results; any change to the per-PR read
   gate or the A/B `--query-profile`.
 
@@ -163,8 +166,23 @@ so a mixed bundle cannot express C=1 writes alongside C=1,8 reads).
    above:* per-command **result values** are **not** captured — §5-Out rules out digest-gating
    write results and §3.4 makes returned values irreproducible (`rand()`, engine-internal ids),
    so the oracle records the `MutationStats` counters only.
-4. ⛔ **Prepared-state + removal shapes** (`remove_user_property_and_label`) and variable-count
-   `detach_delete_user`.
+4. ✅ **Prepared-state + removal shapes** (`remove_user_property_and_label`) and variable-count
+   `detach_delete_user` — both now **oracle-eligible** (9 of the 10 shapes; only
+   `single_edge_update` remains excluded, §3.4). The prepared state is a **recorded load
+   phase** (`prepared`, one deterministic constant statement appended to every `--repo-writes`
+   `graph.jsonl`: every `User` gains `rpc_social_credit = id % 97` + `:TemporaryLabel`), so it is
+   bound into the `workload_hash` and re-established by **every** base restore — each captured
+   `REMOVE` performs a real removal (`properties_removed=1`, `labels_removed=1`) and each
+   `DETACH DELETE` deletes the target plus its full degree (variable `relationships_deleted`
+   recorded per command). *Interpretation note:* the design sketch said "prepared state" without
+   fixing a mechanism; a load phase (mirroring §3.4's fixture precedent) was chosen over
+   per-command setup statements because the §6.3 per-invocation restore already guarantees the
+   state precedes every captured command, with zero new bundle machinery. Write-bundle
+   `workload_hash`es change (the prepared statement is hashed); no committed bundle or golden
+   pins one. This phase also root-caused and fixed a pre-existing capture/verify flake: the
+   per-command loops opened two fresh TCP connections per command (~9 200 rapid connects per
+   capture), which stalls macOS Docker port-forwarding into a spurious send timeout — the §6.3
+   loops now reuse **one connection per pass** (`restore_base_on`).
 5. ⛔ **Concurrency** — decide C>1 (per-worker id partitioning) or keep C=1 for correctness.
 6. 🚧 **Docs** — folded into each phase's PR (doc sync is part of each phase's definition of
    done): §6.1's readme + cookbook updates shipped with phase 1.

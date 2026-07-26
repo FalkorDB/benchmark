@@ -393,6 +393,13 @@ pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
                 bundle.manifest.format_version
             );
         }
+        // ONE connection for the whole verify pass (like the capture pass): a per-command fresh
+        // socket exhausts the ephemeral-port/proxy budget — see `restore_base_on`.
+        let mut verify_conn = if bundle.oracle.is_empty() {
+            None
+        } else {
+            Some(open_graph(&config.endpoint, &graph_name).await?)
+        };
         for (op, cyphers) in &bundle.commands {
             let Some(expected) = bundle.oracle.get(op.name()) else { continue };
             if let Some(reason) = skipped.get(op.name()) {
@@ -415,10 +422,10 @@ pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
                 .map(Duration::from_millis)
                 .unwrap_or(client_deadline);
             for (seq, want) in expected.iter().enumerate() {
-                restore_base(config, &bundle, &graph_name, &dataset_spec).await?;
-                let mut g = open_graph(&config.endpoint, &graph_name).await?;
+                let g = verify_conn.as_mut().expect("verify connection opened above");
+                restore_base_on(g, config, &bundle, &graph_name, &dataset_spec).await?;
                 let sample =
-                    run_and_drain(&mut g, QueryType::Write, &cyphers[seq], op_st, op_deadline)
+                    run_and_drain(g, QueryType::Write, &cyphers[seq], op_st, op_deadline)
                         .await
                         .map_err(|e| {
                             OtherError(format!(
@@ -881,6 +888,21 @@ pub async fn restore_base(
 ) -> BenchmarkResult<()> {
     let mut conn = open_graph(&config.endpoint, graph_name).await?;
     load_recorded_graph(&mut conn, bundle, graph_name, spec, config).await
+}
+
+/// [`restore_base`] on an **existing** connection. The per-command §6.3 loops (oracle capture and
+/// replay verify — thousands of restore+run cycles) MUST reuse one connection per pass: opening
+/// two fresh sockets per command exhausts the host's ephemeral-port/proxy budget (macOS Docker
+/// port-forwarding stalls after ~1k rapid connects) and fails the run with a spurious send
+/// timeout.
+pub(crate) async fn restore_base_on(
+    conn: &mut AsyncGraph,
+    config: &ReplayConfig,
+    bundle: &Bundle,
+    graph_name: &str,
+    spec: &DatasetSpec,
+) -> BenchmarkResult<()> {
+    load_recorded_graph(conn, bundle, graph_name, spec, config).await
 }
 
 /// Drop `graph`, execute the bundle's recorded load statements, and verify the node/edge counts.

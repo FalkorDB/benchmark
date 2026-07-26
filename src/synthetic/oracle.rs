@@ -25,7 +25,9 @@ use crate::error::BenchmarkResult;
 use crate::queries_repository::QueryType;
 use crate::synthetic::op_runner::run_and_drain;
 use crate::synthetic::recording::{self, Bundle};
-use crate::synthetic::replay::{capture_graph_content, restore_and_verify, restore_base, ReplayConfig};
+use crate::synthetic::replay::{
+    capture_graph_content, restore_and_verify, restore_base, restore_base_on, ReplayConfig,
+};
 use crate::synthetic::shapes::oracle_eligible_names;
 use crate::synthetic::writes::MutationStats;
 use crate::synthetic::{open_graph, CacheSelection};
@@ -37,7 +39,7 @@ use tracing::info;
 /// Capture the §6.3 outcome oracle for the (already-recorded) write bundle in `dir` against the
 /// live engine at `endpoint`, and fold it into the bundle (upgrading it to format v3).
 ///
-/// For every **oracle-eligible** write op (the deterministic subset —
+/// For every **oracle-eligible** write op (the eligible subset —
 /// [`ShapeSpec::oracle`](crate::synthetic::shapes::ShapeSpec::oracle)), **every command of the
 /// full corpus** runs **once from a freshly restored pristine base**, recording the
 /// [`MutationStats`] the engine reports. A second full pass then repeats the capture; any
@@ -183,11 +185,14 @@ async fn capture_pass(
 ) -> BenchmarkResult<BTreeMap<String, Vec<MutationStats>>> {
     let client_deadline = Duration::from_millis(config.client_deadline_ms);
     let mut out = BTreeMap::new();
+    // ONE connection for the whole pass: a per-command fresh socket (thousands of rapid
+    // connects) exhausts the host's ephemeral-port/proxy budget and stalls into a spurious
+    // send timeout — see `restore_base_on`.
+    let mut graph = open_graph(&config.endpoint, graph_name).await?;
     for (name, cyphers) in targets {
         let mut outcomes = Vec::with_capacity(cyphers.len());
         for (seq, cypher) in cyphers.iter().enumerate() {
-            restore_base(config, bundle, graph_name, &bundle.spec()).await?;
-            let mut graph = open_graph(&config.endpoint, graph_name).await?;
+            restore_base_on(&mut graph, config, bundle, graph_name, &bundle.spec()).await?;
             let sample = run_and_drain(
                 &mut graph,
                 QueryType::Write,

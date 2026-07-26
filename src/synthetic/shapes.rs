@@ -171,7 +171,9 @@ pub struct ShapeSpec {
 /// from a pristine base at C=1 — and replay re-verifies each recorded outcome per invocation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OracleEligibility {
-    /// In the §6.3 deterministic subset: oracle-captured at record time, re-verified at replay.
+    /// In the oracle-eligible subset (§6.3 deterministic writes + the §6.4
+    /// prepared-state/variable-count writes): oracle-captured at record time, re-verified at
+    /// replay.
     Eligible,
     /// Never oracle-captured, with the design-cited reason.
     Excluded(&'static str),
@@ -182,10 +184,10 @@ pub enum OracleEligibility {
 const ORACLE_NOT_A_WRITE: OracleEligibility =
     OracleEligibility::Excluded("not a write — no mutation outcome to capture (§6.3)");
 
-/// The names of the oracle-eligible write shapes (the §6.3 deterministic subset) — the single
-/// source of truth for which ops a format-v3 bundle **must** carry outcomes for: capture targets
-/// exactly this set, and `recording::load` + replay enforce it exactly (no subset, no strays), so
-/// oracle coverage can never silently shrink.
+/// The names of the oracle-eligible write shapes (the §6.3 deterministic subset plus the §6.4
+/// prepared-state/variable-count shapes) — the single source of truth for which ops a format-v3
+/// bundle **must** carry outcomes for: capture targets exactly this set, and `recording::load` +
+/// replay enforce it exactly (no subset, no strays), so oracle coverage can never silently shrink.
 pub fn oracle_eligible_names() -> std::collections::BTreeSet<&'static str> {
     write_shapes()
         .iter()
@@ -590,12 +592,12 @@ pub fn write_shapes() -> Vec<ShapeSpec> {
         s(
             "detach_delete_user",
             "latency tier — deletes are state-dependent (no-op on repeat) with variable counts",
-            Excluded("variable delete counts — deferred to §6.4 (phasing item 4)"),
+            Eligible,
         ),
         s(
             "remove_user_property_and_label",
-            "latency tier — REMOVE needs prepared state; deferred to the correctness tier (§4.2)",
-            Excluded("needs prepared state (pristine-base REMOVE is a no-op) — deferred to §6.4"),
+            "latency tier — REMOVE outcome depends on prepared state consumed by earlier repeats",
+            Eligible,
         ),
         s(
             "foreach_loop_mutation",
@@ -1044,10 +1046,12 @@ mod tests {
 
     #[test]
     fn oracle_eligibility_names_the_deterministic_subset_exactly() {
-        // §6.3 (design §5): the oracle captures the deterministic fixed-outcome subset — the two
-        // plain create/update, the create-once MERGEs, foreach_loop_mutation — and excludes the
-        // server-rand() shape (§3.4) plus the two §6.4-deferred shapes. Every non-write shape is
-        // excluded by construction (no mutation outcome exists to capture).
+        // §6.3 + §6.4 (design §5, phasing item 4): the oracle captures every write shape whose
+        // outcome is reproducible from the restored base — the two plain create/update, the
+        // create-once MERGEs, foreach_loop_mutation (§6.3), plus the prepared-state REMOVE and the
+        // variable-count DETACH DELETE (§6.4: per-command capture + per-invocation restore make
+        // both reproducible). Only the server-rand() shape (§3.4) stays excluded; every non-write
+        // shape is excluded by construction (no mutation outcome exists to capture).
         let eligible: Vec<&str> = write_shapes()
             .iter()
             .filter(|s| s.oracle == OracleEligibility::Eligible)
@@ -1062,9 +1066,11 @@ mod tests {
                 "merge_user_insert_path",
                 "merge_user_upsert_existing",
                 "merge_friend_edge_upsert",
+                "detach_delete_user",
+                "remove_user_property_and_label",
                 "foreach_loop_mutation",
             ],
-            "the §6.3 deterministic subset drifted"
+            "the oracle-eligible subset drifted"
         );
         let excluded: Vec<&str> = write_shapes()
             .iter()
@@ -1073,7 +1079,7 @@ mod tests {
             .collect();
         assert_eq!(
             excluded,
-            vec!["single_edge_update", "detach_delete_user", "remove_user_property_and_label"],
+            vec!["single_edge_update"],
             "the excluded set drifted"
         );
         for shape in repo_read_shapes().iter().chain(algorithm_read_shapes().iter()) {

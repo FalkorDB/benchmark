@@ -46,7 +46,8 @@ pub struct BaselineKey {
     /// kept it. Absent from pre-§6.3 baselines.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oracle_verified: Option<BTreeMap<String, usize>>,
-    /// The **oracle-eligible** write ops (the §6.3 deterministic subset) this run measured. Lets
+    /// The **oracle-eligible** write ops (§6.3 + §6.4, `shapes::oracle_eligible_names`) this run
+    /// measured. Lets
     /// the guards flag a pair that measured eligible writes with *no* oracle on either side —
     /// legitimate for a v2 latency-tier bundle, but exactly what a two-sided v3→v2 downgrade
     /// looks like, so it warrants a prominent warning. Empty for read runs and older baselines.
@@ -83,7 +84,7 @@ impl BaselineKey {
     }
 }
 
-/// The oracle-eligible write ops (§6.3 deterministic subset) present in a report's op set.
+/// The oracle-eligible write ops (§6.3 + §6.4) present in a report's op set.
 fn eligible_write_ops(report: &Report) -> BTreeSet<String> {
     let eligible = crate::synthetic::shapes::oracle_eligible_names();
     report

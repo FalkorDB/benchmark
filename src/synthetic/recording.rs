@@ -36,7 +36,8 @@ use crate::error::BenchmarkResult;
 use crate::queries_repository::QueryType;
 use crate::synthetic::catalog::{spec, RecordedBudget};
 use crate::synthetic::dataset::{
-    fixture_statements, load_statements, DatasetSpec, LoadPhase, GENERATOR_VERSION,
+    fixture_statements, load_statements, prepared_statements, DatasetSpec, LoadPhase,
+    GENERATOR_VERSION,
 };
 use crate::synthetic::writes::MutationStats;
 use crate::synthetic::{OpKey, OpName};
@@ -454,7 +455,7 @@ pub fn record_rendered(
     batch_size: usize,
     out_dir: &Path,
 ) -> BenchmarkResult<Manifest> {
-    record_rendered_impl(dataset, graph, ops, corpus_seed, batch_size, out_dir, false)
+    record_rendered_impl(dataset, graph, ops, corpus_seed, batch_size, out_dir, ExtraLoad::None)
 }
 
 /// Like [`record_rendered`], but also appends the post-load [`fixture_statements`] (the fulltext +
@@ -474,12 +475,53 @@ pub fn record_rendered_with_fixture(
     batch_size: usize,
     out_dir: &Path,
 ) -> BenchmarkResult<Manifest> {
-    record_rendered_impl(dataset, graph, ops, corpus_seed, batch_size, out_dir, true)
+    record_rendered_impl(dataset, graph, ops, corpus_seed, batch_size, out_dir, ExtraLoad::Fixture)
 }
 
-/// Shared body of [`record_rendered`] / [`record_rendered_with_fixture`]. When `include_fixture` is
-/// set, the fixture statements are streamed into `graph.jsonl` after the base load statements and
-/// hashed in the same order, so the two entry points differ only by whether the fixture is present.
+/// Like [`record_rendered`], but also appends the post-load [`prepared_statements`] (the
+/// deterministic prepared state the state-dependent write shapes address, design §6.4) to
+/// `graph.jsonl`, folded into the [`Manifest::workload_hash`]. Used for `--repo-writes` bundles so
+/// `remove_user_property_and_label` removes a property/label that actually exists — and because
+/// the oracle's per-invocation `restore_base` replays the full `graph.jsonl`, the prepared state
+/// is re-established before **every** captured command (a REMOVE is never a stale no-op). The
+/// statement is constant (no `spec`/seed-derived values) and plain Cypher, so write bundles remain
+/// engine-agnostic.
+pub fn record_rendered_with_prepared(
+    dataset: &DatasetSpec,
+    graph: &str,
+    ops: &[RecordedOp],
+    corpus_seed: u64,
+    batch_size: usize,
+    out_dir: &Path,
+) -> BenchmarkResult<Manifest> {
+    record_rendered_impl(dataset, graph, ops, corpus_seed, batch_size, out_dir, ExtraLoad::Prepared)
+}
+
+/// Which optional statement block [`record_rendered_impl`] appends to `graph.jsonl` after the base
+/// load statements: the FixtureDependent read fixture, the §6.4 prepared write state, or nothing.
+/// The two never coexist — a bundle is all-read or all-write.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ExtraLoad {
+    None,
+    Fixture,
+    Prepared,
+}
+
+impl ExtraLoad {
+    /// The extra statements, in load order, as a boxed iterator (`None` contributes nothing).
+    fn statements(self) -> Box<dyn Iterator<Item = (LoadPhase, String)>> {
+        match self {
+            ExtraLoad::None => Box::new(std::iter::empty()),
+            ExtraLoad::Fixture => Box::new(fixture_statements()),
+            ExtraLoad::Prepared => Box::new(prepared_statements()),
+        }
+    }
+}
+
+/// Shared body of [`record_rendered`] / [`record_rendered_with_fixture`] /
+/// [`record_rendered_with_prepared`]. The `extra` statements are streamed into `graph.jsonl` after
+/// the base load statements and hashed in the same order, so the entry points differ only by which
+/// optional block is present.
 fn record_rendered_impl(
     dataset: &DatasetSpec,
     graph: &str,
@@ -487,7 +529,7 @@ fn record_rendered_impl(
     corpus_seed: u64,
     batch_size: usize,
     out_dir: &Path,
-    include_fixture: bool,
+    extra: ExtraLoad,
 ) -> BenchmarkResult<Manifest> {
     dataset.validate()?;
     if batch_size == 0 {
@@ -575,17 +617,13 @@ fn record_rendered_impl(
     );
 
     // graph.jsonl — streamed straight from the lazy statement iterator (one batch in memory). When
-    // a fixture is requested, its statements follow the base load statements in the same stream, so
-    // they are written and hashed in that exact order (index → nodes → edges → fixture).
+    // an extra block (fixture / prepared state) is requested, its statements follow the base load
+    // statements in the same stream, so they are written and hashed in that exact order
+    // (index → nodes → edges → extra).
     let graph_path = out_dir.join("graph.jsonl");
     {
         let mut w = BufWriter::new(create_file(&graph_path)?);
-        // Append the fixture statements only when requested; `None` contributes nothing to the stream.
-        let fixture = include_fixture
-            .then(fixture_statements)
-            .into_iter()
-            .flatten();
-        let stmts = load_statements(dataset, batch_size).chain(fixture);
+        let stmts = load_statements(dataset, batch_size).chain(extra.statements());
         for (seq, (phase, stmt)) in stmts.enumerate() {
             hasher.graph_record(phase.tag(), &stmt);
             let rec = GraphRecord {
@@ -1355,6 +1393,52 @@ mod tests {
         // the fixture is folded into the hash (so it can't be silently dropped on replay).
         let dir2 = temp_bundle_dir("synthrec-nofixture");
         let without = record_rendered(&spec, "gfix", &ops, 9, 32, &dir2).unwrap();
+        assert_ne!(with.workload_hash, without.workload_hash);
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&dir2).ok();
+    }
+
+    #[test]
+    fn record_rendered_with_prepared_appends_prepared_state_and_changes_hash() {
+        // A --repo-writes recording bakes the §6.4 prepared-state statement into `graph.jsonl`
+        // (so REMOVE targets state that exists, re-established by every oracle restore) and folds
+        // it into the workload_hash.
+        let dir = temp_bundle_dir("synthrec-prepared");
+        let spec = DatasetSpec {
+            seed: 5,
+            nodes: 200,
+            edges: 400,
+        };
+        let ops = vec![RecordedOp {
+            key: OpKey::dynamic("remove_user_property_and_label", QueryType::Write),
+            result_gated: false,
+            budget: RecordedBudget::default(),
+            capability: None,
+            commands: vec![
+                "MATCH (u:User {id: 3}) REMOVE u.rpc_social_credit, u:TemporaryLabel RETURN u.id"
+                    .to_string(),
+            ],
+        }];
+        let with = record_rendered_with_prepared(&spec, "gprep", &ops, 9, 32, &dir).unwrap();
+
+        // The bundle survives the integrity gate and its graph is base load stmts + prepared.
+        let bundle = load(&dir).unwrap();
+        assert_eq!(bundle.manifest, with);
+        let base: Vec<(LoadPhase, String)> = load_statements(&spec, 32).collect();
+        let prepared: Vec<(LoadPhase, String)> = prepared_statements().collect();
+        let want: Vec<(LoadPhase, String)> = base.iter().chain(prepared.iter()).cloned().collect();
+        assert_eq!(bundle.graph_statements, want);
+        // The trailing statements are exactly the prepared phase, in order.
+        let tail = &bundle.graph_statements[bundle.graph_statements.len() - prepared.len()..];
+        assert_eq!(tail, prepared.as_slice());
+        // A write-only bundle keeps the kind-bound format (v2 — no oracle data attached here).
+        assert_eq!(bundle.manifest.format_version, RECORDING_FORMAT_VERSION_WRITES);
+
+        // Recording the same spec/ops *without* the prepared state yields a different
+        // workload_hash, proving it is folded into the hash (it can't be silently dropped).
+        let dir2 = temp_bundle_dir("synthrec-noprepared");
+        let without = record_rendered(&spec, "gprep", &ops, 9, 32, &dir2).unwrap();
         assert_ne!(with.workload_hash, without.workload_hash);
 
         std::fs::remove_dir_all(&dir).ok();

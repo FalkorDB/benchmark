@@ -2175,7 +2175,7 @@ async fn record_with_oracle_captures_verifies_and_replays_end_to_end() {
     assert_eq!(
         bundle.oracle.keys().map(String::as_str).collect::<Vec<_>>(),
         eligible,
-        "exactly the §6.3 deterministic subset is oracle-captured"
+        "exactly the oracle-eligible subset (§6.3 + §6.4) is oracle-captured"
     );
     for entry in &bundle.manifest.ops {
         if eligible.contains(&entry.name.as_str()) {
