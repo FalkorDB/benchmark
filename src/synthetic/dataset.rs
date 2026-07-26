@@ -290,8 +290,8 @@ pub fn corpus_hash(
 
 /// The phase a load statement belongs to, so a recorded bundle can label statements and a loader
 /// can report which phase failed. All phases run identically (execute + drain), but the ordering
-/// (index first, then nodes, then edges, then the optional fixture) matters and is preserved by
-/// [`load_statements`] / [`fixture_statements`].
+/// (index first, then nodes, then edges, then the optional fixture or prepared state) matters and
+/// is preserved by [`load_statements`] / [`fixture_statements`] / [`prepared_statements`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoadPhase {
     Index,
@@ -301,6 +301,10 @@ pub enum LoadPhase {
     /// the FixtureDependent read shapes. Emitted only when a recording includes those shapes; see
     /// [`fixture_statements`].
     Fixture,
+    /// The optional prepared state required by the state-dependent write shapes (design §6.4):
+    /// seeds the property/label that `remove_user_property_and_label` removes. Emitted only for
+    /// write bundles; see [`prepared_statements`].
+    Prepared,
 }
 
 impl LoadPhase {
@@ -311,6 +315,7 @@ impl LoadPhase {
             LoadPhase::Nodes => "nodes",
             LoadPhase::Edges => "edges",
             LoadPhase::Fixture => "fixture",
+            LoadPhase::Prepared => "prepared",
         }
     }
 
@@ -321,6 +326,7 @@ impl LoadPhase {
             "nodes" => Some(LoadPhase::Nodes),
             "edges" => Some(LoadPhase::Edges),
             "fixture" => Some(LoadPhase::Fixture),
+            "prepared" => Some(LoadPhase::Prepared),
             _ => None,
         }
     }
@@ -427,6 +433,27 @@ pub(crate) fn fixture_statements() -> impl Iterator<Item = (LoadPhase, String)> 
     FIXTURE_STMTS
         .iter()
         .map(|stmt| (LoadPhase::Fixture, (*stmt).to_string()))
+}
+
+/// The optional prepared-state statement required by the state-dependent write shapes
+/// (design §6.4): every base `User` gains the `rpc_social_credit` property and the
+/// `:TemporaryLabel` label, so `remove_user_property_and_label` (`REMOVE u.rpc_social_credit,
+/// u:TemporaryLabel`) performs a real removal on any target id instead of a pristine-base no-op.
+/// The statement is **constant** — no `spec`-derived values — and deterministic (`u.id % 97`
+/// mirrors the fixture's id-slice arithmetic), so it records and replays byte-identically and the
+/// oracle's per-invocation `restore_base` (drop + full reload) re-prepares the state before every
+/// captured command. Must run **after** [`load_statements`] (it `MATCH`es the loaded `:User`s).
+const PREPARED_STMTS: [&str; 1] =
+    ["MATCH (u:User) SET u.rpc_social_credit = u.id % 97, u:TemporaryLabel"];
+
+/// The [`PREPARED_STMTS`] tagged as [`LoadPhase::Prepared`], appended **after**
+/// [`load_statements`] when a **write** recording is made (`record_rendered_with_prepared`). Kept
+/// separate from `load_statements` so the live loader and every existing recording stay
+/// byte-identical: only write bundles carry these statements.
+pub(crate) fn prepared_statements() -> impl Iterator<Item = (LoadPhase, String)> {
+    PREPARED_STMTS
+        .iter()
+        .map(|stmt| (LoadPhase::Prepared, (*stmt).to_string()))
 }
 
 /// Generate the dataset described by `spec` and bulk-load it into `graph`, **replacing** whatever
@@ -732,6 +759,28 @@ mod tests {
         let s = spec(7, 200, 400);
         let phases: Vec<LoadPhase> = load_statements(&s, 32).map(|(p, _)| p).collect();
         assert!(!phases.contains(&LoadPhase::Fixture));
+        // Same guarantee for the §6.4 prepared state: only write bundles opt in.
+        assert!(!phases.contains(&LoadPhase::Prepared));
+    }
+
+    #[test]
+    fn prepared_statements_are_constant_deterministic_and_tagged() {
+        let a: Vec<(LoadPhase, String)> = prepared_statements().collect();
+        let b: Vec<(LoadPhase, String)> = prepared_statements().collect();
+        // Byte-identical across calls (constant, no spec/seed input) — the record-once/replay
+        // guarantee for the prepared state.
+        assert_eq!(a, b);
+        // One deterministic SET under the Prepared phase, seeding exactly what
+        // `remove_user_property_and_label` removes.
+        assert_eq!(a.len(), 1);
+        assert!(a.iter().all(|(p, _)| *p == LoadPhase::Prepared));
+        assert_eq!(a[0].1, "MATCH (u:User) SET u.rpc_social_credit = u.id % 97, u:TemporaryLabel");
+    }
+
+    #[test]
+    fn prepared_phase_tag_round_trips() {
+        assert_eq!(LoadPhase::Prepared.tag(), "prepared");
+        assert_eq!(LoadPhase::from_tag("prepared"), Some(LoadPhase::Prepared));
     }
 
     #[test]

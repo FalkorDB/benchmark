@@ -497,29 +497,36 @@ just synthetic-compare-versions demo falkor://127.0.0.1:6379 falkor://127.0.0.1:
   `merge_friend_edge_upsert`, `detach_delete_user`) as a **single-kind write bundle** in
   **recording format v2**, whose `workload_hash` additionally binds each op's read/write **kind**
   (v1 read bundles hash byte-identically to before). Same render-once discipline and full
-  256-command corpora as the reads; no fixture. Every write shape pins a **C=1 budget**
+  256-command corpora as the reads. The recorded graph ends with a **prepared-state statement**
+  (design §6.4: every `User` gains `rpc_social_credit` + `:TemporaryLabel`, deterministically) so
+  the `REMOVE` shape mutates state that actually exists — re-established by every base restore and
+  hash-bound like every other load statement. Every write shape pins a **C=1 budget**
   (100 samples, warm-up 10) and is **result-N/A by design** — this is the **latency tier** of the
   writes design: mutation outcomes (result stats/counters) are state- and value-dependent, so
   nothing is asserted about them. Write bundles are single-kind, so `--repo-writes` is mutually
   exclusive with **every** read selector (`--op`/`--all-reads`/`--tier`/`--repo-reads`/
   `--repo-algorithms`); writes never enter `--repo-reads`, any tier, or the per-PR
   `synthetic-verify` gate.
-  Adding **`--oracle <endpoint>`** (write bundles only) additionally captures the **§6.3 outcome
-  oracle**: every **oracle-eligible** write command (the deterministic subset — 7 of the 10 shapes;
-  excluded: `single_edge_update` (server `rand()`), `detach_delete_user` and
-  `remove_user_property_and_label` (deferred)) runs once against the recorded **pristine base** on
+  Adding **`--oracle <endpoint>`** (write bundles only) additionally captures the **§6.3/§6.4
+  outcome oracle**: every **oracle-eligible** write command (9 of the 10 shapes — the §6.3
+  deterministic subset plus, since §6.4, `detach_delete_user` (variable per-command delete counts,
+  reproducible from the restored base) and `remove_user_property_and_label` (real removals against
+  the prepared state); only `single_edge_update` stays excluded (server `rand()`)) runs once
+  against the recorded **pristine base** on
   that live FalkorDB endpoint — restored before every invocation — recording the mutation counters
   it reports; a **second full pass** must reproduce every outcome exactly (determinism is proven at
   record time, or the record fails naming the op/seq). The capture covers each eligible op's
-  **complete command corpus** (per-command outcomes, no sampling), and the resulting **format v3**
+  **complete command corpus** (per-command outcomes, no sampling), and the resulting **format v4**
   bundle must carry an oracle for **exactly** the eligible set — full corpus per op, none anywhere
-  else — enforced at load, attach and replay, so oracle coverage can never silently shrink. The
+  else — enforced at load, attach and replay, so oracle coverage can never silently shrink
+  (format **v3** is the frozen pre-§6.4 seven-op layout — no prepared phase — and legacy v3
+  bundles still load and replay under their own exact-set rule). The
   outcomes are **bound into the `workload_hash`**, and the endpoint's graph is left restored — on
   failure too, with the restored **content** verified against the pristine post-load digests (a
   dual capture+restore failure surfaces both errors; the *initial* setup load is under the same
   discipline — a mid-load failure triggers one recovery restore and a combined error when that
   fails too). Capture is a record-time-only cost (the two
-  full passes over the 1 000-node/5 000-edge repo-writes bundle take ~13½ min); plain (oracle-free)
+  full passes over the 1 000-node/5 000-edge repo-writes bundle take ~18 min); plain (oracle-free)
   v1/v2 bundles stay byte-identical.
 - **`benchmark synthetic run --recording <dir> [--concurrency … --cache …]`** drops + loads +
   **count-verifies** the recorded graph, then measures the recorded commands across the concurrency
@@ -555,26 +562,28 @@ just synthetic-compare-versions demo falkor://127.0.0.1:6379 falkor://127.0.0.1:
   surfaces **both** errors). `--no-load` is refused for write bundles, a bundle can never mix
   reads with writes, and a write op can never be capability-gated (capabilities are unhashed, so
   a crafted one could otherwise skip-shrink the ten-shape coverage). When the bundle carries a
-  **§6.3 outcome oracle** (format v3, recorded with `--oracle`), replay first runs an untimed
+  **§6.3 outcome oracle** (format v4 — or the frozen legacy v3 — recorded with `--oracle`),
+  replay first runs an untimed
   **correctness pass**: every recorded outcome is re-verified — pristine base restored before
   each invocation, command run once, engine counters required to **equal** the recorded stats —
   and any divergence **hard-fails the replay** naming the op/seq/command (an engine that no
   longer effects the recorded outcome is doing *different work*, so measuring its latency would
   poison the A/B trend silently). The pass re-checks the exact-set rule (every eligible op, full
-  corpus) and the report's `meta.oracle_verified` attests the verified coverage (op → outcome
-  count) — absent for oracle-less runs — so a v3→v2 downgrade is visible when comparing runs.
+  corpus) against the bundle's format version and the report's `meta.oracle_verified` attests the
+  verified coverage (op → outcome
+  count) — absent for oracle-less runs — so an oracle→v2 downgrade is visible when comparing runs.
   Only then are latencies measured, exactly as for a plain write bundle. Because a re-hashed
-  v3→v2 strip is byte-indistinguishable from a legitimate latency-tier recording (v2 hashes never
-  covered oracle data), pass **`--require-oracle`** whenever the bundle is *expected* to carry
-  the correctness tier: the replay then refuses (offline, before any connection) a write bundle
-  without an oracle, and errors on a read bundle (reads have none).
+  oracle→v2 strip is byte-indistinguishable from a legitimate latency-tier recording (v2 hashes
+  never covered oracle data), pass **`--require-oracle`** whenever the bundle is *expected* to
+  carry the correctness tier: the replay then refuses (offline, before any connection) a write
+  bundle without an oracle, and errors on a read bundle (reads have none).
 - **`benchmark synthetic report --diff <A.json> <B.json> [--out diff.md]`** **guards** the pair (it
   aborts unless the `workload_hash` **and** every op's `result_digest` match, so a version returning
   wrong/empty results faster can't masquerade as an improvement — the version difference itself is
   expected and recorded), then writes a **Markdown diff** across every op × cache-mode × concurrency
   level (throughput + total-latency p50/p90/p95/p99 with deltas). The §6.3 **oracle attestation** is
   guarded the same way: a one-sided or differing `meta.oracle_verified` aborts (the runs did not run
-  the same correctness tier — a re-hashed v3→v2 downgrade looks exactly like this), the per-side
+  the same correctness tier — a re-hashed oracle→v2 downgrade looks exactly like this), the per-side
   attestation renders as an **outcome oracle** header row, and a pair of *un*-attested runs over
   oracle-eligible write ops gets a prominent latency-tier-only warning. `just
   synthetic-compare-versions` runs `run --recording` against both endpoints then `report --diff`.

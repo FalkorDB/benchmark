@@ -5,16 +5,21 @@ shapes — recording format v2 with kind-bound `workload_hash`, `--repo-writes` 
 `GRAPH.QUERY` C=1 measure path with per-cell base reset + verified error-safe final restore);
 §6.2 **implemented** (generalized `ExpectedOutcome` model, full 7-counter `MutationStats`,
 `restore_base` per-invocation restore primitive); §6.3 **implemented** (online outcome oracle:
-`record --oracle <endpoint>` captures per-command `MutationStats` for the deterministic subset
+`record --oracle <endpoint>` captures per-command `MutationStats` for the oracle-eligible shapes
 over each eligible op's **complete command corpus** — twice, determinism proven at record time —
 into **recording format v3** with the outcomes bound into the `workload_hash`; a v3 bundle must
 carry the oracle for **exactly** the eligible set, full corpus per op — enforced at load, attach
 and replay — and the replay report attests the verified coverage (`meta.oracle_verified`); replay
 re-verifies every recorded outcome against the engine as an untimed C=1 correctness pass and
-hard-fails on divergence, `--require-oracle` refuses oracle-less write bundles (v3→v2 downgrade
-guard) and the diff/regression guards treat a one-sided or differing attestation as
+hard-fails on divergence, `--require-oracle` refuses oracle-less write bundles (oracle→v2
+downgrade guard) and the diff/regression guards treat a one-sided or differing attestation as
 not-comparable; **stats only** — write result *values* stay un-captured per §3.4/§5-Out);
-§6.4–§6.5 (prepared-state variants, concurrency) **not implemented**. **Rubber-duck reviewed**; this revision folds in the review's corrections — the
+§6.4 **implemented** (prepared state as a recorded load phase + `detach_delete_user` /
+`remove_user_property_and_label` oracle-eligible — 9 of the 10 shapes covered by the correctness
+tier — minting **recording format v4**; **amendment (post-review):** v4 requires the prepared
+phase and the nine-op exact set, while **format v3 is frozen** as the §6.3-era layout — the
+seven-op eligible set, no prepared phase — so pre-§6.4 v3 bundles keep loading and replaying
+under their own exact-set rule; cross-version rehash flips v3↔v4 are refused); §6.5 (concurrency) **not implemented**. **Rubber-duck reviewed**; this revision folds in the review's corrections — the
 first draft's "counters are deterministic" thesis was wrong (see §10). Follows the reads-scope work
 (design [`synthetic-cover-ab-query-shapes.md`](./synthetic-cover-ab-query-shapes.md), Phases 1–5,
 merged in PRs #240–#250) and is the sibling of the algorithms design (Phase 6). The parent design
@@ -117,10 +122,12 @@ not live state. **Fix:** error-safe final restore, forbid `--no-load` for writes
    recorded-write worker, versioned bundle) that **measures write latency/throughput** with periodic
    base-graph reset to bound drift, and **asserts no correctness** (result + counters both untracked).
    This alone delivers per-op **trend** coverage for all 10 write shapes — the A/B trend goal.
-2. **Correctness tier (harder, partial, deferred):** an **online-recorded per-command outcome oracle**
+2. **Correctness tier (harder, partial, staged):** an **online-recorded per-command outcome oracle**
    (full `MutationStats` incl. deleted/removed counters) + **per-invocation pristine restore** + C=1,
-   for the **deterministic subset only** — excludes `single_edge_update` (server `rand()`) and defers
-   `remove_user_property_and_label` (needs prepared state) until the counter model is generalized.
+   covering **9 of the 10 write shapes** — every shape except `single_edge_update` (server
+   `rand()`, permanently excluded per §3.4). Delivered in two stages: §6.3 shipped the initial
+   7-shape deterministic subset, then §6.4 (phasing item 4) added `remove_user_property_and_label`
+   (via the prepared load phase) and `detach_delete_user` (variable counts, exact per-command).
    Replaces the 5-variant `ExpectedMutation` with a **generalized per-invocation expected outcome**.
 
 Selection is an **orthogonal** `--repo-writes` axis (like Phase 6's `--repo-algorithms`), initially
@@ -130,10 +137,10 @@ so a mixed bundle cannot express C=1 writes alongside C=1,8 reads).
 ## 5. Scope: in / out
 - **In (latency tier):** all 10 shapes, latency/throughput, periodic reset, opt-in nightly.
 - **In (correctness tier, staged):** the deterministic fixed-outcome subset (the two plain
-  create/update, the create-once MERGEs, `foreach_loop_mutation`) via the online oracle at C=1.
-- **Deferred:** `single_edge_update` (server `rand()`, §3.4 — outside any oracle),
-  `remove_user_property_and_label` (prepared state — from the pristine base the removal is a
-  degenerate no-op) and `detach_delete_user`'s variable counts (both §6.4); C>1 writes.
+  create/update, the create-once MERGEs, `foreach_loop_mutation`) via the online oracle at C=1;
+  since §6.4 also `remove_user_property_and_label` (against the recorded prepared state) and
+  `detach_delete_user` (variable counts, reproducible per-command from the restored base).
+- **Deferred:** `single_edge_update` (server `rand()`, §3.4 — outside any oracle); C>1 writes.
 - **Out:** Neo4j/Memgraph variants; any digest gating of write results; any change to the per-PR read
   gate or the A/B `--query-profile`.
 
@@ -143,7 +150,7 @@ so a mixed bundle cannot express C=1 writes alongside C=1,8 reads).
 2. ✅ **Generalized outcome model + full `MutationStats`** (`relationships_deleted`/`properties_removed`/
    `labels_removed`); per-invocation restore primitive (`replay::restore_base`).
 3. ✅ **Online outcome oracle** at record time (capture per-command stats), C=1 correctness tier
-   for the deterministic subset — 7 of the 10 shapes eligible; `single_edge_update` excluded
+   for the initial deterministic subset — 7 of the 10 shapes eligible at that stage; `single_edge_update` excluded
    (server `rand()`, §3.4), `detach_delete_user` + `remove_user_property_and_label` excluded
    until §6.4. The capture covers each eligible op's **complete command corpus** (per-command
    outcomes, no sampling), and a v3 bundle must carry the oracle for **exactly** the eligible
@@ -163,8 +170,31 @@ so a mixed bundle cannot express C=1 writes alongside C=1,8 reads).
    above:* per-command **result values** are **not** captured — §5-Out rules out digest-gating
    write results and §3.4 makes returned values irreproducible (`rand()`, engine-internal ids),
    so the oracle records the `MutationStats` counters only.
-4. ⛔ **Prepared-state + removal shapes** (`remove_user_property_and_label`) and variable-count
-   `detach_delete_user`.
+4. ✅ **Prepared-state + removal shapes** (`remove_user_property_and_label`) and variable-count
+   `detach_delete_user` — both now **oracle-eligible** (9 of the 10 shapes; only
+   `single_edge_update` remains excluded, §3.4). The prepared state is a **recorded load
+   phase** (`prepared`, one deterministic constant statement appended to every `--repo-writes`
+   `graph.jsonl`: every `User` gains `rpc_social_credit = id % 97` + `:TemporaryLabel`), so it is
+   bound into the `workload_hash` and re-established by **every** base restore — each captured
+   `REMOVE` performs a real removal (`properties_removed=1`, `labels_removed=1`) and each
+   `DETACH DELETE` deletes the target plus its full degree (variable `relationships_deleted`
+   recorded per command). *Interpretation note:* the design sketch said "prepared state" without
+   fixing a mechanism; a load phase (mirroring §3.4's fixture precedent) was chosen over
+   per-command setup statements because the §6.3 per-invocation restore already guarantees the
+   state precedes every captured command, with zero new bundle machinery. Write-bundle
+   `workload_hash`es change (the prepared statement is hashed); no committed bundle or golden
+   pins one. **Format amendment (review round 2):** growing the eligible set in place would have
+   re-defined what a valid v3 bundle *is* — a #267-era bundle (7 oracle ops, no prepared phase)
+   would retroactively fail the nine-op exact-set check. So §6.4 bundles mint **recording format
+   v4** (prepared phase **required**, nine-op exact set, `attach_oracle` upgrades v2→v4), and
+   **v3 is frozen** as recorded history: the seven-op eligible set (`LEGACY_V3_ORACLE_OPS`), no
+   prepared phase, still loading/replaying/verifying under its own exact-set rule and satisfying
+   `--require-oracle`. A v3 bundle carrying a prepared phase, a v4 bundle lacking one, and
+   rehashed v3↔v4 version flips are all rejected at load. This phase also root-caused and fixed
+   a pre-existing capture/verify flake: the
+   per-command loops opened two fresh TCP connections per command (~9 200 rapid connects per
+   capture), which stalls macOS Docker port-forwarding into a spurious send timeout — the §6.3
+   loops now reuse **one connection per pass** (`restore_base_on`).
 5. ⛔ **Concurrency** — decide C>1 (per-worker id partitioning) or keep C=1 for correctness.
 6. 🚧 **Docs** — folded into each phase's PR (doc sync is part of each phase's definition of
    done): §6.1's readme + cookbook updates shipped with phase 1.
@@ -184,9 +214,10 @@ so a mixed bundle cannot express C=1 writes alongside C=1,8 reads).
 ## 8. Acceptance
 Latency tier: opt-in record + replay of all 10 write shapes on the FalkorDB per-PR image with periodic
 base reset, off the per-PR read gate, no correctness assertion. Correctness tier (staged): the
-deterministic subset verified at C=1 against an online-recorded per-command outcome oracle with
-per-invocation restore; `single_edge_update` and the removal/variable-count shapes explicitly
-deferred. A drift-guard binds the shape table to `queries_repository`'s 10 write names.
+oracle-eligible shapes verified at C=1 against an online-recorded per-command outcome oracle with
+per-invocation restore; `single_edge_update` permanently excluded (§3.4), and the
+removal/variable-count shapes — deferred by the initial §6.3 stage — delivered in §6.4
+(9 of the 10). A drift-guard binds the shape table to `queries_repository`'s 10 write names.
 
 ## 9. Rollout
 Land the phases behind `--repo-writes` in `FalkorDB/benchmark`; `falkordb-rs-next-gen` picks each up on
