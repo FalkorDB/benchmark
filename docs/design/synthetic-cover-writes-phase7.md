@@ -156,7 +156,7 @@ so a mixed bundle cannot express C=1 writes alongside C=1,8 reads).
    (strict and `--regression`) treats a one-sided or differing `meta.oracle_verified` as
    not-comparable, renders the per-side attestation as an "outcome oracle" header row, and
    prominently warns when two un-attested runs measured oracle-eligible write ops. Capture is
-   error-safe end to end: the *initial* setup load failure triggers one recovery restore (a
+   error-safe end-to-end: the *initial* setup load failure triggers one recovery restore (a
    combined error when that fails too), and the final restore is content-verified against the
    pristine digests. Capture is a record-time-only cost (~13½ min for the two full passes
    over the 1 000/5 000 repo-writes bundle on the pinned dev image). *Deviation from the sketch

@@ -223,8 +223,9 @@ pub struct WritePlan {
 /// statistics).
 ///
 /// Serialized verbatim into a bundle's §6.3 oracle records (`oracle/<op>.jsonl`), so the serde
-/// contract is strict: every counter is required (no defaults) and unknown fields are rejected —
-/// a hand-edited or truncated record fails to parse rather than reading as zeros.
+/// contract is strict: every counter field must be present in the JSON (no `serde(default)` — the
+/// `Default` derive serves in-memory construction only) and unknown fields are rejected — a
+/// hand-edited or truncated record fails to parse rather than reading as zeros.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MutationStats {
