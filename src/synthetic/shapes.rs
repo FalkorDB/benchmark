@@ -185,9 +185,10 @@ const ORACLE_NOT_A_WRITE: OracleEligibility =
     OracleEligibility::Excluded("not a write — no mutation outcome to capture (§6.3)");
 
 /// The names of the oracle-eligible write shapes (the §6.3 deterministic subset plus the §6.4
-/// prepared-state/variable-count shapes) — the single source of truth for which ops a format-v3
+/// prepared-state/variable-count shapes) — the single source of truth for which ops a format-v4
 /// bundle **must** carry outcomes for: capture targets exactly this set, and `recording::load` +
 /// replay enforce it exactly (no subset, no strays), so oracle coverage can never silently shrink.
+/// Frozen legacy v3 bundles are checked against `recording::LEGACY_V3_ORACLE_OPS` instead.
 pub fn oracle_eligible_names() -> std::collections::BTreeSet<&'static str> {
     write_shapes()
         .iter()

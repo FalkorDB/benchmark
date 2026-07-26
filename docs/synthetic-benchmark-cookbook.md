@@ -256,10 +256,10 @@ per-PR `synthetic-verify` gate.
 record to also capture what each write **does** — not just how fast it is:
 
 ```bash
-# Record + capture the outcome oracle on a live FalkorDB (format v3; hash binds the outcomes):
+# Record + capture the outcome oracle on a live FalkorDB (format v4; hash binds the outcomes):
 benchmark synthetic record --repo-writes --nodes 1000 --edges 5000 --seed 7 \
-  --oracle falkor://127.0.0.1:6379 --out-dir rec-writes-v3
-benchmark synthetic run --recording rec-writes-v3 --require-oracle \
+  --oracle falkor://127.0.0.1:6379 --out-dir rec-writes-oracle
+benchmark synthetic run --recording rec-writes-oracle --require-oracle \
   --endpoint falkor://127.0.0.1:6379 --out writes.json
 ```
 
@@ -270,10 +270,12 @@ reproducible because every invocation starts from the restored base — and
 statement seeds on every `User`; only `single_edge_update` is excluded, for server `rand()`) once
 against the freshly restored pristine base and records the
 engine's mutation counters, then a **second pass** must reproduce every outcome exactly. The
-capture covers each eligible op's **complete command corpus**, and a v3 bundle must carry an
+capture covers each eligible op's **complete command corpus**, and a v4 bundle must carry an
 oracle for **exactly** the eligible set (full corpus per op, none anywhere else — enforced at
-load, attach and replay), so coverage can never silently shrink. Capture is a record-time-only
-cost: the two full passes over this 1 000/5 000 bundle take ~18 min. Replay of a v3 bundle
+load, attach and replay), so coverage can never silently shrink. Format **v3** is the frozen
+pre-§6.4 seven-op layout (no prepared phase): legacy v3 bundles still load and replay under
+their own exact-set rule, but new captures always mint v4. Capture is a record-time-only
+cost: the two full passes over this 1 000/5 000 bundle take ~18 min. Replay of an oracle bundle
 re-verifies each recorded outcome the same way (untimed, C=1, restore before every invocation)
 **before** measuring latency and **hard-fails on any divergence** — an engine that no longer
 creates/updates what was recorded is doing different work, so its latency would be meaningless —

@@ -516,9 +516,11 @@ just synthetic-compare-versions demo falkor://127.0.0.1:6379 falkor://127.0.0.1:
   that live FalkorDB endpoint — restored before every invocation — recording the mutation counters
   it reports; a **second full pass** must reproduce every outcome exactly (determinism is proven at
   record time, or the record fails naming the op/seq). The capture covers each eligible op's
-  **complete command corpus** (per-command outcomes, no sampling), and the resulting **format v3**
+  **complete command corpus** (per-command outcomes, no sampling), and the resulting **format v4**
   bundle must carry an oracle for **exactly** the eligible set — full corpus per op, none anywhere
-  else — enforced at load, attach and replay, so oracle coverage can never silently shrink. The
+  else — enforced at load, attach and replay, so oracle coverage can never silently shrink
+  (format **v3** is the frozen pre-§6.4 seven-op layout — no prepared phase — and legacy v3
+  bundles still load and replay under their own exact-set rule). The
   outcomes are **bound into the `workload_hash`**, and the endpoint's graph is left restored — on
   failure too, with the restored **content** verified against the pristine post-load digests (a
   dual capture+restore failure surfaces both errors; the *initial* setup load is under the same
@@ -560,14 +562,16 @@ just synthetic-compare-versions demo falkor://127.0.0.1:6379 falkor://127.0.0.1:
   surfaces **both** errors). `--no-load` is refused for write bundles, a bundle can never mix
   reads with writes, and a write op can never be capability-gated (capabilities are unhashed, so
   a crafted one could otherwise skip-shrink the ten-shape coverage). When the bundle carries a
-  **§6.3 outcome oracle** (format v3, recorded with `--oracle`), replay first runs an untimed
+  **§6.3 outcome oracle** (format v4 — or the frozen legacy v3 — recorded with `--oracle`),
+  replay first runs an untimed
   **correctness pass**: every recorded outcome is re-verified — pristine base restored before
   each invocation, command run once, engine counters required to **equal** the recorded stats —
   and any divergence **hard-fails the replay** naming the op/seq/command (an engine that no
   longer effects the recorded outcome is doing *different work*, so measuring its latency would
   poison the A/B trend silently). The pass re-checks the exact-set rule (every eligible op, full
-  corpus) and the report's `meta.oracle_verified` attests the verified coverage (op → outcome
-  count) — absent for oracle-less runs — so a v3→v2 downgrade is visible when comparing runs.
+  corpus) against the bundle's format version and the report's `meta.oracle_verified` attests the
+  verified coverage (op → outcome
+  count) — absent for oracle-less runs — so an oracle→v2 downgrade is visible when comparing runs.
   Only then are latencies measured, exactly as for a plain write bundle. Because a re-hashed
   v3→v2 strip is byte-indistinguishable from a legitimate latency-tier recording (v2 hashes never
   covered oracle data), pass **`--require-oracle`** whenever the bundle is *expected* to carry

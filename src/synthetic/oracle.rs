@@ -1,7 +1,7 @@
 //! Record-side §6.3 **outcome-oracle capture**: run each oracle-eligible write command against the
 //! recorded **pristine base** on a live engine, capture the [`MutationStats`] it effects, prove the
 //! outcomes are deterministic with a second independent pass, and fold them into the bundle
-//! ([`recording::attach_oracle`], format v3).
+//! ([`recording::attach_oracle`], format v4).
 //!
 //! This is the one deliberate departure from the offline read recorder (design §3.2 / risk §7.2):
 //! write counters are state/value/order-dependent — MERGE create-vs-match, SET-same-value counting
@@ -37,7 +37,7 @@ use std::time::Duration;
 use tracing::info;
 
 /// Capture the §6.3 outcome oracle for the (already-recorded) write bundle in `dir` against the
-/// live engine at `endpoint`, and fold it into the bundle (upgrading it to format v3).
+/// live engine at `endpoint`, and fold it into the bundle (upgrading it to format v4).
 ///
 /// For every **oracle-eligible** write op (the eligible subset —
 /// [`ShapeSpec::oracle`](crate::synthetic::shapes::ShapeSpec::oracle)), **every command of the
@@ -74,7 +74,7 @@ pub async fn capture(
     }
     // The §6.3 + §6.4 eligibility table (single source of truth: the annotated write-shape table).
     // Every eligible op is captured over its COMPLETE corpus — the exact set + exact counts that
-    // `recording::attach_oracle`/`load` enforce on the resulting v3 bundle.
+    // `recording::attach_oracle`/`load` enforce on the resulting v4 bundle.
     let eligible = oracle_eligible_names();
     let targets: Vec<(String, Vec<String>)> = bundle
         .commands
@@ -234,7 +234,7 @@ fn reconcile_capture_and_restore(
 mod tests {
     use super::*;
     use crate::synthetic::dataset::DatasetSpec;
-    use crate::synthetic::recording::{record_rendered, temp_bundle_dir, RecordedOp};
+    use crate::synthetic::recording::{record_rendered_with_prepared, temp_bundle_dir, RecordedOp};
     use crate::synthetic::OpKey;
 
     fn record_write_bundle(
@@ -254,7 +254,7 @@ mod tests {
             capability: None,
             commands: vec!["CYPHER x=1 CREATE (n:User {id:$x})".to_string()],
         }];
-        record_rendered(&spec, "g", &ops, 1, 8, &dir).unwrap();
+        record_rendered_with_prepared(&spec, "g", &ops, 1, 8, &dir).unwrap();
         dir
     }
 

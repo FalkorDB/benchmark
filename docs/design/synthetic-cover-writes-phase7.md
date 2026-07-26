@@ -16,7 +16,10 @@ guard) and the diff/regression guards treat a one-sided or differing attestation
 not-comparable; **stats only** — write result *values* stay un-captured per §3.4/§5-Out);
 §6.4 **implemented** (prepared state as a recorded load phase + `detach_delete_user` /
 `remove_user_property_and_label` oracle-eligible — 9 of the 10 shapes covered by the correctness
-tier); §6.5 (concurrency) **not implemented**. **Rubber-duck reviewed**; this revision folds in the review's corrections — the
+tier — minting **recording format v4**; **amendment (post-review):** v4 requires the prepared
+phase and the nine-op exact set, while **format v3 is frozen** as the §6.3-era layout — the
+seven-op eligible set, no prepared phase — so pre-§6.4 v3 bundles keep loading and replaying
+under their own exact-set rule; cross-version rehash flips v3↔v4 are refused); §6.5 (concurrency) **not implemented**. **Rubber-duck reviewed**; this revision folds in the review's corrections — the
 first draft's "counters are deterministic" thesis was wrong (see §10). Follows the reads-scope work
 (design [`synthetic-cover-ab-query-shapes.md`](./synthetic-cover-ab-query-shapes.md), Phases 1–5,
 merged in PRs #240–#250) and is the sibling of the algorithms design (Phase 6). The parent design
@@ -180,7 +183,15 @@ so a mixed bundle cannot express C=1 writes alongside C=1,8 reads).
    per-command setup statements because the §6.3 per-invocation restore already guarantees the
    state precedes every captured command, with zero new bundle machinery. Write-bundle
    `workload_hash`es change (the prepared statement is hashed); no committed bundle or golden
-   pins one. This phase also root-caused and fixed a pre-existing capture/verify flake: the
+   pins one. **Format amendment (review round 2):** growing the eligible set in place would have
+   re-defined what a valid v3 bundle *is* — a #267-era bundle (7 oracle ops, no prepared phase)
+   would retroactively fail the nine-op exact-set check. So §6.4 bundles mint **recording format
+   v4** (prepared phase **required**, nine-op exact set, `attach_oracle` upgrades v2→v4), and
+   **v3 is frozen** as recorded history: the seven-op eligible set (`LEGACY_V3_ORACLE_OPS`), no
+   prepared phase, still loading/replaying/verifying under its own exact-set rule and satisfying
+   `--require-oracle`. A v3 bundle carrying a prepared phase, a v4 bundle lacking one, and
+   rehashed v3↔v4 version flips are all rejected at load. This phase also root-caused and fixed
+   a pre-existing capture/verify flake: the
    per-command loops opened two fresh TCP connections per command (~9 200 rapid connects per
    capture), which stalls macOS Docker port-forwarding into a spurious send timeout — the §6.3
    loops now reuse **one connection per pass** (`restore_base_on`).

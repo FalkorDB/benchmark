@@ -85,8 +85,8 @@ pub struct ReplayConfig {
     /// Optional display name for this run (e.g. `pr`/`main`), recorded into the report.
     pub label: Option<String>,
     /// When `true`, refuse to measure a write bundle that carries no outcome oracle (recording
-    /// format < v3). A re-hashed v3→v2 strip is a perfectly legitimate-looking v2 bundle, so only
-    /// the operator's *expectation* can catch the downgrade — this flag states it (§6.3).
+    /// format < v3). A re-hashed oracle→v2 strip is a perfectly legitimate-looking v2 bundle, so
+    /// only the operator's *expectation* can catch the downgrade — this flag states it (§6.3).
     pub require_oracle: bool,
 }
 
@@ -106,9 +106,10 @@ pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
     // before any connection.
     let has_writes = bundle.commands.iter().any(|(op, _)| op.kind() == QueryType::Write);
     // §6.3 downgrade guard, offline: a v2 write bundle is a legitimate latency-tier recording,
-    // which is exactly why a re-hashed v3→v2 strip replays cleanly — only the operator's stated
-    // expectation can refuse it. `load()` already guarantees a v3 bundle carries the complete
-    // exact-set oracle, so the format version alone decides.
+    // which is exactly why a re-hashed oracle→v2 strip replays cleanly — only the operator's
+    // stated expectation can refuse it. `load()` already guarantees an oracle bundle (v3 legacy
+    // or v4) carries the complete exact-set oracle for its version, so the format version alone
+    // decides.
     if config.require_oracle {
         if !has_writes {
             return Err(OtherError(
@@ -121,7 +122,7 @@ pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
             return Err(OtherError(format!(
                 "--require-oracle: the write bundle at {} carries no outcome oracle (recording \
                  format v{}) — latency tier only. Re-record it with --oracle; if it should \
-                 already carry one, this bundle may be a re-hashed v3→v2 downgrade",
+                 already carry one, this bundle may be a re-hashed oracle→v2 downgrade",
                 config.recording_dir.display(),
                 bundle.manifest.format_version
             )));
@@ -352,10 +353,11 @@ pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
         // silently bypassing the tier.) Untimed, single-flight, per-invocation restore — sample
         // latencies stay clean because restores run between invocations, never inside one.
         //
-        // Exact-set re-check (belt-and-braces over the identical load() gate): every eligible
-        // write op must carry an oracle covering its complete corpus — replay never proceeds on
-        // a bundle whose oracle coverage silently shrank.
-        let eligible = crate::synthetic::shapes::oracle_eligible_names();
+        // Exact-set re-check (belt-and-braces over the identical load() gate): every write op
+        // the bundle's format version deems oracle-eligible must carry an oracle covering its
+        // complete corpus — replay never proceeds on a bundle whose oracle coverage silently
+        // shrank.
+        let eligible = recording::oracle_required_ops(bundle.manifest.format_version);
         if bundle.manifest.format_version >= recording::RECORDING_FORMAT_VERSION_ORACLE {
             for (op, cyphers) in &bundle.commands {
                 if op.kind() != QueryType::Write || !eligible.contains(op.name()) {
@@ -367,7 +369,7 @@ pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
                             "oracle-eligible op '{}' carries no outcome oracle — the bundle's \
                              correctness coverage shrank below what format v{} promises",
                             op.name(),
-                            recording::RECORDING_FORMAT_VERSION_ORACLE
+                            bundle.manifest.format_version
                         )));
                     }
                     Some(outcomes) if outcomes.len() != cyphers.len() => {
@@ -384,9 +386,9 @@ pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
             }
         } else if has_writes {
             // Downgrade visibility: a write bundle WITHOUT an oracle is legitimate (pre-§6.3
-            // latency tier) but must say so loudly, so a v3→v2 strip can't pass as the real
-            // thing unnoticed. The report's `meta.oracle_verified` stays absent for the same
-            // reason.
+            // latency tier) but must say so loudly, so an oracle→v2 strip can't pass as the
+            // real thing unnoticed. The report's `meta.oracle_verified` stays absent for the
+            // same reason.
             info!(
                 "write bundle carries no outcome oracle (recording format v{}) — latency tier \
                  only, no correctness verification",
@@ -1282,7 +1284,79 @@ mod tests {
         let msg = format!("{err}");
         assert!(msg.contains("carries no outcome oracle"), "got: {msg}");
         assert!(msg.contains("recording format v2"), "got: {msg}");
-        assert!(msg.contains("re-hashed v3→v2 downgrade"), "got: {msg}");
+        assert!(msg.contains("re-hashed oracle→v2 downgrade"), "got: {msg}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn run_require_oracle_accepts_a_legacy_v3_bundle() {
+        // Format v3's meaning is frozen (§6.4): a #267-era seven-op bundle still satisfies
+        // --require-oracle under its own exact-set rule — the run must clear every offline
+        // gate and proceed to the connection attempt (closed port ⇒ no oracle complaint).
+        use crate::synthetic::recording::{
+            temp_bundle_dir, test_forge, RECORDING_FORMAT_VERSION_ORACLE,
+        };
+
+        let dir = temp_bundle_dir("replay-require-oracle-legacy-v3");
+        test_forge::forge_oracle_bundle(
+            &dir,
+            &test_forge::legacy_v3_ops(),
+            false,
+            RECORDING_FORMAT_VERSION_ORACLE,
+        );
+
+        let mut config = replay_config(true, vec![1]);
+        config.recording_dir = dir.clone();
+        config.require_oracle = true;
+        let err = run(&config).await.unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            !msg.contains("oracle"),
+            "a legacy v3 bundle must clear the require-oracle gate, got: {msg}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    #[ignore = "needs a live FalkorDB (FALKORDB_HOST/FALKORDB_PORT)"]
+    async fn legacy_v3_bundle_replays_and_verifies_end_to_end() {
+        // The frozen legacy layout stays REPLAYABLE, not merely loadable: a seven-op v3 bundle
+        // (no prepared phase) loads, passes its own exact-set rule, verifies every recorded
+        // outcome against the live engine, and measures all seven ops.
+        use crate::synthetic::recording::{
+            temp_bundle_dir, test_forge, RECORDING_FORMAT_VERSION_ORACLE,
+        };
+
+        let host = std::env::var("FALKORDB_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+        let port = std::env::var("FALKORDB_PORT").unwrap_or_else(|_| "6379".to_string());
+
+        let dir = temp_bundle_dir("replay-legacy-v3-e2e");
+        test_forge::forge_oracle_bundle(
+            &dir,
+            &test_forge::legacy_v3_ops(),
+            false,
+            RECORDING_FORMAT_VERSION_ORACLE,
+        );
+
+        let mut config = replay_config(true, vec![1]);
+        config.recording_dir = dir.clone();
+        config.endpoint = format!("falkor://{}:{}", host, port);
+        config.graph = Some("legacy_v3_e2e".to_string());
+        config.samples = 2;
+        config.warmup = 0;
+        config.require_oracle = true;
+        config.out = dir.join("report.json").to_string_lossy().into_owned();
+        let report = run(&config).await.expect("a legacy v3 bundle must replay cleanly");
+        assert_eq!(report.operations.len(), 7, "all seven legacy ops measured");
+        let attested = report
+            .meta
+            .oracle_verified
+            .as_ref()
+            .expect("a legacy v3 replay attests its oracle");
+        assert_eq!(attested.len(), 7, "attestation covers the legacy exact set");
+        assert!(attested.values().all(|&n| n == 1), "one outcome per forged op");
 
         std::fs::remove_dir_all(&dir).ok();
     }

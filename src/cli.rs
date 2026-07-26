@@ -501,7 +501,7 @@ pub enum SyntheticCommands {
         #[arg(
             long = "require-oracle",
             requires = "recording",
-            help = "with --recording: refuse to measure a write bundle that carries no outcome oracle (recording format < v3). Guards against re-hashed v3-to-v2 downgrades; errors on read bundles (reads have no oracle)."
+            help = "with --recording: refuse to measure a write bundle that carries no outcome oracle (recording format < v3). Guards against re-hashed oracle-to-v2 downgrades; errors on read bundles (reads have no oracle)."
         )]
         require_oracle: bool,
     },
@@ -571,7 +571,7 @@ pub enum SyntheticCommands {
             long,
             requires = "repo_writes",
             value_name = "ENDPOINT",
-            help = "capture the write outcome ORACLE while recording (write bundles only): run EVERY command of each oracle-eligible write shape (9 of the 10 shapes — only the server-rand() single_edge_update is excluded; complete corpus) once against the recorded pristine base on this live FalkorDB endpoint (falkor://host:port), per-invocation restore, capture its mutation counters, prove determinism with a second full pass, and fold the outcomes into the bundle (format v3; hash-bound; the oracle must cover every eligible op exactly — no subset). Replay then re-verifies every recorded outcome at C=1 before measuring latency; any divergence is a hard replay error naming the op/seq/command."
+            help = "capture the write outcome ORACLE while recording (write bundles only): run EVERY command of each oracle-eligible write shape (9 of the 10 shapes — only the server-rand() single_edge_update is excluded; complete corpus) once against the recorded pristine base on this live FalkorDB endpoint (falkor://host:port), per-invocation restore, capture its mutation counters, prove determinism with a second full pass, and fold the outcomes into the bundle (format v4; hash-bound; the oracle must cover every eligible op exactly — no subset. Format v3 is the frozen seven-op pre-prepared-state layout; v3 bundles still load and replay under their own exact-set rule). Replay then re-verifies every recorded outcome at C=1 before measuring latency; any divergence is a hard replay error naming the op/seq/command."
         )]
         oracle: Option<String>,
         #[arg(

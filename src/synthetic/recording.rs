@@ -63,14 +63,54 @@ pub const RECORDING_FORMAT_VERSION_WRITES: u32 = 2;
 
 /// On-disk bundle format version for **write** bundles carrying a §6.3 **outcome oracle**:
 /// per-command [`MutationStats`] captured online against the pristine base at record time
-/// (`oracle/<op>.jsonl`, written by [`attach_oracle`]) and re-verified per invocation at replay.
-/// Oracle records **are** folded into the `workload_hash` (tagged, length-framed parts), so a
-/// recorded outcome cannot be edited without detection; v1/v2 bundles and their hashes stay
-/// byte-identical.
+/// (`oracle/<op>.jsonl`) and re-verified per invocation at replay. Oracle records **are** folded
+/// into the `workload_hash` (tagged, length-framed parts), so a recorded outcome cannot be edited
+/// without detection; v1/v2 bundles and their hashes stay byte-identical.
+///
+/// **Frozen legacy layout (§6.3-era).** A v3 bundle carries oracles for exactly the
+/// [`LEGACY_V3_ORACLE_OPS`] (the seven-op §6.3 eligible set) and **no prepared load phase** —
+/// that is what every v3 bundle ever recorded looks like, and it keeps loading and replaying
+/// under its own exact-set rule forever. When §6.4 grew the eligible set to nine and added the
+/// prepared phase, the format moved to [`RECORDING_FORMAT_VERSION_ORACLE_PREPARED`] rather than
+/// changing v3's meaning in place.
 pub const RECORDING_FORMAT_VERSION_ORACLE: u32 = 3;
 
+/// On-disk bundle format version for §6.4 **prepared oracle** bundles — what
+/// [`attach_oracle`] mints today: the oracle covers exactly the **live** oracle-eligible set
+/// (nine ops, [`shapes::oracle_eligible_names`](crate::synthetic::shapes::oracle_eligible_names))
+/// and the recorded graph **must** end with the §6.4 prepared load phase (the state the
+/// `REMOVE` shape mutates). Same hash rules as v3 (oracle records hash-bound); the version
+/// byte differs, so a v3↔v4 rehash flip is caught by the layout gates even before content.
+pub const RECORDING_FORMAT_VERSION_ORACLE_PREPARED: u32 = 4;
+
 /// The newest bundle format this build can [`load`].
-const RECORDING_FORMAT_VERSION_MAX: u32 = RECORDING_FORMAT_VERSION_ORACLE;
+const RECORDING_FORMAT_VERSION_MAX: u32 = RECORDING_FORMAT_VERSION_ORACLE_PREPARED;
+
+/// The §6.3-era oracle-eligible write ops — **frozen** as recorded history: this is the exact
+/// set a format-v3 bundle must carry oracles for. Never derive it from the live shape registry
+/// (that is what [`RECORDING_FORMAT_VERSION_ORACLE_PREPARED`] uses); v3's meaning never changes
+/// again, or every existing v3 bundle would retroactively become "corrupt".
+const LEGACY_V3_ORACLE_OPS: [&str; 7] = [
+    "single_vertex_write",
+    "single_vertex_update",
+    "single_edge_write",
+    "merge_user_insert_path",
+    "merge_user_upsert_existing",
+    "merge_friend_edge_upsert",
+    "foreach_loop_mutation",
+];
+
+/// The oracle-eligible op names a bundle of `format_version` is required to cover exactly:
+/// the frozen [`LEGACY_V3_ORACLE_OPS`] for v3, the live registry for v4+.
+pub(crate) fn oracle_required_ops(
+    format_version: u32,
+) -> std::collections::BTreeSet<&'static str> {
+    if format_version >= RECORDING_FORMAT_VERSION_ORACLE_PREPARED {
+        crate::synthetic::shapes::oracle_eligible_names()
+    } else {
+        LEGACY_V3_ORACLE_OPS.iter().copied().collect()
+    }
+}
 
 /// The dataset knobs a bundle was recorded from (mirrors [`DatasetSpec`], but owned + serde).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -763,12 +803,14 @@ pub fn load(dir: &Path) -> BenchmarkResult<Bundle> {
             RECORDING_FORMAT_VERSION_WRITES
         )));
     }
-    // Exact-set enforcement (§6.3): a v3 bundle must carry an oracle for EVERY recorded
-    // oracle-eligible write op, covering its COMPLETE command corpus, and for nothing else — so
-    // oracle coverage can never silently shrink (a crafted proper subset, or a padded oracle on
-    // an op outside the eligible set, is rejected here rather than replayed).
+    // Exact-set enforcement (§6.3): an oracle bundle must carry an oracle for EVERY recorded
+    // write op its format version deems eligible ([`oracle_required_ops`]: the frozen legacy
+    // seven for v3, the live nine-op registry for v4+), covering its COMPLETE command corpus,
+    // and for nothing else — so oracle coverage can never silently shrink (a crafted proper
+    // subset, or a padded oracle on an op outside the eligible set, is rejected here rather
+    // than replayed).
     if manifest.format_version >= RECORDING_FORMAT_VERSION_ORACLE {
-        let eligible = crate::synthetic::shapes::oracle_eligible_names();
+        let eligible = oracle_required_ops(manifest.format_version);
         for entry in &manifest.ops {
             let is_eligible =
                 entry.kind == QueryType::Write && eligible.contains(entry.name.as_str());
@@ -777,7 +819,7 @@ pub fn load(dir: &Path) -> BenchmarkResult<Bundle> {
                     return Err(OtherError(format!(
                         "oracle-eligible op '{}' carries no outcome oracle — a v{} bundle must \
                          cover every eligible op (§6.3 exact-set rule; crafted/corrupt manifest)",
-                        entry.name, RECORDING_FORMAT_VERSION_ORACLE
+                        entry.name, manifest.format_version
                     )));
                 }
                 (true, Some(n)) if n != entry.count => {
@@ -798,9 +840,8 @@ pub fn load(dir: &Path) -> BenchmarkResult<Bundle> {
                 (false, Some(_)) => {
                     return Err(OtherError(format!(
                         "manifest declares an outcome oracle for op '{}', which is not \
-                         oracle-eligible (§6.3 + §6.4 eligible set only; crafted/corrupt \
-                         manifest)",
-                        entry.name
+                         oracle-eligible under format v{} (crafted/corrupt manifest)",
+                        entry.name, manifest.format_version
                     )));
                 }
                 _ => {}
@@ -821,6 +862,35 @@ pub fn load(dir: &Path) -> BenchmarkResult<Bundle> {
             ))
         })?;
         graph_statements.push((phase, rec.cypher.clone()));
+    }
+    // Format ↔ layout gates on the (hash-bound) prepared phase: v3 is the frozen §6.3-era
+    // layout that PREDATES the prepared state, v4 is defined by it — so a version flip on a
+    // rehashed bundle is caught structurally, not just by the eligible-set difference.
+    let has_prepared = graph_statements.iter().any(|(p, _)| *p == LoadPhase::Prepared);
+    let has_write_ops = manifest.ops.iter().any(|e| e.kind == QueryType::Write);
+    if has_prepared && !has_write_ops {
+        return Err(OtherError(
+            "bundle carries a §6.4 prepared load phase but records no write ops — the prepared \
+             state exists solely for the write shapes (crafted/corrupt bundle)"
+                .to_string(),
+        ));
+    }
+    if manifest.format_version == RECORDING_FORMAT_VERSION_ORACLE && has_prepared {
+        return Err(OtherError(format!(
+            "format_version {} bundle carries a §6.4 prepared load phase — v{} is the frozen \
+             §6.3-era layout that predates the prepared state; prepared oracle bundles are \
+             format_version {} (crafted/downgraded manifest)",
+            manifest.format_version,
+            RECORDING_FORMAT_VERSION_ORACLE,
+            RECORDING_FORMAT_VERSION_ORACLE_PREPARED
+        )));
+    }
+    if manifest.format_version >= RECORDING_FORMAT_VERSION_ORACLE_PREPARED && !has_prepared {
+        return Err(OtherError(format!(
+            "format_version {} bundle lacks the §6.4 prepared load phase — v{} bundles record \
+             the prepared state the REMOVE shape mutates (crafted/upgraded manifest)",
+            manifest.format_version, RECORDING_FORMAT_VERSION_ORACLE_PREPARED
+        )));
     }
 
     // commands/<op>.jsonl for each op named in the manifest, in order.
@@ -995,10 +1065,13 @@ impl Bundle {
     }
 }
 
-/// Fold captured §6.3 oracle outcomes into an existing **v2 write bundle**, upgrading it in place
-/// to format v3: write `oracle/<op>.jsonl` for every op in `oracle`, mark each op's manifest entry
-/// with its record count, and recompute the [`Manifest::workload_hash`] under v3 rules (the oracle
-/// records are hash-bound — see [`WorkloadHasher::oracle_record`]). The upgraded bundle is
+/// Fold captured §6.3/§6.4 oracle outcomes into an existing **v2 write bundle**, upgrading it in
+/// place to format **v4** ([`RECORDING_FORMAT_VERSION_ORACLE_PREPARED`]): write
+/// `oracle/<op>.jsonl` for every op in `oracle`, mark each op's manifest entry
+/// with its record count, and recompute the [`Manifest::workload_hash`] under oracle rules (the
+/// oracle records are hash-bound — see [`WorkloadHasher::oracle_record`]). The bundle must carry
+/// the §6.4 prepared load phase (every write bundle recorded by this build does); the frozen
+/// legacy v3 layout is load/replay-only and can never be minted again. The upgraded bundle is
 /// re-[`load`]ed as the final step, so the function returns exactly what every future load will
 /// verify — any inconsistency this function could write fails here, at record time.
 ///
@@ -1046,9 +1119,9 @@ pub fn attach_oracle(
         return Err(OtherError("no oracle outcomes to attach (empty capture)".to_string()));
     }
     // Exact-set enforcement (§6.3): the oracle must cover every recorded oracle-eligible write op
-    // with its COMPLETE command corpus — no subset, no strays — so v3 coverage can never silently
+    // with its COMPLETE command corpus — no subset, no strays — so v4 coverage can never silently
     // shrink below the tier the format version promises.
-    let eligible = crate::synthetic::shapes::oracle_eligible_names();
+    let eligible = oracle_required_ops(RECORDING_FORMAT_VERSION_ORACLE_PREPARED);
     for entry in &bundle.manifest.ops {
         let is_eligible =
             entry.kind == QueryType::Write && eligible.contains(entry.name.as_str());
@@ -1057,7 +1130,7 @@ pub fn attach_oracle(
                 return Err(OtherError(format!(
                     "no oracle captured for oracle-eligible op '{}' — a v{} bundle must cover \
                      every eligible op (§6.3 exact-set rule)",
-                    entry.name, RECORDING_FORMAT_VERSION_ORACLE
+                    entry.name, RECORDING_FORMAT_VERSION_ORACLE_PREPARED
                 )));
             }
             (true, Some(outcomes)) if outcomes.len() != entry.count => {
@@ -1071,7 +1144,7 @@ pub fn attach_oracle(
             }
             (false, Some(_)) => {
                 return Err(OtherError(format!(
-                    "oracle captured for op '{}', which is not oracle-eligible (§6.3 + §6.4 \
+                    "oracle captured for op '{}', which is not oracle-eligible (the live \
                      eligible set only)",
                     entry.name
                 )));
@@ -1085,6 +1158,16 @@ pub fn attach_oracle(
         return Err(OtherError(format!(
             "oracle captured for op '{}', which the bundle does not record",
             name
+        )));
+    }
+    // v4 is defined by the §6.4 prepared phase: every write bundle this build records carries
+    // it, so its absence means a stale/crafted bundle that must be re-recorded, not upgraded.
+    if !bundle.graph_statements.iter().any(|(p, _)| *p == LoadPhase::Prepared) {
+        return Err(OtherError(format!(
+            "{} lacks the §6.4 prepared load phase — a v{} oracle bundle records the prepared \
+             state; re-record the bundle with this build instead of attaching to a stale one",
+            dir.display(),
+            RECORDING_FORMAT_VERSION_ORACLE_PREPARED
         )));
     }
 
@@ -1101,9 +1184,9 @@ pub fn attach_oracle(
         w.flush().map_err(|e| OtherError(format!("flushing {}: {}", path.display(), e)))?;
     }
 
-    // Upgraded manifest: v3, per-op oracle counts, hash recomputed over the full v3 stream.
+    // Upgraded manifest: v4, per-op oracle counts, hash recomputed over the full oracle stream.
     let mut manifest = bundle.manifest.clone();
-    manifest.format_version = RECORDING_FORMAT_VERSION_ORACLE;
+    manifest.format_version = RECORDING_FORMAT_VERSION_ORACLE_PREPARED;
     for entry in &mut manifest.ops {
         entry.oracle = oracle.get(&entry.name).map(Vec::len);
     }
@@ -1183,6 +1266,112 @@ pub fn temp_bundle_dir(prefix: &str) -> PathBuf {
         .unwrap_or(0);
     let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
     std::env::temp_dir().join(format!("{}-{}-{}-{}", prefix, std::process::id(), nanos, seq))
+}
+
+#[cfg(test)]
+pub(crate) mod test_forge {
+    //! Test-only bundle forgery: build hash-valid oracle bundles in arbitrary layouts —
+    //! including the frozen legacy v3 layout and the crafted cross-version flips load() must
+    //! reject — bypassing `attach_oracle`'s gates. Shared by the recording and replay tests.
+    use super::*;
+
+    /// Recompute the on-disk bundle's `workload_hash` from its raw files under the manifest's
+    /// declared `format_version` and rewrite `manifest.json` — the same stream `load()` hashes,
+    /// read without `load()`'s gates so a forged layout can be made hash-valid.
+    pub(crate) fn rehash_bundle(dir: &Path) {
+        let manifest_path = dir.join("manifest.json");
+        let mut manifest: Manifest =
+            serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+        let graph_records: Vec<GraphRecord> = read_jsonl(&dir.join("graph.jsonl")).unwrap();
+        let mut hasher = WorkloadHasher::new(
+            manifest.format_version,
+            &manifest.generator_version,
+            &manifest.dataset,
+            &manifest.graph,
+            manifest.corpus_seed,
+        );
+        for rec in &graph_records {
+            hasher.graph_record(&rec.phase, &rec.cypher);
+        }
+        for entry in &manifest.ops {
+            let recs: Vec<CommandRecord> =
+                read_jsonl(&dir.join("commands").join(format!("{}.jsonl", entry.name))).unwrap();
+            hasher.op_header(&entry.name, recs.len(), entry.kind);
+            for rec in &recs {
+                hasher.command(&rec.cypher);
+            }
+            if entry.oracle.is_some() {
+                let orecs: Vec<OracleRecord> =
+                    read_jsonl(&dir.join("oracle").join(format!("{}.jsonl", entry.name)))
+                        .unwrap();
+                for (seq, r) in orecs.iter().enumerate() {
+                    hasher.oracle_record(seq, &r.stats);
+                }
+            }
+        }
+        manifest.workload_hash = hasher.finalize();
+        std::fs::write(&manifest_path, serde_json::to_string_pretty(&manifest).unwrap())
+            .unwrap();
+    }
+
+    /// Forge a hash-valid oracle bundle at `dir`: one `CREATE` command per `op_names` entry
+    /// (each oracled with its true outcome, `nodes_created = 1`, so a live replay verifies),
+    /// with or without the §6.4 prepared load phase, stamped with an arbitrary
+    /// `format_version`. Layout validity is deliberately NOT checked — that is load()'s job.
+    pub(crate) fn forge_oracle_bundle(
+        dir: &Path,
+        op_names: &[&str],
+        prepared: bool,
+        format_version: u32,
+    ) {
+        let spec = DatasetSpec {
+            seed: 3,
+            nodes: 50,
+            edges: 100,
+        };
+        let ops: Vec<RecordedOp> = op_names
+            .iter()
+            .map(|name| RecordedOp {
+                key: OpKey::dynamic(*name, QueryType::Write),
+                result_gated: false,
+                budget: RecordedBudget::default(),
+                capability: None,
+                commands: vec!["CREATE (:ForgedOracleProbe {k: 1})".to_string()],
+            })
+            .collect();
+        if prepared {
+            record_rendered_with_prepared(&spec, "g", &ops, 3, 32, dir).unwrap();
+        } else {
+            record_rendered(&spec, "g", &ops, 3, 32, dir).unwrap();
+        }
+        let oracle_dir = dir.join("oracle");
+        std::fs::create_dir_all(&oracle_dir).unwrap();
+        let stats = MutationStats {
+            nodes_created: 1,
+            ..MutationStats::default()
+        };
+        for name in op_names {
+            let path = oracle_dir.join(format!("{}.jsonl", name));
+            let mut w = BufWriter::new(create_file(&path).unwrap());
+            write_jsonl(&mut w, &path, &OracleRecord { seq: 0, stats }).unwrap();
+            w.flush().unwrap();
+        }
+        let manifest_path = dir.join("manifest.json");
+        let mut manifest: Manifest =
+            serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+        manifest.format_version = format_version;
+        for entry in &mut manifest.ops {
+            entry.oracle = Some(1);
+        }
+        std::fs::write(&manifest_path, serde_json::to_string_pretty(&manifest).unwrap())
+            .unwrap();
+        rehash_bundle(dir);
+    }
+
+    /// The frozen legacy §6.3 op set, exposed for tests that forge v3 bundles.
+    pub(crate) fn legacy_v3_ops() -> Vec<&'static str> {
+        LEGACY_V3_ORACLE_OPS.to_vec()
+    }
 }
 
 #[cfg(test)]
@@ -2263,12 +2452,12 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    // ---- §6.3 outcome oracle (format v3) ----
+    // ---- §6.3/§6.4 outcome oracle (format v4; frozen legacy v3) ----
 
-    /// A recorded two-op write bundle (2 + 3 commands) for oracle tests. The ops carry REAL
-    /// oracle-eligible shape names (`OpKey::dynamic` resolves built-ins by name) because the
-    /// §6.3 exact-set rule pins v3 oracles to exactly the eligible set — custom rendered names
-    /// could never be attached.
+    /// A recorded two-op write bundle (2 + 3 commands, §6.4 prepared phase included) for oracle
+    /// tests. The ops carry REAL oracle-eligible shape names (`OpKey::dynamic` resolves
+    /// built-ins by name) because the exact-set rule pins oracles to exactly the eligible set —
+    /// custom rendered names could never be attached.
     fn record_write_bundle_to_temp(prefix: &str) -> PathBuf {
         let dir = temp_bundle_dir(prefix);
         let spec = DatasetSpec {
@@ -2285,7 +2474,7 @@ mod tests {
                 .map(|i| format!("CYPHER x={} CREATE (n:User {{id:$x}})", i))
                 .collect(),
         };
-        record_rendered(
+        record_rendered_with_prepared(
             &spec,
             "g",
             &[op("single_vertex_write", 2), op("single_vertex_update", 3)],
@@ -2314,11 +2503,11 @@ mod tests {
     }
 
     #[test]
-    fn attach_oracle_upgrades_a_v2_bundle_to_v3_and_round_trips() {
+    fn attach_oracle_upgrades_a_v2_bundle_to_v4_and_round_trips() {
         let dir = record_write_bundle_to_temp("synthrec-oracle-rt");
         let v2_hash = load(&dir).unwrap().manifest.workload_hash.clone();
         let manifest = attach_oracle(&dir, &full_oracle()).unwrap();
-        assert_eq!(manifest.format_version, RECORDING_FORMAT_VERSION_ORACLE);
+        assert_eq!(manifest.format_version, RECORDING_FORMAT_VERSION_ORACLE_PREPARED);
         assert_ne!(manifest.workload_hash, v2_hash, "the oracle must land in the hash");
         let write = manifest.ops.iter().find(|e| e.name == "single_vertex_write").unwrap();
         let update = manifest.ops.iter().find(|e| e.name == "single_vertex_update").unwrap();
@@ -2435,7 +2624,7 @@ mod tests {
             .unwrap();
         std::fs::write(dir.join("oracle").join("ghost.jsonl"), "{}").unwrap();
         let manifest = attach_oracle(&dir, &full_oracle()).unwrap();
-        assert_eq!(manifest.format_version, RECORDING_FORMAT_VERSION_ORACLE);
+        assert_eq!(manifest.format_version, RECORDING_FORMAT_VERSION_ORACLE_PREPARED);
         assert!(!dir.join("oracle").join("ghost.jsonl").exists(), "orphan cleared");
         let bundle = load(&dir).unwrap();
         assert_eq!(bundle.oracle["single_vertex_write"], vec![stats(1), stats(2)]);
@@ -2443,7 +2632,7 @@ mod tests {
     }
 
     #[test]
-    fn re_recording_over_a_v3_bundle_clears_the_stale_oracle() {
+    fn re_recording_over_an_oracle_bundle_clears_the_stale_oracle() {
         // §6.3 lifecycle: `record` replaces the bundle wholesale. Re-recording into a directory
         // holding a v3 bundle must not leave the old oracle/ files behind — the fresh manifest is
         // v2 and can't reference them, so a stale directory would brick every subsequent load.
@@ -2600,8 +2789,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn replay_refuses_a_rehashed_v3_to_v2_downgrade_under_require_oracle() {
-        // The two-sided blind spot: strip a v3 bundle's oracle entirely, declare it v2, and
+    async fn replay_refuses_a_rehashed_v4_to_v2_downgrade_under_require_oracle() {
+        // The two-sided blind spot: strip a v4 bundle's oracle entirely, declare it v2, and
         // REHASH under the v2 rules — the result is byte-indistinguishable from a legitimate
         // latency-tier recording (v2 hashes never covered oracle data), loads cleanly, and would
         // replay with `oracle_verified: None`. Only the operator's stated expectation can refuse
@@ -2668,16 +2857,170 @@ mod tests {
         let err = replay::run(&config).await.unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("carries no outcome oracle"), "got: {msg}");
-        assert!(msg.contains("re-hashed v3→v2 downgrade"), "got: {msg}");
+        assert!(msg.contains("re-hashed oracle→v2 downgrade"), "got: {msg}");
 
-        // Negative control: restore the oracle (v3 again) — the same flag now clears the gate
+        // Negative control: restore the oracle (v4 again) — the same flag now clears the gate
         // and the run proceeds to the connection attempt (no oracle complaint on the closed
         // port's error).
         attach_oracle(&dir, &full_oracle()).unwrap();
         let err = replay::run(&config).await.unwrap_err();
         let msg = format!("{err}");
-        assert!(!msg.contains("oracle"), "v3 must clear the require-oracle gate, got: {msg}");
+        assert!(!msg.contains("oracle"), "v4 must clear the require-oracle gate, got: {msg}");
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn legacy_v3_bundle_loads_and_round_trips() {
+        // Format v3's meaning is FROZEN (§6.4 duck review): a #267-era bundle — the seven-op
+        // §6.3 exact set, no prepared phase — keeps loading under its own rule even though the
+        // live registry now has nine eligible ops and mints v4.
+        let dir = temp_bundle_dir("synthrec-legacy-v3");
+        test_forge::forge_oracle_bundle(
+            &dir,
+            &test_forge::legacy_v3_ops(),
+            false,
+            RECORDING_FORMAT_VERSION_ORACLE,
+        );
+        let bundle = load(&dir).expect("a legacy seven-op v3 bundle must keep loading");
+        assert_eq!(bundle.manifest.format_version, RECORDING_FORMAT_VERSION_ORACLE);
+        assert_eq!(bundle.oracle.len(), 7, "the frozen legacy exact set");
+        assert!(
+            !bundle.graph_statements.iter().any(|(p, _)| *p == LoadPhase::Prepared),
+            "v3 bundles predate the prepared phase"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_rejects_a_v3_bundle_with_a_prepared_phase() {
+        // v3 predates §6.4: a hash-valid "v3" carrying the prepared phase is a crafted or
+        // downgraded v4, not recorded history.
+        let dir = temp_bundle_dir("synthrec-v3-prepared");
+        test_forge::forge_oracle_bundle(
+            &dir,
+            &test_forge::legacy_v3_ops(),
+            true,
+            RECORDING_FORMAT_VERSION_ORACLE,
+        );
+        let err = load(&dir).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("predates the prepared state"), "got: {msg}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_rejects_a_v4_bundle_without_the_prepared_phase() {
+        // v4 is defined by the prepared phase: all nine live-eligible ops covered, but the
+        // prepared load phase stripped — a crafted/upgraded layout, rejected structurally.
+        let nine: Vec<&str> = crate::synthetic::shapes::oracle_eligible_names()
+            .into_iter()
+            .collect();
+        let dir = temp_bundle_dir("synthrec-v4-unprepared");
+        test_forge::forge_oracle_bundle(
+            &dir,
+            &nine,
+            false,
+            RECORDING_FORMAT_VERSION_ORACLE_PREPARED,
+        );
+        let err = load(&dir).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("lacks the §6.4 prepared load phase"), "got: {msg}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_refuses_rehashed_cross_version_flips() {
+        // A version flip on an otherwise-valid rehashed bundle is refused in BOTH directions:
+        // the layout (prepared phase) and the per-version exact set disagree with the claimed
+        // version even when the hash is internally consistent.
+        // v3 → v4 upgrade: legacy seven-op layout claiming v4 lacks the prepared phase.
+        let dir_up = temp_bundle_dir("synthrec-flip-up");
+        test_forge::forge_oracle_bundle(
+            &dir_up,
+            &test_forge::legacy_v3_ops(),
+            false,
+            RECORDING_FORMAT_VERSION_ORACLE_PREPARED,
+        );
+        let msg = format!("{}", load(&dir_up).unwrap_err());
+        assert!(msg.contains("lacks the §6.4 prepared load phase"), "got: {msg}");
+
+        // v4 → v3 downgrade: nine-op prepared layout claiming v3 carries oracles for ops
+        // outside the frozen legacy set (and a prepared phase v3 forbids).
+        let nine: Vec<&str> = crate::synthetic::shapes::oracle_eligible_names()
+            .into_iter()
+            .collect();
+        let dir_down = temp_bundle_dir("synthrec-flip-down");
+        test_forge::forge_oracle_bundle(&dir_down, &nine, true, RECORDING_FORMAT_VERSION_ORACLE);
+        let msg = format!("{}", load(&dir_down).unwrap_err());
+        assert!(
+            msg.contains("not oracle-eligible under format v3"),
+            "got: {msg}"
+        );
+
+        std::fs::remove_dir_all(&dir_up).ok();
+        std::fs::remove_dir_all(&dir_down).ok();
+    }
+
+    #[test]
+    fn attach_oracle_rejects_a_bundle_without_the_prepared_phase() {
+        // attach mints v4, and v4 requires the prepared phase — a stale preparedless write
+        // bundle must be re-recorded, not upgraded into an unloadable state.
+        let dir = temp_bundle_dir("synthrec-attach-unprepared");
+        let spec = DatasetSpec {
+            seed: 1,
+            nodes: 10,
+            edges: 20,
+        };
+        let op = |name: &str, n: usize| RecordedOp {
+            key: OpKey::dynamic(name, QueryType::Write),
+            result_gated: false,
+            budget: RecordedBudget::default(),
+            capability: None,
+            commands: (0..n)
+                .map(|i| format!("CYPHER x={} CREATE (n:User {{id:$x}})", i))
+                .collect(),
+        };
+        record_rendered(
+            &spec,
+            "g",
+            &[op("single_vertex_write", 2), op("single_vertex_update", 3)],
+            1,
+            8,
+            &dir,
+        )
+        .unwrap();
+        let err = attach_oracle(&dir, &full_oracle()).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("lacks the §6.4 prepared load phase"), "got: {msg}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_rejects_a_prepared_phase_on_a_read_bundle() {
+        // The prepared state exists solely for the write shapes; a read bundle carrying one is
+        // crafted (the recorder refuses to write it — see
+        // `record_rejects_a_mismatched_extra_load_block`).
+        let (dir, _man) = record_to_temp(21);
+        let graph_path = dir.join("graph.jsonl");
+        let n_stmts = std::fs::read_to_string(&graph_path)
+            .unwrap()
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .count();
+        let rec = GraphRecord {
+            seq: n_stmts,
+            phase: "prepared".to_string(),
+            cypher: "MATCH (u:User) SET u.crafted = 1".to_string(),
+        };
+        let mut text = std::fs::read_to_string(&graph_path).unwrap();
+        text.push_str(&serde_json::to_string(&rec).unwrap());
+        text.push('\n');
+        std::fs::write(&graph_path, text).unwrap();
+        test_forge::rehash_bundle(&dir);
+        let err = load(&dir).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("records no write ops"), "got: {msg}");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -2700,7 +3043,7 @@ mod tests {
             capability: None,
             commands: (0..n).map(|i| format!("CYPHER x={} CREATE (:User)", i)).collect(),
         };
-        record_rendered(
+        record_rendered_with_prepared(
             &spec,
             "g",
             &[op("single_vertex_write", 2), op("w_custom", 1)],
@@ -2787,7 +3130,7 @@ mod tests {
         std::fs::create_dir_all(&orphan).unwrap();
         std::fs::write(orphan.join("single_vertex_write.jsonl"), b"junk\n").unwrap();
         let man = attach_oracle(&dir, &full_oracle()).unwrap();
-        assert_eq!(man.format_version, RECORDING_FORMAT_VERSION_ORACLE);
+        assert_eq!(man.format_version, RECORDING_FORMAT_VERSION_ORACLE_PREPARED);
         load(&dir).unwrap();
         std::fs::remove_dir_all(&dir).ok();
     }
