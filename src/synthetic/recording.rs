@@ -892,6 +892,19 @@ pub fn load(dir: &Path) -> BenchmarkResult<Bundle> {
             manifest.format_version, RECORDING_FORMAT_VERSION_ORACLE_PREPARED
         )));
     }
+    // The prepared phase is the TRAILING load phase (§6.4): it re-establishes the prepared
+    // state over the complete base, so a base/fixture statement after it would create
+    // un-prepared `:User` rows the recorded outcomes never saw (crafted/reordered graph.jsonl).
+    if let Some(first) = graph_statements.iter().position(|(p, _)| *p == LoadPhase::Prepared) {
+        if graph_statements[first..].iter().any(|(p, _)| *p != LoadPhase::Prepared) {
+            return Err(OtherError(
+                "the §6.4 prepared load phase must be the final load phase — a base/fixture \
+                 statement follows a prepared statement, so the prepared state would not cover \
+                 the complete base (crafted/reordered graph.jsonl)"
+                    .to_string(),
+            ));
+        }
+    }
 
     // commands/<op>.jsonl for each op named in the manifest, in order.
     let mut commands = Vec::with_capacity(manifest.ops.len());
@@ -2926,6 +2939,38 @@ mod tests {
         let err = load(&dir).unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("lacks the §6.4 prepared load phase"), "got: {msg}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_rejects_a_base_statement_after_the_prepared_phase() {
+        // The prepared phase must be the TRAILING load phase: a hash-valid v4 bundle whose
+        // graph.jsonl carries a base statement AFTER a prepared statement would load `:User`
+        // rows the prepared state never covered — rejected structurally, not by hash.
+        let nine: Vec<&str> = crate::synthetic::shapes::oracle_eligible_names()
+            .into_iter()
+            .collect();
+        let dir = temp_bundle_dir("synthrec-v4-reordered");
+        test_forge::forge_oracle_bundle(
+            &dir,
+            &nine,
+            true,
+            RECORDING_FORMAT_VERSION_ORACLE_PREPARED,
+        );
+        // Move the first (base) statement to the end of graph.jsonl, after the prepared
+        // statements, then rehash so only the layout gate can refuse it.
+        let graph_path = dir.join("graph.jsonl");
+        let text = std::fs::read_to_string(&graph_path).unwrap();
+        let mut lines: Vec<&str> = text.lines().collect();
+        assert!(lines.len() >= 2, "forged bundle has base + prepared statements");
+        let first = lines.remove(0);
+        assert!(!first.contains("prepared"), "the first statement is a base statement");
+        lines.push(first);
+        std::fs::write(&graph_path, lines.join("\n") + "\n").unwrap();
+        test_forge::rehash_bundle(&dir);
+        let err = load(&dir).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("must be the final load phase"), "got: {msg}");
         std::fs::remove_dir_all(&dir).ok();
     }
 
