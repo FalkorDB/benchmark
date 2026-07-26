@@ -875,6 +875,16 @@ pub fn load(dir: &Path) -> BenchmarkResult<Bundle> {
                 .to_string(),
         ));
     }
+    // The symmetric gate: the fixture phase (fulltext/vector DDL) exists solely for the
+    // FixtureDependent READ shapes — on a write bundle it is crafted/corrupt (and non-portable
+    // FalkorDB-specific DDL a write replay would blindly load).
+    if has_write_ops && graph_statements.iter().any(|(p, _)| *p == LoadPhase::Fixture) {
+        return Err(OtherError(
+            "bundle carries a fixture load phase but records write ops — the fixture exists \
+             solely for the fixture-dependent read shapes (crafted/corrupt bundle)"
+                .to_string(),
+        ));
+    }
     if manifest.format_version == RECORDING_FORMAT_VERSION_ORACLE && has_prepared {
         return Err(OtherError(format!(
             "format_version {} bundle carries a §6.4 prepared load phase — v{} is the frozen \
@@ -3067,6 +3077,37 @@ mod tests {
         let err = load(&dir).unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("records no write ops"), "got: {msg}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_rejects_a_fixture_phase_on_a_write_bundle() {
+        // The symmetric gate: the fixture phase (fulltext/vector DDL) exists solely for the
+        // fixture-dependent READ shapes — crafted onto a write bundle it must be rejected even
+        // when hash-valid.
+        let dir = record_write_bundle_to_temp("synthrec-fixture-on-write");
+        let graph_path = dir.join("graph.jsonl");
+        let n_stmts = std::fs::read_to_string(&graph_path)
+            .unwrap()
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .count();
+        let rec = GraphRecord {
+            seq: n_stmts,
+            phase: "fixture".to_string(),
+            cypher: "CALL db.idx.fulltext.createNodeIndex('User', 'name')".to_string(),
+        };
+        let mut text = std::fs::read_to_string(&graph_path).unwrap();
+        text.push_str(&serde_json::to_string(&rec).unwrap());
+        text.push('\n');
+        std::fs::write(&graph_path, text).unwrap();
+        test_forge::rehash_bundle(&dir);
+        let err = load(&dir).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("fixture") && msg.contains("records write ops"),
+            "got: {msg}"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
