@@ -830,11 +830,18 @@ pub fn load(dir: &Path) -> BenchmarkResult<Bundle> {
                 .strip_suffix(".jsonl")
                 .is_some_and(|stem| oracle.contains_key(stem));
             if !known {
+                let hint = if manifest.format_version < RECORDING_FORMAT_VERSION_ORACLE {
+                    " — likely an interrupted `record --oracle` attach; delete the bundle's \
+                     oracle/ directory or re-run the oracle capture to repair"
+                } else {
+                    ""
+                };
                 return Err(OtherError(format!(
                     "{}: unexpected oracle file '{}' — not declared by any manifest op \
-                     (the bundle is corrupted or was edited)",
+                     (the bundle is corrupted or was edited){}",
                     oracle_dir.display(),
-                    file_name
+                    file_name,
+                    hint
                 )));
             }
         }
@@ -903,6 +910,25 @@ pub fn attach_oracle(
     dir: &Path,
     oracle: &BTreeMap<String, Vec<MutationStats>>,
 ) -> BenchmarkResult<Manifest> {
+    // Self-heal an interrupted previous attach before the integrity gate: a pre-v3 manifest
+    // cannot declare oracle entries, so an oracle/ directory next to one is provably orphaned
+    // (files written, manifest never upgraded) — remove it so a retry never bricks on load()'s
+    // stray-file check. A v3+ manifest is left untouched (attach rejects it below anyway).
+    let manifest_path = dir.join("manifest.json");
+    if let Ok(bytes) = std::fs::read(&manifest_path) {
+        if let Ok(peek) = serde_json::from_slice::<Manifest>(&bytes) {
+            let orphaned = dir.join("oracle");
+            if peek.format_version < RECORDING_FORMAT_VERSION_ORACLE && orphaned.is_dir() {
+                std::fs::remove_dir_all(&orphaned).map_err(|e| {
+                    OtherError(format!(
+                        "removing orphaned {} (interrupted previous attach): {}",
+                        orphaned.display(),
+                        e
+                    ))
+                })?;
+            }
+        }
+    }
     // Verify the bundle as it stands before touching it (hash gate included).
     let bundle = load(dir)?;
     if bundle.manifest.format_version >= RECORDING_FORMAT_VERSION_ORACLE {
@@ -982,7 +1008,6 @@ pub fn attach_oracle(
     }
     manifest.workload_hash = hasher.finalize();
 
-    let manifest_path = dir.join("manifest.json");
     let json = serde_json::to_string_pretty(&manifest)
         .map_err(|e| OtherError(format!("serializing manifest: {}", e)))?;
     std::fs::write(&manifest_path, json)
@@ -2159,6 +2184,45 @@ mod tests {
         let err = load(&dir).unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("unexpected oracle file") && msg.contains("ghost"), "got: {msg}");
+        assert!(
+            !msg.contains("interrupted"),
+            "a v3 bundle's stray file is tampering, not an interrupted attach: {msg}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_names_the_repair_for_an_orphaned_pre_v3_oracle_dir() {
+        // An interrupted attach leaves oracle/ files next to a still-v2 manifest; load() stays
+        // strict but must point at the recovery instead of a bare corruption claim.
+        let dir = record_write_bundle_to_temp("synthrec-oracle-orphan-msg");
+        std::fs::create_dir_all(dir.join("oracle")).unwrap();
+        std::fs::write(dir.join("oracle").join("w_alpha.jsonl"), "{}").unwrap();
+        let err = load(&dir).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("unexpected oracle file") && msg.contains("interrupted"),
+            "pre-v3 stray oracle files must name the repair path: {msg}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn attach_oracle_self_heals_an_interrupted_previous_attach() {
+        // Simulate a crash between writing oracle/ files and upgrading the manifest: the bundle
+        // is logically still v2, so a retrying attach must clear the orphaned directory and
+        // succeed rather than brick on load()'s stray-file gate.
+        let dir = record_write_bundle_to_temp("synthrec-oracle-selfheal");
+        std::fs::create_dir_all(dir.join("oracle")).unwrap();
+        std::fs::write(dir.join("oracle").join("w_alpha.jsonl"), "not even json").unwrap();
+        std::fs::write(dir.join("oracle").join("ghost.jsonl"), "{}").unwrap();
+        let mut oracle = BTreeMap::new();
+        oracle.insert("w_alpha".to_string(), vec![stats(1), stats(2)]);
+        let manifest = attach_oracle(&dir, &oracle).unwrap();
+        assert_eq!(manifest.format_version, RECORDING_FORMAT_VERSION_ORACLE);
+        assert!(!dir.join("oracle").join("ghost.jsonl").exists(), "orphan cleared");
+        let bundle = load(&dir).unwrap();
+        assert_eq!(bundle.oracle["w_alpha"], vec![stats(1), stats(2)]);
         std::fs::remove_dir_all(&dir).ok();
     }
 
