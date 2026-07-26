@@ -498,6 +498,12 @@ pub enum SyntheticCommands {
             help = "with --recording: skip loading the recorded graph, only count-verify the already-loaded graph (load-once / run-many)."
         )]
         no_load: bool,
+        #[arg(
+            long = "require-oracle",
+            requires = "recording",
+            help = "with --recording: refuse to measure a write bundle that carries no outcome oracle (recording format < v3). Guards against re-hashed v3-to-v2 downgrades; errors on read bundles (reads have no oracle)."
+        )]
+        require_oracle: bool,
     },
     #[command(about = "list the available operations")]
     ListOps,
@@ -549,7 +555,7 @@ pub enum SyntheticCommands {
         #[arg(
             long = "repo-writes",
             conflicts_with_all = ["ops", "all_reads", "tier", "repo_reads", "repo_algorithms"],
-            help = "record the A/B benchmark's 10 WRITE shapes from queries_repository (CREATE/SET/MERGE/DELETE/REMOVE/FOREACH) as a write bundle (recording format v2; the workload_hash binds each op's read/write kind). Replay measures them via GRAPH.QUERY at C=1 only, resetting the base graph before every measured cell and restoring + content-verifying it afterwards; results/counters are NOT asserted (latency tier). Write bundles are single-kind: mutually exclusive with every read selector."
+            help = "record the A/B benchmark's 10 WRITE shapes from queries_repository (CREATE/SET/MERGE/DELETE/REMOVE/FOREACH) as a write bundle (recording format v2; the workload_hash binds each op's read/write kind). Replay measures them via GRAPH.QUERY at C=1 only, resetting the base graph before every measured cell and restoring + content-verifying it afterwards; results/counters are NOT asserted (latency tier) unless the bundle carries the --oracle outcomes. Write bundles are single-kind: mutually exclusive with every read selector."
         )]
         repo_writes: bool,
         #[arg(
@@ -561,6 +567,13 @@ pub enum SyntheticCommands {
         nodes: Option<usize>,
         #[arg(long, help = "dataset edge count, must be >= nodes")]
         edges: Option<usize>,
+        #[arg(
+            long,
+            requires = "repo_writes",
+            value_name = "ENDPOINT",
+            help = "capture the write outcome ORACLE while recording (write bundles only): run EVERY command of each oracle-eligible write shape (the deterministic subset — 7 of the 10 shapes, complete corpus) once against the recorded pristine base on this live FalkorDB endpoint (falkor://host:port), per-invocation restore, capture its mutation counters, prove determinism with a second full pass, and fold the outcomes into the bundle (format v3; hash-bound; the oracle must cover every eligible op exactly — no subset). Replay then re-verifies every recorded outcome at C=1 before measuring latency; any divergence is a hard replay error naming the op/seq/command."
+        )]
+        oracle: Option<String>,
         #[arg(
             long = "out-dir",
             help = "directory to write the recording bundle into (manifest.json + graph.jsonl + commands/)"
@@ -859,6 +872,21 @@ mod tests {
         // `--repo-reads` is record-only (not a `run` flag).
         assert!(Cli::try_parse_from([
             "benchmark", "synthetic", "run", "--repo-reads", "core",
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn cli_require_oracle_needs_recording() {
+        use clap::Parser;
+        // `--require-oracle` rides on `--recording` (like `--no-load`)…
+        assert!(Cli::try_parse_from([
+            "benchmark", "synthetic", "run", "--recording", "rec", "--require-oracle",
+        ])
+        .is_ok());
+        // …and is rejected without it.
+        assert!(Cli::try_parse_from([
+            "benchmark", "synthetic", "run", "--require-oracle",
         ])
         .is_err());
     }

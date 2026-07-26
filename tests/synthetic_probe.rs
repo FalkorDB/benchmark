@@ -1084,6 +1084,7 @@ fn replay_config(dir: &std::path::Path, graph: &str, out: &str, load: bool) -> R
         out: out.to_string(),
         server_image: None,
         label: None,
+        require_oracle: false,
     }
 }
 
@@ -1515,6 +1516,7 @@ async fn record_and_replay_via_run_command() {
         seed: Some(11),
         nodes: Some(400),
         edges: Some(1200),
+        oracle: None,
         out_dir: out_dir.clone(),
     })
     .await
@@ -1545,6 +1547,7 @@ async fn record_and_replay_via_run_command() {
         edges: None,
         recording: Some(out_dir),
         no_load: false,
+        require_oracle: false,
     })
     .await
     .expect("run --recording via run_command");
@@ -1589,6 +1592,7 @@ async fn record_and_replay_algorithm_shapes_end_to_end() {
         seed: Some(7),
         nodes: Some(300),
         edges: Some(900),
+        oracle: None,
         out_dir: out_dir.clone(),
     })
     .await
@@ -1724,6 +1728,7 @@ async fn record_and_replay_write_shapes_end_to_end() {
         seed: Some(7),
         nodes: Some(300),
         edges: Some(900),
+        oracle: None,
         out_dir: out_dir.clone(),
     })
     .await
@@ -2015,6 +2020,7 @@ async fn replay_concurrency_sweep_verifies_results_and_reports_levels() {
         out: dir.join("conc.json").to_string_lossy().into_owned(),
         server_image: None,
         label: None,
+        require_oracle: false,
     };
     // If any op returned different results at C=4 vs the single-flight reference, run() errors here.
     // The two LIMIT ops (expand_hops_5, aggregate_group) are totally ordered, so their value digests
@@ -2121,5 +2127,397 @@ async fn max_flow_runs_on_the_generated_simple_graph() {
         .expect("max_flow is a float");
     assert!(flow > 0.0, "ring backbone connects every pair, got max_flow = {flow}");
 
+    drop_graph(graph).await;
+}
+
+/// Phase 7 §6.3 — the full oracle flow end to end: `record --repo-writes --oracle` captures each
+/// eligible write's per-command outcomes online (double-pass determinism proven at record time),
+/// upgrades the bundle to format v3 with the outcomes hash-bound, and `replay::run` re-verifies
+/// every recorded outcome from a pristine base before measuring latency.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires a running FalkorDB server"]
+async fn record_with_oracle_captures_verifies_and_replays_end_to_end() {
+    use benchmark::cli::SyntheticCommands;
+    use benchmark::synthetic::run_command;
+    use benchmark::synthetic::shapes::{write_shapes, OracleEligibility};
+
+    let graph = "syn_it_oracle";
+    drop_graph(graph).await;
+    let dir = temp_bundle_dir("syn-it-oracle");
+    let out_dir = dir.to_string_lossy().into_owned();
+
+    run_command(SyntheticCommands::Record {
+        config: None,
+        graph: Some(graph.to_string()),
+        ops: vec![],
+        all_reads: false,
+        tier: None,
+        repo_reads: None,
+        repo_algorithms: false,
+        repo_writes: true,
+        seed: Some(7),
+        nodes: Some(300),
+        edges: Some(900),
+        oracle: Some(endpoint()),
+        out_dir: out_dir.clone(),
+    })
+    .await
+    .expect("record --repo-writes --oracle via run_command");
+
+    let bundle = recording::load(&dir).expect("load the oracle bundle");
+    assert_eq!(bundle.manifest.format_version, 3, "oracle bundles are recording format v3");
+    let mut eligible: Vec<&str> = write_shapes()
+        .iter()
+        .filter(|s| s.oracle == OracleEligibility::Eligible)
+        .map(|s| s.name)
+        .collect();
+    eligible.sort_unstable(); // bundle.oracle is a BTreeMap — compare in key order
+    assert_eq!(
+        bundle.oracle.keys().map(String::as_str).collect::<Vec<_>>(),
+        eligible,
+        "exactly the §6.3 deterministic subset is oracle-captured"
+    );
+    for entry in &bundle.manifest.ops {
+        if eligible.contains(&entry.name.as_str()) {
+            assert_eq!(
+                entry.oracle,
+                Some(entry.count),
+                "{}: the oracle covers the complete command corpus",
+                entry.name
+            );
+            assert_eq!(bundle.oracle[&entry.name].len(), entry.count, "{}", entry.name);
+        } else {
+            assert_eq!(entry.oracle, None, "{} is excluded from the oracle", entry.name);
+        }
+    }
+    // The first outcome of the plain CREATE shape is knowable a priori — pin it as a smoke check
+    // that the oracle recorded real counters (everything else is engine-reported).
+    let svw = &bundle.oracle["single_vertex_write"][0];
+    assert_eq!(svw.nodes_created, 1, "CREATE makes one node: {svw:?}");
+
+    // Replay: the oracle verify pass runs before measurement and the whole run stays green —
+    // with --require-oracle asserting the bundle really is v3 (the downgrade guard's happy path).
+    let out = dir.join("oracle.json").to_string_lossy().into_owned();
+    let mut config = replay_config(&dir, graph, &out, true);
+    config.samples = 2;
+    config.warmup = 0;
+    config.cache = benchmark::synthetic::CacheSelection::Cached;
+    config.require_oracle = true;
+    let report = replay::run(&config).await.expect("replay a v3 oracle bundle");
+    assert_eq!(report.operations.len(), 10, "all 10 write shapes still measured");
+    // The report attests the verified oracle coverage (op → outcome count), so a v3→v2
+    // downgrade is visible to report consumers, not just to the replay log.
+    let attested = report.meta.oracle_verified.as_ref().expect("v3 replay attests its oracle");
+    assert_eq!(
+        attested.keys().map(String::as_str).collect::<Vec<_>>(),
+        eligible,
+        "the attestation names exactly the verified ops"
+    );
+    for entry in &bundle.manifest.ops {
+        if let Some(n) = entry.oracle {
+            assert_eq!(attested[&entry.name], n, "{}", entry.name);
+        }
+    }
+
+    // §3.5: the endpoint's graph is left exactly at the recorded base.
+    let mut g = open_graph(&endpoint(), graph).await.expect("open restored graph");
+    assert_eq!(scalar_i64(&mut g, "MATCH (n) RETURN count(n)").await, 300);
+    assert_eq!(scalar_i64(&mut g, "MATCH ()-[r]->() RETURN count(r)").await, 900);
+
+    std::fs::remove_dir_all(&dir).ok();
+    drop_graph(graph).await;
+}
+
+/// Phase 7 §6.3 — a recorded outcome the engine no longer reproduces must HARD-FAIL the replay
+/// (naming the op, seq and command), and the §3.5 error-safe final restore must still leave the
+/// recorded base behind. A diverged write means the engine is doing different work — measuring
+/// its latency anyway would silently poison the A/B trend.
+///
+/// The bundle is a hand-rendered single-op recording carrying the eligible `single_vertex_write`
+/// name: the §6.3 exact-set rule makes it a valid v3 bundle (one recorded eligible op, full
+/// corpus), and crafting the outcome offline keeps the divergence deterministic — the plain
+/// CREATE reports `nodes_created=1`, so expecting 7 always diverges at seq 0.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires a running FalkorDB server"]
+async fn replay_hard_fails_on_a_diverged_oracle_outcome() {
+    use benchmark::synthetic::recording::RecordedOp;
+    use benchmark::synthetic::writes::MutationStats;
+    use benchmark::synthetic::OpKey;
+    use std::collections::BTreeMap;
+
+    let graph = "syn_it_oracle_diverged";
+    drop_graph(graph).await;
+    let dir = temp_bundle_dir("syn-it-oracle-div");
+    let spec = DatasetSpec {
+        seed: 7,
+        nodes: 60,
+        edges: 180,
+    };
+    let op = RecordedOp {
+        key: OpKey::dynamic("single_vertex_write", QueryType::Write),
+        result_gated: false,
+        budget: Default::default(),
+        capability: None,
+        commands: vec!["CREATE (:User {id: 999983})".to_string()],
+    };
+    recording::record_rendered(&spec, graph, &[op], 7, 1_000, &dir).expect("record v2");
+
+    // Attach a hash-valid but WRONG oracle: the plain CREATE reports nodes_created=1, so
+    // expecting 7 is a guaranteed, deterministic divergence.
+    let mut wrong = BTreeMap::new();
+    wrong.insert(
+        "single_vertex_write".to_string(),
+        vec![MutationStats {
+            nodes_created: 7,
+            ..MutationStats::default()
+        }],
+    );
+    recording::attach_oracle(&dir, &wrong).expect("attach the crafted oracle");
+
+    let out = dir.join("diverged.json").to_string_lossy().into_owned();
+    let mut config = replay_config(&dir, graph, &out, true);
+    config.samples = 2;
+    config.warmup = 0;
+    config.cache = benchmark::synthetic::CacheSelection::Cached;
+    let err = replay::run(&config).await.expect_err("a diverged oracle outcome must fail");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("oracle mismatch for op 'single_vertex_write' seq 0"),
+        "must name the op and seq: {msg}"
+    );
+    assert!(msg.contains("nodes_created"), "must name the diverged counter: {msg}");
+    assert!(msg.contains("expected exactly 7"), "must show the recorded expectation: {msg}");
+
+    // The hard failure still ran the §3.5 final restore.
+    let mut g = open_graph(&endpoint(), graph).await.expect("open restored graph");
+    assert_eq!(scalar_i64(&mut g, "MATCH (n) RETURN count(n)").await, 60);
+    assert_eq!(scalar_i64(&mut g, "MATCH ()-[r]->() RETURN count(r)").await, 180);
+
+    std::fs::remove_dir_all(&dir).ok();
+    drop_graph(graph).await;
+}
+
+/// Phase 7 §6.3 — engine failures inside the oracle paths carry the op/seq context: a command the
+/// engine rejects fails the record-time capture as `oracle capture: op … seq …` (base restored),
+/// and the same command in a crafted v3 bundle fails the replay verify pass as
+/// `oracle verify: op … seq …` — both name where the failure happened, not just what.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires a running FalkorDB server"]
+async fn oracle_paths_name_the_op_and_seq_on_engine_failures() {
+    use benchmark::synthetic::oracle;
+    use benchmark::synthetic::recording::RecordedOp;
+    use benchmark::synthetic::writes::MutationStats;
+    use benchmark::synthetic::OpKey;
+    use std::collections::BTreeMap;
+
+    let graph = "syn_it_oracle_enginefail";
+    drop_graph(graph).await;
+    let spec = DatasetSpec {
+        seed: 7,
+        nodes: 60,
+        edges: 180,
+    };
+    let broken_op = || RecordedOp {
+        key: OpKey::dynamic("single_vertex_write", QueryType::Write),
+        result_gated: false,
+        budget: Default::default(),
+        capability: None,
+        commands: vec!["THIS IS NOT CYPHER".to_string()],
+    };
+
+    // Record-time: capture must fail with the op/seq context and leave the base restored.
+    let dir = temp_bundle_dir("syn-it-oracle-capfail");
+    recording::record_rendered(&spec, graph, &[broken_op()], 7, 1_000, &dir).expect("record v2");
+    let err = oracle::capture(&endpoint(), &dir, 5_000, 6_000)
+        .await
+        .expect_err("capturing an engine-rejected command must fail");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("oracle capture: op 'single_vertex_write' seq 0"),
+        "capture errors carry op/seq context: {msg}"
+    );
+    let mut g = open_graph(&endpoint(), graph).await.expect("open restored graph");
+    assert_eq!(scalar_i64(&mut g, "MATCH (n) RETURN count(n)").await, 60);
+    drop(g);
+    std::fs::remove_dir_all(&dir).ok();
+
+    // Replay-time: a crafted v3 bundle whose SECOND command the engine rejects fails the verify
+    // pass with the mirrored context — the first command is valid (and its outcome correct), so
+    // the fail-fast probe and verify seq 0 both pass, isolating the engine error at seq 1.
+    let dir = temp_bundle_dir("syn-it-oracle-verifyfail");
+    let two_cmd_op = RecordedOp {
+        key: OpKey::dynamic("single_vertex_write", QueryType::Write),
+        result_gated: false,
+        budget: Default::default(),
+        capability: None,
+        commands: vec!["CREATE ()".to_string(), "THIS IS NOT CYPHER".to_string()],
+    };
+    recording::record_rendered(&spec, graph, &[two_cmd_op], 7, 1_000, &dir).expect("record v2");
+    let mut crafted = BTreeMap::new();
+    crafted.insert(
+        "single_vertex_write".to_string(),
+        vec![
+            MutationStats {
+                nodes_created: 1,
+                ..MutationStats::default()
+            },
+            MutationStats::default(),
+        ],
+    );
+    recording::attach_oracle(&dir, &crafted).expect("attach a well-formed oracle");
+    let out = dir.join("enginefail.json").to_string_lossy().into_owned();
+    let mut config = replay_config(&dir, graph, &out, true);
+    config.samples = 2;
+    config.warmup = 0;
+    config.cache = benchmark::synthetic::CacheSelection::Cached;
+    let err = replay::run(&config).await.expect_err("verify pass must surface the engine error");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("oracle verify: op 'single_vertex_write' seq 1"),
+        "verify errors carry op/seq context: {msg}"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+    drop_graph(graph).await;
+}
+
+/// Phase 7 §6.3 — capture determinism end to end: two independent record+capture flows over the
+/// same seed produce byte-identical v3 bundles (same `workload_hash`, engine outcomes included),
+/// and a completed capture leaves the endpoint's graph content-identical to a fresh restore of
+/// the recorded base (§3.5 at record time).
+///
+/// The bundle is a hand-rendered two-op recording carrying eligible shape names (the exact-set
+/// rule pins v3 oracles to eligible names): capture semantics — double pass, full corpus,
+/// content-verified final restore — are identical to the full repo-writes flow (covered by the
+/// end-to-end test above) while the small corpus keeps the double capture fast.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires a running FalkorDB server"]
+async fn oracle_capture_is_deterministic_and_leaves_the_base_restored() {
+    use benchmark::synthetic::oracle;
+    use benchmark::synthetic::recording::RecordedOp;
+    use benchmark::synthetic::replay::capture_graph_content;
+    use benchmark::synthetic::OpKey;
+
+    let graph = "syn_it_oracle_det";
+    drop_graph(graph).await;
+
+    let record_one = |prefix: &str| {
+        let dir = temp_bundle_dir(prefix);
+        let spec = DatasetSpec {
+            seed: 7,
+            nodes: 60,
+            edges: 180,
+        };
+        let op = |name: &str, commands: Vec<String>| RecordedOp {
+            key: OpKey::dynamic(name, QueryType::Write),
+            result_gated: false,
+            budget: Default::default(),
+            capability: None,
+            commands,
+        };
+        let ops = [
+            op(
+                "single_vertex_write",
+                (0..3).map(|i| format!("CREATE (:User {{id: {}}})", 999_900 + i)).collect(),
+            ),
+            op(
+                "single_vertex_update",
+                (0..2).map(|i| format!("MATCH (u:User {{id: {i}}}) SET u.probe = {i}")).collect(),
+            ),
+        ];
+        recording::record_rendered(&spec, graph, &ops, 7, 1_000, &dir).expect("record v2");
+        dir
+    };
+
+    let dir_a = record_one("syn-it-oracle-det-a");
+    let manifest_a = oracle::capture(&endpoint(), &dir_a, 5_000, 6_000)
+        .await
+        .expect("capture oracle for bundle A");
+    for entry in &manifest_a.ops {
+        assert_eq!(
+            entry.oracle,
+            Some(entry.count),
+            "{}: capture covers the complete corpus",
+            entry.name
+        );
+    }
+
+    // Post-capture, BEFORE any further restore: the graph must already be the pristine base.
+    let bundle_a = recording::load(&dir_a).expect("reload bundle A");
+    let cfg = replay_config(&dir_a, graph, "unused.json", true);
+    let mut g = open_graph(&endpoint(), graph).await.expect("open post-capture graph");
+    let post_capture = capture_graph_content(&mut g, &cfg).await.expect("digest post-capture");
+    replay::restore_base(&cfg, &bundle_a, graph, &bundle_a.spec())
+        .await
+        .expect("explicit fresh restore");
+    let pristine = capture_graph_content(&mut g, &cfg).await.expect("digest fresh restore");
+    assert_eq!(
+        post_capture, pristine,
+        "capture must leave the base content-identical to a fresh restore"
+    );
+    drop(g);
+
+    let dir_b = record_one("syn-it-oracle-det-b");
+    let manifest_b = oracle::capture(&endpoint(), &dir_b, 5_000, 6_000)
+        .await
+        .expect("capture oracle for bundle B");
+    assert_eq!(
+        manifest_a.workload_hash, manifest_b.workload_hash,
+        "same seed + same engine ⇒ identical v3 bundles, oracle outcomes included"
+    );
+
+    std::fs::remove_dir_all(&dir_a).ok();
+    std::fs::remove_dir_all(&dir_b).ok();
+    drop_graph(graph).await;
+}
+
+/// Phase 7 §6.3 — re-recording over an existing v3 bundle must work, with and without `--oracle`
+/// (the duck repro: a stale `oracle/` directory used to survive the plain re-record and brick
+/// every subsequent load, and the `--oracle` retry loaded the stale bundle before the repair
+/// could run). Exercises the real CLI `record` path end to end, twice over the same directory.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires a running FalkorDB server"]
+async fn re_recording_over_a_v3_bundle_succeeds_with_and_without_oracle() {
+    use benchmark::cli::SyntheticCommands;
+    use benchmark::synthetic::run_command;
+
+    let graph = "syn_it_oracle_rerecord";
+    drop_graph(graph).await;
+    let dir = temp_bundle_dir("syn-it-oracle-rerec");
+    let out_dir = dir.to_string_lossy().into_owned();
+    let record = |oracle: bool| SyntheticCommands::Record {
+        config: None,
+        graph: Some(graph.to_string()),
+        ops: vec![],
+        all_reads: false,
+        tier: None,
+        repo_reads: None,
+        repo_algorithms: false,
+        repo_writes: true,
+        seed: Some(7),
+        nodes: Some(60),
+        edges: Some(180),
+        oracle: oracle.then(endpoint),
+        out_dir: out_dir.clone(),
+    };
+
+    run_command(record(true)).await.expect("initial record --oracle");
+    let v3_hash = recording::load(&dir).expect("v3 loads").manifest.workload_hash;
+
+    // Re-record WITH --oracle over the v3 bundle: the capture-side self-heal must let the retry
+    // through (capture loads the bundle BEFORE attach's own heal), reproducing the identical v3.
+    run_command(record(true)).await.expect("re-record --oracle over v3");
+    let again = recording::load(&dir).expect("the re-captured v3 bundle loads");
+    assert_eq!(again.manifest.format_version, 3);
+    assert_eq!(again.manifest.workload_hash, v3_hash, "same seed + engine ⇒ same v3 bundle");
+
+    // Re-record WITHOUT --oracle over the v3 bundle: the stale oracle/ must be cleared and the
+    // resulting v2 bundle must load cleanly.
+    run_command(record(false)).await.expect("re-record without --oracle over v3");
+    assert!(!dir.join("oracle").exists(), "stale oracle/ cleared by the plain re-record");
+    let v2 = recording::load(&dir).expect("the re-recorded v2 bundle loads");
+    assert_eq!(v2.manifest.format_version, 2);
+
+    std::fs::remove_dir_all(&dir).ok();
     drop_graph(graph).await;
 }

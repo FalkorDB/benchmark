@@ -36,6 +36,7 @@ use crate::synthetic::catalog::DEFAULT_RESET_EVERY;
 use crate::synthetic::dataset::{self, DatasetSpec};
 use crate::synthetic::op_runner::{capture_result, run_and_drain, ResultShape};
 use crate::synthetic::recording::{self, Bundle};
+use crate::synthetic::writes::{verify_mutation, ExpectedOutcome};
 use crate::synthetic::report::{
     DatasetInfo, LevelReport, Meta, OperationReport, Report, ServerInfo, SCHEMA_VERSION,
 };
@@ -83,6 +84,10 @@ pub struct ReplayConfig {
     pub server_image: Option<String>,
     /// Optional display name for this run (e.g. `pr`/`main`), recorded into the report.
     pub label: Option<String>,
+    /// When `true`, refuse to measure a write bundle that carries no outcome oracle (recording
+    /// format < v3). A re-hashed v3→v2 strip is a perfectly legitimate-looking v2 bundle, so only
+    /// the operator's *expectation* can catch the downgrade — this flag states it (§6.3).
+    pub require_oracle: bool,
 }
 
 /// Replay `config`'s bundle: load the recorded graph, then measure the recorded commands through the
@@ -100,6 +105,28 @@ pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
     // C=1 only, nothing result-gated, nothing capability-gated — are guarded up front, offline,
     // before any connection.
     let has_writes = bundle.commands.iter().any(|(op, _)| op.kind() == QueryType::Write);
+    // §6.3 downgrade guard, offline: a v2 write bundle is a legitimate latency-tier recording,
+    // which is exactly why a re-hashed v3→v2 strip replays cleanly — only the operator's stated
+    // expectation can refuse it. `load()` already guarantees a v3 bundle carries the complete
+    // exact-set oracle, so the format version alone decides.
+    if config.require_oracle {
+        if !has_writes {
+            return Err(OtherError(
+                "--require-oracle: the bundle records no write ops — the outcome oracle applies \
+                 to write bundles only (drop the flag for a read bundle)"
+                    .to_string(),
+            ));
+        }
+        if bundle.manifest.format_version < recording::RECORDING_FORMAT_VERSION_ORACLE {
+            return Err(OtherError(format!(
+                "--require-oracle: the write bundle at {} carries no outcome oracle (recording \
+                 format v{}) — latency tier only. Re-record it with --oracle; if it should \
+                 already carry one, this bundle may be a re-hashed v3→v2 downgrade",
+                config.recording_dir.display(),
+                bundle.manifest.format_version
+            )));
+        }
+    }
     if has_writes {
         validate_write_replay(&bundle, config, &concurrency)?;
     }
@@ -315,6 +342,116 @@ pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
         // Setup connection done; drop it so it isn't an idle extra connection during the sweep.
         drop(graph);
 
+        // §6.3 correctness pass: when the bundle carries an outcome oracle, re-verify every
+        // recorded outcome BEFORE any latency measurement — restore the pristine base, run the
+        // command once, and require the engine's mutation counters to EQUAL the recorded stats
+        // (`ExpectedOutcome::exactly`). A mismatch is a hard replay error naming the op, seq and
+        // command: the engine no longer effects the recorded outcome, so it is doing *different
+        // work* — measuring its latency anyway would poison the A/B trend silently. (Divergence
+        // must scream — and an oracle-bearing op that got skipped fails closed rather than
+        // silently bypassing the tier.) Untimed, single-flight, per-invocation restore — sample
+        // latencies stay clean because restores run between invocations, never inside one.
+        //
+        // Exact-set re-check (belt-and-braces over the identical load() gate): every eligible
+        // write op must carry an oracle covering its complete corpus — replay never proceeds on
+        // a bundle whose oracle coverage silently shrank.
+        let eligible = crate::synthetic::shapes::oracle_eligible_names();
+        if bundle.manifest.format_version >= recording::RECORDING_FORMAT_VERSION_ORACLE {
+            for (op, cyphers) in &bundle.commands {
+                if op.kind() != QueryType::Write || !eligible.contains(op.name()) {
+                    continue;
+                }
+                match bundle.oracle.get(op.name()) {
+                    None => {
+                        return Err(OtherError(format!(
+                            "oracle-eligible op '{}' carries no outcome oracle — the bundle's \
+                             correctness coverage shrank below what format v{} promises",
+                            op.name(),
+                            recording::RECORDING_FORMAT_VERSION_ORACLE
+                        )));
+                    }
+                    Some(outcomes) if outcomes.len() != cyphers.len() => {
+                        return Err(OtherError(format!(
+                            "op '{}' has {} recorded outcome(s) for {} command(s) — the §6.3 \
+                             oracle covers the complete corpus",
+                            op.name(),
+                            outcomes.len(),
+                            cyphers.len()
+                        )));
+                    }
+                    Some(_) => {}
+                }
+            }
+        } else if has_writes {
+            // Downgrade visibility: a write bundle WITHOUT an oracle is legitimate (pre-§6.3
+            // latency tier) but must say so loudly, so a v3→v2 strip can't pass as the real
+            // thing unnoticed. The report's `meta.oracle_verified` stays absent for the same
+            // reason.
+            info!(
+                "write bundle carries no outcome oracle (recording format v{}) — latency tier \
+                 only, no correctness verification",
+                bundle.manifest.format_version
+            );
+        }
+        for (op, cyphers) in &bundle.commands {
+            let Some(expected) = bundle.oracle.get(op.name()) else { continue };
+            if let Some(reason) = skipped.get(op.name()) {
+                // Fail closed: unreachable through load() (write bundles can never be
+                // capability-gated, and only write ops carry oracles), but a skip must never
+                // bypass the correctness tier.
+                return Err(OtherError(format!(
+                    "op '{}' carries {} recorded oracle outcome(s) but was skipped ({}) — a \
+                     skip cannot bypass the correctness tier",
+                    op.name(),
+                    expected.len(),
+                    reason
+                )));
+            }
+            let entry = entry_for(op.name());
+            let op_st = entry.budget.server_timeout_ms.unwrap_or(config.server_timeout_ms);
+            let op_deadline = entry
+                .budget
+                .client_deadline_ms
+                .map(Duration::from_millis)
+                .unwrap_or(client_deadline);
+            for (seq, want) in expected.iter().enumerate() {
+                restore_base(config, &bundle, &graph_name, &dataset_spec).await?;
+                let mut g = open_graph(&config.endpoint, &graph_name).await?;
+                let sample =
+                    run_and_drain(&mut g, QueryType::Write, &cyphers[seq], op_st, op_deadline)
+                        .await
+                        .map_err(|e| {
+                            OtherError(format!(
+                                "oracle verify: op '{}' seq {}: {}",
+                                op.name(),
+                                seq,
+                                e
+                            ))
+                        })?;
+                verify_mutation(ExpectedOutcome::exactly(*want), &sample.mutations).map_err(
+                    |e| {
+                        OtherError(format!(
+                            "oracle mismatch for op '{}' seq {} (command: {}): {} — the engine \
+                             diverged from the recorded outcome, so its write latencies would \
+                             measure different work",
+                            op.name(),
+                            seq,
+                            cyphers[seq],
+                            e
+                        ))
+                    },
+                )?;
+            }
+        }
+        if !bundle.oracle.is_empty() {
+            let outcomes: usize = bundle.oracle.values().map(Vec::len).sum();
+            info!(
+                "oracle verified: {} recorded outcome(s) across {} op(s) reproduced exactly",
+                outcomes,
+                bundle.oracle.len()
+            );
+        }
+
         for (op, corpus, shapes) in &reference {
             let entry = entry_for(op.name());
             let is_gated = entry.result_gated;
@@ -444,6 +581,11 @@ pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
                 workload_hash: bundle.manifest.workload_hash.clone(),
             }),
             label: config.label.clone(),
+            oracle_verified: if bundle.oracle.is_empty() {
+                None
+            } else {
+                Some(bundle.oracle.iter().map(|(op, v)| (op.clone(), v.len())).collect())
+            },
         },
         operations,
     })
@@ -658,7 +800,7 @@ fn reconcile_measure_and_restore(
 /// The write replay's final restore (§3.5): reload the recorded base graph, then verify its
 /// **content** — not just its counts — matches the pristine post-load capture, so the replay
 /// provably leaves the endpoint's graph exactly as recorded.
-async fn restore_and_verify(
+pub(crate) async fn restore_and_verify(
     bundle: &Bundle,
     graph_name: &str,
     dataset_spec: &DatasetSpec,
@@ -868,6 +1010,7 @@ mod tests {
             out: "unused.json".to_string(),
             server_image: None,
             label: None,
+            require_oracle: false,
         }
     }
 
@@ -884,6 +1027,7 @@ mod tests {
                 result_gated: *gated,
                 budget: budget.clone(),
                 capability: None,
+                oracle: None,
                 count: 1,
             })
             .collect();
@@ -912,6 +1056,7 @@ mod tests {
             },
             graph_statements: Vec::new(),
             commands,
+            oracle: std::collections::BTreeMap::new(),
         }
     }
 
@@ -1055,6 +1200,69 @@ mod tests {
         config.recording_dir = dir.clone();
         let err = run(&config).await.unwrap_err();
         assert!(format!("{err}").contains("never capability-gated"), "got: {err}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn run_require_oracle_rejects_a_read_bundle() {
+        // Reads have no outcome oracle by definition — asking for one is operator error, and
+        // silently ignoring the flag would train users to pass it everywhere.
+        use crate::synthetic::recording::{record_rendered, temp_bundle_dir, RecordedOp};
+
+        let dir = temp_bundle_dir("replay-require-oracle-read");
+        let spec = DatasetSpec {
+            seed: 7,
+            nodes: 10,
+            edges: 20,
+        };
+        let ops = vec![RecordedOp {
+            key: OpKey::dynamic("r_op", QueryType::Read),
+            result_gated: true,
+            budget: RecordedBudget::default(),
+            capability: None,
+            commands: vec!["MATCH (n) RETURN count(n)".to_string()],
+        }];
+        record_rendered(&spec, "g", &ops, 7, 64, &dir).expect("record a read bundle");
+
+        let mut config = replay_config(true, vec![1]);
+        config.recording_dir = dir.clone();
+        config.require_oracle = true;
+        let err = run(&config).await.unwrap_err();
+        assert!(format!("{err}").contains("records no write ops"), "got: {err}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn run_require_oracle_rejects_a_latency_tier_write_bundle() {
+        // A v2 write bundle is legitimate — but the operator stated the correctness tier is
+        // expected, so the replay must refuse offline instead of measuring latency-only.
+        use crate::synthetic::recording::{record_rendered, temp_bundle_dir, RecordedOp};
+
+        let dir = temp_bundle_dir("replay-require-oracle-v2");
+        let spec = DatasetSpec {
+            seed: 7,
+            nodes: 10,
+            edges: 20,
+        };
+        let ops = vec![RecordedOp {
+            key: OpKey::dynamic("w_op", QueryType::Write),
+            result_gated: false,
+            budget: write_budget(),
+            capability: None,
+            commands: vec!["CREATE (n:X)".to_string()],
+        }];
+        record_rendered(&spec, "g", &ops, 7, 64, &dir).expect("record a v2 write bundle");
+
+        let mut config = replay_config(true, vec![1]);
+        config.recording_dir = dir.clone();
+        config.require_oracle = true;
+        let err = run(&config).await.unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("carries no outcome oracle"), "got: {msg}");
+        assert!(msg.contains("recording format v2"), "got: {msg}");
+        assert!(msg.contains("re-hashed v3→v2 downgrade"), "got: {msg}");
 
         std::fs::remove_dir_all(&dir).ok();
     }

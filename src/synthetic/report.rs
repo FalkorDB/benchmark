@@ -114,6 +114,12 @@ pub struct Meta {
     /// column header in `report --diff`/`--regression`; falls back to `A`/`B` when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// §6.3 oracle attestation: op → number of recorded outcomes the replay **re-verified** before
+    /// measuring (present only for a format-v3 write-bundle replay). Its absence on a write-bundle
+    /// report makes a v3→v2 downgrade visible when comparing runs — a replay without this field
+    /// measured the latency tier only. `#[serde(default)]` so pre-§6.3 reports still deserialize.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oracle_verified: Option<std::collections::BTreeMap<String, usize>>,
 }
 
 /// Provenance for a synthetic dataset: its knobs and the `workload_hash` that identifies the whole
@@ -765,6 +771,7 @@ mod tests {
                 },
                 dataset: None,
                 label: None,
+                oracle_verified: None,
             },
             operations,
         }
@@ -791,6 +798,26 @@ mod tests {
         let _ = l0.cached.as_ref().unwrap().metrics.server_ms.p95;
         assert_eq!(back.meta.server.module_graph_ver, Some(42001));
         assert_eq!(back.meta.server.cache_size, Some(25));
+    }
+
+    #[test]
+    fn oracle_attestation_round_trips_and_defaults_to_none() {
+        // A v3 write-bundle replay attests its verified oracle coverage (op → outcome count)…
+        let mut report = sample_report();
+        let mut coverage = std::collections::BTreeMap::new();
+        coverage.insert("single_vertex_write".to_string(), 256);
+        report.meta.oracle_verified = Some(coverage.clone());
+        let json = report.to_json().unwrap();
+        assert!(json.contains("\"oracle_verified\""), "attestation serialized: {json}");
+        let back: Report = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.meta.oracle_verified, Some(coverage));
+        // …while oracle-less runs omit the field entirely, and pre-§6.3 reports (no field at
+        // all) still deserialize — so a v3→v2 downgrade shows up as a missing attestation.
+        let plain = sample_report();
+        let json = plain.to_json().unwrap();
+        assert!(!json.contains("oracle_verified"), "None must not serialize: {json}");
+        let back: Report = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.meta.oracle_verified, None);
     }
 
     #[test]

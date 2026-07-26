@@ -40,6 +40,18 @@ pub struct BaselineKey {
     /// as neither a pass nor a divergence. Empty for pre-Phase-6 reports.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub skipped_ops: BTreeSet<String>,
+    /// §6.3 oracle attestation (`meta.oracle_verified`): op → number of recorded write outcomes
+    /// the replay **re-verified** before measuring. `None` for a latency-tier-only run. Compared
+    /// across sides so a run that dropped the correctness tier can't silently pair with one that
+    /// kept it. Absent from pre-§6.3 baselines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oracle_verified: Option<BTreeMap<String, usize>>,
+    /// The **oracle-eligible** write ops (the §6.3 deterministic subset) this run measured. Lets
+    /// the guards flag a pair that measured eligible writes with *no* oracle on either side —
+    /// legitimate for a v2 latency-tier bundle, but exactly what a two-sided v3→v2 downgrade
+    /// looks like, so it warrants a prominent warning. Empty for read runs and older baselines.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub eligible_write_ops: BTreeSet<String>,
 }
 
 impl BaselineKey {
@@ -65,7 +77,75 @@ impl BaselineKey {
                 .filter(|(_, op)| op.skipped.is_some())
                 .map(|(name, _)| name.clone())
                 .collect(),
+            oracle_verified: report.meta.oracle_verified.clone(),
+            eligible_write_ops: eligible_write_ops(report),
         }
+    }
+}
+
+/// The oracle-eligible write ops (§6.3 deterministic subset) present in a report's op set.
+fn eligible_write_ops(report: &Report) -> BTreeSet<String> {
+    let eligible = crate::synthetic::shapes::oracle_eligible_names();
+    report
+        .operations
+        .keys()
+        .filter(|name| eligible.contains(name.as_str()))
+        .cloned()
+        .collect()
+}
+
+/// Compact human summary of an oracle attestation map: `"7 op(s), 1792 outcome(s)"`.
+fn attestation_summary(m: &BTreeMap<String, usize>) -> String {
+    format!("{} op(s), {} outcome(s)", m.len(), m.values().sum::<usize>())
+}
+
+/// §6.3 oracle-attestation comparability between two runs.
+///
+/// `Err(reason)` is a **fatal** mismatch — the runs re-verified different outcome coverage
+/// (one-sided or differing attestations), so their correctness tiers are not the same check and
+/// the comparison must refuse, exactly like a workload mismatch. Unreachable through the real
+/// pipeline (a v3 bundle's oracle is hash-bound, so hash-equal replays attest identically) — this
+/// arm defends hand-edited or mixed-provenance reports.
+///
+/// `Ok(warnings)` may carry the **downgrade-visibility** warning: both sides measured
+/// oracle-eligible write ops with no attestation at all. That pair is legitimate (a v2
+/// latency-tier bundle) but indistinguishable from a two-sided re-hashed v3→v2 strip, so it is
+/// surfaced prominently rather than silently passed (§6.3 — duck's downgrade finding).
+fn oracle_attestation_check(
+    baseline: Option<&BTreeMap<String, usize>>,
+    candidate: Option<&BTreeMap<String, usize>>,
+    eligible_ops: &BTreeSet<String>,
+) -> Result<Vec<String>, String> {
+    match (baseline, candidate) {
+        (Some(b), Some(c)) if b == c => Ok(Vec::new()),
+        (Some(b), Some(c)) => Err(format!(
+            "oracle attestation differs — baseline re-verified {} but candidate re-verified {}: \
+             the runs verified different write-outcome coverage, so their correctness tiers are \
+             not comparable",
+            attestation_summary(b),
+            attestation_summary(c)
+        )),
+        (Some(b), None) => Err(format!(
+            "oracle attestation is one-sided — baseline re-verified the write outcome oracle \
+             ({}) but candidate carries no attestation (latency tier only): a re-hashed v3→v2 \
+             downgrade looks exactly like this. Re-run the candidate against the oracle-bearing \
+             (v3) bundle, with `--require-oracle` to refuse the downgrade",
+            attestation_summary(b)
+        )),
+        (None, Some(c)) => Err(format!(
+            "oracle attestation is one-sided — candidate re-verified the write outcome oracle \
+             ({}) but baseline carries no attestation (latency tier only): a re-hashed v3→v2 \
+             downgrade looks exactly like this. Re-run the baseline against the oracle-bearing \
+             (v3) bundle, with `--require-oracle` to refuse the downgrade",
+            attestation_summary(c)
+        )),
+        (None, None) if !eligible_ops.is_empty() => Ok(vec![format!(
+            "both runs measured oracle-eligible write op(s) ({}) with no outcome oracle — \
+             latencies were compared WITHOUT the §6.3 correctness tier. Re-record with --oracle \
+             and replay with --require-oracle to enforce it",
+            eligible_ops.iter().cloned().collect::<Vec<_>>().join(", ")
+        )]),
+        (None, None) => Ok(Vec::new()),
     }
 }
 
@@ -159,6 +239,22 @@ pub fn guard(
         return GuardOutcome::Abort { reason };
     }
 
+    // §6.3 oracle-attestation gate: one-sided or differing attestation means the two runs did not
+    // run the same correctness tier — refuse, like a workload mismatch. Both-absent over
+    // oracle-eligible write ops is legitimate (latency tier) but downgrade-shaped ⇒ warning below.
+    let attestation_warnings = match oracle_attestation_check(
+        baseline.oracle_verified.as_ref(),
+        candidate.oracle_verified.as_ref(),
+        &baseline
+            .eligible_write_ops
+            .union(&candidate.eligible_write_ops)
+            .cloned()
+            .collect(),
+    ) {
+        Ok(warnings) => warnings,
+        Err(reason) => return GuardOutcome::Abort { reason },
+    };
+
     // Result-correctness gate: for every op the baseline recorded a result digest for, the
     // candidate must record the *same* digest — otherwise a version returning wrong or empty
     // results faster could masquerade as an improvement. A candidate that is missing a digest the
@@ -194,7 +290,7 @@ pub fn guard(
         }
     }
 
-    let mut warnings = Vec::new();
+    let mut warnings = attestation_warnings;
     // Only warn "same version" when both versions are actually *known* and equal — two unknown
     // (`None`) versions are not a known match, so don't claim there's no delta to measure. The
     // dev placeholder is excluded too: two edge/RC images both reporting the placeholder are NOT
@@ -353,6 +449,20 @@ pub fn regression_guard(
     {
         return RegressionGuard::NotComparable { reason };
     }
+    // §6.3 oracle-attestation gate — same rule as the strict [`guard`]: one-sided or differing
+    // attestation ⇒ the correctness tiers differ ⇒ NotComparable; both-absent over eligible
+    // write ops ⇒ the prominent latency-tier-only warning (merged into the advisory set below).
+    let attestation_warnings = match oracle_attestation_check(
+        baseline.meta.oracle_verified.as_ref(),
+        candidate.meta.oracle_verified.as_ref(),
+        &eligible_write_ops(baseline)
+            .union(&eligible_write_ops(candidate))
+            .cloned()
+            .collect(),
+    ) {
+        Ok(warnings) => warnings,
+        Err(reason) => return RegressionGuard::NotComparable { reason },
+    };
 
     // 2. Per-op result divergence — reported, never fatal. Over the *union* of ops: two present
     //    digests that differ, or an asymmetric one-side-only digest, is diverged (we can't verify
@@ -383,7 +493,11 @@ pub fn regression_guard(
 
     RegressionGuard::Comparable {
         diverged_ops,
-        warnings: advisory_warnings(baseline, candidate),
+        warnings: {
+            let mut warnings = attestation_warnings;
+            warnings.extend(advisory_warnings(baseline, candidate));
+            warnings
+        },
     }
 }
 
@@ -455,6 +569,8 @@ mod tests {
             result_digests: BTreeMap::new(),
             op_policies: BTreeMap::new(),
             skipped_ops: BTreeSet::new(),
+            oracle_verified: None,
+            eligible_write_ops: BTreeSet::new(),
         }
     }
 
@@ -472,6 +588,8 @@ mod tests {
                 .collect(),
             op_policies: BTreeMap::new(),
             skipped_ops: BTreeSet::new(),
+            oracle_verified: None,
+            eligible_write_ops: BTreeSet::new(),
         }
     }
 
@@ -510,6 +628,8 @@ mod tests {
                 .map(|(k, p)| (k.to_string(), p.clone()))
                 .collect(),
             skipped_ops: BTreeSet::new(),
+            oracle_verified: None,
+            eligible_write_ops: BTreeSet::new(),
         }
     }
 
@@ -685,6 +805,8 @@ mod tests {
             result_digests: BTreeMap::new(),
             op_policies: BTreeMap::new(),
             skipped_ops: BTreeSet::new(),
+            oracle_verified: None,
+            eligible_write_ops: BTreeSet::new(),
         };
         let cand = BaselineKey {
             workload_hash: Some("sha256:abc".to_string()),
@@ -693,6 +815,8 @@ mod tests {
             result_digests: BTreeMap::new(),
             op_policies: BTreeMap::new(),
             skipped_ops: BTreeSet::new(),
+            oracle_verified: None,
+            eligible_write_ops: BTreeSet::new(),
         };
         match guard(&base, &cand) {
             GuardOutcome::Proceed { warnings } => {
@@ -700,6 +824,99 @@ mod tests {
             }
             other => panic!("expected Proceed, got {other:?}"),
         }
+    }
+
+    fn attested(entries: &[(&str, usize)]) -> BTreeMap<String, usize> {
+        entries.iter().map(|(op, n)| (op.to_string(), *n)).collect()
+    }
+
+    #[test]
+    fn attestation_check_covers_every_arm() {
+        let full = attested(&[("single_vertex_write", 256), ("foreach_loop_mutation", 256)]);
+        let subset = attested(&[("single_vertex_write", 256)]);
+        let eligible: BTreeSet<String> = ["single_vertex_write".to_string()].into();
+        // Matching attestations: clean pass.
+        assert_eq!(oracle_attestation_check(Some(&full), Some(&full), &eligible), Ok(Vec::new()));
+        // Differing attestations: fatal.
+        let err = oracle_attestation_check(Some(&full), Some(&subset), &eligible).unwrap_err();
+        assert!(err.contains("oracle attestation differs"), "{err}");
+        assert!(err.contains("2 op(s), 512 outcome(s)"), "{err}");
+        assert!(err.contains("1 op(s), 256 outcome(s)"), "{err}");
+        // One-sided (either way): fatal, naming the downgrade and the flag.
+        for (b, c, side) in
+            [(Some(&full), None, "candidate"), (None, Some(&full), "baseline")]
+        {
+            let err = oracle_attestation_check(b, c, &eligible).unwrap_err();
+            assert!(err.contains("one-sided"), "{err}");
+            assert!(err.contains(&format!("Re-run the {side}")), "{err}");
+            assert!(err.contains("--require-oracle"), "{err}");
+            assert!(err.contains("v3→v2"), "{err}");
+        }
+        // Both absent over eligible write ops: legitimate but downgrade-shaped ⇒ warning.
+        let warnings = oracle_attestation_check(None, None, &eligible).unwrap();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("WITHOUT"), "{}", warnings[0]);
+        assert!(warnings[0].contains("single_vertex_write"), "{}", warnings[0]);
+        assert!(warnings[0].contains("--require-oracle"), "{}", warnings[0]);
+        // Both absent, nothing eligible (read runs): silent.
+        assert_eq!(oracle_attestation_check(None, None, &BTreeSet::new()), Ok(Vec::new()));
+    }
+
+    #[test]
+    fn guard_aborts_on_one_sided_or_differing_attestation() {
+        let mut base = key(Some("sha256:abc"), Some(42001));
+        let mut cand = key(Some("sha256:abc"), Some(42002));
+        base.oracle_verified = Some(attested(&[("single_vertex_write", 256)]));
+        match guard(&base, &cand) {
+            GuardOutcome::Abort { reason } => assert!(reason.contains("one-sided"), "{reason}"),
+            other => panic!("expected Abort, got {other:?}"),
+        }
+        cand.oracle_verified = Some(attested(&[("single_vertex_write", 8)]));
+        match guard(&base, &cand) {
+            GuardOutcome::Abort { reason } => {
+                assert!(reason.contains("attestation differs"), "{reason}");
+            }
+            other => panic!("expected Abort, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn guard_warns_on_downgrade_shaped_pair_and_passes_matching_attestation() {
+        // Both sides measured an oracle-eligible write op with no attestation: comparable, but
+        // the latency-tier-only warning must surface (the two-sided-downgrade blind spot).
+        let mut base = key(Some("sha256:abc"), Some(42001));
+        let mut cand = key(Some("sha256:abc"), Some(42002));
+        base.eligible_write_ops = ["single_vertex_write".to_string()].into();
+        cand.eligible_write_ops = base.eligible_write_ops.clone();
+        match guard(&base, &cand) {
+            GuardOutcome::Proceed { warnings } => {
+                assert!(warnings.iter().any(|w| w.contains("no outcome oracle")), "{warnings:?}");
+            }
+            other => panic!("expected Proceed, got {other:?}"),
+        }
+        // Matching attestations: no oracle warning at all.
+        base.oracle_verified = Some(attested(&[("single_vertex_write", 256)]));
+        cand.oracle_verified = base.oracle_verified.clone();
+        match guard(&base, &cand) {
+            GuardOutcome::Proceed { warnings } => {
+                assert!(!warnings.iter().any(|w| w.contains("oracle")), "{warnings:?}");
+            }
+            other => panic!("expected Proceed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn baseline_key_serde_defaults_for_pre_oracle_json() {
+        // A pre-§6.3 baseline JSON (no oracle fields) must load with the defaults…
+        let old = r#"{"workload_hash":"sha256:abc","module_graph_ver":42001,"result_digests":{}}"#;
+        let key: BaselineKey = serde_json::from_str(old).unwrap();
+        assert_eq!(key.oracle_verified, None);
+        assert!(key.eligible_write_ops.is_empty());
+        // …and a key without attestation serializes without the new fields (read baselines stay
+        // byte-identical to pre-§6.3 output).
+        let json = serde_json::to_string(&key).unwrap();
+        assert!(!json.contains("oracle_verified"), "{json}");
+        assert!(!json.contains("eligible_write_ops"), "{json}");
     }
 }
 
@@ -760,6 +977,7 @@ mod regression_guard_tests {
                     workload_hash: hash.to_string(),
                 }),
                 label: None,
+                oracle_verified: None,
             },
             operations,
         }
@@ -1079,5 +1297,93 @@ mod regression_guard_tests {
         assert!(clean_key.skipped_ops.is_empty());
         let json = serde_json::to_string(&clean_key).unwrap();
         assert!(!json.contains("skipped_ops"), "{json}");
+    }
+
+    fn oracle_map(entries: &[(&str, usize)]) -> BTreeMap<String, usize> {
+        entries.iter().map(|(op, n)| (op.to_string(), *n)).collect()
+    }
+
+    #[test]
+    fn regression_guard_not_comparable_on_one_sided_or_differing_attestation() {
+        // Baseline replayed the v3 bundle (attested); candidate replayed a stripped/downgraded
+        // v2 twin — hash-equal, so only the attestation gate can catch it.
+        let mut a =
+            rep("h", 100, 50, vec![1], None, None, &[("single_vertex_write", Some("d1"))]);
+        let mut b =
+            rep("h", 100, 50, vec![1], None, None, &[("single_vertex_write", Some("d1"))]);
+        a.meta.oracle_verified = Some(oracle_map(&[("single_vertex_write", 256)]));
+        match regression_guard(&a, &b) {
+            RegressionGuard::NotComparable { reason } => {
+                assert!(reason.contains("one-sided"), "{reason}");
+                assert!(reason.contains("--require-oracle"), "{reason}");
+            }
+            other => panic!("expected NotComparable, got {other:?}"),
+        }
+        // Differing attestations are just as fatal.
+        b.meta.oracle_verified = Some(oracle_map(&[("single_vertex_write", 8)]));
+        assert!(matches!(regression_guard(&a, &b), RegressionGuard::NotComparable { .. }));
+    }
+
+    #[test]
+    fn regression_guard_warns_on_unattested_eligible_write_ops_only() {
+        // Two latency-tier (v2) write replays: comparable, but prominently flagged.
+        let a = rep("h", 100, 50, vec![1], None, None, &[("single_vertex_write", Some("d1"))]);
+        let b = rep("h", 100, 50, vec![1], None, None, &[("single_vertex_write", Some("d1"))]);
+        match regression_guard(&a, &b) {
+            RegressionGuard::Comparable { warnings, .. } => {
+                assert!(
+                    warnings.iter().any(|w| w.contains("no outcome oracle")),
+                    "{warnings:?}"
+                );
+            }
+            other => panic!("expected Comparable, got {other:?}"),
+        }
+        // A read-only pair carries no oracle-eligible ops ⇒ no oracle warning.
+        let ra = rep("h", 100, 50, vec![1], None, None, &[("match_by_index", Some("d1"))]);
+        let rb = rep("h", 100, 50, vec![1], None, None, &[("match_by_index", Some("d1"))]);
+        match regression_guard(&ra, &rb) {
+            RegressionGuard::Comparable { warnings, .. } => {
+                assert!(!warnings.iter().any(|w| w.contains("oracle")), "{warnings:?}");
+            }
+            other => panic!("expected Comparable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn regression_guard_passes_matching_attestation_without_warning() {
+        let mut a =
+            rep("h", 100, 50, vec![1], None, None, &[("single_vertex_write", Some("d1"))]);
+        let mut b =
+            rep("h", 100, 50, vec![1], None, None, &[("single_vertex_write", Some("d1"))]);
+        a.meta.oracle_verified = Some(oracle_map(&[("single_vertex_write", 256)]));
+        b.meta.oracle_verified = a.meta.oracle_verified.clone();
+        match regression_guard(&a, &b) {
+            RegressionGuard::Comparable { diverged_ops, warnings } => {
+                assert!(diverged_ops.is_empty());
+                assert!(!warnings.iter().any(|w| w.contains("oracle")), "{warnings:?}");
+            }
+            other => panic!("expected Comparable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn baseline_key_collects_oracle_attestation_and_eligible_write_ops() {
+        let mut r = rep(
+            "h",
+            100,
+            50,
+            vec![1],
+            None,
+            None,
+            &[("single_vertex_write", Some("d1")), ("match_by_index", Some("d2"))],
+        );
+        r.meta.oracle_verified = Some(oracle_map(&[("single_vertex_write", 256)]));
+        let key = BaselineKey::from_report(&r);
+        assert_eq!(key.oracle_verified, r.meta.oracle_verified);
+        // Only the oracle-eligible write op is collected — reads never carry oracles.
+        assert_eq!(
+            key.eligible_write_ops,
+            ["single_vertex_write".to_string()].into()
+        );
     }
 }

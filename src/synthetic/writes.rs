@@ -22,6 +22,7 @@
 use crate::error::BenchmarkError::OtherError;
 use crate::error::BenchmarkResult;
 use crate::query::Query;
+use serde::{Deserialize, Serialize};
 
 /// Fires a reset every `reset_every` operations, counted over the **global** invocation sequence
 /// (warm-up + measured), so scratch that warm-up mutated is bounded too.
@@ -220,7 +221,13 @@ pub struct WritePlan {
 /// plans verify (Phase 7 §6.2) — a deliberate subset of the server's statistics (e.g. `labels_added`
 /// and index counters are not tracked): absent counters read as 0 (FalkorDB omits untouched
 /// statistics).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+///
+/// Serialized verbatim into a bundle's §6.3 oracle records (`oracle/<op>.jsonl`), so the serde
+/// contract is strict: every counter field must be present in the JSON (no `serde(default)` — the
+/// `Default` derive serves in-memory construction only) and unknown fields are rejected — a
+/// hand-edited or truncated record fails to parse rather than reading as zeros.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MutationStats {
     pub nodes_created: i64,
     pub nodes_deleted: i64,

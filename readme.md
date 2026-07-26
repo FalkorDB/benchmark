@@ -504,6 +504,23 @@ just synthetic-compare-versions demo falkor://127.0.0.1:6379 falkor://127.0.0.1:
   exclusive with **every** read selector (`--op`/`--all-reads`/`--tier`/`--repo-reads`/
   `--repo-algorithms`); writes never enter `--repo-reads`, any tier, or the per-PR
   `synthetic-verify` gate.
+  Adding **`--oracle <endpoint>`** (write bundles only) additionally captures the **§6.3 outcome
+  oracle**: every **oracle-eligible** write command (the deterministic subset — 7 of the 10 shapes;
+  excluded: `single_edge_update` (server `rand()`), `detach_delete_user` and
+  `remove_user_property_and_label` (deferred)) runs once against the recorded **pristine base** on
+  that live FalkorDB endpoint — restored before every invocation — recording the mutation counters
+  it reports; a **second full pass** must reproduce every outcome exactly (determinism is proven at
+  record time, or the record fails naming the op/seq). The capture covers each eligible op's
+  **complete command corpus** (per-command outcomes, no sampling), and the resulting **format v3**
+  bundle must carry an oracle for **exactly** the eligible set — full corpus per op, none anywhere
+  else — enforced at load, attach and replay, so oracle coverage can never silently shrink. The
+  outcomes are **bound into the `workload_hash`**, and the endpoint's graph is left restored — on
+  failure too, with the restored **content** verified against the pristine post-load digests (a
+  dual capture+restore failure surfaces both errors; the *initial* setup load is under the same
+  discipline — a mid-load failure triggers one recovery restore and a combined error when that
+  fails too). Capture is a record-time-only cost (the two
+  full passes over the 1 000-node/5 000-edge repo-writes bundle take ~13½ min); plain (oracle-free)
+  v1/v2 bundles stay byte-identical.
 - **`benchmark synthetic run --recording <dir> [--concurrency … --cache …]`** drops + loads +
   **count-verifies** the recorded graph, then measures the recorded commands across the concurrency
   sweep + cache modes, writing a report plus a per-op **`result_digest`** (a hash of the result
@@ -537,13 +554,30 @@ just synthetic-compare-versions demo falkor://127.0.0.1:6379 falkor://127.0.0.1:
   write replay never silently leaves a mutated graph behind (a dual measurement+restore failure
   surfaces **both** errors). `--no-load` is refused for write bundles, a bundle can never mix
   reads with writes, and a write op can never be capability-gated (capabilities are unhashed, so
-  a crafted one could otherwise skip-shrink the ten-shape coverage).
+  a crafted one could otherwise skip-shrink the ten-shape coverage). When the bundle carries a
+  **§6.3 outcome oracle** (format v3, recorded with `--oracle`), replay first runs an untimed
+  **correctness pass**: every recorded outcome is re-verified — pristine base restored before
+  each invocation, command run once, engine counters required to **equal** the recorded stats —
+  and any divergence **hard-fails the replay** naming the op/seq/command (an engine that no
+  longer effects the recorded outcome is doing *different work*, so measuring its latency would
+  poison the A/B trend silently). The pass re-checks the exact-set rule (every eligible op, full
+  corpus) and the report's `meta.oracle_verified` attests the verified coverage (op → outcome
+  count) — absent for oracle-less runs — so a v3→v2 downgrade is visible when comparing runs.
+  Only then are latencies measured, exactly as for a plain write bundle. Because a re-hashed
+  v3→v2 strip is byte-indistinguishable from a legitimate latency-tier recording (v2 hashes never
+  covered oracle data), pass **`--require-oracle`** whenever the bundle is *expected* to carry
+  the correctness tier: the replay then refuses (offline, before any connection) a write bundle
+  without an oracle, and errors on a read bundle (reads have none).
 - **`benchmark synthetic report --diff <A.json> <B.json> [--out diff.md]`** **guards** the pair (it
   aborts unless the `workload_hash` **and** every op's `result_digest` match, so a version returning
   wrong/empty results faster can't masquerade as an improvement — the version difference itself is
   expected and recorded), then writes a **Markdown diff** across every op × cache-mode × concurrency
-  level (throughput + total-latency p50/p90/p95/p99 with deltas). `just synthetic-compare-versions`
-  runs `run --recording` against both endpoints then `report --diff`.
+  level (throughput + total-latency p50/p90/p95/p99 with deltas). The §6.3 **oracle attestation** is
+  guarded the same way: a one-sided or differing `meta.oracle_verified` aborts (the runs did not run
+  the same correctness tier — a re-hashed v3→v2 downgrade looks exactly like this), the per-side
+  attestation renders as an **outcome oracle** header row, and a pair of *un*-attested runs over
+  oracle-eligible write ops gets a prominent latency-tier-only warning. `just
+  synthetic-compare-versions` runs `run --recording` against both endpoints then `report --diff`.
 - **`benchmark synthetic report --diff <A.json> <B.json> --regression [--thresholds t.toml]`** is a
   **non-fatal, colored** variant for a per-PR regression report: each op × cache-mode × concurrency
   cell gets a **🟢 / 🔴 / N/A** verdict on **p50** — 🟢 if the candidate (B) is faster or slower
@@ -569,7 +603,12 @@ just synthetic-compare-versions demo falkor://127.0.0.1:6379 falkor://127.0.0.1:
   counts) ▸ **regressed** (≥1 cell over budget, or a divergence under the `gate` policy) ▸
   **advisory** (⚠ — a divergence under the `advisory` policy, or **zero comparable cells**, which is
   never a green pass) ▸ **pass** (≥1 comparable cell, nothing wrong). Version/image mismatches are
-  advisory *warnings*, never comparability guards. An op **skipped** on either side (capability
+  advisory *warnings*, never comparability guards. A **one-sided or differing §6.3 oracle
+  attestation** (`meta.oracle_verified`) *is* a comparability guard — the runs did not run the same
+  correctness tier, so the pair renders **not comparable** — while two *un*-attested runs over
+  oracle-eligible write ops stay comparable with a prominent latency-tier-only warning (both rules
+  shared with the strict `--diff` guard, which also renders the per-side **outcome oracle** header
+  row). An op **skipped** on either side (capability
   probe — the engine lacks its required procedure) is **neither a pass nor a divergence** under
   both policies: its perf cells are N/A, it never gates or caps the verdict, it is tallied in its
   own **`skipped`** bucket (⏭ in the reports) and exempt from the per-op policy/digest guards —
@@ -581,7 +620,8 @@ just synthetic-compare-versions demo falkor://127.0.0.1:6379 falkor://127.0.0.1:
     offenders, `budget_profile`, `divergence_policy`, `gated_metric`, `elapsed_secs`, and a stable
     `slug` for linking the externally-hosted full report) — small enough for a PR comment.
   - **`--cells <file>`** writes the **full analysis model** as JSON (schema v2): the meta block
-    (labels, module versions, images, `workload_hash`, samples/warmup, thresholds echo) plus every
+    (labels, module versions, images, `workload_hash`, samples/warmup, per-side `oracle_verified`
+    attestation when present, thresholds echo) plus every
     op × cache-mode × concurrency cell with baseline/candidate p50, `delta_pct`/`delta_ms`, the
     resolved budget and the per-cell verdict — source material for an interactive report page.
     Skipped ops carry their reason in `skipped_baseline`/`skipped_candidate` (omitted otherwise).

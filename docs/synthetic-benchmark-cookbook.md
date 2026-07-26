@@ -249,6 +249,35 @@ the pristine post-load capture, so the endpoint's graph is provably left exactly
 `--no-load` is refused for write bundles. Writes never enter `--repo-reads`, any tier, or the
 per-PR `synthetic-verify` gate.
 
+**Variant — the §6.3 outcome oracle (correctness tier).** Add `--oracle <endpoint>` to the record
+to also capture what each write **does** — not just how fast it is:
+
+```bash
+# Record + capture the outcome oracle on a live FalkorDB (format v3; hash binds the outcomes):
+benchmark synthetic record --repo-writes --nodes 1000 --edges 5000 --seed 7 \
+  --oracle falkor://127.0.0.1:6379 --out-dir rec-writes-v3
+benchmark synthetic run --recording rec-writes-v3 --require-oracle \
+  --endpoint falkor://127.0.0.1:6379 --out writes.json
+```
+
+Record-time capture runs every **oracle-eligible** command (the deterministic subset — 7 of the
+10 shapes; `single_edge_update` is excluded for server `rand()`, the two §6.4 prepared-state
+shapes stay latency-only) once against the freshly restored pristine base and records the
+engine's mutation counters, then a **second pass** must reproduce every outcome exactly. The
+capture covers each eligible op's **complete command corpus**, and a v3 bundle must carry an
+oracle for **exactly** the eligible set (full corpus per op, none anywhere else — enforced at
+load, attach and replay), so coverage can never silently shrink. Capture is a record-time-only
+cost: the two full passes over this 1 000/5 000 bundle take ~13½ min. Replay of a v3 bundle
+re-verifies each recorded outcome the same way (untimed, C=1, restore before every invocation)
+**before** measuring latency and **hard-fails on any divergence** — an engine that no longer
+creates/updates what was recorded is doing different work, so its latency would be meaningless —
+and the report's `meta.oracle_verified` attests the verified coverage. Pass **`--require-oracle`**
+on the replay whenever the bundle is *expected* to carry the correctness tier (as above): a
+re-hashed v3→v2 strip is byte-indistinguishable from a legitimate latency-tier recording, so only
+your stated expectation can refuse the downgrade — and on the comparison side, `report --diff`
+aborts on a one-sided or differing `meta.oracle_verified` and prominently warns when two
+un-attested runs measured oracle-eligible write ops.
+
 ---
 
 <a id="story-4"></a>

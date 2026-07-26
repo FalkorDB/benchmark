@@ -158,6 +158,40 @@ pub struct ShapeSpec {
     /// Per-op runtime budget recorded into the bundle ([`OpBudget`], design §3.4) and overlaid on
     /// the global config at replay. [`OpBudget::INHERIT`] for every current repo read.
     pub budget: OpBudget,
+    /// Whether `record --oracle` captures this shape's per-command mutation outcomes into the
+    /// bundle (Phase 7 §6.3) — [`OracleEligibility::Eligible`] only for the deterministic write
+    /// subset; every read/algorithm shape and every excluded write carries the design-cited
+    /// reason. Declared per row so adding a shape forces an explicit eligibility decision.
+    pub oracle: OracleEligibility,
+}
+
+/// Whether the §6.3 online outcome oracle applies to a shape (Phase 7 §5): `record --oracle`
+/// captures per-command [`MutationStats`](crate::synthetic::writes::MutationStats) only for
+/// **eligible** writes — the deterministic fixed-outcome subset whose counters are reproducible
+/// from a pristine base at C=1 — and replay re-verifies each recorded outcome per invocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OracleEligibility {
+    /// In the §6.3 deterministic subset: oracle-captured at record time, re-verified at replay.
+    Eligible,
+    /// Never oracle-captured, with the design-cited reason.
+    Excluded(&'static str),
+}
+
+/// The [`OracleEligibility::Excluded`] annotation every non-write shape carries: the oracle
+/// captures **mutation** counters, which reads and algorithm procedures never produce.
+const ORACLE_NOT_A_WRITE: OracleEligibility =
+    OracleEligibility::Excluded("not a write — no mutation outcome to capture (§6.3)");
+
+/// The names of the oracle-eligible write shapes (the §6.3 deterministic subset) — the single
+/// source of truth for which ops a format-v3 bundle **must** carry outcomes for: capture targets
+/// exactly this set, and `recording::load` + replay enforce it exactly (no subset, no strays), so
+/// oracle coverage can never silently shrink.
+pub fn oracle_eligible_names() -> std::collections::BTreeSet<&'static str> {
+    write_shapes()
+        .iter()
+        .filter(|s| s.oracle == OracleEligibility::Eligible)
+        .map(|s| s.name)
+        .collect()
 }
 
 /// The curated annotation for the **46 baseline non-algorithm read shapes** (design §3.4).
@@ -190,6 +224,7 @@ pub fn baseline_read_shapes() -> Vec<ShapeSpec> {
             capability: None,
             corpus_size: CORPUS_SIZE,
             budget: OpBudget::INHERIT,
+            oracle: ORACLE_NOT_A_WRITE,
         }
     }
     vec![
@@ -268,6 +303,7 @@ pub fn extended_core_read_shapes() -> Vec<ShapeSpec> {
         capability: None,
         corpus_size: CORPUS_SIZE,
         budget: OpBudget::INHERIT,
+        oracle: ORACLE_NOT_A_WRITE,
     }]
 }
 
@@ -301,6 +337,7 @@ pub fn fixture_dependent_read_shapes() -> Vec<ShapeSpec> {
             capability: None,
             corpus_size: CORPUS_SIZE,
             budget: OpBudget::INHERIT,
+            oracle: ORACLE_NOT_A_WRITE,
         }
     }
     vec![
@@ -425,6 +462,7 @@ pub fn algorithm_read_shapes() -> Vec<ShapeSpec> {
             capability: Some(capability),
             corpus_size,
             budget: ALGORITHM_BUDGET,
+            oracle: ORACLE_NOT_A_WRITE,
         }
     }
     vec![
@@ -486,15 +524,21 @@ const WRITE_BUDGET: OpBudget = OpBudget {
 /// Every shape is **latency-tier** (design §4.1): replayed via `GRAPH.QUERY` with periodic
 /// base-graph resets, and `ResultPolicy::NotApplicable` — mutation outcomes are state- and
 /// value-dependent (MERGE create-vs-match, SET-same-value counting 0, DETACH DELETE no-ops on
-/// repeat — §2/§10.1), `timestamp()`/`date()`/`rand()` values are non-reproducible (§3.4), and the
-/// correctness tier (an online per-command outcome oracle with per-invocation restore) is
-/// deliberately deferred to later Phase 7 PRs (§6.2–6.3). No capability: all plain Cypher.
+/// repeat — §2/§10.1), `timestamp()`/`date()`/`rand()` values are non-reproducible (§3.4), and no
+/// **statically modelled** counter expectation exists. The §6.3 **correctness tier** instead
+/// records each command's *actual* outcome online (`record --oracle`) for the deterministic
+/// subset — the seven [`OracleEligibility::Eligible`] rows below — and replay re-verifies those
+/// recorded outcomes per invocation from a pristine base; the three excluded rows carry the
+/// design-cited reason (§3.4 server `rand()`, §6.4 prepared-state/variable-count deferral).
+/// No capability: all plain Cypher.
 pub fn write_shapes() -> Vec<ShapeSpec> {
+    use OracleEligibility::{Eligible, Excluded};
     // Every row is a Write-family, Full-tier, result-N/A shape with the write budget and a full
-    // corpus; only the name and the N/A reason vary.
+    // corpus; only the name, the N/A reason and the §6.3 oracle eligibility vary.
     fn s(
         name: &'static str,
         why_na: &'static str,
+        oracle: OracleEligibility,
     ) -> ShapeSpec {
         ShapeSpec {
             name,
@@ -504,48 +548,59 @@ pub fn write_shapes() -> Vec<ShapeSpec> {
             capability: None,
             corpus_size: CORPUS_SIZE,
             budget: WRITE_BUDGET,
+            oracle,
         }
     }
     vec![
         s(
             "single_vertex_write",
             "latency tier — plain CREATE grows the graph (duplicate ids); outcome untracked",
+            Eligible,
         ),
         s(
             "single_vertex_update",
             "latency tier — SET counters are value-dependent (1↔0 on repeated value, §10.1)",
+            Eligible,
         ),
         s(
             "single_edge_update",
             "latency tier — server rand() picks the target edge; never correctness-verifiable (§3.4)",
+            Excluded("server rand() picks the target edge — outcome not reproducible (§3.4)"),
         ),
         s(
             "single_edge_write",
             "latency tier — MERGE create-vs-match depends on accumulated state; date() non-reproducible",
+            Eligible,
         ),
         s(
             "merge_user_insert_path",
             "latency tier — create-once-then-match ordering; timestamp() non-reproducible (§10.2)",
+            Eligible,
         ),
         s(
             "merge_user_upsert_existing",
             "latency tier — ON MATCH SET counters value-dependent; timestamp() non-reproducible",
+            Eligible,
         ),
         s(
             "merge_friend_edge_upsert",
             "latency tier — MERGE create-vs-match depends on accumulated state; date() non-reproducible",
+            Eligible,
         ),
         s(
             "detach_delete_user",
             "latency tier — deletes are state-dependent (no-op on repeat) with variable counts",
+            Excluded("variable delete counts — deferred to §6.4 (phasing item 4)"),
         ),
         s(
             "remove_user_property_and_label",
             "latency tier — REMOVE needs prepared state; deferred to the correctness tier (§4.2)",
+            Excluded("needs prepared state (pristine-base REMOVE is a no-op) — deferred to §6.4"),
         ),
         s(
             "foreach_loop_mutation",
             "latency tier — SET counters value-dependent on repeat against the same User",
+            Eligible,
         ),
     ]
 }
@@ -985,6 +1040,49 @@ mod tests {
             assert_eq!(shape.budget, WRITE_BUDGET, "{}", shape.name);
         }
         assert_eq!(WRITE_BUDGET.concurrency, Some(&WRITE_SWEEP[..]), "write replay is C=1 (§5)");
+    }
+
+    #[test]
+    fn oracle_eligibility_names_the_deterministic_subset_exactly() {
+        // §6.3 (design §5): the oracle captures the deterministic fixed-outcome subset — the two
+        // plain create/update, the create-once MERGEs, foreach_loop_mutation — and excludes the
+        // server-rand() shape (§3.4) plus the two §6.4-deferred shapes. Every non-write shape is
+        // excluded by construction (no mutation outcome exists to capture).
+        let eligible: Vec<&str> = write_shapes()
+            .iter()
+            .filter(|s| s.oracle == OracleEligibility::Eligible)
+            .map(|s| s.name)
+            .collect();
+        assert_eq!(
+            eligible,
+            vec![
+                "single_vertex_write",
+                "single_vertex_update",
+                "single_edge_write",
+                "merge_user_insert_path",
+                "merge_user_upsert_existing",
+                "merge_friend_edge_upsert",
+                "foreach_loop_mutation",
+            ],
+            "the §6.3 deterministic subset drifted"
+        );
+        let excluded: Vec<&str> = write_shapes()
+            .iter()
+            .filter(|s| matches!(s.oracle, OracleEligibility::Excluded(_)))
+            .map(|s| s.name)
+            .collect();
+        assert_eq!(
+            excluded,
+            vec!["single_edge_update", "detach_delete_user", "remove_user_property_and_label"],
+            "the excluded set drifted"
+        );
+        for shape in repo_read_shapes().iter().chain(algorithm_read_shapes().iter()) {
+            assert!(
+                matches!(shape.oracle, OracleEligibility::Excluded(_)),
+                "non-write shape '{}' must be oracle-excluded",
+                shape.name
+            );
+        }
     }
 
     #[test]
@@ -1477,6 +1575,7 @@ mod tests {
             capability: None,
             corpus_size: CORPUS_SIZE,
             budget: OpBudget::INHERIT,
+            oracle: ORACLE_NOT_A_WRITE,
         }];
         let err = record_selected_shapes(&bogus, 1000, 5000, 1).unwrap_err();
         assert!(
@@ -1515,6 +1614,7 @@ mod tests {
                 concurrency: Some(&SWEEP),
                 ..OpBudget::INHERIT
             },
+            oracle: ORACLE_NOT_A_WRITE,
         }];
         let ops = record_selected_shapes(&small, 1000, 5000, 42).unwrap();
         assert_eq!(ops.len(), 1);
@@ -1547,6 +1647,7 @@ mod tests {
             capability: None,
             corpus_size: 0,
             budget: OpBudget::INHERIT,
+            oracle: ORACLE_NOT_A_WRITE,
         }];
         let err = record_selected_shapes(&bogus, 1000, 5000, 42).unwrap_err();
         let msg = format!("{err}");
