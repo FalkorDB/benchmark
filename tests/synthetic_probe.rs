@@ -1697,6 +1697,80 @@ async fn record_and_replay_write_shapes_end_to_end() {
     drop_graph(graph).await;
 }
 
+/// Phase 7 §3.5 — a write replay that fails **during the reference pass** (a broken recorded
+/// command caught by the write fail-fast probe) must still run the error-safe final restore: an
+/// earlier op's probe has already mutated the graph by then, so skipping the restore would leave
+/// the endpoint polluted for the next recording/replay.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires a running FalkorDB server"]
+async fn failed_write_probe_still_restores_the_recorded_base() {
+    use benchmark::synthetic::catalog::RecordedBudget;
+    use benchmark::synthetic::recording::RecordedOp;
+    use benchmark::synthetic::OpKey;
+
+    let graph = "syn_it_write_probe_fail";
+    drop_graph(graph).await;
+    let dir = temp_bundle_dir("syn-it-probe-fail");
+    let spec = DatasetSpec {
+        seed: 7,
+        nodes: 50,
+        edges: 100,
+    };
+    // Op order matters: the first op's probe mutates the graph, then the second op's broken
+    // command fails its probe mid-reference-pass.
+    let ops = vec![
+        RecordedOp {
+            key: OpKey::dynamic("w_marker", QueryType::Write),
+            result_gated: false,
+            budget: RecordedBudget {
+                concurrency: Some(vec![1]),
+                ..RecordedBudget::default()
+            },
+            capability: None,
+            commands: vec!["CREATE (:ProbeMarker)".to_string()],
+        },
+        RecordedOp {
+            key: OpKey::dynamic("w_broken", QueryType::Write),
+            result_gated: false,
+            budget: RecordedBudget {
+                concurrency: Some(vec![1]),
+                ..RecordedBudget::default()
+            },
+            capability: None,
+            commands: vec!["CREAT (:Broken)".to_string()],
+        },
+    ];
+    recording::record_rendered(&spec, graph, &ops, spec.seed, 256, &dir).expect("record");
+
+    let out = dir.join("r.json").to_string_lossy().into_owned();
+    let config = replay_config(&dir, graph, &out, true);
+    let err = replay::run(&config)
+        .await
+        .expect_err("a broken write command must fail the replay at its probe");
+    assert!(
+        format!("{err:?}").contains("probing write 'w_broken'"),
+        "error should name the failing probe, got: {err:?}"
+    );
+
+    // The final restore ran despite the reference-pass failure: the marker probe's mutation is
+    // gone and the graph is exactly the recorded base again.
+    let mut g = open_graph(&endpoint(), graph).await.expect("open restored graph");
+    assert_eq!(
+        scalar_i64(&mut g, "MATCH (m:ProbeMarker) RETURN count(m)").await,
+        0,
+        "probe mutation must be erased by the final restore"
+    );
+    assert_eq!(
+        scalar_i64(&mut g, "MATCH (n) RETURN count(n)").await,
+        50,
+        "restored graph must be the recorded base"
+    );
+    drop(g);
+
+    std::fs::remove_dir_all(&dir).ok();
+    drop_graph(graph).await;
+}
+
 #[tokio::test]
 #[ignore = "requires a running FalkorDB server"]
 async fn replay_concurrency_sweep_verifies_results_and_reports_levels() {

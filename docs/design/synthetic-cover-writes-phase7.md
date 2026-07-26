@@ -125,16 +125,16 @@ so a mixed bundle cannot express C=1 writes alongside C=1,8 reads).
   gate or the A/B `--query-profile`.
 
 ## 6. Phasing (each its own PR)
-1. **Write-capable record/replay (latency-only):** versioned bundle with hashed write kind,
+1. ✅ **Write-capable record/replay (latency-only):** versioned bundle with hashed write kind,
    recorded-write worker, `GRAPH.QUERY` measure path, periodic base reset. Latency tier for all 10.
-2. **Generalized outcome model + full `MutationStats`** (`relationships_deleted`/`properties_removed`/
+2. ⛔ **Generalized outcome model + full `MutationStats`** (`relationships_deleted`/`properties_removed`/
    `labels_removed`); per-invocation restore primitive.
-3. **Online outcome oracle** at record time (capture per-command stats+result), C=1 correctness tier
+3. ⛔ **Online outcome oracle** at record time (capture per-command stats+result), C=1 correctness tier
    for the deterministic subset.
-4. **Prepared-state + removal shapes** (`remove_user_property_and_label`) and variable-count
+4. ⛔ **Prepared-state + removal shapes** (`remove_user_property_and_label`) and variable-count
    `detach_delete_user`.
-5. **Concurrency** — decide C>1 (per-worker id partitioning) or keep C=1 for correctness.
-6. **Docs.**
+5. ⛔ **Concurrency** — decide C>1 (per-worker id partitioning) or keep C=1 for correctness.
+6. ⛔ **Docs.**
 
 ## 7. Risks & open questions
 1. **Reset cost / throughput accounting (§3.3)** — per-invocation restore is expensive and pollutes

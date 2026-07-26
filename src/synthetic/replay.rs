@@ -238,58 +238,6 @@ pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
         }
     }
 
-    // Reference pass (untimed, single-flight): capture each result's shape (cardinality +
-    // order-independent value digest) for every **result-gated** command — the correctness oracle,
-    // which also primes the plan cache. A result-N/A op's shapes are never verified or digested, so
-    // it skips the full capture (a heavy shape would pay corpus × per-call latency for nothing —
-    // design §3.4) and only its first command runs once, to fail fast on a broken recorded command.
-    // Captures run under the op's budgeted timeouts so a budgeted heavy op can't trip the global
-    // deadline before measurement starts. Reads return scalars, so a single connection is safe.
-    let mut reference: Vec<(OpKey, Arc<Vec<String>>, Vec<ResultShape>)> =
-        Vec::with_capacity(bundle.commands.len());
-    for (op, cyphers) in &bundle.commands {
-        if cyphers.is_empty() {
-            return Err(OtherError(format!("op '{}' has no recorded commands", op.name())));
-        }
-        if skipped.contains_key(op.name()) {
-            continue; // capability-skipped: never executed, not even the fail-fast probe
-        }
-        let entry = entry_for(op.name());
-        let op_st = entry.budget.server_timeout_ms.unwrap_or(config.server_timeout_ms);
-        let op_deadline = entry
-            .budget
-            .client_deadline_ms
-            .map(Duration::from_millis)
-            .unwrap_or(client_deadline);
-        if op.kind() == QueryType::Write {
-            // Fail-fast probe for a write op, via GRAPH.QUERY (`RO_QUERY` rejects writes
-            // server-side): run the first recorded command once, untimed, so a broken command
-            // fails here instead of mid-measurement. Its mutation is erased by the first
-            // measured cell's base reset. No shapes: the latency tier asserts nothing (§4.1).
-            run_and_drain(&mut graph, QueryType::Write, &cyphers[0], op_st, op_deadline)
-                .await
-                .map_err(|e| OtherError(format!("probing write '{}': {}", op.name(), e)))?;
-            reference.push((op.clone(), Arc::new(cyphers.clone()), Vec::new()));
-            continue;
-        }
-        let to_capture: &[String] = if entry.result_gated { cyphers } else { &cyphers[..1] };
-        let mut shapes = Vec::with_capacity(to_capture.len());
-        for c in to_capture {
-            shapes.push(
-                capture_result(&mut graph, c, op_st, op_deadline)
-                    .await
-                    .map_err(|e| OtherError(format!("capturing '{}': {}", op.name(), e)))?,
-            );
-        }
-        if !entry.result_gated {
-            // The probe shape is discarded: downstream code treats a shapeless op as result-N/A.
-            shapes.clear();
-        }
-        reference.push((op.clone(), Arc::new(cyphers.clone()), shapes));
-    }
-    // Setup connection done; drop it so it isn't an idle extra connection during the sweep.
-    drop(graph);
-
     let run_token = rand::random_range(0..=u64::MAX);
     let uid_alloc = AtomicU64::new(0);
 
@@ -297,20 +245,74 @@ pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
     // Skipped ops get an empty-levels entry carrying the skip reason (BTreeMap renders by key),
     // so the report keeps the full recorded op set and the diff/regression guards can tell
     // "skipped" from "not recorded".
-    for (name, reason) in skipped {
+    for (name, reason) in &skipped {
         operations.insert(
-            name,
+            name.clone(),
             crate::synthetic::report::OperationReport {
                 levels: Vec::new(),
                 result_digest: None,
                 policy: None,
-                skipped: Some(reason),
+                skipped: Some(reason.clone()),
             },
         );
     }
-    // The measurement loop runs inside an immediately-awaited block so a write replay can run its
-    // error-safe final restore on success AND failure (§3.5) before any error propagates.
+    // The reference pass and the measurement loop both run inside an immediately-awaited block so
+    // a write replay can run its error-safe final restore on success AND failure (§3.5) before any
+    // error propagates — including a failed write fail-fast probe, where earlier ops' probes (or
+    // the failing command's own partial execution) may already have mutated the graph.
     let measured: BenchmarkResult<()> = async {
+        // Reference pass (untimed, single-flight): capture each result's shape (cardinality +
+        // order-independent value digest) for every **result-gated** command — the correctness oracle,
+        // which also primes the plan cache. A result-N/A op's shapes are never verified or digested, so
+        // it skips the full capture (a heavy shape would pay corpus × per-call latency for nothing —
+        // design §3.4) and only its first command runs once, to fail fast on a broken recorded command.
+        // Captures run under the op's budgeted timeouts so a budgeted heavy op can't trip the global
+        // deadline before measurement starts. Reads return scalars, so a single connection is safe.
+        let mut reference: Vec<(OpKey, Arc<Vec<String>>, Vec<ResultShape>)> =
+            Vec::with_capacity(bundle.commands.len());
+        for (op, cyphers) in &bundle.commands {
+            if cyphers.is_empty() {
+                return Err(OtherError(format!("op '{}' has no recorded commands", op.name())));
+            }
+            if skipped.contains_key(op.name()) {
+                continue; // capability-skipped: never executed, not even the fail-fast probe
+            }
+            let entry = entry_for(op.name());
+            let op_st = entry.budget.server_timeout_ms.unwrap_or(config.server_timeout_ms);
+            let op_deadline = entry
+                .budget
+                .client_deadline_ms
+                .map(Duration::from_millis)
+                .unwrap_or(client_deadline);
+            if op.kind() == QueryType::Write {
+                // Fail-fast probe for a write op, via GRAPH.QUERY (`RO_QUERY` rejects writes
+                // server-side): run the first recorded command once, untimed, so a broken command
+                // fails here instead of mid-measurement. Its mutation is erased by the first
+                // measured cell's base reset. No shapes: the latency tier asserts nothing (§4.1).
+                run_and_drain(&mut graph, QueryType::Write, &cyphers[0], op_st, op_deadline)
+                    .await
+                    .map_err(|e| OtherError(format!("probing write '{}': {}", op.name(), e)))?;
+                reference.push((op.clone(), Arc::new(cyphers.clone()), Vec::new()));
+                continue;
+            }
+            let to_capture: &[String] = if entry.result_gated { cyphers } else { &cyphers[..1] };
+            let mut shapes = Vec::with_capacity(to_capture.len());
+            for c in to_capture {
+                shapes.push(
+                    capture_result(&mut graph, c, op_st, op_deadline)
+                        .await
+                        .map_err(|e| OtherError(format!("capturing '{}': {}", op.name(), e)))?,
+                );
+            }
+            if !entry.result_gated {
+                // The probe shape is discarded: downstream code treats a shapeless op as result-N/A.
+                shapes.clear();
+            }
+            reference.push((op.clone(), Arc::new(cyphers.clone()), shapes));
+        }
+        // Setup connection done; drop it so it isn't an idle extra connection during the sweep.
+        drop(graph);
+
         for (op, corpus, shapes) in &reference {
             let entry = entry_for(op.name());
             let is_gated = entry.result_gated;
@@ -559,6 +561,7 @@ async fn measure_write_op(
         let level = cell_report.levels.into_iter().next().ok_or_else(|| {
             OtherError(format!("write op '{}' produced no level report", op.name()))
         })?;
+        debug_assert_eq!(level.concurrency, 1, "write replay is C=1 only (validate_write_replay)");
         match mode {
             CacheMode::Cached => cached = level.cached,
             CacheMode::Uncached => uncached = level.uncached,
@@ -570,15 +573,18 @@ async fn measure_write_op(
     };
     Ok(OperationReport {
         levels: vec![LevelReport {
-            concurrency: 1,
+            // The op's effective sweep — `[1]` today, enforced by `validate_write_replay`, and
+            // derived (not hardcoded) so the report stays honest if §5's C>1 decision ever lands.
+            concurrency: op_concurrency.first().copied().unwrap_or(1),
             cached,
             uncached,
             compilation_ms_median,
         }],
         // The latency tier asserts nothing about results (§4.1): no digest, ever.
         result_digest: None,
-        // WRITE_BUDGET always overrides the global sweep, so the effective per-op policy is
-        // always persisted — the diff/baseline guards then refuse cross-policy comparisons.
+        // The effective per-op policy is persisted unconditionally — whether WRITE_BUDGET
+        // overrode the globals or an inherit budget ran under a global C=1 sweep — so the
+        // diff/baseline guards always refuse cross-policy comparisons of write cells.
         policy: Some(op_config.resolved_policy(op_concurrency)),
         skipped: None,
     })
@@ -587,7 +593,10 @@ async fn measure_write_op(
 /// The whole-graph content queries backing the write replay's restore verification: the node and
 /// edge multisets, canonicalized value-by-value by [`capture_result`] (order-independent digest;
 /// node/edge canonicalization includes entity ids, which are deterministic across identical fresh
-/// loads because the recorded statements replay in recorded order onto an empty graph).
+/// loads because the recorded statements replay in recorded order onto an empty graph). Both scans
+/// materialize the graph client-side, so they price the verification at the recorded base's size —
+/// fine for the fixture-scale bases `synthetic record` emits (10³–10⁴ entities, ≈0.1 s), by design
+/// not a path for arbitrarily large graphs.
 const CONTENT_QUERIES: [&str; 2] =
     ["MATCH (n) RETURN n", "MATCH (a)-[r]->(b) RETURN ID(a), r, ID(b)"];
 
