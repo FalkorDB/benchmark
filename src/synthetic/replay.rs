@@ -338,7 +338,10 @@ pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
                     &uid_alloc,
                     op_deadline,
                 )
-                .await?;
+                .await
+                .map_err(|e| {
+                    OtherError(format!("measuring write op '{}': {}", op.name(), e))
+                })?;
                 operations.insert(op.name().to_string(), op_report);
                 continue;
             }
@@ -376,7 +379,8 @@ pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
                 &uid_alloc,
                 op_deadline,
             )
-            .await?;
+            .await
+            .map_err(|e| OtherError(format!("measuring op '{}': {}", op.name(), e)))?;
             // Gate the result only for byte-stable shapes; a result-N/A op reports `None` so the
             // diff guard renders it N/A instead of comparing a non-deterministic digest.
             op_report.result_digest =

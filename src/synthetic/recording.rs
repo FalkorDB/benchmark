@@ -439,6 +439,17 @@ fn record_rendered_impl(
             .to_string(),
         ));
     }
+    // The write latency tier asserts nothing (Phase 7 §4.1), so a result-gated write op could be
+    // recorded but never replayed (replay hard-rejects it) — fail early here instead.
+    if let Some(op) =
+        ops.iter().find(|op| op.key.kind() == QueryType::Write && op.result_gated)
+    {
+        return Err(OtherError(format!(
+            "write op '{}' is marked result-gated — the write latency tier asserts nothing \
+             (Phase 7 §4.1), so a result-gated write bundle could never be replayed",
+            op.key.name()
+        )));
+    }
     // The write latency tier is algorithm-free plain Cypher (Phase 7 §4.1): no engine procedure to
     // probe for, so a capability on a write op is meaningless — and `capability` is outside the
     // workload hash, so replay independently re-rejects it (a capability-skip would silently
@@ -1270,6 +1281,32 @@ mod tests {
         let err = record_rendered(&spec, "g", &ops, 1, 8, &dir).unwrap_err();
         assert!(format!("{err}").contains("never capability-gated"), "got: {err}");
         assert!(format!("{err}").contains("algo.maxFlow"), "must name the capability: {err}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn record_rendered_rejects_a_result_gated_write_op() {
+        // Phase 7 §4.1: the write latency tier asserts nothing, and replay hard-rejects a
+        // result-gated write — so recording one would produce a bundle that can never be
+        // replayed. Fail early, naming the op.
+        let dir = temp_bundle_dir("synthrec-writegated");
+        let spec = DatasetSpec {
+            seed: 1,
+            nodes: 10,
+            edges: 20,
+        };
+        let ops = vec![RecordedOp {
+            key: OpKey::dynamic("w_gated", QueryType::Write),
+            result_gated: true,
+            budget: RecordedBudget::default(),
+            capability: None,
+            commands: vec!["CREATE (n)".to_string()],
+        }];
+        let err = record_rendered(&spec, "g", &ops, 1, 8, &dir).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("could never be replayed"), "got: {msg}");
+        assert!(msg.contains("w_gated"), "must name the op: {msg}");
+        assert!(!dir.join("manifest.json").exists(), "nothing may be written");
         std::fs::remove_dir_all(&dir).ok();
     }
 
