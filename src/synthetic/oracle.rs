@@ -81,7 +81,11 @@ pub async fn capture(
         .commands
         .iter()
         .filter(|(op, _)| op.kind() == QueryType::Write && eligible.contains_key(op.name()))
-        .map(|(op, cyphers)| (op.name().to_string(), cyphers.clone()))
+        .map(|(op, cyphers)| {
+            // Only the first `samples_per_op` commands are ever executed — don't clone the rest.
+            let take = samples_per_op.min(cyphers.len());
+            (op.name().to_string(), cyphers[..take].to_vec())
+        })
         .collect();
     if targets.is_empty() {
         return Err(OtherError(
