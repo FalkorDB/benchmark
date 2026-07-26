@@ -551,6 +551,23 @@ fn record_rendered_impl(
             .to_string(),
         ));
     }
+    // Fail fast on a mismatched extra-load block (Copilot round 3): the fixture is FalkorDB
+    // index DDL for the FixtureDependent READ shapes — appending it to a write bundle would break
+    // engine-agnostic write recording; the prepared state exists solely for the §6.4 write shapes.
+    if extra == ExtraLoad::Fixture && has_writes {
+        return Err(OtherError(
+            "the fulltext/vector fixture is for read bundles — cannot record a write bundle with \
+             fixture statements"
+                .to_string(),
+        ));
+    }
+    if extra == ExtraLoad::Prepared && !has_writes {
+        return Err(OtherError(
+            "the §6.4 prepared state is for write bundles — cannot record a read bundle with \
+             prepared statements"
+                .to_string(),
+        ));
+    }
     // The write latency tier asserts nothing (Phase 7 §4.1), so a result-gated write op could be
     // recorded but never replayed (replay hard-rejects it) — fail early here instead.
     if let Some(op) =
@@ -1440,6 +1457,48 @@ mod tests {
         let dir2 = temp_bundle_dir("synthrec-noprepared");
         let without = record_rendered(&spec, "gprep", &ops, 9, 32, &dir2).unwrap();
         assert_ne!(with.workload_hash, without.workload_hash);
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&dir2).ok();
+    }
+
+    #[test]
+    fn record_rejects_a_mismatched_extra_load_block() {
+        // Fail-fast guards: fixture on a write bundle (FalkorDB DDL would break engine-agnostic
+        // write recording) and prepared state on a read bundle are both constructor misuse.
+        let spec = DatasetSpec {
+            seed: 5,
+            nodes: 200,
+            edges: 400,
+        };
+        let write_op = RecordedOp {
+            key: OpKey::dynamic("w_solo", QueryType::Write),
+            result_gated: false,
+            budget: RecordedBudget::default(),
+            capability: None,
+            commands: vec!["MATCH (u:User {id: 1}) SET u.x = 1".to_string()],
+        };
+        let read_op = RecordedOp {
+            key: OpKey::dynamic("r_solo", QueryType::Read),
+            result_gated: false,
+            budget: RecordedBudget::default(),
+            capability: None,
+            commands: vec!["MATCH (u:User {id: 1}) RETURN u.id".to_string()],
+        };
+
+        let dir = temp_bundle_dir("synthrec-fixture-on-write");
+        let err = record_rendered_with_fixture(&spec, "g", &[write_op], 9, 32, &dir).unwrap_err();
+        assert!(
+            format!("{err}").contains("fixture is for read bundles"),
+            "got: {err}"
+        );
+
+        let dir2 = temp_bundle_dir("synthrec-prepared-on-read");
+        let err = record_rendered_with_prepared(&spec, "g", &[read_op], 9, 32, &dir2).unwrap_err();
+        assert!(
+            format!("{err}").contains("prepared state is for write bundles"),
+            "got: {err}"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&dir2).ok();
