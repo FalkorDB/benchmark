@@ -748,7 +748,7 @@ pub fn load(dir: &Path) -> BenchmarkResult<Bundle> {
     }
     // Exact-set enforcement (§6.3): a v3 bundle must carry an oracle for EVERY recorded
     // oracle-eligible write op, covering its COMPLETE command corpus, and for nothing else — so
-    // oracle coverage can never silently shrink (a crafted 1-of-7 subset, or a padded oracle on
+    // oracle coverage can never silently shrink (a crafted proper subset, or a padded oracle on
     // an op outside the eligible set, is rejected here rather than replayed).
     if manifest.format_version >= RECORDING_FORMAT_VERSION_ORACLE {
         let eligible = crate::synthetic::shapes::oracle_eligible_names();
