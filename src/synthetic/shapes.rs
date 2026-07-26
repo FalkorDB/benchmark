@@ -1045,7 +1045,7 @@ mod tests {
     }
 
     #[test]
-    fn oracle_eligibility_names_the_deterministic_subset_exactly() {
+    fn oracle_eligibility_names_the_eligible_set_exactly() {
         // §6.3 + §6.4 (design §5, phasing item 4): the oracle captures every write shape whose
         // outcome is reproducible from the restored base — the two plain create/update, the
         // create-once MERGEs, foreach_loop_mutation (§6.3), plus the prepared-state REMOVE and the
