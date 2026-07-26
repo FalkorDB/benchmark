@@ -769,8 +769,9 @@ async fn write_scratch_reset_reuses_its_band_without_duplicates() {
 
 /// Phase 7 §6.2 — pin the full mutation-counter set end-to-end against the server: DETACH DELETE
 /// reports `relationships_deleted` = the victim's degree, REMOVE reports `properties_removed` +
-/// `labels_removed`, and a repeated (no-op) mutation reports all-zero (absent counters read as 0)
-/// — exactly the outcomes the generalized [`ExpectedOutcome`] model pins via `exactly`.
+/// `labels_removed`, and repeated (no-op) runs of **both** mutations report all-zero (absent
+/// counters read as 0) — exactly the outcomes the generalized [`ExpectedOutcome`] model pins via
+/// `exactly`.
 #[tokio::test]
 #[ignore = "requires a running FalkorDB server"]
 async fn full_mutation_counters_are_read_from_the_server() {
@@ -828,17 +829,33 @@ async fn full_mutation_counters_are_read_from_the_server() {
     assert_eq!(s.mutations, removed, "REMOVE counters");
     verify_mutation(ExpectedOutcome::exactly(removed), &s.mutations).expect("remove outcome");
 
-    // Repeating the REMOVE is a silent no-op: the server omits every counter, all must read 0.
+    // Repeating both mutations is a silent no-op (E1c): the DETACH DELETE target is gone and the
+    // property + label are already removed — the server omits every counter, all must read 0.
     let s = run_and_drain(
         &mut g,
         QueryType::Write,
-        "MATCH (u:User {id:2}) REMOVE u.flag",
+        "MATCH (u:User {id:1}) DETACH DELETE u",
+        5_000,
+        deadline,
+    )
+    .await
+    .expect("no-op detach delete");
+    assert_eq!(s.mutations, MutationStats::default(), "no-op DETACH DELETE reports all-zero");
+    assert!(
+        verify_mutation(ExpectedOutcome::exactly(detach), &s.mutations).is_err(),
+        "a silent no-op must not satisfy the deletion outcome"
+    );
+
+    let s = run_and_drain(
+        &mut g,
+        QueryType::Write,
+        "MATCH (u:User {id:2}) REMOVE u.flag, u:Temp",
         5_000,
         deadline,
     )
     .await
     .expect("no-op remove");
-    assert_eq!(s.mutations, MutationStats::default(), "no-op reports all-zero");
+    assert_eq!(s.mutations, MutationStats::default(), "no-op REMOVE reports all-zero");
     // …which the generalized model surfaces as a hard error when an outcome was expected.
     assert!(
         verify_mutation(ExpectedOutcome::exactly(removed), &s.mutations).is_err(),
@@ -1853,10 +1870,12 @@ async fn failed_write_probe_still_restores_the_recorded_base() {
 }
 
 /// Phase 7 §6.2 — [`replay::restore_base`] is a *per-invocation* restore primitive: calling it
-/// back-to-back after arbitrary pollution (marker nodes, deleted users) must return the endpoint
-/// to the recorded base every single time — the property the §6.3 correctness tier will lean on
-/// between oracle invocations. The pristine shape is captured after the first restore (no fixture
-/// assumptions) and re-asserted after each subsequent one.
+/// back-to-back after arbitrary pollution must return the endpoint to the recorded base every
+/// single time — the property the §6.3 correctness tier will lean on between oracle invocations.
+/// "Returns the base" is asserted on **content digests** ([`replay::capture_graph_content`]), not
+/// just counts: the count-preserving rounds mutate node/edge *properties* (invisible to counts,
+/// asserted so) and only the digest can catch them; the count-changing round proves the reload
+/// path. The pristine shape is captured after the first restore (no fixture assumptions).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires a running FalkorDB server"]
 async fn restore_base_returns_the_recorded_base_per_invocation() {
@@ -1880,37 +1899,50 @@ async fn restore_base_returns_the_recorded_base_per_invocation() {
     let mut g = open_graph(&endpoint(), graph).await.expect("open graph");
     let pristine_nodes = scalar_i64(&mut g, "MATCH (n) RETURN count(n)").await;
     let pristine_edges = scalar_i64(&mut g, "MATCH ()-[r]->() RETURN count(r)").await;
+    let pristine = replay::capture_graph_content(&mut g, &config)
+        .await
+        .expect("capture the pristine content digest");
 
     let deadline = Duration::from_secs(5);
     for round in 0..3_i64 {
-        // Pollute: add a marker node and detach-delete one recorded user.
-        run_and_drain(
-            &mut g,
-            QueryType::Write,
-            &format!("CREATE (:RestoreMarker {{round: {round}}})"),
-            5_000,
-            deadline,
-        )
-        .await
-        .expect("marker");
-        run_and_drain(
-            &mut g,
-            QueryType::Write,
-            "MATCH (u:User)-[]->() WITH u LIMIT 1 DETACH DELETE u",
-            5_000,
-            deadline,
-        )
-        .await
-        .expect("delete a user");
-        assert_eq!(
-            scalar_i64(&mut g, "MATCH (m:RestoreMarker) RETURN count(m)").await,
-            1,
-            "round {round}: pollution must actually change the graph"
-        );
+        if round % 2 == 0 {
+            // Count-preserving pollution: corrupt a node property and an edge property. Node and
+            // edge counts stay pristine — only the content digest can detect this class.
+            for cypher in [
+                "MATCH (u:User) WITH u ORDER BY u.id LIMIT 1 SET u.polluted = true",
+                "MATCH ()-[r:Friend]->() WITH r LIMIT 1 SET r.polluted = true",
+            ] {
+                run_and_drain(&mut g, QueryType::Write, cypher, 5_000, deadline)
+                    .await
+                    .expect("property pollution");
+            }
+            assert_eq!(
+                scalar_i64(&mut g, "MATCH (n) RETURN count(n)").await,
+                pristine_nodes,
+                "round {round}: property pollution must preserve the node count"
+            );
+            assert_eq!(
+                scalar_i64(&mut g, "MATCH ()-[r]->() RETURN count(r)").await,
+                pristine_edges,
+                "round {round}: property pollution must preserve the edge count"
+            );
+        } else {
+            // Count-changing pollution: add a marker node and detach-delete a connected user.
+            for cypher in [
+                &format!("CREATE (:RestoreMarker {{round: {round}}})") as &str,
+                "MATCH (u:User)-[]->() WITH u LIMIT 1 DETACH DELETE u",
+            ] {
+                run_and_drain(&mut g, QueryType::Write, cypher, 5_000, deadline)
+                    .await
+                    .expect("structural pollution");
+            }
+        }
+        let polluted = replay::capture_graph_content(&mut g, &config)
+            .await
+            .expect("capture the polluted content digest");
         assert_ne!(
-            scalar_i64(&mut g, "MATCH ()-[r]->() RETURN count(r)").await,
-            pristine_edges,
-            "round {round}: the detach-delete must remove edges"
+            polluted, pristine,
+            "round {round}: pollution must be visible to the content digest"
         );
         drop(g);
 
@@ -1933,6 +1965,13 @@ async fn restore_base_returns_the_recorded_base_per_invocation() {
             scalar_i64(&mut g, "MATCH ()-[r]->() RETURN count(r)").await,
             pristine_edges,
             "round {round}: edge count must match the recorded base"
+        );
+        let restored = replay::capture_graph_content(&mut g, &config)
+            .await
+            .expect("capture the restored content digest");
+        assert_eq!(
+            restored, pristine,
+            "round {round}: restored content must digest-match the recorded base"
         );
     }
     drop(g);

@@ -611,7 +611,10 @@ const CONTENT_QUERIES: [&str; 2] =
     ["MATCH (n) RETURN n", "MATCH (a)-[r]->(b) RETURN ID(a), r, ID(b)"];
 
 /// Capture the graph's full content shape ([`CONTENT_QUERIES`]) under load-scale timeouts.
-async fn capture_graph_content(
+/// `pub` as [`restore_base`]'s verification counterpart: the §3.5 final restore compares against
+/// it, the restore-primitive integration test proves restores content-identical (not merely
+/// count-identical) with it, and §6.3's correctness tier captures the pristine base through it.
+pub async fn capture_graph_content(
     graph: &mut AsyncGraph,
     config: &ReplayConfig,
 ) -> BenchmarkResult<Vec<ResultShape>> {
