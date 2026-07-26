@@ -114,12 +114,11 @@ pub struct Meta {
     /// column header in `report --diff`/`--regression`; falls back to `A`/`B` when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
-    /// §6.3 oracle attestation: op → number of recorded outcomes the replay **re-verified** before
-    /// measuring (present only for an oracle-format write-bundle replay). Its absence on a
-    /// write-bundle
-    /// report makes an oracle→v2 downgrade visible when comparing runs — a replay without this
-    /// field
-    /// measured the latency tier only. `#[serde(default)]` so pre-§6.3 reports still deserialize.
+    /// §6.3 oracle attestation: op → number of recorded outcomes the replay **re-verified**
+    /// before measuring (present only for an oracle-format write-bundle replay). Its absence
+    /// on a write-bundle report makes an oracle→v2 downgrade visible when comparing runs —
+    /// a replay without this field measured the latency tier only. `#[serde(default)]` so
+    /// pre-§6.3 reports still deserialize.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oracle_verified: Option<std::collections::BTreeMap<String, usize>>,
 }
