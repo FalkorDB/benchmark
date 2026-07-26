@@ -498,6 +498,12 @@ pub enum SyntheticCommands {
             help = "with --recording: skip loading the recorded graph, only count-verify the already-loaded graph (load-once / run-many)."
         )]
         no_load: bool,
+        #[arg(
+            long = "require-oracle",
+            requires = "recording",
+            help = "with --recording: refuse to measure a write bundle that carries no outcome oracle (recording format < v3). Guards against re-hashed v3-to-v2 downgrades; errors on read bundles (reads have no oracle)."
+        )]
+        require_oracle: bool,
     },
     #[command(about = "list the available operations")]
     ListOps,
@@ -866,6 +872,21 @@ mod tests {
         // `--repo-reads` is record-only (not a `run` flag).
         assert!(Cli::try_parse_from([
             "benchmark", "synthetic", "run", "--repo-reads", "core",
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn cli_require_oracle_needs_recording() {
+        use clap::Parser;
+        // `--require-oracle` rides on `--recording` (like `--no-load`)…
+        assert!(Cli::try_parse_from([
+            "benchmark", "synthetic", "run", "--recording", "rec", "--require-oracle",
+        ])
+        .is_ok());
+        // …and is rejected without it.
+        assert!(Cli::try_parse_from([
+            "benchmark", "synthetic", "run", "--require-oracle",
         ])
         .is_err());
     }

@@ -246,6 +246,11 @@ pub struct SideMeta {
     pub warmup: usize,
     /// The concurrency sweep this side measured.
     pub concurrency: Vec<usize>,
+    /// §6.3 oracle attestation this side's report carries (`meta.oracle_verified`): op → number
+    /// of recorded write outcomes the replay re-verified before measuring. `None` for read runs
+    /// and latency-tier-only write runs. Additive optional field — absent from pre-§6.3 models.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oracle_verified: Option<std::collections::BTreeMap<String, usize>>,
 }
 
 /// Header/config metadata the renderers need: both sides plus the threshold settings that were
@@ -442,6 +447,7 @@ fn side_meta(r: &Report) -> SideMeta {
         samples: r.meta.samples,
         warmup: r.meta.warmup,
         concurrency: r.meta.concurrency.clone(),
+        oracle_verified: r.meta.oracle_verified.clone(),
     }
 }
 
@@ -1322,6 +1328,30 @@ mod tests {
         assert_eq!(an.divergence_policy, DivergencePolicy::Gate);
         // The thresholds echo carries the resolved default budget.
         assert!((an.meta.thresholds.default_budget_pct - 10.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn analysis_meta_carries_oracle_attestation_additively() {
+        // §6.3 attestation is an additive optional SideMeta field: the key is absent (not null)
+        // for un-attested runs — pre-oracle cells consumers never see it — and a plain copy of
+        // `meta.oracle_verified` when the replay re-verified a write outcome oracle.
+        let mut a = rpt("main", 42001, &[("match_by_index", 1.0, Some("d1"))]);
+        let mut b = rpt("pr", 42002, &[("match_by_index", 1.0, Some("d1"))]);
+        let un_attested = gate(&a, &b);
+        let value: serde_json::Value =
+            serde_json::from_str(&un_attested.to_json().unwrap()).unwrap();
+        assert!(value["meta"]["baseline"].get("oracle_verified").is_none(), "{value}");
+
+        let attestation: std::collections::BTreeMap<String, usize> =
+            [("single_vertex_write".to_string(), 256)].into();
+        a.meta.oracle_verified = Some(attestation.clone());
+        b.meta.oracle_verified = Some(attestation.clone());
+        let attested = gate(&a, &b);
+        assert_eq!(attested.meta.baseline.oracle_verified, Some(attestation.clone()));
+        assert_eq!(attested.meta.candidate.oracle_verified, Some(attestation));
+        let value: serde_json::Value =
+            serde_json::from_str(&attested.to_json().unwrap()).unwrap();
+        assert_eq!(value["meta"]["candidate"]["oracle_verified"]["single_vertex_write"], 256);
     }
 
     #[test]

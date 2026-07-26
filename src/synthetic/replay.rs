@@ -84,6 +84,10 @@ pub struct ReplayConfig {
     pub server_image: Option<String>,
     /// Optional display name for this run (e.g. `pr`/`main`), recorded into the report.
     pub label: Option<String>,
+    /// When `true`, refuse to measure a write bundle that carries no outcome oracle (recording
+    /// format < v3). A re-hashed v3→v2 strip is a perfectly legitimate-looking v2 bundle, so only
+    /// the operator's *expectation* can catch the downgrade — this flag states it (§6.3).
+    pub require_oracle: bool,
 }
 
 /// Replay `config`'s bundle: load the recorded graph, then measure the recorded commands through the
@@ -101,6 +105,28 @@ pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
     // C=1 only, nothing result-gated, nothing capability-gated — are guarded up front, offline,
     // before any connection.
     let has_writes = bundle.commands.iter().any(|(op, _)| op.kind() == QueryType::Write);
+    // §6.3 downgrade guard, offline: a v2 write bundle is a legitimate latency-tier recording,
+    // which is exactly why a re-hashed v3→v2 strip replays cleanly — only the operator's stated
+    // expectation can refuse it. `load()` already guarantees a v3 bundle carries the complete
+    // exact-set oracle, so the format version alone decides.
+    if config.require_oracle {
+        if !has_writes {
+            return Err(OtherError(
+                "--require-oracle: the bundle records no write ops — the outcome oracle applies \
+                 to write bundles only (drop the flag for a read bundle)"
+                    .to_string(),
+            ));
+        }
+        if bundle.manifest.format_version < recording::RECORDING_FORMAT_VERSION_ORACLE {
+            return Err(OtherError(format!(
+                "--require-oracle: the write bundle at {} carries no outcome oracle (recording \
+                 format v{}) — latency tier only. Re-record it with --oracle; if it should \
+                 already carry one, this bundle may be a re-hashed v3→v2 downgrade",
+                config.recording_dir.display(),
+                bundle.manifest.format_version
+            )));
+        }
+    }
     if has_writes {
         validate_write_replay(&bundle, config, &concurrency)?;
     }
@@ -984,6 +1010,7 @@ mod tests {
             out: "unused.json".to_string(),
             server_image: None,
             label: None,
+            require_oracle: false,
         }
     }
 
@@ -1173,6 +1200,69 @@ mod tests {
         config.recording_dir = dir.clone();
         let err = run(&config).await.unwrap_err();
         assert!(format!("{err}").contains("never capability-gated"), "got: {err}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn run_require_oracle_rejects_a_read_bundle() {
+        // Reads have no outcome oracle by definition — asking for one is operator error, and
+        // silently ignoring the flag would train users to pass it everywhere.
+        use crate::synthetic::recording::{record_rendered, temp_bundle_dir, RecordedOp};
+
+        let dir = temp_bundle_dir("replay-require-oracle-read");
+        let spec = DatasetSpec {
+            seed: 7,
+            nodes: 10,
+            edges: 20,
+        };
+        let ops = vec![RecordedOp {
+            key: OpKey::dynamic("r_op", QueryType::Read),
+            result_gated: true,
+            budget: RecordedBudget::default(),
+            capability: None,
+            commands: vec!["MATCH (n) RETURN count(n)".to_string()],
+        }];
+        record_rendered(&spec, "g", &ops, 7, 64, &dir).expect("record a read bundle");
+
+        let mut config = replay_config(true, vec![1]);
+        config.recording_dir = dir.clone();
+        config.require_oracle = true;
+        let err = run(&config).await.unwrap_err();
+        assert!(format!("{err}").contains("records no write ops"), "got: {err}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn run_require_oracle_rejects_a_latency_tier_write_bundle() {
+        // A v2 write bundle is legitimate — but the operator stated the correctness tier is
+        // expected, so the replay must refuse offline instead of measuring latency-only.
+        use crate::synthetic::recording::{record_rendered, temp_bundle_dir, RecordedOp};
+
+        let dir = temp_bundle_dir("replay-require-oracle-v2");
+        let spec = DatasetSpec {
+            seed: 7,
+            nodes: 10,
+            edges: 20,
+        };
+        let ops = vec![RecordedOp {
+            key: OpKey::dynamic("w_op", QueryType::Write),
+            result_gated: false,
+            budget: write_budget(),
+            capability: None,
+            commands: vec!["CREATE (n:X)".to_string()],
+        }];
+        record_rendered(&spec, "g", &ops, 7, 64, &dir).expect("record a v2 write bundle");
+
+        let mut config = replay_config(true, vec![1]);
+        config.recording_dir = dir.clone();
+        config.require_oracle = true;
+        let err = run(&config).await.unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("carries no outcome oracle"), "got: {msg}");
+        assert!(msg.contains("recording format v2"), "got: {msg}");
+        assert!(msg.contains("re-hashed v3→v2 downgrade"), "got: {msg}");
 
         std::fs::remove_dir_all(&dir).ok();
     }

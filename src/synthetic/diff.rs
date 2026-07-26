@@ -85,6 +85,14 @@ pub fn diff_markdown(
         &format!("{} / {}", baseline.meta.samples, baseline.meta.warmup),
         &format!("{} / {}", candidate.meta.samples, candidate.meta.warmup),
     );
+    // §6.3 attestation, surfaced per side: a write-bundle replay that ran the correctness tier
+    // says so here; "—" on a write run means latency tier only (see the guard's warnings).
+    row2(
+        &mut out,
+        "outcome oracle",
+        &oracle_cell(baseline.meta.oracle_verified.as_ref()),
+        &oracle_cell(candidate.meta.oracle_verified.as_ref()),
+    );
 
     out.push_str(
         "\n_Δ is 100·(candidate−baseline)/baseline. **Latency: lower is better** (a positive Δ = \
@@ -143,6 +151,17 @@ fn diff_skip_note(
 /// (`A`/`B` for `diff_markdown`; `baseline`/`candidate` for the regression report).
 fn col_label(r: &Report, fallback: &str) -> String {
     r.meta.label.clone().unwrap_or_else(|| fallback.to_string())
+}
+
+/// One side's §6.3 oracle-attestation cell: `"verified — 7 op(s), 1792 outcome(s)"` when the
+/// replay re-verified a write outcome oracle, `"—"` otherwise (read run or latency tier only).
+fn oracle_cell(att: Option<&std::collections::BTreeMap<String, usize>>) -> String {
+    att.map_or_else(
+        || "—".to_string(),
+        |m| {
+            format!("verified — {} op(s), {} outcome(s)", m.len(), m.values().sum::<usize>())
+        },
+    )
 }
 
 /// Render one op × cache-mode table (rows = concurrency levels present in either run). Skipped
@@ -351,6 +370,14 @@ pub fn regression_markdown(analysis: &RegressionAnalysis) -> String {
         "samples / warmup",
         &format!("{} / {}", meta.baseline.samples, meta.baseline.warmup),
         &format!("{} / {}", meta.candidate.samples, meta.candidate.warmup),
+    );
+    // §6.3 attestation per side (mirrors the plain diff's row): "—" on a write run means the
+    // latency tier only — the guard's warnings call that out below.
+    row2(
+        &mut head,
+        "outcome oracle",
+        &oracle_cell(meta.baseline.oracle_verified.as_ref()),
+        &oracle_cell(meta.candidate.oracle_verified.as_ref()),
     );
     head.push('\n');
     head.push_str(&meta.thresholds.settings_markdown());
@@ -894,6 +921,37 @@ mod tests {
         assert!(md.contains("diff — main → pr"), "title: {md}");
         assert!(md.contains("| main (baseline) | pr (candidate) |"), "header: {md}");
         assert!(md.contains("main total p50") && md.contains("pr tput"), "op header: {md}");
+    }
+
+    #[test]
+    fn diff_and_regression_render_the_oracle_attestation_row() {
+        use crate::synthetic::baseline::regression_guard;
+        let mut a = report(42001, 1.0, 1000.0);
+        let b = report(42002, 1.1, 900.0);
+        // Un-attested pair: both sides show the placeholder.
+        let md = diff_markdown(&a, &b, &[]);
+        assert!(md.contains("| outcome oracle | — | — |"), "{md}");
+        // An attested side renders the compact verified summary — per side, so a one-sided
+        // (downgrade-shaped) pair is visible at a glance even before the guard's warnings.
+        a.meta.oracle_verified =
+            Some([("single_vertex_write".to_string(), 256)].into_iter().collect());
+        let md = diff_markdown(&a, &b, &[]);
+        assert!(
+            md.contains("| outcome oracle | verified — 1 op(s), 256 outcome(s) | — |"),
+            "{md}"
+        );
+        // The regression report renders the same row from the analysis SideMeta.
+        let mut b2 = report(42002, 1.0, 1000.0);
+        b2.meta.oracle_verified = a.meta.oracle_verified.clone();
+        let g = regression_guard(&a, &b2);
+        let md = regression_md(&a, &b2, &g, &Thresholds::builtin(), None);
+        assert!(
+            md.contains(
+                "| outcome oracle | verified — 1 op(s), 256 outcome(s) | verified — 1 op(s), \
+                 256 outcome(s) |"
+            ),
+            "{md}"
+        );
     }
 
     #[test]

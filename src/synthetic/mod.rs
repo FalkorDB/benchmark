@@ -1402,6 +1402,7 @@ pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkRes
             edges,
             recording,
             no_load,
+            require_oracle,
         } => {
             // Expand `--op all` / `--op '*'` to the concrete read ops before anything else.
             let ops = crate::cli::expand_op_selectors(&ops);
@@ -1434,8 +1435,18 @@ pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkRes
                     out: out.unwrap_or_else(|| "synthetic-report.json".to_string()),
                     server_image,
                     label,
+                    require_oracle,
                 };
                 return replay::run_and_report(&replay_config).await;
+            }
+            // clap enforces `--require-oracle requires --recording`; re-validate for directly
+            // constructed commands (tests, future callers) so the flag can never silently no-op.
+            if require_oracle {
+                return Err(OtherError(
+                    "--require-oracle requires --recording: the outcome oracle lives in a \
+                     recorded write bundle"
+                        .to_string(),
+                ));
             }
             let overrides = config::CliOverrides {
                 endpoint,
@@ -2381,6 +2392,7 @@ mod tests {
             edges: None,
             recording: None,
             no_load: false,
+            require_oracle: false,
         };
         assert!(run_command(command).await.is_err());
         let _ = std::fs::remove_file(&cfg_path);
@@ -2557,6 +2569,7 @@ mod tests {
             out: out_dir.join("unused.json").to_string_lossy().into_owned(),
             server_image: None,
             label: None,
+            require_oracle: false,
         };
         let err = crate::synthetic::replay::run(&replay_cfg).await.unwrap_err();
         assert!(
@@ -2869,6 +2882,7 @@ mod tests {
             edges: None,
             recording: None,
             no_load: false,
+            require_oracle: false,
         };
         let err = run_command(command).await.expect_err("no ops ⇒ error");
         assert!(
@@ -2904,9 +2918,46 @@ mod tests {
             edges: None,
             recording: Some("/nonexistent/rec".to_string()),
             no_load: false,
+            require_oracle: false,
         };
         let err = run_command(command).await.expect_err("recording + generate ⇒ error");
         assert!(format!("{err}").contains("--recording"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn run_command_rejects_require_oracle_without_recording() {
+        // clap enforces `requires = "recording"`; the handler re-validates for directly
+        // constructed commands so the flag can never silently no-op on a plain run.
+        let command = crate::cli::SyntheticCommands::Run {
+            config: None,
+            endpoint: None,
+            graph: None,
+            ops: vec![],
+            all_reads: false,
+            tier: None,
+            samples: None,
+            warmup: None,
+            concurrency: vec![],
+            reset_every: None,
+            seed: None,
+            cache: None,
+            server_timeout_ms: None,
+            client_deadline_ms: None,
+            out: None,
+            server_image: None,
+            label: None,
+            generate: false,
+            nodes: None,
+            edges: None,
+            recording: None,
+            no_load: false,
+            require_oracle: true,
+        };
+        let err = run_command(command).await.expect_err("--require-oracle without --recording");
+        assert!(
+            format!("{err}").contains("--require-oracle requires --recording"),
+            "got: {err}"
+        );
     }
 
     #[tokio::test]

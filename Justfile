@@ -207,7 +207,8 @@ synthetic-record name *args:
 # Measure a recorded bundle against an endpoint via `run --recording`: load the recorded graph +
 # measure the recorded commands across the concurrency sweep + cache modes, writing
 # recordings/<name>/report.json. Extra flags forward to `synthetic run`
-# (e.g. --concurrency, --cache, --no-load, --samples, --out).
+# (e.g. --concurrency, --cache, --no-load, --samples, --out, and --require-oracle for a write
+# bundle expected to carry the §6.3 outcome oracle).
 synthetic-replay name endpoint *args:
     #!/usr/bin/env bash
     set -euo pipefail

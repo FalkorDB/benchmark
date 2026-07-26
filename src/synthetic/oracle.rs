@@ -103,18 +103,38 @@ pub async fn capture(
         out: String::new(),
         server_image: None,
         label: None,
+        require_oracle: false,
     };
     let graph_name = bundle.manifest.graph.clone();
     let dataset_spec = bundle.spec();
 
     // Establish the pristine base and capture its CONTENT digests first (§3.5: the final restore
-    // is verified against these, not just count-checked). If this fails, no measured command has
-    // run yet — the load either failed outright or the read-only content scan did — so the error
-    // propagates directly with nothing to reconcile.
-    restore_base(&config, &bundle, &graph_name, &dataset_spec).await?;
-    let pristine = {
+    // is verified against these, not just count-checked). The load is drop-then-rebuild, so a
+    // transient mid-load failure would leave the graph partial — bring this setup under the same
+    // error-safe discipline as the measured passes below: on failure, run one recovery restore so
+    // the endpoint is left on the recorded base, and surface BOTH errors when that fails too.
+    let setup = async {
+        restore_base(&config, &bundle, &graph_name, &dataset_spec).await?;
         let mut graph = open_graph(&config.endpoint, &graph_name).await?;
-        capture_graph_content(&mut graph, &config).await?
+        capture_graph_content(&mut graph, &config).await
+    }
+    .await;
+    let pristine = match setup {
+        Ok(pristine) => pristine,
+        Err(e) => {
+            return Err(match restore_base(&config, &bundle, &graph_name, &dataset_spec).await {
+                Ok(()) => OtherError(format!(
+                    "oracle capture setup failed (graph '{}' was re-restored to the recorded \
+                     base): {}",
+                    graph_name, e
+                )),
+                Err(restore) => OtherError(format!(
+                    "oracle capture setup failed AND the recovery restore failed — graph '{}' \
+                     may be left partially loaded (setup error: {}; restore error: {})",
+                    graph_name, e, restore
+                )),
+            });
+        }
     };
 
     let captured: BenchmarkResult<BTreeMap<String, Vec<MutationStats>>> = async {
@@ -282,6 +302,21 @@ mod tests {
             "must get past the stray-file gate to the eligibility check: {err}"
         );
         assert!(!dir.join("oracle").exists(), "orphan cleared");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn capture_setup_failure_surfaces_both_errors() {
+        // §3.5 discipline for the setup path (duck round-2 F2): the initial load is
+        // drop-then-rebuild, so a setup failure triggers one recovery restore; when THAT fails
+        // too (unreachable endpoint here) the combined error must surface both failures and warn
+        // that the graph may be left partial.
+        let dir = record_write_bundle("synthorc-setup", "single_vertex_write");
+        let err = capture("falkor://127.0.0.1:1", &dir, 1_000, 1_500).await.unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("setup failed AND the recovery restore failed"), "got: {msg}");
+        assert!(msg.contains("may be left partially loaded"), "got: {msg}");
+        assert!(msg.contains("setup error:") && msg.contains("restore error:"), "got: {msg}");
         std::fs::remove_dir_all(&dir).ok();
     }
 

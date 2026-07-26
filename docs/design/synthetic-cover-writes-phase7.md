@@ -11,7 +11,9 @@ into **recording format v3** with the outcomes bound into the `workload_hash`; a
 carry the oracle for **exactly** the eligible set, full corpus per op — enforced at load, attach
 and replay — and the replay report attests the verified coverage (`meta.oracle_verified`); replay
 re-verifies every recorded outcome against the engine as an untimed C=1 correctness pass and
-hard-fails on divergence; **stats only** — write result *values* stay un-captured per §3.4/§5-Out);
+hard-fails on divergence, `--require-oracle` refuses oracle-less write bundles (v3→v2 downgrade
+guard) and the diff/regression guards treat a one-sided or differing attestation as
+not-comparable; **stats only** — write result *values* stay un-captured per §3.4/§5-Out);
 §6.4–§6.5 (prepared-state variants, concurrency) **not implemented**. **Rubber-duck reviewed**; this revision folds in the review's corrections — the
 first draft's "counters are deterministic" thesis was wrong (see §10). Follows the reads-scope work
 (design [`synthetic-cover-ab-query-shapes.md`](./synthetic-cover-ab-query-shapes.md), Phases 1–5,
@@ -147,7 +149,16 @@ so a mixed bundle cannot express C=1 writes alongside C=1,8 reads).
    outcomes, no sampling), and a v3 bundle must carry the oracle for **exactly** the eligible
    set — full corpus per op, none anywhere else — enforced at load, attach and replay, with the
    replay report attesting verified coverage (`meta.oracle_verified`), so oracle coverage can
-   never silently shrink. Capture is a record-time-only cost (~13½ min for the two full passes
+   never silently shrink. A re-hashed **v3→v2 downgrade** is byte-indistinguishable from a
+   legitimate latency-tier v2 bundle (v2 hashes never covered oracle data), so it is refused by
+   operator expectation instead: `run --recording --require-oracle` rejects (offline) any write
+   bundle without an oracle, and the comparison side guards the attestation — `report --diff`
+   (strict and `--regression`) treats a one-sided or differing `meta.oracle_verified` as
+   not-comparable, renders the per-side attestation as an "outcome oracle" header row, and
+   prominently warns when two un-attested runs measured oracle-eligible write ops. Capture is
+   error-safe end to end: the *initial* setup load failure triggers one recovery restore (a
+   combined error when that fails too), and the final restore is content-verified against the
+   pristine digests. Capture is a record-time-only cost (~13½ min for the two full passes
    over the 1 000/5 000 repo-writes bundle on the pinned dev image). *Deviation from the sketch
    above:* per-command **result values** are **not** captured — §5-Out rules out digest-gating
    write results and §3.4 makes returned values irreproducible (`rand()`, engine-internal ids),

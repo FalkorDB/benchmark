@@ -2456,6 +2456,88 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    #[tokio::test]
+    async fn replay_refuses_a_rehashed_v3_to_v2_downgrade_under_require_oracle() {
+        // The two-sided blind spot: strip a v3 bundle's oracle entirely, declare it v2, and
+        // REHASH under the v2 rules — the result is byte-indistinguishable from a legitimate
+        // latency-tier recording (v2 hashes never covered oracle data), loads cleanly, and would
+        // replay with `oracle_verified: None`. Only the operator's stated expectation can refuse
+        // it: `--require-oracle`.
+        use crate::synthetic::replay::{self, ReplayConfig};
+        use crate::synthetic::CacheSelection;
+
+        let dir = record_write_bundle_to_temp("synthrec-downgrade");
+        attach_oracle(&dir, &full_oracle()).unwrap();
+        let bundle = load(&dir).unwrap();
+
+        // Downgrade: v2 format, no per-op oracle counts, no oracle/ dir, valid v2 hash.
+        let mut manifest = bundle.manifest.clone();
+        manifest.format_version = RECORDING_FORMAT_VERSION_WRITES;
+        for entry in &mut manifest.ops {
+            entry.oracle = None;
+        }
+        let mut hasher = WorkloadHasher::new(
+            manifest.format_version,
+            &manifest.generator_version,
+            &manifest.dataset,
+            &manifest.graph,
+            manifest.corpus_seed,
+        );
+        for (phase, cypher) in &bundle.graph_statements {
+            hasher.graph_record(phase.tag(), cypher);
+        }
+        for ((_, cyphers), entry) in bundle.commands.iter().zip(&manifest.ops) {
+            hasher.op_header(&entry.name, cyphers.len(), entry.kind);
+            for cypher in cyphers {
+                hasher.command(cypher);
+            }
+        }
+        manifest.workload_hash = hasher.finalize();
+        std::fs::write(
+            dir.join("manifest.json"),
+            serde_json::to_string_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+        std::fs::remove_dir_all(dir.join("oracle")).unwrap();
+
+        // The downgrade IS a legitimate v2 — the load hash gate cannot object…
+        load(&dir).expect("a rehashed v3→v2 strip must be indistinguishable from a real v2");
+
+        // …so the replay-side flag is the only refusal point.
+        let config = ReplayConfig {
+            recording_dir: dir.clone(),
+            // Closed port: nothing must connect — both run() calls below fail offline or on
+            // connect, never against a live server.
+            endpoint: "falkor://127.0.0.1:1".to_string(),
+            graph: None,
+            load: true,
+            samples: 5,
+            warmup: 0,
+            concurrency: vec![1],
+            cache: CacheSelection::Cached,
+            server_timeout_ms: 5_000,
+            client_deadline_ms: 6_000,
+            out: "unused.json".to_string(),
+            server_image: None,
+            label: None,
+            require_oracle: true,
+        };
+        let err = replay::run(&config).await.unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("carries no outcome oracle"), "got: {msg}");
+        assert!(msg.contains("re-hashed v3→v2 downgrade"), "got: {msg}");
+
+        // Negative control: restore the oracle (v3 again) — the same flag now clears the gate
+        // and the run proceeds to the connection attempt (no oracle complaint on the closed
+        // port's error).
+        attach_oracle(&dir, &full_oracle()).unwrap();
+        let err = replay::run(&config).await.unwrap_err();
+        let msg = format!("{err}");
+        assert!(!msg.contains("oracle"), "v3 must clear the require-oracle gate, got: {msg}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn load_rejects_an_oracle_on_a_non_eligible_write_op() {
         // Mixed bundle (one eligible + one custom write op): attach the valid exact-set oracle,

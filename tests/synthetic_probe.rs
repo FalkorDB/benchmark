@@ -1084,6 +1084,7 @@ fn replay_config(dir: &std::path::Path, graph: &str, out: &str, load: bool) -> R
         out: out.to_string(),
         server_image: None,
         label: None,
+        require_oracle: false,
     }
 }
 
@@ -1546,6 +1547,7 @@ async fn record_and_replay_via_run_command() {
         edges: None,
         recording: Some(out_dir),
         no_load: false,
+        require_oracle: false,
     })
     .await
     .expect("run --recording via run_command");
@@ -2018,6 +2020,7 @@ async fn replay_concurrency_sweep_verifies_results_and_reports_levels() {
         out: dir.join("conc.json").to_string_lossy().into_owned(),
         server_image: None,
         label: None,
+        require_oracle: false,
     };
     // If any op returned different results at C=4 vs the single-flight reference, run() errors here.
     // The two LIMIT ops (expand_hops_5, aggregate_group) are totally ordered, so their value digests
@@ -2192,12 +2195,14 @@ async fn record_with_oracle_captures_verifies_and_replays_end_to_end() {
     let svw = &bundle.oracle["single_vertex_write"][0];
     assert_eq!(svw.nodes_created, 1, "CREATE makes one node: {svw:?}");
 
-    // Replay: the oracle verify pass runs before measurement and the whole run stays green.
+    // Replay: the oracle verify pass runs before measurement and the whole run stays green —
+    // with --require-oracle asserting the bundle really is v3 (the downgrade guard's happy path).
     let out = dir.join("oracle.json").to_string_lossy().into_owned();
     let mut config = replay_config(&dir, graph, &out, true);
     config.samples = 2;
     config.warmup = 0;
     config.cache = benchmark::synthetic::CacheSelection::Cached;
+    config.require_oracle = true;
     let report = replay::run(&config).await.expect("replay a v3 oracle bundle");
     assert_eq!(report.operations.len(), 10, "all 10 write shapes still measured");
     // The report attests the verified oracle coverage (op → outcome count), so a v3→v2
