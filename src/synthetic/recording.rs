@@ -1336,7 +1336,7 @@ pub(crate) mod test_forge {
                 result_gated: false,
                 budget: RecordedBudget::default(),
                 capability: None,
-                commands: vec!["CREATE (:ForgedOracleProbe {k: 1})".to_string()],
+                commands: vec!["CREATE (:ForgedOracleProbe)".to_string()],
             })
             .collect();
         if prepared {

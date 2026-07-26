@@ -1319,7 +1319,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[ignore = "needs a live FalkorDB (FALKORDB_HOST/FALKORDB_PORT)"]
     async fn legacy_v3_bundle_replays_and_verifies_end_to_end() {
         // The frozen legacy layout stays REPLAYABLE, not merely loadable: a seven-op v3 bundle

@@ -573,17 +573,17 @@ just synthetic-compare-versions demo falkor://127.0.0.1:6379 falkor://127.0.0.1:
   verified coverage (op → outcome
   count) — absent for oracle-less runs — so an oracle→v2 downgrade is visible when comparing runs.
   Only then are latencies measured, exactly as for a plain write bundle. Because a re-hashed
-  v3→v2 strip is byte-indistinguishable from a legitimate latency-tier recording (v2 hashes never
-  covered oracle data), pass **`--require-oracle`** whenever the bundle is *expected* to carry
-  the correctness tier: the replay then refuses (offline, before any connection) a write bundle
-  without an oracle, and errors on a read bundle (reads have none).
+  oracle→v2 strip is byte-indistinguishable from a legitimate latency-tier recording (v2 hashes
+  never covered oracle data), pass **`--require-oracle`** whenever the bundle is *expected* to
+  carry the correctness tier: the replay then refuses (offline, before any connection) a write
+  bundle without an oracle, and errors on a read bundle (reads have none).
 - **`benchmark synthetic report --diff <A.json> <B.json> [--out diff.md]`** **guards** the pair (it
   aborts unless the `workload_hash` **and** every op's `result_digest` match, so a version returning
   wrong/empty results faster can't masquerade as an improvement — the version difference itself is
   expected and recorded), then writes a **Markdown diff** across every op × cache-mode × concurrency
   level (throughput + total-latency p50/p90/p95/p99 with deltas). The §6.3 **oracle attestation** is
   guarded the same way: a one-sided or differing `meta.oracle_verified` aborts (the runs did not run
-  the same correctness tier — a re-hashed v3→v2 downgrade looks exactly like this), the per-side
+  the same correctness tier — a re-hashed oracle→v2 downgrade looks exactly like this), the per-side
   attestation renders as an **outcome oracle** header row, and a pair of *un*-attested runs over
   oracle-eligible write ops gets a prominent latency-tier-only warning. `just
   synthetic-compare-versions` runs `run --recording` against both endpoints then `report --diff`.

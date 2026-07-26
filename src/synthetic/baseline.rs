@@ -49,7 +49,7 @@ pub struct BaselineKey {
     /// The **oracle-eligible** write ops (§6.3 + §6.4, `shapes::oracle_eligible_names`) this run
     /// measured. Lets
     /// the guards flag a pair that measured eligible writes with *no* oracle on either side —
-    /// legitimate for a v2 latency-tier bundle, but exactly what a two-sided v3→v2 downgrade
+    /// legitimate for a v2 latency-tier bundle, but exactly what a two-sided oracle→v2 downgrade
     /// looks like, so it warrants a prominent warning. Empty for read runs and older baselines.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub eligible_write_ops: BTreeSet<String>,
@@ -110,7 +110,7 @@ fn attestation_summary(m: &BTreeMap<String, usize>) -> String {
 ///
 /// `Ok(warnings)` may carry the **downgrade-visibility** warning: both sides measured
 /// oracle-eligible write ops with no attestation at all. That pair is legitimate (a v2
-/// latency-tier bundle) but indistinguishable from a two-sided re-hashed v3→v2 strip, so it is
+/// latency-tier bundle) but indistinguishable from a two-sided re-hashed oracle→v2 strip, so it is
 /// surfaced prominently rather than silently passed (§6.3 — duck's downgrade finding).
 fn oracle_attestation_check(
     baseline: Option<&BTreeMap<String, usize>>,
@@ -128,16 +128,16 @@ fn oracle_attestation_check(
         )),
         (Some(b), None) => Err(format!(
             "oracle attestation is one-sided — baseline re-verified the write outcome oracle \
-             ({}) but candidate carries no attestation (latency tier only): a re-hashed v3→v2 \
-             downgrade looks exactly like this. Re-run the candidate against the oracle-bearing \
-             (v3) bundle, with `--require-oracle` to refuse the downgrade",
+             ({}) but candidate carries no attestation (latency tier only): a re-hashed \
+             oracle→v2 downgrade looks exactly like this. Re-run the candidate against the \
+             oracle-bearing bundle, with `--require-oracle` to refuse the downgrade",
             attestation_summary(b)
         )),
         (None, Some(c)) => Err(format!(
             "oracle attestation is one-sided — candidate re-verified the write outcome oracle \
-             ({}) but baseline carries no attestation (latency tier only): a re-hashed v3→v2 \
-             downgrade looks exactly like this. Re-run the baseline against the oracle-bearing \
-             (v3) bundle, with `--require-oracle` to refuse the downgrade",
+             ({}) but baseline carries no attestation (latency tier only): a re-hashed \
+             oracle→v2 downgrade looks exactly like this. Re-run the baseline against the \
+             oracle-bearing bundle, with `--require-oracle` to refuse the downgrade",
             attestation_summary(c)
         )),
         (None, None) if !eligible_ops.is_empty() => Ok(vec![format!(
@@ -851,7 +851,7 @@ mod tests {
             assert!(err.contains("one-sided"), "{err}");
             assert!(err.contains(&format!("Re-run the {side}")), "{err}");
             assert!(err.contains("--require-oracle"), "{err}");
-            assert!(err.contains("v3→v2"), "{err}");
+            assert!(err.contains("oracle→v2"), "{err}");
         }
         // Both absent over eligible write ops: legitimate but downgrade-shaped ⇒ warning.
         let warnings = oracle_attestation_check(None, None, &eligible).unwrap();

@@ -2520,7 +2520,7 @@ async fn re_recording_over_an_oracle_bundle_succeeds_with_and_without_oracle() {
 
     // Re-record WITHOUT --oracle over the v4 bundle: the stale oracle/ must be cleared and the
     // resulting v2 bundle must load cleanly.
-    run_command(record(false)).await.expect("re-record without --oracle over v3");
+    run_command(record(false)).await.expect("re-record without --oracle over the oracle bundle");
     assert!(!dir.join("oracle").exists(), "stale oracle/ cleared by the plain re-record");
     let v2 = recording::load(&dir).expect("the re-recorded v2 bundle loads");
     assert_eq!(v2.manifest.format_version, 2);
