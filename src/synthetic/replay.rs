@@ -322,12 +322,22 @@ pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
         // (`ExpectedOutcome::exactly`). A mismatch is a hard replay error naming the op, seq and
         // command: the engine no longer effects the recorded outcome, so it is doing *different
         // work* — measuring its latency anyway would poison the A/B trend silently. (Divergence
-        // must scream; skips never gate.) Untimed, single-flight, per-invocation restore — sample
+        // must scream — and an oracle-bearing op that got skipped fails closed rather than
+        // silently bypassing the tier.) Untimed, single-flight, per-invocation restore — sample
         // latencies stay clean because restores run between invocations, never inside one.
         for (op, cyphers) in &bundle.commands {
             let Some(expected) = bundle.oracle.get(op.name()) else { continue };
-            if skipped.contains_key(op.name()) {
-                continue;
+            if let Some(reason) = skipped.get(op.name()) {
+                // Fail closed: unreachable through load() (write bundles can never be
+                // capability-gated, and only write ops carry oracles), but a skip must never
+                // bypass the correctness tier.
+                return Err(OtherError(format!(
+                    "op '{}' carries {} recorded oracle outcome(s) but was skipped ({}) — a \
+                     skip cannot bypass the correctness tier",
+                    op.name(),
+                    expected.len(),
+                    reason
+                )));
             }
             let entry = entry_for(op.name());
             let op_st = entry.budget.server_timeout_ms.unwrap_or(config.server_timeout_ms);

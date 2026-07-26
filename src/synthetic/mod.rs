@@ -1615,6 +1615,9 @@ pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkRes
             // the just-written bundle (upgrading it to format v3 with a new workload_hash).
             if let Some(endpoint) = &oracle {
                 let samples = oracle_samples.unwrap_or(oracle::DEFAULT_ORACLE_SAMPLES);
+                // The resolved defaults budget only the single measured write per sample; the
+                // per-sample base restores are bulk loads and get replay's ≥60 s floor inside
+                // `load_recorded_graph`, so no capture-specific budget is needed.
                 let manifest = oracle::capture(
                     endpoint,
                     std::path::Path::new(&out_dir),

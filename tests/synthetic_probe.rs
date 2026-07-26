@@ -2306,7 +2306,7 @@ async fn oracle_capture_is_deterministic_and_leaves_the_base_restored() {
     };
 
     let dir_a = record_one("syn-it-oracle-det-a");
-    let manifest_a = oracle::capture(&endpoint(), &dir_a, 2, 10_000, 60_000)
+    let manifest_a = oracle::capture(&endpoint(), &dir_a, 2, 5_000, 6_000)
         .await
         .expect("capture oracle for bundle A");
 
@@ -2326,7 +2326,7 @@ async fn oracle_capture_is_deterministic_and_leaves_the_base_restored() {
     drop(g);
 
     let dir_b = record_one("syn-it-oracle-det-b");
-    let manifest_b = oracle::capture(&endpoint(), &dir_b, 2, 10_000, 60_000)
+    let manifest_b = oracle::capture(&endpoint(), &dir_b, 2, 5_000, 6_000)
         .await
         .expect("capture oracle for bundle B");
     assert_eq!(

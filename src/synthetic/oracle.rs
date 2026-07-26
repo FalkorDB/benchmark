@@ -45,6 +45,11 @@ pub const DEFAULT_ORACLE_SAMPLES: usize = 8;
 /// at record time, not assumed (design §3.2: the recorded outcome is only an oracle if it is
 /// reproducible). Ineligible write ops stay latency-only.
 ///
+/// `server_timeout_ms`/`client_deadline_ms` budget each **measured write command** (one small
+/// CREATE/SET/MERGE — the resolved CLI defaults are ample and match what a replay-time verify
+/// uses); the per-sample base restores are bulk loads and get the same ≥60 s floor as every
+/// replay restore ([`load_recorded_graph`](crate::synthetic::replay) applies it internally).
+///
 /// The bundle's graph on `endpoint` is left restored to the pristine base on success **and**
 /// failure (§3.5 discipline); a dual failure reports both errors.
 pub async fn capture(
