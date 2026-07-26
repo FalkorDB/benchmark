@@ -5,7 +5,7 @@ shapes — recording format v2 with kind-bound `workload_hash`, `--repo-writes` 
 `GRAPH.QUERY` C=1 measure path with per-cell base reset + verified error-safe final restore);
 §6.2 **implemented** (generalized `ExpectedOutcome` model, full 7-counter `MutationStats`,
 `restore_base` per-invocation restore primitive); §6.3 **implemented** (online outcome oracle:
-`record --oracle <endpoint>` captures per-command `MutationStats` for the deterministic subset
+`record --oracle <endpoint>` captures per-command `MutationStats` for the oracle-eligible shapes
 over each eligible op's **complete command corpus** — twice, determinism proven at record time —
 into **recording format v3** with the outcomes bound into the `workload_hash`; a v3 bundle must
 carry the oracle for **exactly** the eligible set, full corpus per op — enforced at load, attach
@@ -147,7 +147,7 @@ so a mixed bundle cannot express C=1 writes alongside C=1,8 reads).
 2. ✅ **Generalized outcome model + full `MutationStats`** (`relationships_deleted`/`properties_removed`/
    `labels_removed`); per-invocation restore primitive (`replay::restore_base`).
 3. ✅ **Online outcome oracle** at record time (capture per-command stats), C=1 correctness tier
-   for the deterministic subset — 7 of the 10 shapes eligible; `single_edge_update` excluded
+   for the initial deterministic subset — 7 of the 10 shapes eligible at that stage; `single_edge_update` excluded
    (server `rand()`, §3.4), `detach_delete_user` + `remove_user_property_and_label` excluded
    until §6.4. The capture covers each eligible op's **complete command corpus** (per-command
    outcomes, no sampling), and a v3 bundle must carry the oracle for **exactly** the eligible
@@ -203,9 +203,10 @@ so a mixed bundle cannot express C=1 writes alongside C=1,8 reads).
 ## 8. Acceptance
 Latency tier: opt-in record + replay of all 10 write shapes on the FalkorDB per-PR image with periodic
 base reset, off the per-PR read gate, no correctness assertion. Correctness tier (staged): the
-deterministic subset verified at C=1 against an online-recorded per-command outcome oracle with
-per-invocation restore; `single_edge_update` and the removal/variable-count shapes explicitly
-deferred. A drift-guard binds the shape table to `queries_repository`'s 10 write names.
+oracle-eligible shapes verified at C=1 against an online-recorded per-command outcome oracle with
+per-invocation restore; `single_edge_update` permanently excluded (§3.4), and the
+removal/variable-count shapes — deferred by the initial §6.3 stage — delivered in §6.4
+(9 of the 10). A drift-guard binds the shape table to `queries_repository`'s 10 write names.
 
 ## 9. Rollout
 Land the phases behind `--repo-writes` in `FalkorDB/benchmark`; `falkordb-rs-next-gen` picks each up on
