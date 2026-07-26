@@ -69,13 +69,16 @@ pub async fn run_and_drain(
         .map_err(|e| OtherError(format!("query '{}' failed: {:?}", cypher, e)))?;
 
         let cached = query_result.get_cached_execution();
-        // Read the mutation counters (absent ⇒ 0, e.g. for reads) before draining the stream, so a
-        // write worker can verify the sample actually did what the operation intends.
+        // Read the full mutation-counter set (absent ⇒ 0, e.g. for reads) before draining the
+        // stream, so a write worker can verify the sample actually did what the operation intends.
         let mutations = MutationStats {
             nodes_created: query_result.get_nodes_created().unwrap_or(0),
             nodes_deleted: query_result.get_nodes_deleted().unwrap_or(0),
             relationships_created: query_result.get_relationship_created().unwrap_or(0),
+            relationships_deleted: query_result.get_relationship_deleted().unwrap_or(0),
             properties_set: query_result.get_properties_set().unwrap_or(0),
+            properties_removed: query_result.get_properties_removed().unwrap_or(0),
+            labels_removed: query_result.get_labels_removed().unwrap_or(0),
         };
         // A missing server-time stat is a hard error — never fold it into the numbers as NaN/0.
         let server_ms = validate_server_ms(query_result.get_internal_execution_time(), cypher)?;

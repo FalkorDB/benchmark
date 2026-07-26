@@ -3,8 +3,9 @@
 **Status:** §6.1 **implemented** (write-capable record/replay, latency tier for all 10 write
 shapes — recording format v2 with kind-bound `workload_hash`, `--repo-writes` selector,
 `GRAPH.QUERY` C=1 measure path with per-cell base reset + verified error-safe final restore);
-§6.2–§6.5 (outcome model, online oracle / correctness tier, prepared-state variants, concurrency)
-**not implemented**. **Rubber-duck reviewed**; this revision folds in the review's corrections — the
+§6.2 **implemented** (generalized `ExpectedOutcome` model, full 7-counter `MutationStats`,
+`restore_base` per-invocation restore primitive); §6.3–§6.5 (online oracle / correctness tier,
+prepared-state variants, concurrency) **not implemented**. **Rubber-duck reviewed**; this revision folds in the review's corrections — the
 first draft's "counters are deterministic" thesis was wrong (see §10). Follows the reads-scope work
 (design [`synthetic-cover-ab-query-shapes.md`](./synthetic-cover-ab-query-shapes.md), Phases 1–5,
 merged in PRs #240–#250) and is the sibling of the algorithms design (Phase 6). The parent design
@@ -127,8 +128,8 @@ so a mixed bundle cannot express C=1 writes alongside C=1,8 reads).
 ## 6. Phasing (each its own PR)
 1. ✅ **Write-capable record/replay (latency-only):** versioned bundle with hashed write kind,
    recorded-write worker, `GRAPH.QUERY` measure path, periodic base reset. Latency tier for all 10.
-2. ⛔ **Generalized outcome model + full `MutationStats`** (`relationships_deleted`/`properties_removed`/
-   `labels_removed`); per-invocation restore primitive.
+2. ✅ **Generalized outcome model + full `MutationStats`** (`relationships_deleted`/`properties_removed`/
+   `labels_removed`); per-invocation restore primitive (`replay::restore_base`).
 3. ⛔ **Online outcome oracle** at record time (capture per-command stats+result), C=1 correctness tier
    for the deterministic subset.
 4. ⛔ **Prepared-state + removal shapes** (`remove_user_property_and_label`) and variable-count

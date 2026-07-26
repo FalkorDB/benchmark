@@ -546,11 +546,8 @@ async fn measure_write_op(
     let mut cached = None;
     let mut uncached = None;
     for &mode in op_config.cache.modes() {
-        // Per-cell base reset, on its own short-lived connection (the measurement workers open
-        // their own).
-        let mut reset_conn = open_graph(&config.endpoint, graph_name).await?;
-        load_recorded_graph(&mut reset_conn, bundle, graph_name, dataset_spec, config).await?;
-        drop(reset_conn);
+        // Per-cell base reset (§4.1's periodic reset — one restore per measured cell).
+        restore_base(config, bundle, graph_name, dataset_spec).await?;
         let cell_config = Config {
             cache: match mode {
                 CacheMode::Cached => CacheSelection::Cached,
@@ -719,6 +716,26 @@ async fn probe_procedures(
                 e
             ))
         })?
+}
+
+/// Restore the recorded pristine base into `graph_name` — drop + reload the bundle's recorded
+/// statements + verify counts (the exact `--generate` load path), on a fresh short-lived
+/// connection (the measurement workers hold their own).
+///
+/// This is the Phase 7 §3.3 **restore primitive**: the §4.1 latency tier calls it once per
+/// measured cell (a periodic reset bounding mutation drift to one cell's invocations), and the
+/// §6.3 correctness tier will call it **before each measured invocation** (per-invocation pristine
+/// state at C=1, so accumulated-state effects — MERGE create-vs-match, delete no-ops — can't skew
+/// the recorded outcome). Restores always run *between* invocations/cells, never inside a timed
+/// sample, so their cost lands in wall-clock only — sample latencies stay clean.
+pub async fn restore_base(
+    config: &ReplayConfig,
+    bundle: &Bundle,
+    graph_name: &str,
+    spec: &DatasetSpec,
+) -> BenchmarkResult<()> {
+    let mut conn = open_graph(&config.endpoint, graph_name).await?;
+    load_recorded_graph(&mut conn, bundle, graph_name, spec, config).await
 }
 
 /// Drop `graph`, execute the bundle's recorded load statements, and verify the node/edge counts.

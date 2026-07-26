@@ -702,7 +702,7 @@ async fn write_scratch_reset_reuses_its_band_without_duplicates() {
     // Pin the isolation model against the server directly: within a window every MERGE misses
     // (unique keys), a band-scoped reset clears exactly this worker's rows, and the next window
     // reuses the very same keys — still all misses, with no duplicate accumulation.
-    use benchmark::synthetic::writes::{verify_mutation, ExpectedMutation, WriteScratch};
+    use benchmark::synthetic::writes::{verify_mutation, ExpectedOutcome, WriteScratch};
 
     let graph = "syn_it_write_reset";
     drop_graph(graph).await;
@@ -722,7 +722,7 @@ async fn write_scratch_reset_reuses_its_band_without_duplicates() {
         let s = run_and_drain(&mut g, QueryType::Write, &cypher, 5_000, Duration::from_secs(5))
             .await
             .expect("window-1 merge");
-        verify_mutation(ExpectedMutation::NodeCreated, &s.mutations).expect("window-1 must miss");
+        verify_mutation(ExpectedOutcome::node_created(), &s.mutations).expect("window-1 must miss");
     }
     assert_eq!(
         scalar_i64(&mut g, &count_cypher).await,
@@ -756,12 +756,93 @@ async fn write_scratch_reset_reuses_its_band_without_duplicates() {
         let s = run_and_drain(&mut g, QueryType::Write, &cypher, 5_000, Duration::from_secs(5))
             .await
             .expect("window-2 merge");
-        verify_mutation(ExpectedMutation::NodeCreated, &s.mutations).expect("window-2 must miss");
+        verify_mutation(ExpectedOutcome::node_created(), &s.mutations).expect("window-2 must miss");
     }
     assert_eq!(
         scalar_i64(&mut g, &count_cypher).await,
         reset_every as i64,
         "the reused band holds exactly one node per key — no duplicate accumulation"
+    );
+
+    drop_graph(graph).await;
+}
+
+/// Phase 7 §6.2 — pin the full mutation-counter set end-to-end against the server: DETACH DELETE
+/// reports `relationships_deleted` = the victim's degree, REMOVE reports `properties_removed` +
+/// `labels_removed`, and a repeated (no-op) mutation reports all-zero (absent counters read as 0)
+/// — exactly the outcomes the generalized [`ExpectedOutcome`] model pins via `exactly`.
+#[tokio::test]
+#[ignore = "requires a running FalkorDB server"]
+async fn full_mutation_counters_are_read_from_the_server() {
+    use benchmark::synthetic::writes::{verify_mutation, ExpectedOutcome, MutationStats};
+
+    let graph = "syn_it_full_counters";
+    drop_graph(graph).await;
+    let mut g = open_graph(&endpoint(), graph).await.expect("open graph");
+    let deadline = Duration::from_secs(5);
+
+    // A hub (id 1) with 3 edges, and a labeled + flagged node (id 2) to strip.
+    for cypher in [
+        "CREATE (a:User {id:1}), (b:User {id:2}), (c:User {id:3}), (d:User {id:4}), \
+         (a)-[:Friend]->(b), (a)-[:Friend]->(c), (d)-[:Friend]->(a)",
+        "MATCH (u:User {id:2}) SET u:Temp, u.flag = 1",
+    ] {
+        run_and_drain(&mut g, QueryType::Write, cypher, 5_000, deadline)
+            .await
+            .expect("setup");
+    }
+
+    // DETACH DELETE the hub: 1 node + its full degree of edges, nothing else.
+    let s = run_and_drain(
+        &mut g,
+        QueryType::Write,
+        "MATCH (u:User {id:1}) DETACH DELETE u",
+        5_000,
+        deadline,
+    )
+    .await
+    .expect("detach delete");
+    let detach = MutationStats {
+        nodes_deleted: 1,
+        relationships_deleted: 3,
+        ..Default::default()
+    };
+    assert_eq!(s.mutations, detach, "DETACH DELETE counters");
+    verify_mutation(ExpectedOutcome::exactly(detach), &s.mutations).expect("detach outcome");
+
+    // REMOVE a property + a label: only the removal counters move.
+    let s = run_and_drain(
+        &mut g,
+        QueryType::Write,
+        "MATCH (u:User {id:2}) REMOVE u.flag, u:Temp",
+        5_000,
+        deadline,
+    )
+    .await
+    .expect("remove");
+    let removed = MutationStats {
+        properties_removed: 1,
+        labels_removed: 1,
+        ..Default::default()
+    };
+    assert_eq!(s.mutations, removed, "REMOVE counters");
+    verify_mutation(ExpectedOutcome::exactly(removed), &s.mutations).expect("remove outcome");
+
+    // Repeating the REMOVE is a silent no-op: the server omits every counter, all must read 0.
+    let s = run_and_drain(
+        &mut g,
+        QueryType::Write,
+        "MATCH (u:User {id:2}) REMOVE u.flag",
+        5_000,
+        deadline,
+    )
+    .await
+    .expect("no-op remove");
+    assert_eq!(s.mutations, MutationStats::default(), "no-op reports all-zero");
+    // …which the generalized model surfaces as a hard error when an outcome was expected.
+    assert!(
+        verify_mutation(ExpectedOutcome::exactly(removed), &s.mutations).is_err(),
+        "a silent no-op must not satisfy a removal outcome"
     );
 
     drop_graph(graph).await;
@@ -1765,6 +1846,95 @@ async fn failed_write_probe_still_restores_the_recorded_base() {
         50,
         "restored graph must be the recorded base"
     );
+    drop(g);
+
+    std::fs::remove_dir_all(&dir).ok();
+    drop_graph(graph).await;
+}
+
+/// Phase 7 §6.2 — [`replay::restore_base`] is a *per-invocation* restore primitive: calling it
+/// back-to-back after arbitrary pollution (marker nodes, deleted users) must return the endpoint
+/// to the recorded base every single time — the property the §6.3 correctness tier will lean on
+/// between oracle invocations. The pristine shape is captured after the first restore (no fixture
+/// assumptions) and re-asserted after each subsequent one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires a running FalkorDB server"]
+async fn restore_base_returns_the_recorded_base_per_invocation() {
+    let graph = "syn_it_restore_base";
+    drop_graph(graph).await;
+    let dir = temp_bundle_dir("syn-it-restore");
+    let spec = DatasetSpec {
+        seed: 7,
+        nodes: 120,
+        edges: 360,
+    };
+    recording::record(&spec, graph, &[OpName::MatchByIndex], spec.seed, 16, &dir)
+        .expect("record a small bundle");
+    let bundle = recording::load(&dir).expect("load the bundle");
+    let out = dir.join("unused.json").to_string_lossy().into_owned();
+    let config = replay_config(&dir, graph, &out, true);
+
+    replay::restore_base(&config, &bundle, graph, &spec)
+        .await
+        .expect("initial restore");
+    let mut g = open_graph(&endpoint(), graph).await.expect("open graph");
+    let pristine_nodes = scalar_i64(&mut g, "MATCH (n) RETURN count(n)").await;
+    let pristine_edges = scalar_i64(&mut g, "MATCH ()-[r]->() RETURN count(r)").await;
+
+    let deadline = Duration::from_secs(5);
+    for round in 0..3_i64 {
+        // Pollute: add a marker node and detach-delete one recorded user.
+        run_and_drain(
+            &mut g,
+            QueryType::Write,
+            &format!("CREATE (:RestoreMarker {{round: {round}}})"),
+            5_000,
+            deadline,
+        )
+        .await
+        .expect("marker");
+        run_and_drain(
+            &mut g,
+            QueryType::Write,
+            "MATCH (u:User)-[]->() WITH u LIMIT 1 DETACH DELETE u",
+            5_000,
+            deadline,
+        )
+        .await
+        .expect("delete a user");
+        assert_eq!(
+            scalar_i64(&mut g, "MATCH (m:RestoreMarker) RETURN count(m)").await,
+            1,
+            "round {round}: pollution must actually change the graph"
+        );
+        assert_ne!(
+            scalar_i64(&mut g, "MATCH ()-[r]->() RETURN count(r)").await,
+            pristine_edges,
+            "round {round}: the detach-delete must remove edges"
+        );
+        drop(g);
+
+        replay::restore_base(&config, &bundle, graph, &spec)
+            .await
+            .unwrap_or_else(|e| panic!("round {round}: restore_base failed: {e}"));
+
+        g = open_graph(&endpoint(), graph).await.expect("reopen graph");
+        assert_eq!(
+            scalar_i64(&mut g, "MATCH (m:RestoreMarker) RETURN count(m)").await,
+            0,
+            "round {round}: the marker must be erased"
+        );
+        assert_eq!(
+            scalar_i64(&mut g, "MATCH (n) RETURN count(n)").await,
+            pristine_nodes,
+            "round {round}: node count must match the recorded base"
+        );
+        assert_eq!(
+            scalar_i64(&mut g, "MATCH ()-[r]->() RETURN count(r)").await,
+            pristine_edges,
+            "round {round}: edge count must match the recorded base"
+        );
+    }
     drop(g);
 
     std::fs::remove_dir_all(&dir).ok();

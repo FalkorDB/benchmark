@@ -14,7 +14,7 @@
 //!    sequence (warm-up included), bounding accumulation to one sawtooth window.
 //! 3. **Silent no-ops** — a `delete` with no target, or a `merge` that hit when it should have
 //!    missed, would benchmark the wrong thing. [`verify_mutation`] checks FalkorDB's reported
-//!    mutation counters against the operation's [`ExpectedMutation`] on every sample.
+//!    mutation counters against the operation's [`ExpectedOutcome`] on every sample.
 //!
 //! These primitives are deliberately pure (no I/O), so the tricky invariants — reset cadence, key
 //! disjointness, mutation checks — are unit-tested in isolation before being wired into the engine.
@@ -196,7 +196,7 @@ impl WriteScratch {
 pub struct WritePlan {
     /// What each invocation must mutate, checked against the response counters via
     /// [`verify_mutation`].
-    pub expected: ExpectedMutation,
+    pub expected: ExpectedOutcome,
     /// A stable identifier for this operation's query shape, folded into the workload hash so a
     /// change to the write bodies makes old and new runs incomparable. Bump the suffix when the
     /// cypher changes (e.g. `"create_node.v1"`).
@@ -216,84 +216,177 @@ pub struct WritePlan {
 }
 
 /// The mutation counters FalkorDB reports for a query, used to verify a write actually did what the
-/// operation intends (rather than silently matching nothing).
+/// operation intends (rather than silently matching nothing). Covers the full counter set a write
+/// can move (Phase 7 §6.2): absent counters read as 0 (FalkorDB omits untouched statistics).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct MutationStats {
     pub nodes_created: i64,
     pub nodes_deleted: i64,
     pub relationships_created: i64,
+    pub relationships_deleted: i64,
     pub properties_set: i64,
+    pub properties_removed: i64,
+    pub labels_removed: i64,
 }
 
-/// What a write operation must effect on **each** invocation, checked against the response's
-/// [`MutationStats`] so a no-op (a delete with no target, a merge that hit instead of missed) is a
-/// hard error rather than a fast, misleading sample.
+/// One mutation counter's per-invocation expectation: pinned to an exact value, or explicitly
+/// unconstrained (for counters that legitimately vary, like a create's inline `properties_set`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExpectedMutation {
-    /// Exactly one node created (`create_node`, `merge_miss`).
-    NodeCreated,
-    /// Exactly one node deleted (`delete_node`).
-    NodeDeleted,
-    /// Exactly one relationship created (`create_edge`).
-    RelationshipCreated,
-    /// Exactly one property set (`set_property`).
-    PropertySet,
-    /// A merge that matched an existing node — **no** node created (`merge_hit`).
-    NodeMatched,
+pub enum CounterExpectation {
+    /// The counter must equal exactly this value.
+    Exactly(i64),
+    /// The counter is legitimately variable — not checked.
+    Any,
 }
 
-/// Verify a sample's [`MutationStats`] match the operation's [`ExpectedMutation`], returning a clear
-/// error naming the mismatch so an operation that silently benchmarks the wrong thing fails loudly.
+impl CounterExpectation {
+    /// Whether `reported` satisfies this expectation.
+    fn accepts(
+        self,
+        reported: i64,
+    ) -> bool {
+        match self {
+            CounterExpectation::Exactly(want) => reported == want,
+            CounterExpectation::Any => true,
+        }
+    }
+}
+
+/// What a write operation must effect on **each** invocation — one [`CounterExpectation`] per
+/// [`MutationStats`] counter, checked by [`verify_mutation`] so a no-op (a delete with no target, a
+/// merge that hit instead of missed) is a hard error rather than a fast, misleading sample.
 ///
-/// Each variant asserts its **primary** counter *and* that no **conflicting structural** mutation
-/// happened (a `create_node` that also deleted a node or created a relationship is rejected, not
-/// just one that created zero nodes). `properties_set` is deliberately left unconstrained for the
-/// create/edge variants because inline properties (`{id: $id}`, `{eid: $eid}`) legitimately count
-/// toward it, and FalkorDB's exact accounting for inline-vs-`SET` properties is pinned per operation
-/// against a live server in the Part 5b integration tests; the non-create variants, which set no
-/// inline properties, do assert `properties_set == 0`.
+/// This is the generalized per-invocation outcome model of Phase 7 §6.2 (replacing five rigid
+/// unit variants that could not express `DETACH DELETE`'s `relationships_deleted` or `REMOVE`'s
+/// `properties_removed`/`labels_removed`): the catalog's fixed-shape writes use the named
+/// constructors below, and the §6.3 online oracle pins a recorded per-command outcome with
+/// [`ExpectedOutcome::exactly`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExpectedOutcome {
+    pub nodes_created: CounterExpectation,
+    pub nodes_deleted: CounterExpectation,
+    pub relationships_created: CounterExpectation,
+    pub relationships_deleted: CounterExpectation,
+    pub properties_set: CounterExpectation,
+    pub properties_removed: CounterExpectation,
+    pub labels_removed: CounterExpectation,
+}
+
+impl ExpectedOutcome {
+    /// Every counter pinned to 0 — the base the named constructors override, and exactly what a
+    /// pure match (`merge_hit`) must report.
+    const ZERO: Self = Self {
+        nodes_created: CounterExpectation::Exactly(0),
+        nodes_deleted: CounterExpectation::Exactly(0),
+        relationships_created: CounterExpectation::Exactly(0),
+        relationships_deleted: CounterExpectation::Exactly(0),
+        properties_set: CounterExpectation::Exactly(0),
+        properties_removed: CounterExpectation::Exactly(0),
+        labels_removed: CounterExpectation::Exactly(0),
+    };
+
+    /// Pin every counter to the given stats — the §6.3 oracle mode, where record captured the
+    /// command's *actual* outcome and replay must reproduce it exactly.
+    pub fn exactly(stats: MutationStats) -> Self {
+        Self {
+            nodes_created: CounterExpectation::Exactly(stats.nodes_created),
+            nodes_deleted: CounterExpectation::Exactly(stats.nodes_deleted),
+            relationships_created: CounterExpectation::Exactly(stats.relationships_created),
+            relationships_deleted: CounterExpectation::Exactly(stats.relationships_deleted),
+            properties_set: CounterExpectation::Exactly(stats.properties_set),
+            properties_removed: CounterExpectation::Exactly(stats.properties_removed),
+            labels_removed: CounterExpectation::Exactly(stats.labels_removed),
+        }
+    }
+
+    /// Exactly one node created (`create_node`, `merge_miss`). `properties_set` is unconstrained:
+    /// the shape's inline property (`{id: $id}`) legitimately counts toward it.
+    pub fn node_created() -> Self {
+        Self {
+            nodes_created: CounterExpectation::Exactly(1),
+            properties_set: CounterExpectation::Any,
+            ..Self::ZERO
+        }
+    }
+
+    /// Exactly one node deleted (`delete_node`), nothing else — the scratch target is edgeless, so
+    /// even `relationships_deleted` must stay 0.
+    pub fn node_deleted() -> Self {
+        Self {
+            nodes_deleted: CounterExpectation::Exactly(1),
+            ..Self::ZERO
+        }
+    }
+
+    /// Exactly one relationship created (`create_edge`). `properties_set` is unconstrained for the
+    /// same inline-property reason as [`ExpectedOutcome::node_created`].
+    pub fn relationship_created() -> Self {
+        Self {
+            relationships_created: CounterExpectation::Exactly(1),
+            properties_set: CounterExpectation::Any,
+            ..Self::ZERO
+        }
+    }
+
+    /// Exactly one property set (`set_property`), nothing else.
+    pub fn property_set() -> Self {
+        Self {
+            properties_set: CounterExpectation::Exactly(1),
+            ..Self::ZERO
+        }
+    }
+
+    /// A merge that matched an existing node (`merge_hit`) — every counter must be 0.
+    pub fn node_matched() -> Self {
+        Self::ZERO
+    }
+}
+
+/// Verify a sample's [`MutationStats`] satisfy the operation's [`ExpectedOutcome`], returning a
+/// clear error naming every mismatching counter so an operation that silently benchmarks the wrong
+/// thing fails loudly.
 pub fn verify_mutation(
-    expected: ExpectedMutation,
+    expected: ExpectedOutcome,
     stats: &MutationStats,
 ) -> BenchmarkResult<()> {
-    let ok = match expected {
-        ExpectedMutation::NodeCreated => {
-            stats.nodes_created == 1
-                && stats.nodes_deleted == 0
-                && stats.relationships_created == 0
-        }
-        ExpectedMutation::NodeDeleted => {
-            stats.nodes_deleted == 1
-                && stats.nodes_created == 0
-                && stats.relationships_created == 0
-                && stats.properties_set == 0
-        }
-        ExpectedMutation::RelationshipCreated => {
-            stats.relationships_created == 1
-                && stats.nodes_created == 0
-                && stats.nodes_deleted == 0
-        }
-        ExpectedMutation::PropertySet => {
-            stats.properties_set == 1
-                && stats.nodes_created == 0
-                && stats.nodes_deleted == 0
-                && stats.relationships_created == 0
-        }
-        ExpectedMutation::NodeMatched => {
-            stats.nodes_created == 0
-                && stats.nodes_deleted == 0
-                && stats.relationships_created == 0
-                && stats.properties_set == 0
-        }
-    };
-    if ok {
+    // (counter name, expectation, reported) — one row per MutationStats counter, so a new counter
+    // can't be silently skipped here (the exhaustive destructuring below fails to compile).
+    let MutationStats {
+        nodes_created,
+        nodes_deleted,
+        relationships_created,
+        relationships_deleted,
+        properties_set,
+        properties_removed,
+        labels_removed,
+    } = *stats;
+    let checks = [
+        ("nodes_created", expected.nodes_created, nodes_created),
+        ("nodes_deleted", expected.nodes_deleted, nodes_deleted),
+        ("relationships_created", expected.relationships_created, relationships_created),
+        ("relationships_deleted", expected.relationships_deleted, relationships_deleted),
+        ("properties_set", expected.properties_set, properties_set),
+        ("properties_removed", expected.properties_removed, properties_removed),
+        ("labels_removed", expected.labels_removed, labels_removed),
+    ];
+    let mismatches: Vec<String> = checks
+        .iter()
+        .filter(|(_, want, got)| !want.accepts(*got))
+        .map(|(name, want, got)| match want {
+            CounterExpectation::Exactly(want) => {
+                format!("{name}: expected exactly {want}, server reported {got}")
+            }
+            CounterExpectation::Any => unreachable!("Any accepts every value"),
+        })
+        .collect();
+    if mismatches.is_empty() {
         Ok(())
     } else {
         Err(OtherError(format!(
-            "write operation expected {:?} but the server reported {:?} — the operation is not \
-             doing what it should (e.g. a delete matched nothing, a merge hit instead of missed, or \
-             a create also mutated something it shouldn't have)",
-            expected, stats
+            "write outcome mismatch ({}) — the operation is not doing what it should (e.g. a \
+             delete matched nothing, a merge hit instead of missed, or a write also mutated \
+             something it shouldn't have)",
+            mismatches.join("; ")
         )))
     }
 }
@@ -405,7 +498,7 @@ mod tests {
     #[test]
     fn verify_mutation_accepts_the_expected_effect() {
         assert!(verify_mutation(
-            ExpectedMutation::NodeCreated,
+            ExpectedOutcome::node_created(),
             &MutationStats {
                 nodes_created: 1,
                 ..Default::default()
@@ -413,7 +506,7 @@ mod tests {
         )
         .is_ok());
         assert!(verify_mutation(
-            ExpectedMutation::NodeDeleted,
+            ExpectedOutcome::node_deleted(),
             &MutationStats {
                 nodes_deleted: 1,
                 ..Default::default()
@@ -421,7 +514,7 @@ mod tests {
         )
         .is_ok());
         assert!(verify_mutation(
-            ExpectedMutation::RelationshipCreated,
+            ExpectedOutcome::relationship_created(),
             &MutationStats {
                 relationships_created: 1,
                 ..Default::default()
@@ -429,7 +522,7 @@ mod tests {
         )
         .is_ok());
         assert!(verify_mutation(
-            ExpectedMutation::PropertySet,
+            ExpectedOutcome::property_set(),
             &MutationStats {
                 properties_set: 1,
                 ..Default::default()
@@ -437,11 +530,11 @@ mod tests {
         )
         .is_ok());
         // merge_hit: a match, so nothing created.
-        assert!(verify_mutation(ExpectedMutation::NodeMatched, &MutationStats::default()).is_ok());
+        assert!(verify_mutation(ExpectedOutcome::node_matched(), &MutationStats::default()).is_ok());
         // A create's inline property (`{id: $id}`) legitimately bumps properties_set, so it is not
         // constrained for the create/edge variants.
         assert!(verify_mutation(
-            ExpectedMutation::NodeCreated,
+            ExpectedOutcome::node_created(),
             &MutationStats {
                 nodes_created: 1,
                 properties_set: 1,
@@ -450,7 +543,7 @@ mod tests {
         )
         .is_ok());
         assert!(verify_mutation(
-            ExpectedMutation::RelationshipCreated,
+            ExpectedOutcome::relationship_created(),
             &MutationStats {
                 relationships_created: 1,
                 properties_set: 1,
@@ -463,12 +556,12 @@ mod tests {
     #[test]
     fn verify_mutation_rejects_a_silent_no_op() {
         // A delete that matched nothing.
-        assert!(verify_mutation(ExpectedMutation::NodeDeleted, &MutationStats::default()).is_err());
+        assert!(verify_mutation(ExpectedOutcome::node_deleted(), &MutationStats::default()).is_err());
         // A merge that HIT when it should have MISSED (created 0, expected 1).
-        assert!(verify_mutation(ExpectedMutation::NodeCreated, &MutationStats::default()).is_err());
+        assert!(verify_mutation(ExpectedOutcome::node_created(), &MutationStats::default()).is_err());
         // A merge that MISSED when it should have HIT (created 1, expected 0).
         assert!(verify_mutation(
-            ExpectedMutation::NodeMatched,
+            ExpectedOutcome::node_matched(),
             &MutationStats {
                 nodes_created: 1,
                 ..Default::default()
@@ -482,7 +575,7 @@ mod tests {
         // A create that ALSO deleted a node — a conflicting structural mutation, not just a
         // wrong-count no-op — must be rejected even though it created one node.
         assert!(verify_mutation(
-            ExpectedMutation::NodeCreated,
+            ExpectedOutcome::node_created(),
             &MutationStats {
                 nodes_created: 1,
                 nodes_deleted: 1,
@@ -492,7 +585,7 @@ mod tests {
         .is_err());
         // A create that also created a relationship.
         assert!(verify_mutation(
-            ExpectedMutation::NodeCreated,
+            ExpectedOutcome::node_created(),
             &MutationStats {
                 nodes_created: 1,
                 relationships_created: 1,
@@ -502,7 +595,7 @@ mod tests {
         .is_err());
         // A delete that also created a node.
         assert!(verify_mutation(
-            ExpectedMutation::NodeDeleted,
+            ExpectedOutcome::node_deleted(),
             &MutationStats {
                 nodes_deleted: 1,
                 nodes_created: 1,
@@ -512,7 +605,7 @@ mod tests {
         .is_err());
         // A set_property that also created a node.
         assert!(verify_mutation(
-            ExpectedMutation::PropertySet,
+            ExpectedOutcome::property_set(),
             &MutationStats {
                 properties_set: 1,
                 nodes_created: 1,
@@ -522,12 +615,128 @@ mod tests {
         .is_err());
         // A merge_hit that unexpectedly set a property.
         assert!(verify_mutation(
-            ExpectedMutation::NodeMatched,
+            ExpectedOutcome::node_matched(),
             &MutationStats {
                 properties_set: 1,
                 ..Default::default()
             }
         )
         .is_err());
+        // A delete that also silently dropped edges — the new counters are pinned to 0 for the
+        // catalog shapes (an edgeless scratch target must not report relationship deletions).
+        assert!(verify_mutation(
+            ExpectedOutcome::node_deleted(),
+            &MutationStats {
+                nodes_deleted: 1,
+                relationships_deleted: 2,
+                ..Default::default()
+            }
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn exactly_pins_every_counter() {
+        // The §6.3 oracle mode: an outcome built from recorded stats accepts exactly those stats…
+        let recorded = MutationStats {
+            nodes_created: 1,
+            nodes_deleted: 2,
+            relationships_created: 3,
+            relationships_deleted: 4,
+            properties_set: 5,
+            properties_removed: 6,
+            labels_removed: 7,
+        };
+        let expected = ExpectedOutcome::exactly(recorded);
+        assert!(verify_mutation(expected, &recorded).is_ok());
+        // …and rejects a deviation in ANY single counter (each counter is independently pinned).
+        for i in 0..7 {
+            let mut off = recorded;
+            match i {
+                0 => off.nodes_created += 1,
+                1 => off.nodes_deleted += 1,
+                2 => off.relationships_created += 1,
+                3 => off.relationships_deleted += 1,
+                4 => off.properties_set += 1,
+                5 => off.properties_removed += 1,
+                _ => off.labels_removed += 1,
+            }
+            assert!(verify_mutation(expected, &off).is_err(), "counter {i} not pinned");
+        }
+    }
+
+    #[test]
+    fn generalized_outcomes_express_detach_delete_and_remove() {
+        // The outcomes the 5 rigid variants could not represent (design §2/§10.4), pinned to the
+        // live-verified counter behavior: DETACH DELETE reports the deleted node AND its degree…
+        let detach_delete = ExpectedOutcome::exactly(MutationStats {
+            nodes_deleted: 1,
+            relationships_deleted: 3,
+            ..Default::default()
+        });
+        assert!(verify_mutation(
+            detach_delete,
+            &MutationStats {
+                nodes_deleted: 1,
+                relationships_deleted: 3,
+                ..Default::default()
+            }
+        )
+        .is_ok());
+        // …a wrong degree is a mismatch, not a pass…
+        assert!(verify_mutation(
+            detach_delete,
+            &MutationStats {
+                nodes_deleted: 1,
+                relationships_deleted: 2,
+                ..Default::default()
+            }
+        )
+        .is_err());
+        // …and REMOVE prop/label reports the removal counters.
+        let remove = ExpectedOutcome::exactly(MutationStats {
+            properties_removed: 1,
+            labels_removed: 1,
+            ..Default::default()
+        });
+        assert!(verify_mutation(
+            remove,
+            &MutationStats {
+                properties_removed: 1,
+                labels_removed: 1,
+                ..Default::default()
+            }
+        )
+        .is_ok());
+        // A REMOVE that silently no-opped (unprepared state) is a hard error.
+        assert!(verify_mutation(remove, &MutationStats::default()).is_err());
+    }
+
+    #[test]
+    fn verify_mutation_names_every_mismatching_counter() {
+        let err = verify_mutation(
+            ExpectedOutcome::node_deleted(),
+            &MutationStats {
+                nodes_created: 1,
+                properties_removed: 2,
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        let msg = format!("{err}");
+        // All three deviations named, with expected vs reported values.
+        assert!(msg.contains("nodes_created: expected exactly 0, server reported 1"), "{msg}");
+        assert!(msg.contains("nodes_deleted: expected exactly 1, server reported 0"), "{msg}");
+        assert!(msg.contains("properties_removed: expected exactly 0, server reported 2"), "{msg}");
+        // Unconstrained counters never appear: node_created() leaves properties_set free.
+        let ok = verify_mutation(
+            ExpectedOutcome::node_created(),
+            &MutationStats {
+                nodes_created: 1,
+                properties_set: 40,
+                ..Default::default()
+            },
+        );
+        assert!(ok.is_ok());
     }
 }
