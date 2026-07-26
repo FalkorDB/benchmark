@@ -527,16 +527,16 @@ const WRITE_BUDGET: OpBudget = OpBudget {
 /// base-graph resets, and `ResultPolicy::NotApplicable` — mutation outcomes are state- and
 /// value-dependent (MERGE create-vs-match, SET-same-value counting 0, DETACH DELETE no-ops on
 /// repeat — §2/§10.1), `timestamp()`/`date()`/`rand()` values are non-reproducible (§3.4), and no
-/// **statically modelled** counter expectation exists. The §6.3 **correctness tier** instead
-/// records each command's *actual* outcome online (`record --oracle`) for the deterministic
-/// subset — the seven [`OracleEligibility::Eligible`] rows below — and replay re-verifies those
-/// recorded outcomes per invocation from a pristine base; the three excluded rows carry the
-/// design-cited reason (§3.4 server `rand()`, §6.4 prepared-state/variable-count deferral).
+/// **statically modelled** counter expectation exists. The §6.3 + §6.4 **correctness tier**
+/// instead records each command's *actual* outcome online (`record --oracle`) for the
+/// oracle-eligible set — the nine [`OracleEligibility::Eligible`] rows below — and replay
+/// re-verifies those recorded outcomes per invocation from a pristine base; the one excluded row
+/// carries the design-cited reason (§3.4 server `rand()`).
 /// No capability: all plain Cypher.
 pub fn write_shapes() -> Vec<ShapeSpec> {
     use OracleEligibility::{Eligible, Excluded};
     // Every row is a Write-family, Full-tier, result-N/A shape with the write budget and a full
-    // corpus; only the name, the N/A reason and the §6.3 oracle eligibility vary.
+    // corpus; only the name, the N/A reason and the §6.3 + §6.4 oracle eligibility vary.
     fn s(
         name: &'static str,
         why_na: &'static str,
