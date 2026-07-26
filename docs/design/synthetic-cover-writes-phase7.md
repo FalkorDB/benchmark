@@ -11,8 +11,8 @@ into **recording format v3** with the outcomes bound into the `workload_hash`; a
 carry the oracle for **exactly** the eligible set, full corpus per op — enforced at load, attach
 and replay — and the replay report attests the verified coverage (`meta.oracle_verified`); replay
 re-verifies every recorded outcome against the engine as an untimed C=1 correctness pass and
-hard-fails on divergence, `--require-oracle` refuses oracle-less write bundles (v3→v2 downgrade
-guard) and the diff/regression guards treat a one-sided or differing attestation as
+hard-fails on divergence, `--require-oracle` refuses oracle-less write bundles (oracle→v2
+downgrade guard) and the diff/regression guards treat a one-sided or differing attestation as
 not-comparable; **stats only** — write result *values* stay un-captured per §3.4/§5-Out);
 §6.4 **implemented** (prepared state as a recorded load phase + `detach_delete_user` /
 `remove_user_property_and_label` oracle-eligible — 9 of the 10 shapes covered by the correctness

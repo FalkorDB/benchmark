@@ -281,7 +281,8 @@ re-verifies each recorded outcome the same way (untimed, C=1, restore before eve
 creates/updates what was recorded is doing different work, so its latency would be meaningless —
 and the report's `meta.oracle_verified` attests the verified coverage. Pass **`--require-oracle`**
 on the replay whenever the bundle is *expected* to carry the correctness tier (as above): a
-re-hashed v3→v2 strip is byte-indistinguishable from a legitimate latency-tier recording, so only
+re-hashed oracle→v2 strip is byte-indistinguishable from a legitimate latency-tier recording, so
+only
 your stated expectation can refuse the downgrade — and on the comparison side, `report --diff`
 aborts on a one-sided or differing `meta.oracle_verified` and prominently warns when two
 un-attested runs measured oracle-eligible write ops.

@@ -115,8 +115,10 @@ pub struct Meta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
     /// §6.3 oracle attestation: op → number of recorded outcomes the replay **re-verified** before
-    /// measuring (present only for a format-v3 write-bundle replay). Its absence on a write-bundle
-    /// report makes a v3→v2 downgrade visible when comparing runs — a replay without this field
+    /// measuring (present only for an oracle-format write-bundle replay). Its absence on a
+    /// write-bundle
+    /// report makes an oracle→v2 downgrade visible when comparing runs — a replay without this
+    /// field
     /// measured the latency tier only. `#[serde(default)]` so pre-§6.3 reports still deserialize.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oracle_verified: Option<std::collections::BTreeMap<String, usize>>,
@@ -812,7 +814,7 @@ mod tests {
         let back: Report = serde_json::from_str(&json).unwrap();
         assert_eq!(back.meta.oracle_verified, Some(coverage));
         // …while oracle-less runs omit the field entirely, and pre-§6.3 reports (no field at
-        // all) still deserialize — so a v3→v2 downgrade shows up as a missing attestation.
+        // all) still deserialize — so an oracle→v2 downgrade shows up as a missing attestation.
         let plain = sample_report();
         let json = plain.to_json().unwrap();
         assert!(!json.contains("oracle_verified"), "None must not serialize: {json}");
