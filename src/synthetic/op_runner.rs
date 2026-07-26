@@ -69,7 +69,7 @@ pub async fn run_and_drain(
         .map_err(|e| OtherError(format!("query '{}' failed: {:?}", cypher, e)))?;
 
         let cached = query_result.get_cached_execution();
-        // Read the full mutation-counter set (absent ⇒ 0, e.g. for reads) before draining the
+        // Read every MutationStats counter (absent ⇒ 0, e.g. for reads) before draining the
         // stream, so a write worker can verify the sample actually did what the operation intends.
         let mutations = MutationStats {
             nodes_created: query_result.get_nodes_created().unwrap_or(0),

@@ -44,12 +44,14 @@ first draft listed 8 and mis-described several:
 The synthetic **live** path benchmarks *synthetic-owned* writes with isolation
 (`src/synthetic/writes.rs`, `src/synthetic/catalog.rs:272-370`), but the primitives **do not** transfer cleanly:
 
-- **`ExpectedMutation`** is **5 rigid unit variants** and **`MutationStats` has only 4 counters**
-  (`src/synthetic/writes.rs:221-287`): `nodes_created`/`nodes_deleted`/`relationships_created`/`properties_set` —
+- **`ExpectedMutation`** *was* **5 rigid unit variants** and **`MutationStats` had only 4 counters**:
+  `nodes_created`/`nodes_deleted`/`relationships_created`/`properties_set` —
   **no** `relationships_deleted`, `properties_removed`, or `labels_removed` (the client exposes them,
   `vendor/falkordb-rs/src/response/mod.rs:109-156`). So `detach_delete_user` and
-  `remove_user_property_and_label` are **unrepresentable** today, and `NodeMatched` (which requires
-  `properties_set == 0`) cannot model an upsert that matches *and* updates.
+  `remove_user_property_and_label` were **unrepresentable**, and `NodeMatched` (which required
+  `properties_set == 0`) could not model an upsert that matches *and* updates. *Resolved by §6.2
+  (phasing item 2): `MutationStats` now carries all 7 counters and the generalized `ExpectedOutcome`
+  (`src/synthetic/writes.rs`) replaces the variants with per-counter `Exactly(n)`/`Any` expectations.*
 - **`verify_mutation` is value-dependent, not value-independent** — FalkorDB counts *actual* changes,
   so `single_vertex_update`/`merge_user_upsert_existing`/`single_edge_update` flap between
   `properties_set` 1 and 0 when a repeated value is already set (observed even at C=1).
@@ -121,7 +123,8 @@ so a mixed bundle cannot express C=1 writes alongside C=1,8 reads).
 - **In (correctness tier, staged):** the deterministic fixed-outcome subset (the two plain
   create/update, the create-once MERGEs, `foreach_loop_mutation`) via the online oracle at C=1.
 - **Deferred:** `single_edge_update` (server `rand()`), `remove_user_property_and_label` (prepared
-  state), `detach_delete_user`'s variable counts until `relationships_deleted` is added; C>1 writes.
+  state), `detach_delete_user`'s variable counts until the §6.3 online oracle records per-invocation
+  expected values (the `relationships_deleted` counter itself landed with §6.2); C>1 writes.
 - **Out:** Neo4j/Memgraph variants; any digest gating of write results; any change to the per-PR read
   gate or the A/B `--query-profile`.
 

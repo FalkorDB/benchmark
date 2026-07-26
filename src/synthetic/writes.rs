@@ -216,8 +216,10 @@ pub struct WritePlan {
 }
 
 /// The mutation counters FalkorDB reports for a query, used to verify a write actually did what the
-/// operation intends (rather than silently matching nothing). Covers the full counter set a write
-/// can move (Phase 7 §6.2): absent counters read as 0 (FalkorDB omits untouched statistics).
+/// operation intends (rather than silently matching nothing). Covers the seven counters the write
+/// plans verify (Phase 7 §6.2) — a deliberate subset of the server's statistics (e.g. `labels_added`
+/// and index counters are not tracked): absent counters read as 0 (FalkorDB omits untouched
+/// statistics).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct MutationStats {
     pub nodes_created: i64,
