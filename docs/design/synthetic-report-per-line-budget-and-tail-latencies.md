@@ -105,6 +105,13 @@ question §8.1.)
 
 `p95` is also computed but **left out** (§8.2). Tail **Δ**s are left out (§8.3).
 
+> **Later change — `--gated-metric`:** the gated median (and the context tails above) now
+> **defaults to the server-reported `server_ms`** (maintainer decision: only the server execution
+> time is measured); `report --regression --gated-metric total-ms` is the explicit opt-in that
+> restores the client-observed `total_ms` gate described in this table. Under the default server
+> gate the client-observed total p50 is **demoted to the `context:` line** (informational, never
+> gated) so the wall clock stays visible. The gate mechanics are unchanged either way.
+
 ## 6. Data availability (no new collection)
 
 - `Summary` already carries `median`/`p90`/`p95`/`p99` (`src/synthetic/stats.rs`); percentiles are a

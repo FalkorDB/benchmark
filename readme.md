@@ -594,7 +594,8 @@ just synthetic-compare-versions demo falkor://127.0.0.1:6379 falkor://127.0.0.1:
   synthetic-compare-versions` runs `run --recording` against both endpoints then `report --diff`.
 - **`benchmark synthetic report --diff <A.json> <B.json> --regression [--thresholds t.toml]`** is a
   **non-fatal, colored** variant for a per-PR regression report: each op × cache-mode × concurrency
-  cell gets a **🟢 / 🔴 / N/A** verdict on **p50** — 🟢 if the candidate (B) is faster or slower
+  cell gets a **🟢 / 🔴 / N/A** verdict on **p50** (of the server-reported `server_ms` by default —
+  see `--gated-metric`) — 🟢 if the candidate (B) is faster or slower
   within budget, 🔴 if slower beyond it. The budget is a `budget_pct` plus an absolute `floor_ms`
   noise guard, defaulting to 10 % / 0.5 ms and overridable per-operation and per-operation×concurrency
   in a TOML file (`[default]` + `[op.<name>]` with a `concurrency` inline table). `<name>` may be a
@@ -609,7 +610,8 @@ just synthetic-compare-versions demo falkor://127.0.0.1:6379 falkor://127.0.0.1:
   passes **`--elapsed-secs <n>`** — a compute-time line (benchmark + reporting) for the run. Each cell
   row also prints the **effective `p50 guard`** applied to it (e.g. `15% AND 0.5 ms`, per-op×C
   overrides included) and the absolute `Δms`, and folds **p90/p99 + throughput** onto a smaller,
-  clearly non-gated `context:` line — the verdict stays **p50-only**. Each op's tables are wrapped in
+  clearly non-gated `context:` line — under the default server-ms gate that line also carries the
+  **demoted client-observed total p50** — the verdict stays **p50-only**. Each op's tables are wrapped in
   a **collapsed `<details>`** (with the op's 🟢/🔴 verdict on the summary row) so the PR sticky
   comment stays compact — the reader expands only the ops they care about.
 - Every regression comparison is computed **once** into a single analysis model and rolled up into a
@@ -650,6 +652,24 @@ just synthetic-compare-versions demo falkor://127.0.0.1:6379 falkor://127.0.0.1:
     `[cross-engine.op.<name>]` sections (same shape as the top-level `[default]`/`[op.<name>]`,
     typically looser for engine-vs-engine noise) and **errors** if the TOML doesn't define them —
     there is no silent fallback to the strict budgets.
+  - **`--gated-metric <total-ms|server-ms>`** (default `server-ms`) selects **which latency
+    metric's p50** the budget verdicts gate on. `server-ms` — the default, by maintainer decision:
+    only the server-reported execution time is measured — is immune to client scheduling and
+    network jitter. `total-ms` is an explicit opt-in escape hatch gating the client-observed total
+    latency (including client scheduling and network time). The p90/p99 tails on each cell's
+    `context:` line follow the selected metric, so a cell never mixes clocks; under the default
+    server-ms gate the client-observed total p50 is **demoted to that `context:` line** —
+    visible, informational, never gated. If the **selected metric's** p50 is missing/invalid
+    (≤ 0 / non-finite) on either side of a cell — whichever metric is gated — that cell's
+    verdict is **N/A**; there is **never** a silent fallback to the other clock. Under the
+    default `server-ms` gate (a report predating server-time capture, or an engine that doesn't
+    report execution time) the affected ops are additionally named in **one loud advisory
+    warning** that also names the `total-ms` escape hatch; `total_ms` is the always-captured
+    wall clock, so total-ms gating degrades this way only on a malformed report (N/A cells, no
+    dedicated warning). The choice is echoed as `gated_metric` in the report header, the
+    `--summary` JSON and the `--cells` model; the Markdown header and legend always name the gated
+    metric. *(Note: the default gate **changed** from `total-ms` to `server-ms`; pass
+    `--gated-metric total-ms` explicitly to reproduce the old behavior.)*
 
 A `--cells` file deserializes straight back into the tool's public `RegressionAnalysis` type, so
 downstream tooling consumes the analysis without re-parsing Markdown (compiled and type-checked as

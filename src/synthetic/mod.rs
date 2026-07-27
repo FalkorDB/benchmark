@@ -1656,8 +1656,9 @@ pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkRes
             cells,
             budget_profile,
             divergence_policy,
+            gated_metric,
         } => {
-            // clap's value_parser restricts both to known names, so these parses cannot fail; map
+            // clap's value_parser restricts these to known names, so the parses cannot fail; map
             // errors anyway so a future drift fails loudly instead of silently defaulting.
             let budget_profile = budget_profile
                 .as_deref()
@@ -1668,6 +1669,12 @@ pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkRes
             let divergence_policy = divergence_policy
                 .as_deref()
                 .map(str::parse::<analysis::DivergencePolicy>)
+                .transpose()
+                .map_err(OtherError)?
+                .unwrap_or_default();
+            let gated_metric = gated_metric
+                .as_deref()
+                .map(str::parse::<analysis::GatedMetric>)
                 .transpose()
                 .map_err(OtherError)?
                 .unwrap_or_default();
@@ -1683,6 +1690,7 @@ pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkRes
                     cells,
                     budget_profile,
                     divergence_policy,
+                    gated_metric,
                 },
             )
             .await
@@ -1698,6 +1706,7 @@ struct RegressionOpts {
     cells: Option<String>,
     budget_profile: BudgetProfile,
     divergence_policy: analysis::DivergencePolicy,
+    gated_metric: analysis::GatedMetric,
 }
 
 /// `synthetic report`: re-render a saved report (`input`) to console + Markdown, or **diff** two
@@ -1753,6 +1762,7 @@ async fn report_command(
                 &analysis::AnalysisOptions {
                     budget_profile: opts.budget_profile,
                     divergence_policy: opts.divergence_policy,
+                    gated_metric: opts.gated_metric,
                     elapsed_secs: opts.elapsed_secs,
                 },
             );
@@ -2981,6 +2991,7 @@ mod tests {
             cells: None,
             budget_profile: None,
             divergence_policy: None,
+            gated_metric: None,
         })
         .await
         .expect_err("report with no args ⇒ error");
@@ -3035,6 +3046,7 @@ mod tests {
             cells: None,
             budget_profile: None,
             divergence_policy: None,
+            gated_metric: None,
         })
         .await
         .is_ok());
@@ -3051,6 +3063,7 @@ mod tests {
             cells: None,
             budget_profile: None,
             divergence_policy: None,
+            gated_metric: None,
         })
         .await
         .expect_err("workload_hash mismatch must abort");
@@ -3102,6 +3115,7 @@ mod tests {
             cells: None,
             budget_profile: None,
             divergence_policy: None,
+            gated_metric: None,
         })
         .await
         .is_ok());
@@ -3159,6 +3173,7 @@ mod tests {
             cells: Some(cells.clone()),
             budget_profile: None,
             divergence_policy: Some("advisory".to_string()),
+            gated_metric: None,
         })
         .await
         .is_ok());
@@ -3200,6 +3215,7 @@ mod tests {
             cells: None,
             budget_profile: Some("cross-engine".to_string()),
             divergence_policy: None,
+            gated_metric: None,
         })
         .await
         .expect_err("cross-engine without --thresholds must fail");
@@ -3237,6 +3253,7 @@ mod tests {
             cells: None,
             budget_profile: Some("cross-engine".to_string()),
             divergence_policy: None,
+            gated_metric: None,
         })
         .await
         .is_ok());
@@ -3245,6 +3262,129 @@ mod tests {
         for p in [rep, toml_path, out] {
             let _ = std::fs::remove_file(p);
         }
+    }
+
+    #[tokio::test]
+    async fn report_regression_gates_on_server_ms_by_default() {
+        // Hermetic end-to-end default flip: the candidate doubles its TOTAL p50 (over budget)
+        // while its SERVER p50 grows 5 % (within budget). The default gate (server-ms) passes;
+        // the explicit `--gated-metric total-ms` opt-in regresses; every artifact (Markdown,
+        // summary JSON, cells JSON) names the selected metric.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir();
+        let stem = format!(
+            "gm-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        );
+        let write = |label: &str, total: f64, server: f64| -> String {
+            let p = dir
+                .join(format!("{stem}-{label}.json"))
+                .to_string_lossy()
+                .into_owned();
+            let summ = |m: f64| {
+                format!(
+                    r#"{{"n":10,"removed":0,"min":{m},"mean":{m},"median":{m},"p90":{m},"p95":{m},"p99":{m},"max":{m},"stddev":0.0}}"#
+                )
+            };
+            let json = format!(
+                r#"{{"meta":{{"tool_version":"0.1.0","endpoint":"x","samples":1,"warmup":0,"concurrency":[1],"server_timeout_ms":5000,"client_deadline_ms":6000,"connection":"c","started_at_epoch_secs":0,"server":{{"module_graph_ver":42001}},"dataset":{{"seed":1,"nodes":10,"edges":20,"corpus_hash":"sha256:same"}},"label":"{label}"}},"operations":{{"match_by_index":{{"levels":[{{"concurrency":1,"cached":{{"throughput_ops_per_sec":1000.0,"metrics":{{"server_ms":{srv},"total_ms":{tot},"non_internal_ms":{ni},"cached_false_rate":0.0,"cached_unknown":0}}}}}}],"result_digest":"sha256:aa"}}}}}}"#,
+                srv = summ(server),
+                tot = summ(total),
+                ni = summ(total - server),
+            );
+            std::fs::write(&p, json).unwrap();
+            p
+        };
+        let a = write("main", 10.0, 2.0);
+        let b = write("pr", 20.0, 2.1);
+        let run = |gated: Option<&str>, suffix: &str| {
+            let out = dir
+                .join(format!("{stem}-{suffix}.md"))
+                .to_string_lossy()
+                .into_owned();
+            let sum = dir
+                .join(format!("{stem}-{suffix}-sum.json"))
+                .to_string_lossy()
+                .into_owned();
+            let cells = dir
+                .join(format!("{stem}-{suffix}-cells.json"))
+                .to_string_lossy()
+                .into_owned();
+            let cmd = crate::cli::SyntheticCommands::Report {
+                input: None,
+                regression: true,
+                thresholds: None,
+                diff: vec![a.clone(), b.clone()],
+                out: Some(out.clone()),
+                elapsed_secs: None,
+                summary: Some(sum.clone()),
+                cells: Some(cells.clone()),
+                budget_profile: None,
+                divergence_policy: None,
+                gated_metric: gated.map(str::to_string),
+            };
+            (cmd, out, sum, cells)
+        };
+
+        let (cmd, out, sum, cells) = run(None, "srv");
+        assert!(run_command(cmd).await.is_ok());
+        let compact: diff::SyntheticSummary =
+            serde_json::from_str(&std::fs::read_to_string(&sum).unwrap()).unwrap();
+        assert_eq!(compact.overall_verdict, analysis::OverallVerdict::Pass);
+        assert_eq!(compact.gated_metric, "server_ms.p50");
+        let model: analysis::RegressionAnalysis =
+            serde_json::from_str(&std::fs::read_to_string(&cells).unwrap()).unwrap();
+        assert!(model.gated_on_server_ms());
+        assert_eq!(
+            model.ops["match_by_index"].cells[0].baseline_p50_ms,
+            Some(2.0)
+        );
+        let md = std::fs::read_to_string(&out).unwrap();
+        assert!(md.contains("**Gated metric: `server_ms.p50`**"), "{md}");
+        for p in [out, sum, cells] {
+            let _ = std::fs::remove_file(p);
+        }
+
+        // The identical pair under the explicit total-ms opt-in: the total-latency regression
+        // is caught, and the artifacts name total_ms.p50.
+        let (cmd, out, sum, cells) = run(Some("total-ms"), "tot");
+        assert!(run_command(cmd).await.is_ok());
+        let compact: diff::SyntheticSummary =
+            serde_json::from_str(&std::fs::read_to_string(&sum).unwrap()).unwrap();
+        assert_eq!(compact.overall_verdict, analysis::OverallVerdict::Regressed);
+        assert_eq!(compact.gated_metric, "total_ms.p50");
+        let md = std::fs::read_to_string(&out).unwrap();
+        assert!(md.contains("**Gated metric: `total_ms.p50`** (opt-in)"), "{md}");
+        for p in [a, b, out, sum, cells] {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+
+    #[tokio::test]
+    async fn report_regression_rejects_an_unknown_gated_metric() {
+        // clap's value_parser guards the real CLI; a directly-constructed command must fail
+        // loudly too (the parse happens before any report is read).
+        let err = run_command(crate::cli::SyntheticCommands::Report {
+            input: None,
+            regression: true,
+            thresholds: None,
+            diff: vec!["a.json".to_string(), "b.json".to_string()],
+            out: None,
+            elapsed_secs: None,
+            summary: None,
+            cells: None,
+            budget_profile: None,
+            divergence_policy: None,
+            gated_metric: Some("bogus".to_string()),
+        })
+        .await
+        .expect_err("unknown gated metric must fail");
+        assert!(
+            format!("{err}").contains("unknown gated metric 'bogus'"),
+            "got: {err}"
+        );
     }
 
     #[test]
