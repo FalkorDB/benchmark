@@ -52,6 +52,16 @@ type DashboardProps = {
    * Hides hardware controls/indicators and ignores hardware filtering when true.
    */
   hideHardware?: boolean;
+  /**
+   * Keeps the dashboard constrained to viewport height when true.
+   * Set false for long-form pages that stack additional sections.
+   */
+  fullHeight?: boolean;
+  /**
+   * Renders the left filter sidebar when true.
+   * Disable for focused pages that need full-width content.
+   */
+  showSidebar?: boolean;
 };
 
 const DEFAULT_SELECTED_OPTIONS: Record<string, string[]> = {
@@ -86,6 +96,8 @@ export default function DashBoard({
   initialManifest,
   comparisonVendors,
   hideHardware = false,
+  fullHeight = true,
+  showSidebar = true,
 }: DashboardProps) {
   const allowedVendors = useMemo(() => {
     const v = (comparisonVendors ?? [])
@@ -700,6 +712,12 @@ export default function DashBoard({
     const baseRun = validRuns[0];
     const nodes = baseRun.edges ?? 0;
     const edges = baseRun.relationships ?? 0;
+    const engineVersions = validRuns.reduce<Record<string, string>>((acc, run) => {
+      const vendor = run.vendor;
+      const version = run["engine-version"];
+      if (vendor && version) acc[vendor] = version;
+      return acc;
+    }, {});
 
     const opsByQuery = baseRun.result?.operations?.["by-query"] ?? {};
     const writeQueryNames = new Set([
@@ -732,10 +750,18 @@ export default function DashBoard({
         readQueries: typeof total === "number" ? total : 0,
         writeQueries: 0,
         startedAtEpochSecs: baseRun["started-at-epoch-secs"],
+        engineVersions,
       };
     }
 
-    return { nodes, edges, readQueries, writeQueries, startedAtEpochSecs: baseRun["started-at-epoch-secs"] };
+    return {
+      nodes,
+      edges,
+      readQueries,
+      writeQueries,
+      startedAtEpochSecs: baseRun["started-at-epoch-secs"],
+      engineVersions,
+    };
   }, [validRuns]);
 
   const parseMemory = (memory: string): number => {
@@ -873,40 +899,54 @@ export default function DashBoard({
   }, [concurrentRuns]);
 
   return (
-    <SidebarProvider className="max-h-none md:max-h-svh h-auto md:h-screen w-full md:w-screen overflow-visible md:overflow-hidden">
-      <div className="flex h-full w-full min-h-0">
-        <AppSidebar
-          selectedOptions={selectedOptions}
-          handleSideBarSelection={handleSideBarSelection}
-          platform={data?.platforms}
-          hideHardware={hideHardware}
-          allowedVendors={
-            validRuns.length
-              ? Array.from(
-                  new Set(
-                    validRuns
-                      .map((r) => r.vendor?.toString().toLowerCase())
-                      .filter(Boolean)
+    <SidebarProvider
+      className={
+        fullHeight
+          ? "max-h-none md:max-h-svh h-auto md:h-screen w-full overflow-visible md:overflow-hidden"
+          : "h-auto max-h-none w-full overflow-visible"
+      }
+    >
+      <div className={showSidebar ? "flex h-full w-full min-h-0 min-w-0" : "w-full h-auto max-h-none"}>
+        {showSidebar && (
+          <AppSidebar
+            selectedOptions={selectedOptions}
+            handleSideBarSelection={handleSideBarSelection}
+            platform={data?.platforms}
+            hideHardware={hideHardware}
+            allowedVendors={
+              validRuns.length
+                ? Array.from(
+                    new Set(
+                      validRuns
+                        .map((r) => r.vendor?.toString().toLowerCase())
+                        .filter(Boolean)
+                    )
                   )
-                )
-              : undefined
+                : undefined
+            }
+            throughputOptions={
+              validRuns.length
+                ? Array.from(
+                    new Set(
+                      validRuns
+                        .map((r) => r["target-messages-per-second"])
+                        .filter((v) => v !== undefined && v !== null)
+                    )
+                  ).sort((a, b) => Number(a) - Number(b))
+                : undefined
+            }
+            queryOptions={availableQueries.length ? availableQueries : undefined}
+            datasetSummary={datasetSummary}
+          />
+        )}
+        <SidebarInset
+          className={
+            fullHeight
+              ? `flex-grow h-auto md:h-full min-h-0 min-w-0 max-h-none md:max-h-svh overflow-visible md:overflow-y-auto ${showSidebar ? "" : "max-h-none"}`
+              : `flex-grow h-auto min-h-0 min-w-0 overflow-visible ${showSidebar ? "" : "max-h-none"}`
           }
-          throughputOptions={
-            validRuns.length
-              ? Array.from(
-                  new Set(
-                    validRuns
-                      .map((r) => r["target-messages-per-second"])
-                      .filter((v) => v !== undefined && v !== null)
-                  )
-                ).sort((a, b) => Number(a) - Number(b))
-              : undefined
-          }
-          queryOptions={availableQueries.length ? availableQueries : undefined}
-          datasetSummary={datasetSummary}
-        />
-        <SidebarInset className="flex-grow h-auto md:h-full min-h-0 max-h-none md:max-h-svh overflow-visible md:overflow-y-auto">
-          <MobileFiltersBar />
+        >
+          {showSidebar && <MobileFiltersBar />}
           {!hideHardware && pastRuns.length > 0 && (
             <div className="bg-muted/30 border-b border-gray-200/40 p-4 flex flex-wrap items-center justify-between gap-4 font-space">
               <div className="flex flex-col">
