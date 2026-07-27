@@ -2952,6 +2952,7 @@ mod tests {
             server_image: None,
             label: None,
             require_oracle: true,
+            pipeline_depth: 1,
         };
         let err = replay::run(&config).await.unwrap_err();
         let msg = format!("{err}");

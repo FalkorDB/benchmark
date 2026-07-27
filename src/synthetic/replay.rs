@@ -88,6 +88,9 @@ pub struct ReplayConfig {
     /// format < v3). A re-hashed oracle→v2 strip is a perfectly legitimate-looking v2 bundle, so
     /// only the operator's *expectation* can catch the downgrade — this flag states it (§6.3).
     pub require_oracle: bool,
+    /// READ-op pipelining depth `K` (default 1 = the plain closed loop; see
+    /// [`Config::pipeline_depth`]). Recorded write bundles always measure at depth 1.
+    pub pipeline_depth: usize,
 }
 
 /// Replay `config`'s bundle: load the recorded graph, then measure the recorded commands through the
@@ -228,6 +231,7 @@ pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
         server_timeout_ms: config.server_timeout_ms,
         client_deadline_ms: config.client_deadline_ms,
         cache: config.cache,
+        pipeline_depth: config.pipeline_depth,
         out: config.out.clone(),
         server_image: config.server_image.clone(),
         label: config.label.clone(),
@@ -575,7 +579,7 @@ pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
             corpus_size,
             server_timeout_ms: config.server_timeout_ms,
             client_deadline_ms: config.client_deadline_ms,
-            connection: "pool(size=1) per worker".to_string(),
+            connection: crate::synthetic::connection_description(config.pipeline_depth),
             started_at_epoch_secs,
             server,
             host: crate::synthetic::host::collect(),
@@ -1033,6 +1037,7 @@ mod tests {
             server_image: None,
             label: None,
             require_oracle: false,
+            pipeline_depth: 1,
         }
     }
 

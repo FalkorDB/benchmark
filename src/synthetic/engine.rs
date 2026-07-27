@@ -3,7 +3,10 @@
 //! A *level* runs `C` worker tasks against a connection pool of size `C` (one connection per
 //! worker). Each worker fires an operation, awaits it to completion (row draining included), then
 //! fires the next from its pre-generated sequence — a **closed loop**: each worker keeps at most one
-//! outstanding request, so at most `C` are in flight. Because a new request is issued
+//! outstanding request, so at most `C` are in flight. (Under `--pipeline-depth K > 1`, read levels
+//! feed the same loop `C × K` lane workers that share `C` multiplexed sockets — see
+//! `synthetic::measure_level`; the engine itself is agnostic to how workers map to connections.)
+//! Because a new request is issued
 //! only after the previous one *completes*, the throughput it reports is **achieved** (what the
 //! server actually served), not **offered** (a target arrival rate), and it can't push past the
 //! server's own service rate. The measured latencies therefore describe behaviour *at that achieved

@@ -123,6 +123,7 @@ pub async fn capture(
         server_image: None,
         label: None,
         require_oracle: false,
+        pipeline_depth: 1,
     };
     let graph_name = bundle.manifest.graph.clone();
     let dataset_spec = bundle.spec();

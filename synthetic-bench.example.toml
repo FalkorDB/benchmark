@@ -29,6 +29,13 @@ cache = "both"              # cached | uncached | both
 # latency-vs-throughput curve. Each level opens that many dedicated connections.
 concurrency = [1, 2, 4, 8, 16, 32]
 
+# READ-op pipelining depth K (default 1 = the plain closed loop). K > 1 keeps K commands
+# concurrently in flight on each of the C connections (one multiplexed socket, K lanes), so the
+# server self-paces and client scheduling jitter stops perturbing server_ms. Server concurrency
+# stays C (FalkorDB executes a connection's commands serially); total_ms inflates (informational).
+# Write ops always run at depth 1. Pick `samples` divisible by K for identical totals.
+# pipeline_depth = 1
+
 # Write-op reset cadence: every `reset_every` operations each worker's scratch is reset (untimed)
 # so write drift is bounded to one sawtooth window. Ignored by read ops.
 reset_every = 50000

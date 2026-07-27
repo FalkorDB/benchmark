@@ -149,6 +149,12 @@ impl clap::builder::TypedValueParser for OpSelectorValueParser {
 #[derive(Parser, Debug)]
 #[command(name = "benchmark", version, about="falkor benchmark tool", long_about = None, arg_required_else_help(true), propagate_version(true))]
 pub struct Cli {
+    #[arg(
+        long = "client-threads",
+        global = true,
+        help = "cap the tokio runtime at N worker threads (default: one per CPU core). Always a multi-threaded runtime, even for 1 — the FalkorDB client requires it."
+    )]
+    pub client_threads: Option<std::num::NonZeroUsize>,
     #[command(subcommand)]
     pub command: Commands,
 }
@@ -504,6 +510,11 @@ pub enum SyntheticCommands {
             help = "with --recording: refuse to measure a write bundle that carries no outcome oracle (recording format < v3). Guards against re-hashed oracle-to-v2 downgrades; errors on read bundles (reads have no oracle)."
         )]
         require_oracle: bool,
+        #[arg(
+            long = "pipeline-depth",
+            help = "READ-op pipelining depth K (default 1 = today's closed loop): each of the C connections carries K concurrently in-flight commands over one multiplexed socket, so the server always has the next command queued (self-pacing; decouples client scheduling jitter from server_ms). FalkorDB executes a connection's commands serially, so server concurrency stays C. Write ops always run at depth 1. Each connection's K lanes measure ceil(samples/K) invocations each (pick --samples divisible by K for identical totals)."
+        )]
+        pipeline_depth: Option<std::num::NonZeroUsize>,
     },
     #[command(about = "list the available operations")]
     ListOps,
@@ -818,6 +829,58 @@ mod tests {
             "create_node",
             "--out-dir",
             "/tmp/does-not-matter",
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn cli_client_threads_is_global_and_rejects_zero() {
+        use clap::Parser;
+        // Before the subcommand.
+        let cli =
+            Cli::try_parse_from(["benchmark", "--client-threads", "3", "synthetic", "list-ops"]).unwrap();
+        assert_eq!(cli.client_threads.map(std::num::NonZeroUsize::get), Some(3));
+        // Global flags also parse after the subcommand.
+        let cli =
+            Cli::try_parse_from(["benchmark", "synthetic", "list-ops", "--client-threads", "1"]).unwrap();
+        assert_eq!(cli.client_threads.map(std::num::NonZeroUsize::get), Some(1));
+        // Absent → None (tokio default).
+        let cli = Cli::try_parse_from(["benchmark", "synthetic", "list-ops"]).unwrap();
+        assert_eq!(cli.client_threads, None);
+        // Zero worker threads is impossible; clap's NonZeroUsize parser rejects it.
+        assert!(
+            Cli::try_parse_from(["benchmark", "--client-threads", "0", "synthetic", "list-ops"]).is_err()
+        );
+    }
+
+    #[test]
+    fn cli_pipeline_depth_parses_on_run_and_rejects_zero() {
+        use clap::Parser;
+        let depth_of = |cli: Cli| match cli.command {
+            Commands::Synthetic { command: SyntheticCommands::Run { pipeline_depth, .. } } => {
+                pipeline_depth.map(std::num::NonZeroUsize::get)
+            }
+            _ => panic!("expected synthetic run"),
+        };
+        let cli =
+            Cli::try_parse_from(["benchmark", "synthetic", "run", "--pipeline-depth", "4"]).unwrap();
+        assert_eq!(depth_of(cli), Some(4));
+        // Absent → None (config-file value or the depth-1 default applies downstream).
+        let cli = Cli::try_parse_from(["benchmark", "synthetic", "run"]).unwrap();
+        assert_eq!(depth_of(cli), None);
+        // Depth 0 is meaningless (no lanes at all) and rejected at parse time.
+        assert!(
+            Cli::try_parse_from(["benchmark", "synthetic", "run", "--pipeline-depth", "0"]).is_err()
+        );
+        // `record` has no --pipeline-depth: recording is untimed single-flight by design.
+        assert!(Cli::try_parse_from([
+            "benchmark",
+            "synthetic",
+            "record",
+            "--out-dir",
+            "x",
+            "--pipeline-depth",
+            "4",
         ])
         .is_err());
     }
