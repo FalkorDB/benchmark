@@ -106,7 +106,7 @@ RegressionAnalysis {
           concurrency: [usize] }, thresholds: ThresholdsEcho },
   budget_profile: "strict" | "cross-engine",
   divergence_policy: "gate" | "advisory",
-  gated_metric: "total_ms.p50",
+  gated_metric: "server_ms.p50",                     // default; "total_ms.p50" under --gated-metric total-ms
   status: Comparable | NotComparable { reason },     // workload-hash/config guard only —
                                                       // version mismatches are advisory warnings
                                                       // (as today), never comparability guards

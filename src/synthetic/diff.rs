@@ -95,8 +95,11 @@ pub fn diff_markdown(
     );
 
     out.push_str(
-        "\n_Δ is 100·(candidate−baseline)/baseline. **Latency: lower is better** (a positive Δ = \
-         slower / regressed); **throughput: higher is better**. `—` = not measured in that run._\n",
+        "\n_Δ is 100·(candidate−baseline)/baseline. Latency percentiles and Δp50 are the \
+         **server-reported execution time** (`server_ms`); the client-observed total p50 rides \
+         along as an informational sub-line. **Latency: lower is better** (a positive Δ = \
+         slower / regressed); **throughput: higher is better**. `—` = not measured in that run \
+         (or, in a latency column, a report predating server-time capture)._\n",
     );
     for w in warnings {
         out.push_str(&format!("\n> ⚠ {w}\n"));
@@ -191,7 +194,7 @@ fn render_mode(
     let la = md_cell(&col_label(a, "A"));
     let lb = md_cell(&col_label(b, "B"));
     out.push_str(&format!(
-        "| C | {la} total p50/p90/p95/p99 (ms) | {lb} total p50/p90/p95/p99 (ms) | Δp50 | {la} tput (ops/s) | {lb} tput (ops/s) | Δtput |\n\
+        "| C | {la} server p50/p90/p95/p99 (ms) | {lb} server p50/p90/p95/p99 (ms) | Δp50 | {la} tput (ops/s) | {lb} tput (ops/s) | Δtput |\n\
          |---:|---|---|---:|---:|---:|---:|\n",
     ));
     for c in levels {
@@ -199,8 +202,8 @@ fn render_mode(
         let bm = level_metrics(b, op, c, mode);
         let a_pct = am.map(percentiles).unwrap_or_else(|| "—".to_string());
         let b_pct = bm.map(percentiles).unwrap_or_else(|| "—".to_string());
-        let dp50 = match (am, bm) {
-            (Some(x), Some(y)) => pct(x.metrics.total_ms.median, y.metrics.total_ms.median),
+        let dp50 = match (am.map(server_median), bm.map(server_median)) {
+            (Some(Some(x)), Some(Some(y))) => pct(x, y),
             _ => "—".to_string(),
         };
         let a_tp = am.map(|m| format!("{:.0}", m.throughput_ops_per_sec)).unwrap_or_else(|| "—".to_string());
@@ -231,9 +234,29 @@ fn level_metrics<'a>(
         .and_then(|lvl| mode.pick(lvl))
 }
 
+/// A side's valid server-time median: `Some` iff finite and positive (a non-positive or
+/// non-finite value means the report predates server-time capture — no silent fallback).
+fn server_median(m: &LevelMetrics) -> Option<f64> {
+    let v = m.metrics.server_ms.median;
+    (v.is_finite() && v > 0.0).then_some(v)
+}
+
+/// A diff-table latency cell: server-time percentiles on the primary line (`—` when the report
+/// predates server-time capture), with the client-observed total p50 demoted to a `sub` line
+/// whenever it is valid — mirroring the regression report's demotion.
 fn percentiles(m: &LevelMetrics) -> String {
-    let s = &m.metrics.total_ms;
-    format!("{:.3} / {:.3} / {:.3} / {:.3}", s.median, s.p90, s.p95, s.p99)
+    let primary = if server_median(m).is_some() {
+        let s = &m.metrics.server_ms;
+        format!("{:.3} / {:.3} / {:.3} / {:.3}", s.median, s.p90, s.p95, s.p99)
+    } else {
+        "—".to_string()
+    };
+    let t = m.metrics.total_ms.median;
+    if t.is_finite() && t > 0.0 {
+        format!("{primary}<br><sub>total p50 {t:.3}</sub>")
+    } else {
+        primary
+    }
 }
 
 /// A regression-table latency cell: the gated **p50** on the primary line, with p90/p95/p99,
@@ -1000,6 +1023,57 @@ mod tests {
     }
 
     #[test]
+    fn diff_gates_dp50_on_server_time_and_demotes_total() {
+        // Server clocks disagree with the wall clocks: Δp50 must follow server_ms (+50 %), not
+        // total_ms (+10 %), and each cell leads with server percentiles, total p50 demoted.
+        let mut a = report(42001, 1.000, 1000.0);
+        let mut b = report(42002, 1.100, 1000.0);
+        set_server_median(&mut a, 0.400);
+        set_server_median(&mut b, 0.600);
+        let md = diff_markdown(&a, &b, &[]);
+        assert!(md.contains("A server p50/p90/p95/p99"), "server-led header: {md}");
+        assert!(md.contains("+50.0%"), "Δp50 from server medians: {md}");
+        assert!(!md.contains("+10.0%"), "wall-clock Δ must not be gated: {md}");
+        assert!(
+            md.contains("<sub>total p50 1.000</sub>") && md.contains("<sub>total p50 1.100</sub>"),
+            "demoted totals: {md}"
+        );
+    }
+
+    #[test]
+    fn diff_degrades_to_na_when_server_time_is_missing() {
+        // A report predating server-time capture (zeroed server_ms): no silent fallback — the
+        // latency cell shows — (with the total demoted alongside) and Δp50 is —.
+        let mut a = report(42001, 1.000, 1000.0);
+        let b = report(42002, 1.100, 900.0);
+        set_server_median(&mut a, 0.0);
+        let md = diff_markdown(&a, &b, &[]);
+        assert!(
+            md.contains("| —<br><sub>total p50 1.000</sub> |"),
+            "missing server side degrades to — with demoted total: {md}"
+        );
+        assert!(
+            md.contains("</sub> | — |"),
+            "Δp50 must be — when either server median is invalid: {md}"
+        );
+        assert!(md.contains("predating server-time capture"), "legend explains —: {md}");
+    }
+
+    /// Overwrite every level's `server_ms` summary median (fixtures default both clocks equal).
+    fn set_server_median(
+        r: &mut Report,
+        v: f64,
+    ) {
+        for op in r.operations.values_mut() {
+            for lvl in &mut op.levels {
+                for m in [&mut lvl.cached, &mut lvl.uncached].into_iter().flatten() {
+                    m.metrics.server_ms = summ(v);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn diff_uses_run_labels_as_headers() {
         let mut a = report(42001, 1.0, 1000.0);
         let mut b = report(42002, 1.1, 900.0);
@@ -1008,7 +1082,7 @@ mod tests {
         let md = diff_markdown(&a, &b, &[]);
         assert!(md.contains("diff — main → pr"), "title: {md}");
         assert!(md.contains("| main (baseline) | pr (candidate) |"), "header: {md}");
-        assert!(md.contains("main total p50") && md.contains("pr tput"), "op header: {md}");
+        assert!(md.contains("main server p50") && md.contains("pr tput"), "op header: {md}");
     }
 
     #[test]
