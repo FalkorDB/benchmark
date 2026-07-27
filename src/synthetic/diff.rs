@@ -99,7 +99,8 @@ pub fn diff_markdown(
          **server-reported execution time** (`server_ms`); the client-observed total p50 rides \
          along as an informational sub-line. **Latency: lower is better** (a positive Δ = \
          slower / regressed); **throughput: higher is better**. `—` = not measured in that run \
-         (or, in a latency column, a report predating server-time capture)._\n",
+         (or, in a latency column, no valid server time on that side — e.g. a report predating \
+         server-time capture or an engine that doesn't report execution time)._\n",
     );
     for w in warnings {
         out.push_str(&format!("\n> ⚠ {w}\n"));
@@ -234,16 +235,17 @@ fn level_metrics<'a>(
         .and_then(|lvl| mode.pick(lvl))
 }
 
-/// A side's valid server-time median: `Some` iff finite and positive (a non-positive or
-/// non-finite value means the report predates server-time capture — no silent fallback).
+/// A side's valid server-time median: `Some` iff finite and positive. A non-positive or
+/// non-finite value means the side carries no usable server time (a report predating
+/// server-time capture, or an engine that doesn't report execution time) — no silent fallback.
 fn server_median(m: &LevelMetrics) -> Option<f64> {
     let v = m.metrics.server_ms.median;
     (v.is_finite() && v > 0.0).then_some(v)
 }
 
-/// A diff-table latency cell: server-time percentiles on the primary line (`—` when the report
-/// predates server-time capture), with the client-observed total p50 demoted to a `sub` line
-/// whenever it is valid — mirroring the regression report's demotion.
+/// A diff-table latency cell: server-time percentiles on the primary line (`—` when the side
+/// has no valid server time — see [`server_median`]), with the client-observed total p50
+/// demoted to a `sub` line whenever it is valid — mirroring the regression report's demotion.
 fn percentiles(m: &LevelMetrics) -> String {
     let primary = if server_median(m).is_some() {
         let s = &m.metrics.server_ms;
