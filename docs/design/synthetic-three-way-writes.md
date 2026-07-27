@@ -28,13 +28,13 @@ rendered in the same page, comment and job summary — without weakening any exi
 |---|---|
 | Tier | **Latency tier only** — no outcome oracle in CI (see §3 *Why no oracle*). Write ops render `correctness: not_gated`, exactly like the fulltext/vector reads do today. |
 | Bundle | A **second recorded bundle** (`--repo-writes`; write bundles are single-kind by design §4 of Phase 7 — they cannot share the reads bundle). Recorded **offline** from the same pinned `.github/synthetic-workload.toml` (same seed/graph/nodes/edges ⇒ one dataset definition; its own `workload_hash`). |
-| Sweep / cache | The recorded per-op write budget **pins C=1, 100 samples, warm-up 10** (§6.5 policy, enforced at record and replay) and overrides the CI's global `--concurrency`/`--samples` flags; cache mode follows the run's global knob (`uncached` per-PR, like reads). Measured: **10 ops × 1 cache mode × C=1 = 10 cells** per comparison. |
+| Sweep / cache | The recorded per-op write budget **pins C=1, 100 samples, warmup 10** (§6.5 policy, enforced at record and replay) and overrides the CI's global `--concurrency`/`--samples` flags; cache mode follows the run's global knob (`uncached` per-PR, like reads). Measured: **10 ops × 1 cache mode × C=1 = 10 cells** per comparison. |
 | Comparisons | The same three, same profiles/policies: `main-pr` strict + gate, `c-pr`/`c-main` cross-engine + advisory. |
 | Budgets | Write ops fall under the existing `[default]` / `[cross-engine.default]` budgets, with **one pre-seeded strict override**: `single_edge_update` (the one ~20 ms write, server-`rand()` targeted) gets `budget_pct 25` — the `floor_ms 0.5` floor that guards every sub-ms write (A/A jitter up to ±33 % observed) is meaningless at 20 ms where 10 % = 2 ms, and there is no A/A variance data on the CI VM class yet. Tighten after real runs, exactly as the reads' `expand_hops_5`/`shortest_path` were calibrated. |
 | Failure isolation | Writes must never cost a read signal, and a C-write hiccup must never cost `main-pr` writes: **two new timeout-bounded child scripts** mirroring the existing read C-leg pattern (§5.2). |
 | Schema | `data.json` **schema_version 2**: each comparison becomes `{"reads": {…}, "writes": {…}}` slots (§5.4). The page and data ship together, so no cross-version compat shim. |
-| Feature flag | `REPO_WRITES` env, **exact truthiness pinned**: the write pass is disabled iff the value is `0`, `false`, `no`, `off` or the empty string; unset defaults to enabled. The script logs `writes pass: enabled/disabled` at start so a run's state is never ambiguous. No workflow input initially (env-only knob; nothing in the workflow can render it empty by accident). When disabled the write slots are simply absent and the page hides the writes UI. |
-| Tool ref | Bump `SYNTHETIC_BENCHMARK_REF` to the **v2.4** release SHA (first tag containing `--repo-writes`; v2.3 = `e2706fa` predates it). |
+| Feature flag | `REPO_WRITES` env, **exact truthiness pinned**: the write pass is disabled iff the value is `0`, `false`, `no` or `off` (any case); unset, empty and every other value mean enabled. The script logs `writes pass: enabled/disabled` at start so a run's state is never ambiguous. No workflow input initially (env-only knob — a workflow input would render unset as `""`, and any ""-is-falsy rule would then silently disable the legs). When disabled the write slots are simply absent and the page hides the writes UI. |
+| Tool ref | Bump `SYNTHETIC_BENCHMARK_REF` to the **v2.4** release SHA (first tag containing `--repo-writes`; v2.3 predates it). |
 | Cost | Measured on the CI workload (10 k nodes / 50 k edges): record **0.6 s** (offline), replay **≈ 48 s per engine leg** (10 cells, one base-graph drop+reload per cell) → **≈ +3 min nominal** wall-clock for all three legs incl. container churn. Worst-case arithmetic is a different matter: the bounded children alone can sum to 2700 + 900 + 900 s = 75 min, and the unbounded prelude (toolchain + release build on a fresh VM + reads record + two reads legs) realistically needs 15–25 min — so the job `timeout-minutes` is raised **90 → 110**, and `data.json`/`run-meta.json` are **assembled incrementally after every phase** (cheap pure-python step) with the artifact upload on `if: always()`, so even a job-timeout run publishes whatever completed. |
 
 ## 3. Why no oracle in CI (and when to revisit)
@@ -70,7 +70,7 @@ This is what makes **default-on** safe:
 - `record --config synthetic-workload.toml --repo-writes --out-dir rec-writes` — offline, 0.6 s,
   10 ops, deterministic `workload_hash`.
 - `run --recording rec-writes --concurrency 1,8 --cache uncached --samples 200 --warmup 50 …` —
-  the recorded write budget (C=[1], samples 100, warm-up 10) **overrides** the global flags, so the
+  the recorded write budget (C=[1], samples 100, warmup 10) **overrides** the global flags, so the
   CI can pass the same env-driven flags to both bundles; per-cell base reset + final
   content-verified restore. 48 s/leg.
 - `report --diff … --regression --thresholds synthetic-thresholds.toml` with **both**
