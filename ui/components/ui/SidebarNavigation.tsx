@@ -487,6 +487,7 @@ export function NavMain({
     readQueries: number;
     writeQueries: number;
     startedAtEpochSecs?: number;
+    engineVersions?: Record<string, string>;
   } | null;
 }) {
   const { state } = useSidebar();
@@ -553,6 +554,19 @@ export function NavMain({
                       {datasetSummary.readQueries.toLocaleString()} / {datasetSummary.writeQueries.toLocaleString()}
                     </span>
                   </div>
+                  {datasetSummary.engineVersions && Object.keys(datasetSummary.engineVersions).length > 0 && (
+                    <div className="pt-1">
+                      <div className="text-gray-500 mb-0.5">Engine versions</div>
+                      <div className="space-y-0.5">
+                        {Object.entries(datasetSummary.engineVersions).map(([vendor, version]) => (
+                          <div key={`${vendor}-${version}`} className="flex justify-between gap-2">
+                            <span className="text-gray-500">{vendor}</span>
+                            <span className="tabular-nums text-right">{version}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
             )}
@@ -619,8 +633,10 @@ export function NavMain({
                 </p>
               )}
               <div
-                className={`flex gap-3 ${
-                  group.layout === "row" ? "flex-row" : "flex-col"
+                className={`gap-2 ${
+                  group.layout === "row"
+                    ? "grid grid-cols-2"
+                    : "flex flex-col"
                 }`}
               >
                 {(group.title === "Queries"
@@ -651,7 +667,7 @@ export function NavMain({
                   return (
                     <div
                       key={option.id}
-                      className={`flex items-center gap-2 w-full ${
+                      className={`flex min-w-0 items-center gap-2 w-full ${
                         group.title === "Queries"
                           ? "text-sm flex-wrap justify-center"
                           : ""
@@ -659,7 +675,7 @@ export function NavMain({
                     >
                       <button
                         onClick={() => handleSideBarSelection(group.title, option.id)}
-                        className={`font-fira px-4 py-1 rounded-lg border text-center w-full ${getButtonClasses()}`}
+                        className={`font-fira flex-1 min-w-0 px-3 py-1 rounded-lg border text-center whitespace-normal break-words leading-tight ${getButtonClasses()}`}
                       >
                         {option.label}
                       </button>

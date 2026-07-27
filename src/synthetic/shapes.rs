@@ -198,7 +198,7 @@ pub fn oracle_eligible_names() -> std::collections::BTreeSet<&'static str> {
         .collect()
 }
 
-/// The curated annotation for the **46 baseline non-algorithm read shapes** (design §3.4).
+/// The curated annotation for the **44 baseline non-algorithm read shapes** (design §3.4).
 ///
 /// The op *set* is auto-discovered from [`queries_repository`] — the drift-guard test asserts this
 /// table's names are **exactly** [`UsersQueriesRepository::non_algorithm_read_names`] for the
@@ -271,8 +271,6 @@ pub fn baseline_read_shapes() -> Vec<ShapeSpec> {
         s("union_distinct_ids", Full, Gated),
         s("all_shortest_paths_len", Full, Gated),
         s("var_len_with_edge_where_filter", Full, Gated),
-        s("exact_5_hop_traverse_count", Full, Gated),
-        s("exact_6_hop_traverse_count", Full, Gated),
         s("count_users_plain", Core, Gated),
         s("count_friend_edges_plain", Core, Gated),
         s("indexed_or_predicate", Full, Gated),
@@ -285,9 +283,9 @@ pub fn baseline_read_shapes() -> Vec<ShapeSpec> {
     ]
 }
 
-/// The curated annotation for the **ExtendedCore** read shapes (design §3.4 / Phase 4): today just
-/// `temporal_spatial_roundtrip`, which round-trips deterministic temporal (`date`/`localtime`/
-/// `duration`) and spatial (`point`/`distance`) values.
+/// The curated annotation for the **ExtendedCore** read shapes (design §3.4 / Phase 4):
+/// `exact_5_hop_traverse_count`, `exact_6_hop_traverse_count`, and
+/// `temporal_spatial_roundtrip`.
 ///
 /// It binds **no random params**, so every render is byte-identical; its result canonicalizes stably
 /// ([`op_runner`] handles `Date`/`Time`/`Duration`/`Point` and bit-patterns floats), so it is
@@ -299,16 +297,38 @@ pub fn baseline_read_shapes() -> Vec<ShapeSpec> {
 ///
 /// [`op_runner`]: crate::synthetic::op_runner
 pub fn extended_core_read_shapes() -> Vec<ShapeSpec> {
-    vec![ShapeSpec {
-        name: "temporal_spatial_roundtrip",
-        family: CoverageFamily::Reads(QueryCoverageProfile::ExtendedCore),
-        tier: Tier::Core,
-        result_policy: ResultPolicy::Gated,
-        capability: None,
-        corpus_size: CORPUS_SIZE,
-        budget: OpBudget::INHERIT,
-        oracle: ORACLE_NOT_A_WRITE,
-    }]
+    vec![
+        ShapeSpec {
+            name: "exact_5_hop_traverse_count",
+            family: CoverageFamily::Reads(QueryCoverageProfile::ExtendedCore),
+            tier: Tier::Full,
+            result_policy: ResultPolicy::Gated,
+            capability: None,
+            corpus_size: CORPUS_SIZE,
+            budget: OpBudget::INHERIT,
+            oracle: ORACLE_NOT_A_WRITE,
+        },
+        ShapeSpec {
+            name: "exact_6_hop_traverse_count",
+            family: CoverageFamily::Reads(QueryCoverageProfile::ExtendedCore),
+            tier: Tier::Full,
+            result_policy: ResultPolicy::Gated,
+            capability: None,
+            corpus_size: CORPUS_SIZE,
+            budget: OpBudget::INHERIT,
+            oracle: ORACLE_NOT_A_WRITE,
+        },
+        ShapeSpec {
+            name: "temporal_spatial_roundtrip",
+            family: CoverageFamily::Reads(QueryCoverageProfile::ExtendedCore),
+            tier: Tier::Core,
+            result_policy: ResultPolicy::Gated,
+            capability: None,
+            corpus_size: CORPUS_SIZE,
+            budget: OpBudget::INHERIT,
+            oracle: ORACLE_NOT_A_WRITE,
+        },
+    ]
 }
 
 /// The curated annotation for the **FixtureDependent** fulltext/vector read shapes (design §3.4 /
@@ -914,11 +934,11 @@ mod tests {
     }
 
     #[test]
-    fn extended_core_adds_exactly_temporal_spatial_roundtrip_over_baseline() {
+    fn extended_core_adds_exactly_the_two_hop_counts_and_temporal_roundtrip_over_baseline() {
         // Derive-with-annotation for Phase 4: the reads the `ExtendedCore` profile adds over
-        // `Baseline` must be EXACTLY the annotated extended-core shapes (today just
-        // `temporal_spatial_roundtrip`). If `queries_repository` adds another ExtendedCore read, this
-        // fails until `extended_core_read_shapes()` is updated.
+        // `Baseline` must be EXACTLY the annotated extended-core shapes. If
+        // `queries_repository` adds another ExtendedCore read, this fails until
+        // `extended_core_read_shapes()` is updated.
         let baseline_repo = read_shapes_repository(QueryCoverageProfile::Baseline, 1000, 5000);
         let extended_repo = read_shapes_repository(QueryCoverageProfile::ExtendedCore, 1000, 5000);
         let baseline: BTreeSet<&str> =
@@ -929,7 +949,14 @@ mod tests {
         let annotated: BTreeSet<&str> =
             extended_core_read_shapes().iter().map(|s| s.name).collect();
         assert_eq!(added, annotated, "ExtendedCore adds exactly the annotated extended-core reads");
-        assert!(added.contains("temporal_spatial_roundtrip"));
+        assert_eq!(
+            added,
+            BTreeSet::from([
+                "exact_5_hop_traverse_count",
+                "exact_6_hop_traverse_count",
+                "temporal_spatial_roundtrip",
+            ])
+        );
         for shape in extended_core_read_shapes() {
             assert_eq!(shape.family, CoverageFamily::Reads(QueryCoverageProfile::ExtendedCore));
         }
@@ -1351,20 +1378,20 @@ mod tests {
     }
 
     #[test]
-    fn there_are_forty_six_baseline_reads_with_a_nonempty_core_subset() {
+    fn there_are_forty_four_baseline_reads_with_a_nonempty_core_subset() {
         let shapes = baseline_read_shapes();
-        assert_eq!(shapes.len(), 46, "expected the 46 baseline reads (design §3.4)");
+        assert_eq!(shapes.len(), 44, "expected the 44 baseline reads (design §3.4)");
         // Names are unique.
-        assert_eq!(annotated_names().len(), 46, "shape names must be unique");
+        assert_eq!(annotated_names().len(), 44, "shape names must be unique");
         let core = shapes.iter().filter(|s| s.tier == Tier::Core).count();
         assert!(core > 0 && core < shapes.len(), "core is a small non-empty subset, got {core}");
     }
 
     #[test]
     fn repo_read_shapes_are_fifty_across_the_three_profiles() {
-        // Baseline (46) + ExtendedCore (1) + FixtureDependent (3) = 50 unique reads across profiles.
+        // Baseline (44) + ExtendedCore (3) + FixtureDependent (3) = 50 unique reads across profiles.
         let shapes = repo_read_shapes();
-        assert_eq!(shapes.len(), 50, "46 baseline + 1 extended-core + 3 fixture-dependent reads");
+        assert_eq!(shapes.len(), 50, "44 baseline + 3 extended-core + 3 fixture-dependent reads");
         let names: BTreeSet<&str> = shapes.iter().map(|s| s.name).collect();
         assert_eq!(names.len(), 50, "shape names must be unique across profiles");
         assert_eq!(
@@ -1372,8 +1399,8 @@ mod tests {
                 .iter()
                 .filter(|s| s.family == CoverageFamily::Reads(QueryCoverageProfile::ExtendedCore))
                 .count(),
-            1,
-            "exactly one extended-core read"
+            3,
+            "exactly three extended-core reads"
         );
         assert_eq!(
             shapes
@@ -1391,7 +1418,18 @@ mod tests {
         assert_eq!(ts.tier, Tier::Core);
         assert!(ts.result_policy.is_gated());
         assert_eq!(ts.capability, None);
-        // The fixture reads are FixtureDependent, Full-tier, result-N/A, with a capability.
+        // 5/6-hop reads are ExtendedCore, Full-tier, and result-gated.
+        for name in ["exact_5_hop_traverse_count", "exact_6_hop_traverse_count"] {
+            let shape = shapes.iter().find(|s| s.name == name).unwrap();
+            assert_eq!(
+                shape.family,
+                CoverageFamily::Reads(QueryCoverageProfile::ExtendedCore)
+            );
+            assert_eq!(shape.tier, Tier::Full);
+            assert!(shape.result_policy.is_gated());
+            assert_eq!(shape.capability, None);
+        }
+        // The fixture reads are FixtureDependent, Full-tier, result-N/A, and capability-free.
         for name in [
             "vector_query_nodes_smoke",
             "fulltext_query_nodes_smoke",
