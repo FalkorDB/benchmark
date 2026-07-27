@@ -586,7 +586,10 @@ just synthetic-compare-versions demo falkor://127.0.0.1:6379 falkor://127.0.0.1:
   aborts unless the `workload_hash` **and** every op's `result_digest` match, so a version returning
   wrong/empty results faster can't masquerade as an improvement — the version difference itself is
   expected and recorded), then writes a **Markdown diff** across every op × cache-mode × concurrency
-  level (throughput + total-latency p50/p90/p95/p99 with deltas). The §6.3 **oracle attestation** is
+  level (throughput + **server-time** p50/p90/p95/p99 with deltas; the client-observed total p50
+  rides along as an informational sub-line, and a side without a valid server time — e.g. a report
+  predating server-time capture — degrades that
+  latency cell to `—` — no silent fallback). The §6.3 **oracle attestation** is
   guarded the same way: a one-sided or differing `meta.oracle_verified` aborts (the runs did not run
   the same correctness tier — a re-hashed oracle→v2 downgrade looks exactly like this), the per-side
   attestation renders as an **outcome oracle** header row, and a pair of *un*-attested runs over

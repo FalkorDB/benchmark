@@ -310,7 +310,7 @@ synthetic-sanity:
     grep -q '"budget_profile": "cross-engine"' recordings/_sanity_a/summary.json || { echo "SANITY FAIL: summary lacks the cross-engine profile"; exit 1; }
     grep -q '"divergence_policy": "advisory"' recordings/_sanity_a/summary.json || { echo "SANITY FAIL: summary lacks the advisory policy"; exit 1; }
     grep -q '"overall_verdict"' recordings/_sanity_a/summary.json || { echo "SANITY FAIL: summary lacks overall_verdict"; exit 1; }
-    grep -q '"gated_metric": "total_ms.p50"' recordings/_sanity_a/cells.json || { echo "SANITY FAIL: cells JSON lacks the gated metric"; exit 1; }
+    grep -q '"gated_metric": "server_ms.p50"' recordings/_sanity_a/cells.json || { echo "SANITY FAIL: cells JSON lacks the gated metric"; exit 1; }
     grep -q '"budget_pct": 150' recordings/_sanity_a/cells.json || { echo "SANITY FAIL: cells JSON did not apply the [cross-engine.op] override"; exit 1; }
     echo "regression artifacts OK (cross-engine profile + advisory policy + summary/cells)"
     echo "synthetic-sanity OK"
