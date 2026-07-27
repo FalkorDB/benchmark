@@ -837,7 +837,7 @@ mod tests {
             argv.extend_from_slice(extra);
             Cli::try_parse_from(argv)
         };
-        // Both known values parse; the flag is optional (default total-ms applies downstream).
+        // Both known values parse; the flag is optional (default server-ms applies downstream).
         assert!(report(&["--regression", "--gated-metric", "total-ms"]).is_ok());
         assert!(report(&["--regression", "--gated-metric", "server-ms"]).is_ok());
         assert!(report(&["--regression"]).is_ok());

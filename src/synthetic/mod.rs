@@ -3270,8 +3270,14 @@ mod tests {
         // while its SERVER p50 grows 5 % (within budget). The default gate (server-ms) passes;
         // the explicit `--gated-metric total-ms` opt-in regresses; every artifact (Markdown,
         // summary JSON, cells JSON) names the selected metric.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
         let dir = std::env::temp_dir();
-        let stem = format!("gm-{}", std::process::id());
+        let stem = format!(
+            "gm-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        );
         let write = |label: &str, total: f64, server: f64| -> String {
             let p = dir
                 .join(format!("{stem}-{label}.json"))

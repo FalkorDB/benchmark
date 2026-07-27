@@ -659,11 +659,14 @@ just synthetic-compare-versions demo falkor://127.0.0.1:6379 falkor://127.0.0.1:
     latency (including client scheduling and network time). The p90/p99 tails on each cell's
     `context:` line follow the selected metric, so a cell never mixes clocks; under the default
     server-ms gate the client-observed total p50 is **demoted to that `context:` line** —
-    visible, informational, never gated. If the server p50 is
-    missing/invalid on either side of a cell (a report predating server-time capture, or an engine
-    that doesn't report execution time) that cell's verdict is **N/A** and the affected ops are
-    named in **one loud advisory warning** that also names the `total-ms` escape hatch — there is
-    **never** a silent fallback. The choice is echoed as `gated_metric` in the report header, the
+    visible, informational, never gated. If the **selected metric's** p50 is missing/invalid
+    (≤ 0 / non-finite) on either side of a cell — whichever metric is gated — that cell's
+    verdict is **N/A**; there is **never** a silent fallback to the other clock. Under the
+    default `server-ms` gate (a report predating server-time capture, or an engine that doesn't
+    report execution time) the affected ops are additionally named in **one loud advisory
+    warning** that also names the `total-ms` escape hatch; `total_ms` is the always-captured
+    wall clock, so total-ms gating degrades this way only on a malformed report (N/A cells, no
+    dedicated warning). The choice is echoed as `gated_metric` in the report header, the
     `--summary` JSON and the `--cells` model; the Markdown header and legend always name the gated
     metric. *(Note: the default gate **changed** from `total-ms` to `server-ms`; pass
     `--gated-metric total-ms` explicitly to reproduce the old behavior.)*
