@@ -142,8 +142,8 @@ stub, never run unbounded.
 
 ### 5.3 Parent script (`synthetic-run.sh`) changes
 
-- `REPO_WRITES` gate with pinned truthiness (§2): disabled iff `0|false|no|off|""`
-  (case-insensitive); unset → enabled; state logged at start.
+- `REPO_WRITES` gate with pinned truthiness (§2): disabled iff `0|false|no|off`
+  (case-insensitive); unset, empty and every other value → enabled; state logged at start.
 - Stub bookkeeping: `W_STATUS`/`W_REASON` (writes leg) and `CW_STATUS`/`CW_REASON` (C writes leg),
   with stage files (`$WORKDIR/writes-stage`, `$WORKDIR/c-writes-stage`) for attribution, mirroring
   the C leg's `c-stage`. Statuses feed the incremental assembly (§5.1): `pending` phases are
@@ -219,8 +219,8 @@ stub, never run unbounded.
   synthetic job's artifact-upload step so incremental artifacts survive a job timeout; the
   comment step's summary loop gains the `--summary-writes` file checks (without this the renderer
   change is dead code). `REPO_WRITES` stays env-only — no workflow input (an unset input would
-  render as the empty string, which the pinned truthiness treats as *disabled*: a silent
-  feature-off footgun).
+  render as the empty string; keeping the knob out of the workflow means no ""-is-falsy rule can
+  ever creep in and silently disable the legs — a feature-off footgun).
 - `.github/synthetic-workload.toml`: doc comment gains the write-bundle sentence (same
   seed/graph/nodes/edges define **two** recorded bundles — reads and writes — each with its own
   `workload_hash`), and notes that the nightly SWEEP override is deliberately neutralized for
