@@ -891,6 +891,7 @@ mod tests {
                 }),
                 label: None,
                 oracle_verified: None,
+                paired_with: None,
             },
             operations,
         }
@@ -1429,6 +1430,7 @@ mod tests {
                 }),
                 label: Some(label.to_string()),
                 oracle_verified: None,
+                paired_with: None,
             },
             operations,
         }

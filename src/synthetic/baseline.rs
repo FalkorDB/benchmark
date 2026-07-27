@@ -979,6 +979,7 @@ mod regression_guard_tests {
                 }),
                 label: None,
                 oracle_verified: None,
+                paired_with: None,
             },
             operations,
         }

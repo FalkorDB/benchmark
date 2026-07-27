@@ -25,6 +25,7 @@ pub mod engine;
 pub mod host;
 pub mod op_runner;
 pub mod oracle;
+pub mod paired;
 pub mod provenance;
 pub mod recording;
 pub mod replay;
@@ -772,6 +773,7 @@ pub async fn run(config: &Config) -> BenchmarkResult<Report> {
             dataset: dataset_info,
             label: config.label.clone(),
             oracle_verified: None,
+            paired_with: None,
         },
         operations,
     })
@@ -1403,6 +1405,10 @@ pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkRes
             recording,
             no_load,
             require_oracle,
+            paired_endpoint,
+            paired_graph,
+            paired_out,
+            paired_label,
         } => {
             // Expand `--op all` / `--op '*'` to the concrete read ops before anything else.
             let ops = crate::cli::expand_op_selectors(&ops);
@@ -1417,6 +1423,7 @@ pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkRes
                             .to_string(),
                     ));
                 }
+                let out = out.unwrap_or_else(|| "synthetic-report.json".to_string());
                 let replay_config = replay::ReplayConfig {
                     recording_dir: std::path::PathBuf::from(recording),
                     endpoint: endpoint.unwrap_or_else(|| "falkor://127.0.0.1:6379".to_string()),
@@ -1432,11 +1439,32 @@ pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkRes
                     cache: cache.unwrap_or(CacheSelection::Both),
                     server_timeout_ms: server_timeout_ms.unwrap_or(5_000),
                     client_deadline_ms: client_deadline_ms.unwrap_or(6_000),
-                    out: out.unwrap_or_else(|| "synthetic-report.json".to_string()),
+                    out: out.clone(),
                     server_image,
                     label,
                     require_oracle,
                 };
+                // A second endpoint switches to the PAIRED interleaved replay: same bundle, both
+                // endpoints, each per-op cell measured A-then-B back to back, two reports.
+                if let Some(paired_endpoint) = paired_endpoint {
+                    let paired_config = paired::PairedReplayConfig {
+                        base: replay_config,
+                        paired_endpoint,
+                        paired_graph,
+                        paired_out: paired_out.unwrap_or_else(|| paired::default_paired_out(&out)),
+                        paired_label,
+                    };
+                    return paired::run_and_report(&paired_config).await;
+                }
+                // clap enforces `--paired-* requires --paired-endpoint`; re-validate for directly
+                // constructed commands so the knobs can never silently no-op.
+                if paired_graph.is_some() || paired_out.is_some() || paired_label.is_some() {
+                    return Err(OtherError(
+                        "--paired-graph/--paired-out/--paired-label require --paired-endpoint \
+                         (they configure the paired replay's second side)"
+                            .to_string(),
+                    ));
+                }
                 return replay::run_and_report(&replay_config).await;
             }
             // clap enforces `--require-oracle requires --recording`; re-validate for directly
@@ -1445,6 +1473,20 @@ pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkRes
                 return Err(OtherError(
                     "--require-oracle requires --recording: the outcome oracle lives in a \
                      recorded write bundle"
+                        .to_string(),
+                ));
+            }
+            // Same re-validation for the paired flags (clap ties them to --recording via
+            // --paired-endpoint): paired measurement is defined over a recorded bundle only.
+            if paired_endpoint.is_some()
+                || paired_graph.is_some()
+                || paired_out.is_some()
+                || paired_label.is_some()
+            {
+                return Err(OtherError(
+                    "--paired-endpoint (and --paired-graph/--paired-out/--paired-label) require \
+                     --recording: paired interleaved measurement replays a recorded bundle \
+                     against two endpoints"
                         .to_string(),
                 ));
             }
@@ -2395,6 +2437,10 @@ mod tests {
             recording: None,
             no_load: false,
             require_oracle: false,
+            paired_endpoint: None,
+            paired_graph: None,
+            paired_out: None,
+            paired_label: None,
         };
         assert!(run_command(command).await.is_err());
         let _ = std::fs::remove_file(&cfg_path);
@@ -2891,6 +2937,10 @@ mod tests {
             recording: None,
             no_load: false,
             require_oracle: false,
+            paired_endpoint: None,
+            paired_graph: None,
+            paired_out: None,
+            paired_label: None,
         };
         let err = run_command(command).await.expect_err("no ops ⇒ error");
         assert!(
@@ -2927,6 +2977,10 @@ mod tests {
             recording: Some("/nonexistent/rec".to_string()),
             no_load: false,
             require_oracle: false,
+            paired_endpoint: None,
+            paired_graph: None,
+            paired_out: None,
+            paired_label: None,
         };
         let err = run_command(command).await.expect_err("recording + generate ⇒ error");
         assert!(format!("{err}").contains("--recording"), "got: {err}");
@@ -2960,11 +3014,76 @@ mod tests {
             recording: None,
             no_load: false,
             require_oracle: true,
+            paired_endpoint: None,
+            paired_graph: None,
+            paired_out: None,
+            paired_label: None,
         };
         let err = run_command(command).await.expect_err("--require-oracle without --recording");
         assert!(
             format!("{err}").contains("--require-oracle requires --recording"),
             "got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_command_rejects_paired_flags_without_recording() {
+        // clap ties the paired flags to --recording via --paired-endpoint; the handler
+        // re-validates for directly constructed commands so they can never silently no-op.
+        let command = |recording: Option<String>,
+                       paired_endpoint: Option<String>,
+                       paired_out: Option<String>| {
+            crate::cli::SyntheticCommands::Run {
+                config: None,
+                endpoint: None,
+                graph: None,
+                ops: vec![],
+                all_reads: false,
+                tier: None,
+                samples: None,
+                warmup: None,
+                concurrency: vec![],
+                reset_every: None,
+                seed: None,
+                cache: None,
+                server_timeout_ms: None,
+                client_deadline_ms: None,
+                out: None,
+                server_image: None,
+                label: None,
+                generate: false,
+                nodes: None,
+                edges: None,
+                recording,
+                no_load: false,
+                require_oracle: false,
+                paired_endpoint,
+                paired_graph: None,
+                paired_out,
+                paired_label: None,
+            }
+        };
+        // --paired-endpoint without --recording: paired measurement replays a bundle.
+        let err = run_command(command(
+            None,
+            Some("falkor://127.0.0.1:6380".to_string()),
+            None,
+        ))
+        .await
+        .expect_err("paired without --recording");
+        assert!(format!("{err}").contains("--recording"), "got: {err}");
+        assert!(format!("{err}").contains("--paired-endpoint"), "got: {err}");
+        // A secondary paired knob without --paired-endpoint is refused on the recording path too.
+        let err = run_command(command(
+            Some("/nonexistent/rec".to_string()),
+            None,
+            Some("b.json".to_string()),
+        ))
+        .await
+        .expect_err("--paired-out without --paired-endpoint");
+        assert!(
+            format!("{err}").contains("--paired-endpoint"),
+            "must name the missing flag: {err}"
         );
     }
 

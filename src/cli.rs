@@ -504,6 +504,30 @@ pub enum SyntheticCommands {
             help = "with --recording: refuse to measure a write bundle that carries no outcome oracle (recording format < v3). Guards against re-hashed oracle-to-v2 downgrades; errors on read bundles (reads have no oracle)."
         )]
         require_oracle: bool,
+        #[arg(
+            long = "paired-endpoint",
+            requires = "recording",
+            help = "with --recording (READ bundles only): measure the bundle against this SECOND endpoint too, INTERLEAVED per cell — each op's cache-mode x concurrency cell runs on the primary endpoint then immediately here (A,B,A,B,...), so both sides of every per-op comparison share the same environment window. Both endpoints are set up identically (own graph load, reference pass, digests); two complete standard reports are written (--out / --paired-out) that work unchanged with `report --diff`/`--regression`. Refused for write bundles (their per-cell resets/restores don't interleave safely)."
+        )]
+        paired_endpoint: Option<String>,
+        #[arg(
+            long = "paired-graph",
+            requires = "paired_endpoint",
+            help = "with --paired-endpoint: the second side's graph key (default: same resolution as --graph). Give side B its own graph to pair two graphs on ONE server (an A/A self-check)."
+        )]
+        paired_graph: Option<String>,
+        #[arg(
+            long = "paired-out",
+            requires = "paired_endpoint",
+            help = "with --paired-endpoint: path for the second side's JSON report (default: --out with a `-b` suffix before the extension, e.g. synthetic-report-b.json)."
+        )]
+        paired_out: Option<String>,
+        #[arg(
+            long = "paired-label",
+            requires = "paired_endpoint",
+            help = "with --paired-endpoint: display name for the second side's run (like --label for the first), recorded into its report."
+        )]
+        paired_label: Option<String>,
     },
     #[command(about = "list the available operations")]
     ListOps,
@@ -889,5 +913,60 @@ mod tests {
             "benchmark", "synthetic", "run", "--require-oracle",
         ])
         .is_err());
+    }
+
+    #[test]
+    fn cli_paired_flags_need_recording_and_paired_endpoint() {
+        use clap::Parser;
+        // The full paired flag set rides on `--recording`.
+        assert!(Cli::try_parse_from([
+            "benchmark",
+            "synthetic",
+            "run",
+            "--recording",
+            "rec",
+            "--paired-endpoint",
+            "falkor://127.0.0.1:6380",
+            "--paired-graph",
+            "g_b",
+            "--paired-out",
+            "b.json",
+            "--paired-label",
+            "pr",
+        ])
+        .is_ok());
+        // `--paired-endpoint` alone is enough (out/label/graph default).
+        assert!(Cli::try_parse_from([
+            "benchmark",
+            "synthetic",
+            "run",
+            "--recording",
+            "rec",
+            "--paired-endpoint",
+            "falkor://127.0.0.1:6380",
+        ])
+        .is_ok());
+        // …but is rejected without `--recording` (paired measurement replays a bundle).
+        assert!(Cli::try_parse_from([
+            "benchmark",
+            "synthetic",
+            "run",
+            "--paired-endpoint",
+            "falkor://127.0.0.1:6380",
+        ])
+        .is_err());
+        // The secondary knobs ride on `--paired-endpoint`, not on `--recording` alone.
+        for lone in [
+            vec!["--paired-graph", "g_b"],
+            vec!["--paired-out", "b.json"],
+            vec!["--paired-label", "pr"],
+        ] {
+            let mut argv = vec!["benchmark", "synthetic", "run", "--recording", "rec"];
+            argv.extend(lone);
+            assert!(
+                Cli::try_parse_from(argv.clone()).is_err(),
+                "expected missing --paired-endpoint for {argv:?}"
+            );
+        }
     }
 }

@@ -105,6 +105,21 @@ _cached (plan reused — execution only)_
 `just synthetic-compare-versions A=falkor://…:6381 B=falkor://…:6382` wraps the two runs + the diff
 into a single recipe.
 
+**Noise-sensitive variant — one paired run instead of two sequential ones.** The two `run
+--recording` invocations above are minutes apart, so environment drift (thermal state, background
+load) lands on *different* ops in each run and pollutes per-op deltas. `--paired-endpoint` measures
+both versions in **one interleaved run**: each cache-mode × concurrency cell is measured on A and
+immediately after on B, so both sides of every compared cell see the same environment window. It
+writes the same two standard reports (read bundles only):
+
+```bash
+benchmark synthetic run --recording rec --endpoint falkor://127.0.0.1:6381 \
+  --paired-endpoint falkor://127.0.0.1:6382 \
+  --concurrency 1,2,4,8,16,32 --cache both \
+  --out runA.json --paired-out runB.json --label v4.2.0 --paired-label v4.2.1
+benchmark synthetic report --diff runA.json runB.json --out diff.md
+```
+
 ---
 
 <a id="story-2"></a>

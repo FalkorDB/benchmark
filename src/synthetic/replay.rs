@@ -325,19 +325,15 @@ pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
                 reference.push((op.clone(), Arc::new(cyphers.clone()), Vec::new()));
                 continue;
             }
-            let to_capture: &[String] = if entry.result_gated { cyphers } else { &cyphers[..1] };
-            let mut shapes = Vec::with_capacity(to_capture.len());
-            for c in to_capture {
-                shapes.push(
-                    capture_result(&mut graph, c, op_st, op_deadline)
-                        .await
-                        .map_err(|e| OtherError(format!("capturing '{}': {}", op.name(), e)))?,
-                );
-            }
-            if !entry.result_gated {
-                // The probe shape is discarded: downstream code treats a shapeless op as result-N/A.
-                shapes.clear();
-            }
+            let shapes = capture_read_op_shapes(
+                &mut graph,
+                op.name(),
+                cyphers,
+                entry.result_gated,
+                op_st,
+                op_deadline,
+            )
+            .await?;
             reference.push((op.clone(), Arc::new(cyphers.clone()), shapes));
         }
         // Setup connection done; drop it so it isn't an idle extra connection during the sweep.
@@ -555,47 +551,77 @@ pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
     // The corpus size is what the bundle actually recorded per op (not the compile-time constant) —
     // over every recorded op, including capability-skipped ones (it describes the bundle, not the
     // subset this engine could execute).
-    let corpus_size = bundle
-        .commands
-        .iter()
-        .map(|(_, cyphers)| cyphers.len())
-        .max()
-        .unwrap_or(0);
+    let corpus_size = bundle_corpus_size(&bundle);
 
     Ok(Report {
         schema_version: SCHEMA_VERSION,
-        meta: Meta {
-            tool_version: env!("CARGO_PKG_VERSION").to_string(),
-            endpoint: redact_endpoint(&config.endpoint),
-            graph: graph_name,
-            samples: config.samples,
-            warmup: config.warmup,
-            concurrency: concurrency.clone(),
-            seed: bundle.manifest.corpus_seed,
+        meta: replay_meta(
+            config,
+            &bundle,
+            graph_name,
+            concurrency,
             corpus_size,
-            server_timeout_ms: config.server_timeout_ms,
-            client_deadline_ms: config.client_deadline_ms,
-            connection: "pool(size=1) per worker".to_string(),
             started_at_epoch_secs,
             server,
-            host: crate::synthetic::host::collect(),
-            // The bundle's workload_hash attests the graph *and* the commands, so the guard compares
-            // replays of the same bundle safely.
-            dataset: Some(DatasetInfo {
-                seed: dataset_spec.seed,
-                nodes: dataset_spec.nodes,
-                edges: dataset_spec.edges,
-                workload_hash: bundle.manifest.workload_hash.clone(),
-            }),
-            label: config.label.clone(),
-            oracle_verified: if bundle.oracle.is_empty() {
-                None
-            } else {
-                Some(bundle.oracle.iter().map(|(op, v)| (op.clone(), v.len())).collect())
-            },
-        },
+            None,
+        ),
         operations,
     })
+}
+
+/// The bundle's recorded per-op corpus size (the maximum across ops — what the bundle actually
+/// recorded, not the compile-time constant), over every recorded op including capability-skipped
+/// ones (it describes the bundle, not the subset an engine could execute).
+pub(crate) fn bundle_corpus_size(bundle: &Bundle) -> usize {
+    bundle.commands.iter().map(|(_, cyphers)| cyphers.len()).max().unwrap_or(0)
+}
+
+/// Build the replay report's [`Meta`] block — shared by the solo replay and each side of the
+/// paired replay (see [`crate::synthetic::paired`]) so the two can't drift. `paired_with` is the
+/// redacted endpoint of the *other* side for a paired run, `None` for a solo one.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn replay_meta(
+    config: &ReplayConfig,
+    bundle: &Bundle,
+    graph_name: String,
+    concurrency: Vec<usize>,
+    corpus_size: usize,
+    started_at_epoch_secs: u64,
+    server: ServerInfo,
+    paired_with: Option<String>,
+) -> Meta {
+    let dataset_spec = bundle.spec();
+    Meta {
+        tool_version: env!("CARGO_PKG_VERSION").to_string(),
+        endpoint: redact_endpoint(&config.endpoint),
+        graph: graph_name,
+        samples: config.samples,
+        warmup: config.warmup,
+        concurrency,
+        seed: bundle.manifest.corpus_seed,
+        corpus_size,
+        server_timeout_ms: config.server_timeout_ms,
+        client_deadline_ms: config.client_deadline_ms,
+        connection: "pool(size=1) per worker".to_string(),
+        started_at_epoch_secs,
+        server,
+        host: crate::synthetic::host::collect(),
+        // The bundle's workload_hash attests the graph *and* the commands, so the guard compares
+        // replays of the same bundle safely.
+        dataset: Some(DatasetInfo {
+            seed: dataset_spec.seed,
+            nodes: dataset_spec.nodes,
+            edges: dataset_spec.edges,
+            workload_hash: bundle.manifest.workload_hash.clone(),
+        }),
+        label: config.label.clone(),
+        oracle_verified: if bundle.oracle.is_empty() {
+            None
+        } else {
+            Some(bundle.oracle.iter().map(|(op, v)| (op.clone(), v.len())).collect())
+        },
+        paired_with,
+    }
 }
 
 /// Replay, print the console summary, and write the JSON + Markdown report.
@@ -827,11 +853,40 @@ pub(crate) async fn restore_and_verify(
     Ok(())
 }
 
+/// Untimed single-flight reference capture for one **read** op (design §3.4): capture every
+/// command's [`ResultShape`] when the op is result-gated; otherwise probe only the first command
+/// (fail-fast on a broken recorded command) and discard the shape, so downstream code treats the
+/// op as result-N/A. Shared by the solo replay and each side of the paired replay
+/// ([`crate::synthetic::paired`]) so the capture semantics can't drift.
+pub(crate) async fn capture_read_op_shapes(
+    graph: &mut AsyncGraph,
+    op_name: &str,
+    cyphers: &[String],
+    result_gated: bool,
+    server_timeout_ms: i64,
+    client_deadline: Duration,
+) -> BenchmarkResult<Vec<ResultShape>> {
+    let to_capture: &[String] = if result_gated { cyphers } else { &cyphers[..1] };
+    let mut shapes = Vec::with_capacity(to_capture.len());
+    for c in to_capture {
+        shapes.push(
+            capture_result(graph, c, server_timeout_ms, client_deadline)
+                .await
+                .map_err(|e| OtherError(format!("capturing '{}': {}", op_name, e)))?,
+        );
+    }
+    if !result_gated {
+        // The probe shape is discarded: downstream code treats a shapeless op as result-N/A.
+        shapes.clear();
+    }
+    Ok(shapes)
+}
+
 /// Ask the engine which procedures it registers (`dbms.procedures()`), returning their
 /// **lowercased** names — the capability probe (design Phase 6 §3.5). One query per replay,
 /// mirroring the A/B driver's `detect_algorithm_capabilities` (matching is case-insensitive so a
 /// registry spelling change can't fake a missing capability).
-async fn probe_procedures(
+pub(crate) async fn probe_procedures(
     graph: &mut AsyncGraph,
     server_timeout_ms: i64,
     client_deadline: Duration,
@@ -906,7 +961,7 @@ pub(crate) async fn restore_base_on(
 }
 
 /// Drop `graph`, execute the bundle's recorded load statements, and verify the node/edge counts.
-async fn load_recorded_graph(
+pub(crate) async fn load_recorded_graph(
     graph: &mut AsyncGraph,
     bundle: &Bundle,
     graph_name: &str,
@@ -943,7 +998,7 @@ async fn load_recorded_graph(
 /// connections, run every command on each, and assert each command's [`ResultShape`] equals the
 /// single-flight reference. Untimed — a pure correctness check that concurrency didn't change
 /// results. Any mismatch (or error) fails the whole run.
-async fn verify_concurrent(
+pub(crate) async fn verify_concurrent(
     endpoint: &str,
     graph_name: &str,
     cyphers: &Arc<Vec<String>>,
@@ -984,7 +1039,7 @@ async fn verify_concurrent(
 /// row set), in command order. Deterministic given the same graph + recorded commands, and
 /// length-framed so it can't alias a different op's digest. Two versions returning different results
 /// for the same recorded command produce different digests.
-fn op_result_digest(
+pub(crate) fn op_result_digest(
     name: &str,
     shapes: &[ResultShape],
 ) -> String {

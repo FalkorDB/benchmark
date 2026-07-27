@@ -860,6 +860,7 @@ mod tests {
                 }),
                 label: Some(label.to_string()),
                 oracle_verified: None,
+                paired_with: None,
             },
             operations,
         }

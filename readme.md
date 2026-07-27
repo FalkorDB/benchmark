@@ -582,6 +582,25 @@ just synthetic-compare-versions demo falkor://127.0.0.1:6379 falkor://127.0.0.1:
   never covered oracle data), pass **`--require-oracle`** whenever the bundle is *expected* to
   carry the correctness tier: the replay then refuses (offline, before any connection) a write
   bundle without an oracle, and errors on a read bundle (reads have none).
+- **`benchmark synthetic run --recording <dir> --paired-endpoint <endpoint-B> [--paired-graph g]
+  [--paired-out B.json] [--paired-label name]`** measures the same recorded bundle against **two**
+  endpoints **interleaved** instead of sequentially, so both sides of every per-op comparison cell
+  see the same environment window (thermal state, background load) and per-op deltas aren't
+  polluted by minutes of drift between two full runs. Both endpoints are set up identically (each
+  loads the recorded graph, runs its own untimed reference pass and digests, honors per-op
+  budgets), then for each op, for each cache-mode × concurrency cell, the cell is measured on the
+  primary endpoint and **immediately after** on the paired endpoint (A,B,A,B,…). Ops are never
+  interleaved with each other — per-op attribution stays strict, and an op skipped on either side
+  (capability) is skipped on both so the reports stay comparable. The run writes **two complete
+  standard reports** — primary → `--out`, paired → `--paired-out` (default: `<out>` with a `-b`
+  suffix, e.g. `report-b.json`) — that work unchanged with `report --diff`/`--regression`; each
+  report's `meta.paired_with` names the other side's endpoint as pairing provenance.
+  `--paired-label` names the B column like `--label` names A's. Paired mode is **read-bundle
+  only** (write bundles reset the base graph around every cell, which defeats interleaving; the
+  replay refuses them up front) and requires `--recording`; `--require-oracle` is likewise
+  refused. For an **A/A self-check** on a single server, pass the same endpoint twice with a
+  distinct `--paired-graph` — identical `workload_hash` + per-op digests and near-zero deltas are
+  the expected outcome.
 - **`benchmark synthetic report --diff <A.json> <B.json> [--out diff.md]`** **guards** the pair (it
   aborts unless the `workload_hash` **and** every op's `result_digest` match, so a version returning
   wrong/empty results faster can't masquerade as an improvement — the version difference itself is

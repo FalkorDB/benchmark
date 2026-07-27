@@ -121,6 +121,13 @@ pub struct Meta {
     /// pre-§6.3 reports still deserialize.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oracle_verified: Option<std::collections::BTreeMap<String, usize>>,
+    /// Pairing provenance: the **redacted endpoint of the other side** when this report was
+    /// produced by a paired interleaved replay (`synthetic run --recording --paired-endpoint`),
+    /// where each per-op cell (cache mode × concurrency) was measured back-to-back on both
+    /// endpoints so the two sides shared the same environment window. Absent for a solo run.
+    /// `#[serde(default)]` so pre-paired reports still deserialize.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paired_with: Option<String>,
 }
 
 /// Provenance for a synthetic dataset: its knobs and the `workload_hash` that identifies the whole
@@ -773,6 +780,7 @@ mod tests {
                 dataset: None,
                 label: None,
                 oracle_verified: None,
+                paired_with: None,
             },
             operations,
         }
@@ -819,6 +827,33 @@ mod tests {
         assert!(!json.contains("oracle_verified"), "None must not serialize: {json}");
         let back: Report = serde_json::from_str(&json).unwrap();
         assert_eq!(back.meta.oracle_verified, None);
+    }
+
+    #[test]
+    fn paired_with_round_trips_and_defaults_to_none() {
+        // A paired interleaved replay records the other side's redacted endpoint…
+        let mut report = sample_report();
+        report.meta.paired_with = Some("falkor://127.0.0.1:6380/".to_string());
+        let json = report.to_json().unwrap();
+        assert!(
+            json.contains("\"paired_with\""),
+            "pairing provenance serialized: {json}"
+        );
+        let back: Report = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            back.meta.paired_with,
+            Some("falkor://127.0.0.1:6380/".to_string())
+        );
+        // …while solo runs omit the field entirely, and pre-paired reports (no field at all)
+        // still deserialize — schema compatibility is additive.
+        let plain = sample_report();
+        let json = plain.to_json().unwrap();
+        assert!(
+            !json.contains("paired_with"),
+            "None must not serialize: {json}"
+        );
+        let back: Report = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.meta.paired_with, None);
     }
 
     #[test]

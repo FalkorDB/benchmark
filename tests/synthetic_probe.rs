@@ -1548,6 +1548,10 @@ async fn record_and_replay_via_run_command() {
         recording: Some(out_dir),
         no_load: false,
         require_oracle: false,
+        paired_endpoint: None,
+        paired_graph: None,
+        paired_out: None,
+        paired_label: None,
     })
     .await
     .expect("run --recording via run_command");
@@ -2528,4 +2532,287 @@ async fn re_recording_over_an_oracle_bundle_succeeds_with_and_without_oracle() {
 
     std::fs::remove_dir_all(&dir).ok();
     drop_graph(graph).await;
+}
+
+/// Paired interleaved replay (`--paired-endpoint`), exercised as a TRUE A/A pairing: ONE FalkorDB
+/// serves as both endpoints with distinct graph names, driven end-to-end through the real CLI
+/// `run` path (so the flag mapping + the default `--paired-out` derivation run too). Asserts the
+/// noise-reduction mode changes nothing about correctness or comparability:
+/// - both standard reports are written (side B at the derived `<out>-b.json` default);
+/// - the two sides carry the identical `workload_hash` and identical per-op `result_digest`s
+///   (same engine + same recorded commands ⇒ same results);
+/// - pairing provenance is recorded crosswise (`meta.paired_with` names the other side);
+/// - a capability-gated op the engine lacks is skipped on BOTH sides (union-skip semantics);
+/// - `report --diff` (strict guard) and `report --diff --regression` both complete clean on the
+///   pair — the paired reports are drop-in inputs for the existing comparison pipeline.
+///
+/// Multi-thread runtime: FalkorDB entity decoding uses `block_in_place`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires a running FalkorDB server"]
+async fn paired_replay_a_a_pairing_matches_digests_and_diffs_clean() {
+    use benchmark::cli::SyntheticCommands;
+    use benchmark::synthetic::catalog::RecordedBudget;
+    use benchmark::synthetic::recording::RecordedOp;
+    use benchmark::synthetic::report::Report;
+    use benchmark::synthetic::{run_command, OpKey};
+
+    let graph_a = "syn_it_paired_a";
+    let graph_b = "syn_it_paired_b";
+    drop_graph(graph_a).await;
+    drop_graph(graph_b).await;
+    let dir = temp_bundle_dir("syn-it-paired");
+    let spec = DatasetSpec {
+        seed: 9,
+        nodes: 300,
+        edges: 900,
+    };
+    let ops = vec![
+        RecordedOp {
+            key: OpKey::dynamic("point_read", QueryType::Read),
+            result_gated: true,
+            budget: RecordedBudget::default(),
+            capability: None,
+            commands: vec![
+                "MATCH (u:User {id: 1}) RETURN u.id".to_string(),
+                "MATCH (u:User {id: 2}) RETURN u.id".to_string(),
+            ],
+        },
+        RecordedOp {
+            key: OpKey::dynamic("count_all", QueryType::Read),
+            result_gated: true,
+            budget: RecordedBudget::default(),
+            capability: None,
+            commands: vec!["MATCH (n:User) RETURN count(n)".to_string()],
+        },
+        RecordedOp {
+            key: OpKey::dynamic("ghost_algo", QueryType::Read),
+            result_gated: true,
+            budget: RecordedBudget::default(),
+            // A procedure no engine registers: the capability probe must skip this op on BOTH
+            // sides (union-skip), and the skip must not disturb the paired measurement.
+            capability: Some("algo.doesNotExist123".to_string()),
+            commands: vec!["RETURN 1".to_string()],
+        },
+    ];
+    recording::record_rendered(&spec, graph_a, &ops, spec.seed, 256, &dir).expect("record");
+
+    // Drive the real CLI path: --recording + --paired-endpoint (+ --paired-graph for the A/A
+    // pairing on one server), leaving --paired-out at its derived default.
+    let out_a = dir.join("paired-a.json").to_string_lossy().into_owned();
+    let out_b_default = dir.join("paired-a-b.json").to_string_lossy().into_owned();
+    run_command(SyntheticCommands::Run {
+        config: None,
+        endpoint: Some(endpoint()),
+        graph: Some(graph_a.to_string()),
+        ops: vec![],
+        all_reads: false,
+        tier: None,
+        samples: Some(30),
+        warmup: Some(5),
+        concurrency: vec![1, 2],
+        reset_every: None,
+        seed: None,
+        cache: None, // defaults to Both
+        server_timeout_ms: None,
+        client_deadline_ms: None,
+        out: Some(out_a.clone()),
+        server_image: None,
+        label: Some("base".to_string()),
+        generate: false,
+        nodes: None,
+        edges: None,
+        recording: Some(dir.to_string_lossy().into_owned()),
+        no_load: false,
+        require_oracle: false,
+        paired_endpoint: Some(endpoint()),
+        paired_graph: Some(graph_b.to_string()),
+        paired_out: None, // exercise the `<out>-b.json` default
+        paired_label: Some("cand".to_string()),
+    })
+    .await
+    .expect("paired replay");
+
+    // Both reports written; both sides measured the identical workload.
+    let load = |path: &str| -> Report {
+        let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+        serde_json::from_str(&text).unwrap_or_else(|e| panic!("parse {path}: {e}"))
+    };
+    let a = load(&out_a);
+    let b = load(&out_b_default);
+    assert_eq!(
+        a.meta.dataset.as_ref().expect("dataset a").workload_hash,
+        b.meta.dataset.as_ref().expect("dataset b").workload_hash,
+        "both sides replay the same bundle"
+    );
+    assert_eq!(a.meta.label.as_deref(), Some("base"));
+    assert_eq!(b.meta.label.as_deref(), Some("cand"));
+    assert_eq!(a.meta.graph, graph_a);
+    assert_eq!(b.meta.graph, graph_b);
+    // Pairing provenance is crosswise: each side names the other's (redacted) endpoint — the
+    // same normalization `meta.endpoint` uses, so they must match exactly.
+    assert_eq!(
+        a.meta.paired_with.as_deref(),
+        Some(b.meta.endpoint.as_str())
+    );
+    assert_eq!(
+        b.meta.paired_with.as_deref(),
+        Some(a.meta.endpoint.as_str())
+    );
+
+    // A true A/A pairing: same engine + same commands ⇒ identical per-op result digests, with
+    // every measured cell present on both sides (C=1,2 × cached+uncached).
+    for op in ["point_read", "count_all"] {
+        let op_a = &a.operations[op];
+        let op_b = &b.operations[op];
+        let da = op_a
+            .result_digest
+            .as_ref()
+            .unwrap_or_else(|| panic!("digest a for {op}"));
+        let db = op_b
+            .result_digest
+            .as_ref()
+            .unwrap_or_else(|| panic!("digest b for {op}"));
+        assert_eq!(da, db, "A/A digests must match for {op}");
+        for side in [op_a, op_b] {
+            let levels: Vec<usize> = side.levels.iter().map(|l| l.concurrency).collect();
+            assert_eq!(levels, vec![1, 2], "full sweep measured for {op}");
+            for level in &side.levels {
+                assert!(level.cached.is_some(), "cached cell for {op}");
+                assert!(level.uncached.is_some(), "uncached cell for {op}");
+            }
+        }
+    }
+    // The capability-gated op was skipped on BOTH sides, unmeasured, with the probe's reason.
+    for side in [&a, &b] {
+        let ghost = &side.operations["ghost_algo"];
+        let reason = ghost.skipped.as_ref().expect("ghost_algo skipped");
+        assert!(reason.contains("algo.doesNotExist123"), "got: {reason}");
+        assert!(ghost.levels.is_empty() && ghost.result_digest.is_none());
+    }
+
+    // The paired reports are drop-in inputs for the comparison pipeline: the strict diff guard
+    // (workload_hash + digests) passes, and the regression flavor renders clean too.
+    let diff_out = dir.join("diff.md").to_string_lossy().into_owned();
+    run_command(SyntheticCommands::Report {
+        input: None,
+        diff: vec![out_a.clone(), out_b_default.clone()],
+        regression: false,
+        thresholds: None,
+        out: Some(diff_out.clone()),
+        elapsed_secs: None,
+        summary: None,
+        cells: None,
+        budget_profile: None,
+        divergence_policy: None,
+    })
+    .await
+    .expect("report --diff on the paired pair");
+    assert!(std::path::Path::new(&diff_out).exists(), "diff.md written");
+    let regression_out = dir.join("regression.md").to_string_lossy().into_owned();
+    run_command(SyntheticCommands::Report {
+        input: None,
+        diff: vec![out_a, out_b_default],
+        regression: true,
+        thresholds: None,
+        out: Some(regression_out.clone()),
+        elapsed_secs: None,
+        summary: None,
+        cells: None,
+        budget_profile: None,
+        divergence_policy: None,
+    })
+    .await
+    .expect("report --diff --regression on the paired pair");
+    assert!(
+        std::path::Path::new(&regression_out).exists(),
+        "regression.md written"
+    );
+
+    // ---- Phase 2: paired `--no-load` over the already-loaded graphs (library API this time),
+    // with a bundle that has NO capability ops and ONE budgeted op — the second recorded shape
+    // paired mode must honor (per-op budgets narrow the cell grid, C=1 skips the concurrent
+    // verify pass, cached-only leaves the compilation column empty).
+    use benchmark::synthetic::paired::{self as paired_mod, PairedReplayConfig};
+
+    let dir2 = temp_bundle_dir("syn-it-paired-noload");
+    let tight = RecordedBudget {
+        samples: Some(5),
+        warmup: Some(0),
+        concurrency: Some(vec![1]),
+        cache: Some(benchmark::synthetic::CacheSelection::Cached),
+        ..RecordedBudget::default()
+    };
+    let ops2 = vec![
+        RecordedOp {
+            key: OpKey::dynamic("plain_read", QueryType::Read),
+            result_gated: true,
+            budget: RecordedBudget::default(),
+            capability: None,
+            commands: vec!["MATCH (u:User {id: 3}) RETURN u.id".to_string()],
+        },
+        RecordedOp {
+            key: OpKey::dynamic("tight_read", QueryType::Read),
+            result_gated: true,
+            budget: tight,
+            capability: None,
+            commands: vec!["MATCH (u:User {id: 4}) RETURN u.id".to_string()],
+        },
+    ];
+    recording::record_rendered(&spec, graph_a, &ops2, spec.seed, 128, &dir2).expect("record 2");
+    let paired_no_load = |graph_override: &str| PairedReplayConfig {
+        base: ReplayConfig {
+            recording_dir: dir2.to_path_buf(),
+            endpoint: endpoint(),
+            graph: Some(graph_override.to_string()),
+            load: false,
+            samples: 40,
+            warmup: 5,
+            concurrency: vec![1],
+            cache: benchmark::synthetic::CacheSelection::Cached,
+            server_timeout_ms: 5_000,
+            client_deadline_ms: 6_000,
+            out: dir2.join("nl-a.json").to_string_lossy().into_owned(),
+            server_image: None,
+            label: None,
+            require_oracle: false,
+        },
+        paired_endpoint: endpoint(),
+        paired_graph: Some(graph_b.to_string()),
+        paired_out: dir2.join("nl-b.json").to_string_lossy().into_owned(),
+        paired_label: None,
+    };
+    let (nl_a, nl_b) = paired_mod::run(&paired_no_load(graph_a))
+        .await
+        .expect("paired --no-load over the loaded graphs");
+    for report in [&nl_a, &nl_b] {
+        // The budgeted op measured its own narrowed grid (one C=1 cached cell) and carries the
+        // resolved policy; the plain op followed the global config; digests are gated on both.
+        let tight_op = &report.operations["tight_read"];
+        assert_eq!(tight_op.levels.len(), 1);
+        assert!(tight_op.levels[0].cached.is_some() && tight_op.levels[0].uncached.is_none());
+        let policy = tight_op.policy.as_ref().expect("budgeted op persists its policy");
+        assert_eq!((policy.samples, policy.warmup), (5, 0));
+        assert!(report.operations["plain_read"].policy.is_none());
+    }
+    for op in ["plain_read", "tight_read"] {
+        assert_eq!(
+            nl_a.operations[op].result_digest, nl_b.operations[op].result_digest,
+            "A/A digests must match for {op}"
+        );
+        assert!(nl_a.operations[op].result_digest.is_some());
+    }
+
+    // A paired `--no-load` against a graph that was never loaded fails closed with the fix.
+    let msg = format!(
+        "{}",
+        paired_mod::run(&paired_no_load("syn_it_paired_missing"))
+            .await
+            .expect_err("count-verify must fail on a missing graph")
+    );
+    assert!(msg.contains("don't pass --no-load"), "got: {msg}");
+
+    std::fs::remove_dir_all(&dir2).ok();
+    std::fs::remove_dir_all(&dir).ok();
+    drop_graph(graph_a).await;
+    drop_graph(graph_b).await;
 }
