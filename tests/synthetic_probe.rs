@@ -721,6 +721,13 @@ async fn pipeline_depth_leaves_write_ops_on_the_plain_closed_loop() {
     .await
     .expect("write sweep with a configured pipeline depth should still succeed at depth 1");
 
+    // A write-only run never pipelines, so its metadata must say so too.
+    assert!(
+        !report.meta.connection.contains("pipelined"),
+        "write-only runs report the plain pooled connection, got '{}'",
+        report.meta.connection
+    );
+
     let op = report.operations.get("create_node").expect("op present");
     let lvl = only_level(op);
     let m = lvl.cached.as_ref().expect("cached metrics present");

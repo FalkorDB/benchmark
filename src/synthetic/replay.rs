@@ -579,7 +579,13 @@ pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
             corpus_size,
             server_timeout_ms: config.server_timeout_ms,
             client_deadline_ms: config.client_deadline_ms,
-            connection: crate::synthetic::connection_description(config.pipeline_depth),
+            // A write bundle always measures at depth 1 (single-kind bundle ⇒ no read ever
+            // pipelines), so its report never claims pipelined read lanes.
+            connection: crate::synthetic::connection_description(if has_writes {
+                1
+            } else {
+                config.pipeline_depth
+            }),
             started_at_epoch_secs,
             server,
             host: crate::synthetic::host::collect(),

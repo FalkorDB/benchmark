@@ -782,6 +782,13 @@ pub async fn run(config: &Config) -> BenchmarkResult<Report> {
     let uid_alloc = AtomicU64::new(0);
 
     let mut operations = BTreeMap::new();
+    // Write ops always measure at depth 1, so a run with no reads reports the plain pooled
+    // connection whatever depth was configured (computed before `ops` is consumed below).
+    let effective_meta_depth = if ops.iter().any(|op| op.kind() == QueryType::Read) {
+        config.pipeline_depth
+    } else {
+        1
+    };
     // Capture each op's corpus fingerprint (in execution order) so the corpus_hash reflects the
     // exact rendered workload — parameter values included — not just the op names.
     let mut op_fingerprints: Vec<(OpName, String)> = Vec::with_capacity(ops.len());
@@ -855,7 +862,7 @@ pub async fn run(config: &Config) -> BenchmarkResult<Report> {
             corpus_size: CORPUS_SIZE,
             server_timeout_ms: config.server_timeout_ms,
             client_deadline_ms: config.client_deadline_ms,
-            connection: connection_description(config.pipeline_depth),
+            connection: connection_description(effective_meta_depth),
             started_at_epoch_secs,
             server,
             host: host::collect(),
