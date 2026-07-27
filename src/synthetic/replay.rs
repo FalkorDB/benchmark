@@ -614,7 +614,7 @@ pub async fn run_and_report(config: &ReplayConfig) -> BenchmarkResult<()> {
 /// - **`--no-load` forbidden**: write measurement is defined from the recorded base graph
 ///   (per-cell resets reload it — §3.3);
 /// - **C=1 only**: every write op's *effective* sweep (its recorded budget's, else the run's)
-///   must be exactly `[1]` (§5 defers concurrent writes);
+///   must be exactly `[1]` (§6.5 policy: recorded write replay stays C=1);
 /// - **never result-gated**: the latency tier asserts nothing (§4.1) — a gated write would imply
 ///   a correctness capture the write path deliberately skips;
 /// - **never capability-gated**: write shapes are algorithm-free plain Cypher (§4.1), and
@@ -647,7 +647,7 @@ fn validate_write_replay(
         if sweep != [1] {
             return Err(OtherError(format!(
                 "write op '{}' resolves to concurrency sweep {:?} — write replay is C=1 only \
-                 (design §5; budgets are outside workload_hash, so this is enforced at replay)",
+                 (design §6.5; budgets are outside workload_hash, so this is enforced at replay)",
                 op.name(),
                 sweep
             )));
@@ -732,8 +732,8 @@ async fn measure_write_op(
     };
     Ok(OperationReport {
         levels: vec![LevelReport {
-            // The op's effective sweep — `[1]` today, enforced by `validate_write_replay`, and
-            // derived (not hardcoded) so the report stays honest if §5's C>1 decision ever lands.
+            // The op's effective sweep — `[1]`, enforced by `validate_write_replay` per the §6.5
+            // decision, and derived (not hardcoded) so the report stays honest with the guard.
             concurrency: op_concurrency.first().copied().unwrap_or(1),
             cached,
             uncached,
@@ -1137,7 +1137,7 @@ mod tests {
 
     #[test]
     fn validate_write_replay_rejects_a_non_c1_sweep() {
-        // §5: C=1 only — budgets are outside workload_hash, so a tampered budget passes the load
+        // §6.5: C=1 only — budgets are outside workload_hash, so a tampered budget passes the load
         // hash gate and MUST be caught here, whether the sweep comes from the budget…
         let tampered = RecordedBudget {
             concurrency: Some(vec![8]),

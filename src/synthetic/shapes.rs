@@ -496,9 +496,11 @@ pub fn algorithm_read_shapes() -> Vec<ShapeSpec> {
     ]
 }
 
-/// The per-op replay budget every write shape records (Phase 7 §4.1): **C=1 only** — concurrent
-/// writes are explicitly deferred (design §5; interleaved mutations change what each invocation
-/// does, so a C>1 latency number would not be comparable across versions) — with a modest
+/// The per-op replay budget every write shape records (Phase 7 §4.1): **C=1 only** — the §6.5
+/// policy decision (a recorded corpus is replayed verbatim on one shared graph: its commands
+/// interleave on shared node ids across any contiguous worker split, so a naive split races
+/// mutations of the same node and a C>1 latency number would not be comparable across versions;
+/// a partitioned-correct C>1 replay is corpus-partitioning engineering deliberately not built) — with a modest
 /// samples/warmup so the drift a cell accumulates between base resets stays small (~110
 /// invocations/cell). Cache modes + timeouts inherit the run's global knobs: the write shapes are
 /// single-entity point mutations, as cheap as the point reads, and their uncached-vs-cached
@@ -1029,8 +1031,8 @@ mod tests {
     fn write_shapes_are_uniformly_latency_tier_annotated() {
         // Phase 7 §4.1 (latency tier): every write shape is Write-family, Full-tier (never in the
         // per-PR Core gate), result-N/A (mutation outcomes are state/value-dependent — §2/§10),
-        // plain Cypher (no capability), full corpus, and pinned to the C=1 write budget (§5 defers
-        // concurrent writes).
+        // plain Cypher (no capability), full corpus, and pinned to the C=1 write budget (§6.5
+        // policy: recorded write replay stays C=1).
         for shape in write_shapes() {
             assert_eq!(shape.family, CoverageFamily::Write, "{}", shape.name);
             assert_eq!(shape.tier, Tier::Full, "{}", shape.name);
@@ -1043,7 +1045,7 @@ mod tests {
             assert_eq!(shape.corpus_size, CORPUS_SIZE, "{}", shape.name);
             assert_eq!(shape.budget, WRITE_BUDGET, "{}", shape.name);
         }
-        assert_eq!(WRITE_BUDGET.concurrency, Some(&WRITE_SWEEP[..]), "write replay is C=1 (§5)");
+        assert_eq!(WRITE_BUDGET.concurrency, Some(&WRITE_SWEEP[..]), "write replay is C=1 (§6.5)");
     }
 
     #[test]

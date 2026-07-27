@@ -650,6 +650,23 @@ fn record_rendered_impl(
             op.capability.as_deref().unwrap_or_default()
         )));
     }
+    // Recorded write replay is C=1 by policy (§6.5): the corpus is replayed verbatim on one
+    // shared graph, and its commands interleave on shared node ids across any contiguous worker
+    // split — measured on the pinned dev image, racing MERGEs of one colliding edge both fire
+    // ON CREATE and duplicate it. A partitioned-correct C>1 replay would take corpus-partitioning
+    // engineering (id-band-clean corpora, per-worker assignment) that is deliberately not built.
+    // Replay enforces the effective sweep; fail the explicit pin early here too.
+    if let Some(op) = ops.iter().find(|op| {
+        op.key.kind() == QueryType::Write
+            && op.budget.concurrency.as_deref().is_some_and(|sweep| sweep != [1])
+    }) {
+        return Err(OtherError(format!(
+            "write op '{}' pins concurrency sweep {:?} — recorded write replay is C=1 only \
+             (design §6.5 policy: the recorded corpus is not partitioned across workers)",
+            op.key.name(),
+            op.budget.concurrency.as_deref().unwrap_or_default()
+        )));
+    }
     // Content-determined format version: any write op ⇒ v2 (kind folded into the workload hash);
     // an all-read bundle stays v1, byte-identical to every bundle recorded before writes existed.
     let format_version = if has_writes {
@@ -1732,6 +1749,47 @@ mod tests {
 
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&dir2).ok();
+    }
+
+    #[test]
+    fn record_rejects_a_write_op_pinning_a_non_c1_sweep() {
+        // §6.5 policy: recorded write replay stays C=1. Replay enforces the *effective* sweep
+        // (budgets are outside workload_hash), but an explicitly pinned C>1 budget is caught at
+        // record time too — fail before writing a bundle replay can only reject.
+        let spec = DatasetSpec {
+            seed: 5,
+            nodes: 200,
+            edges: 400,
+        };
+        let op = |sweep: Option<Vec<usize>>| RecordedOp {
+            key: OpKey::dynamic("w_solo", QueryType::Write),
+            result_gated: false,
+            budget: RecordedBudget {
+                concurrency: sweep,
+                ..RecordedBudget::default()
+            },
+            capability: None,
+            commands: vec!["MATCH (u:User {id: 1}) SET u.x = 1".to_string()],
+        };
+
+        let dir = temp_bundle_dir("synthrec-c8-write");
+        let err = record_rendered(&spec, "g", &[op(Some(vec![8]))], 9, 32, &dir).unwrap_err();
+        assert!(
+            format!("{err}").contains("recorded write replay is C=1 only"),
+            "got: {err}"
+        );
+        assert!(format!("{err}").contains("[8]"), "must name the offending sweep: {err}");
+
+        // An explicit [1] pin and an inherit budget (None) both record fine — replay guards the
+        // effective sweep for the inherit case.
+        let dir_ok = temp_bundle_dir("synthrec-c1-write");
+        record_rendered(&spec, "g", &[op(Some(vec![1]))], 9, 32, &dir_ok).unwrap();
+        let dir_inherit = temp_bundle_dir("synthrec-inherit-write");
+        record_rendered(&spec, "g", &[op(None)], 9, 32, &dir_inherit).unwrap();
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&dir_ok).ok();
+        std::fs::remove_dir_all(&dir_inherit).ok();
     }
 
     #[test]
