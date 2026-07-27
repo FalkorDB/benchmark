@@ -3265,11 +3265,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn report_regression_gates_on_server_ms_when_selected() {
-        // Hermetic end-to-end `--gated-metric`: the candidate doubles its TOTAL p50 (over budget)
-        // while its SERVER p50 grows 5 % (within budget). The default gate regresses; selecting
-        // `server-ms` passes, and every artifact (Markdown, summary JSON, cells JSON) names the
-        // selected metric.
+    async fn report_regression_gates_on_server_ms_by_default() {
+        // Hermetic end-to-end default flip: the candidate doubles its TOTAL p50 (over budget)
+        // while its SERVER p50 grows 5 % (within budget). The default gate (server-ms) passes;
+        // the explicit `--gated-metric total-ms` opt-in regresses; every artifact (Markdown,
+        // summary JSON, cells JSON) names the selected metric.
         let dir = std::env::temp_dir();
         let stem = format!("gm-{}", std::process::id());
         let write = |label: &str, total: f64, server: f64| -> String {
@@ -3322,7 +3322,7 @@ mod tests {
             (cmd, out, sum, cells)
         };
 
-        let (cmd, out, sum, cells) = run(Some("server-ms"), "srv");
+        let (cmd, out, sum, cells) = run(None, "srv");
         assert!(run_command(cmd).await.is_ok());
         let compact: diff::SyntheticSummary =
             serde_json::from_str(&std::fs::read_to_string(&sum).unwrap()).unwrap();
@@ -3341,13 +3341,16 @@ mod tests {
             let _ = std::fs::remove_file(p);
         }
 
-        // The identical pair under the default gate: the total-latency regression is caught.
-        let (cmd, out, sum, cells) = run(None, "tot");
+        // The identical pair under the explicit total-ms opt-in: the total-latency regression
+        // is caught, and the artifacts name total_ms.p50.
+        let (cmd, out, sum, cells) = run(Some("total-ms"), "tot");
         assert!(run_command(cmd).await.is_ok());
         let compact: diff::SyntheticSummary =
             serde_json::from_str(&std::fs::read_to_string(&sum).unwrap()).unwrap();
         assert_eq!(compact.overall_verdict, analysis::OverallVerdict::Regressed);
         assert_eq!(compact.gated_metric, "total_ms.p50");
+        let md = std::fs::read_to_string(&out).unwrap();
+        assert!(md.contains("**Gated metric: `total_ms.p50`** (opt-in)"), "{md}");
         for p in [a, b, out, sum, cells] {
             let _ = std::fs::remove_file(p);
         }

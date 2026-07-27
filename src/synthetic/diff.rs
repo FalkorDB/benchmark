@@ -323,11 +323,11 @@ fn row2(
 // ==== Non-fatal regression report ===============================================================
 
 /// Render the **non-fatal** `report --regression` markdown from the [`RegressionAnalysis`] model:
-/// per-cell 🟢/🔴/N-A verdicts on the gated p50 — the total-latency median by default, the
-/// server-reported execution-time median under `--gated-metric server-ms` — against the threshold
-/// budget, with throughput shown for context. Diverged ops get a perf verdict of N/A — 🔴 under
-/// the `gate` divergence policy, ⚠ under `advisory`. A `NotComparable` status renders a single
-/// "not comparable" note. Never errors.
+/// per-cell 🟢/🔴/N-A verdicts on the gated p50 — the server-reported execution-time median by
+/// default, the total-latency median under the `--gated-metric total-ms` opt-in — against the
+/// threshold budget, with throughput shown for context. Diverged ops get a perf verdict of N/A —
+/// 🔴 under the `gate` divergence policy, ⚠ under `advisory`. A `NotComparable` status renders a
+/// single "not comparable" note. Never errors.
 pub fn regression_markdown(analysis: &RegressionAnalysis) -> String {
     let la = analysis.comparison.baseline_label.as_str();
     let lb = analysis.comparison.candidate_label.as_str();
@@ -382,10 +382,18 @@ pub fn regression_markdown(analysis: &RegressionAnalysis) -> String {
     );
     head.push('\n');
     head.push_str(&meta.thresholds.settings_markdown());
+    // The gated metric is always named — the default gate changed to server-ms (maintainer
+    // decision), so no reader should have to guess which clock the verdicts are on.
     if analysis.gated_on_server_ms() {
         head.push_str(
-            "\n**Gated metric: `server_ms.p50`** — the server-reported execution time; \
+            "\n**Gated metric: `server_ms.p50`** (default) — the server-reported execution time; \
              client-observed total latency is not part of any verdict in this comparison.\n",
+        );
+    } else {
+        head.push_str(
+            "\n**Gated metric: `total_ms.p50`** (opt-in) — the client-observed total latency, \
+             including client scheduling and network time; the default gate is the \
+             server-reported execution time (`server_ms.p50`).\n",
         );
     }
 
@@ -455,12 +463,12 @@ pub fn regression_markdown(analysis: &RegressionAnalysis) -> String {
     for w in &analysis.warnings {
         out.push_str(&format!("\n> ⚠ {}\n", md_cell(w)));
     }
-    // The legend names the gated metric under `--gated-metric server-ms`; the default (total-ms)
-    // wording stays byte-identical to the pre-flag report.
+    // The legend always names the gated metric — server_ms by default, total_ms under the
+    // explicit opt-in.
     let metric_clause = if analysis.gated_on_server_ms() {
         "Only **p50** of `server_ms` (server-reported execution time) is gated"
     } else {
-        "Only **p50** is gated"
+        "Only **p50** of `total_ms` (client-observed total latency) is gated"
     };
     out.push_str(&match analysis.divergence_policy {
         DivergencePolicy::Gate => format!(
@@ -615,8 +623,8 @@ pub struct SyntheticSummary {
     pub budget_profile: BudgetProfile,
     /// How divergences were treated (`gate` / `advisory`).
     pub divergence_policy: DivergencePolicy,
-    /// The gated metric id (`total_ms.p50` by default, `server_ms.p50` under
-    /// `--gated-metric server-ms`); everything else is informational.
+    /// The gated metric id (`server_ms.p50` by default, `total_ms.p50` under the
+    /// `--gated-metric total-ms` opt-in); everything else is informational.
     pub gated_metric: String,
     /// Total wall-clock seconds the caller spent computing the check (`--elapsed-secs`), if given.
     pub elapsed_secs: Option<f64>,
@@ -743,10 +751,15 @@ impl SyntheticSummary {
             self.overall_verdict.emoji(),
             md_cell(&self.headline)
         ));
-        // Name a non-default gated metric; the default (total-ms) rendering stays byte-identical
-        // to the pre-flag comment.
+        // The sticky comment always names the gated metric — the default gate changed to
+        // server-ms (maintainer decision), so the clock is never ambiguous.
         if self.gated_metric == GatedMetric::ServerMs.id() {
             out.push_str("\n_gated metric: `server_ms.p50` (server-reported execution time)_\n");
+        } else {
+            out.push_str(
+                "\n_gated metric: `total_ms.p50` (client-observed total latency — opt-in; the \
+                 default gate is `server_ms.p50`)_\n",
+            );
         }
         if self.not_comparable_reason.is_some() {
             // NotComparable: the headline already carries the reason; there is nothing to tally.
@@ -841,7 +854,8 @@ mod tests {
         summarize(&analyze_gate(a, b, g, t))
     }
 
-    /// Analyze under `--gated-metric server-ms` (gate divergence policy).
+    /// Analyze under `--gated-metric server-ms` — the default, spelled out for symmetry with
+    /// [`analyze_total`] (gate divergence policy).
     fn analyze_server(
         a: &Report,
         b: &Report,
@@ -855,6 +869,25 @@ mod tests {
             t,
             &AnalysisOptions {
                 gated_metric: GatedMetric::ServerMs,
+                ..Default::default()
+            },
+        )
+    }
+
+    /// Analyze under the `--gated-metric total-ms` opt-in (gate divergence policy).
+    fn analyze_total(
+        a: &Report,
+        b: &Report,
+        g: &crate::synthetic::baseline::RegressionGuard,
+        t: &Thresholds,
+    ) -> RegressionAnalysis {
+        analyze(
+            a,
+            b,
+            g,
+            t,
+            &AnalysisOptions {
+                gated_metric: GatedMetric::TotalMs,
                 ..Default::default()
             },
         )
@@ -878,7 +911,9 @@ mod tests {
         LevelMetrics {
             throughput_ops_per_sec: tput,
             metrics: MetricSet {
-                server_ms: summ(median * 0.2),
+                // Both clocks carry the same medians so metric-agnostic tests behave identically
+                // under either gate; metric-specific tests overwrite one side explicitly.
+                server_ms: summ(median),
                 total_ms: summ(median),
                 non_internal_ms: summ(median * 0.8),
                 cached_false_rate: 0.0,
@@ -1231,8 +1266,9 @@ mod tests {
 
     // --- folded layout: per-line guard + non-gated p90/p99 context -----------------------------
 
-    /// Mutate the candidate's cached `total_ms` percentiles in place (keeping p50) so tests can
-    /// isolate tail behaviour from the gated p50.
+    /// Mutate the candidate's cached `server_ms` percentiles in place (keeping p50) so tests can
+    /// isolate tail behaviour from the gated p50 — the context tails follow the gated metric,
+    /// server_ms by default.
     fn set_tails(r: &mut Report, p90: f64, p99: f64) {
         let m = r
             .operations
@@ -1242,9 +1278,9 @@ mod tests {
             .cached
             .as_mut()
             .unwrap();
-        m.metrics.total_ms.p90 = p90;
-        m.metrics.total_ms.p95 = (p90 + p99) / 2.0;
-        m.metrics.total_ms.p99 = p99;
+        m.metrics.server_ms.p90 = p90;
+        m.metrics.server_ms.p95 = (p90 + p99) / 2.0;
+        m.metrics.server_ms.p99 = p99;
     }
 
     #[test]
@@ -1263,40 +1299,43 @@ mod tests {
         assert!(md.contains("<br><sub>context: p90 ") && md.contains("op/s</sub>"), "{md}");
         // The per-line guard shows the resolved default (10%) + floor.
         assert!(md.contains("10% AND 0.5 ms"), "guard cell: {md}");
-        // Legend states the gate is p50-only.
-        assert!(md.contains("Only **p50** is gated"), "{md}");
+        // Legend states the gate is p50-only, naming the default gated metric.
+        assert!(
+            md.contains("Only **p50** of `server_ms` (server-reported execution time) is gated"),
+            "{md}"
+        );
     }
 
     #[test]
-    fn regression_markdown_names_a_server_gated_metric_and_default_stays_silent() {
+    fn regression_markdown_names_the_gated_metric_for_both_gates() {
         use crate::synthetic::baseline::regression_guard;
         use crate::synthetic::thresholds::Thresholds;
         // +100 % total p50 (over budget) while the server p50 grows only +0.2 ms — over its 10 %
-        // budget but under the 0.5 ms floor, so server-ms gating passes.
-        let a = report(42001, 1.0, 1000.0);
-        let b = report(42002, 2.0, 900.0);
+        // budget but under the 0.5 ms floor, so the default (server-ms) gate passes while the
+        // total-ms opt-in regresses.
+        let mut a = report(42001, 1.0, 1000.0);
+        let mut b = report(42002, 2.0, 900.0);
+        a.operations.get_mut("match_by_index").unwrap().levels[0]
+            .cached
+            .as_mut()
+            .unwrap()
+            .metrics
+            .server_ms = summ(0.2);
+        b.operations.get_mut("match_by_index").unwrap().levels[0]
+            .cached
+            .as_mut()
+            .unwrap()
+            .metrics
+            .server_ms = summ(0.4);
         let g = regression_guard(&a, &b);
 
-        // Default (total-ms): report byte-layout unchanged — no gated-metric header line, the
-        // pre-flag legend wording, and the total-latency verdict.
+        // Default (server-ms): the header and the legend both name the metric; the verdict
+        // follows the server medians (0.200 → 0.400), which the table carries.
         let md = regression_markdown(&analyze_gate(&a, &b, &g, &Thresholds::builtin()));
         assert!(
-            !md.contains("Gated metric:"),
-            "default header must stay silent: {md}"
-        );
-        assert!(
-            md.contains("Only **p50** is gated — the `context:` line"),
+            md.contains("**Gated metric: `server_ms.p50`** (default)"),
             "{md}"
         );
-        assert!(
-            md.contains("🔴 1 of 1 comparable cell(s) over budget"),
-            "{md}"
-        );
-
-        // server-ms: the header and the legend both name the metric; the verdict follows the
-        // server medians (0.200 → 0.400), which the table now carries.
-        let md = regression_markdown(&analyze_server(&a, &b, &g, &Thresholds::builtin()));
-        assert!(md.contains("**Gated metric: `server_ms.p50`**"), "{md}");
         assert!(
             md.contains("Only **p50** of `server_ms` (server-reported execution time) is gated"),
             "{md}"
@@ -1309,15 +1348,34 @@ mod tests {
             md.contains("0.200") && md.contains("0.400"),
             "server medians in cells: {md}"
         );
+
+        // total-ms opt-in: named as such, and the total-latency regression is caught.
+        let md = regression_markdown(&analyze_total(&a, &b, &g, &Thresholds::builtin()));
+        assert!(
+            md.contains("**Gated metric: `total_ms.p50`** (opt-in)"),
+            "{md}"
+        );
+        assert!(
+            md.contains("Only **p50** of `total_ms` (client-observed total latency) is gated"),
+            "{md}"
+        );
+        assert!(
+            md.contains("🔴 1 of 1 comparable cell(s) over budget"),
+            "{md}"
+        );
+        assert!(
+            md.contains("1.000") && md.contains("2.000"),
+            "total medians in cells: {md}"
+        );
     }
 
     #[test]
     fn regression_markdown_renders_the_degraded_server_metric_advisory() {
         use crate::synthetic::baseline::regression_guard;
         use crate::synthetic::thresholds::Thresholds;
-        // The candidate carries no usable server time (all-zero summary): under server-ms gating
-        // the only cell is N/A, the overall verdict is Advisory, and the degraded-metric warning
-        // renders as a `> ⚠` line naming the op.
+        // The candidate carries no usable server time (all-zero summary): under the default
+        // server-ms gating the only cell is N/A, the overall verdict is Advisory, and the loud
+        // degraded-metric warning renders as a `> ⚠` line naming the op and the escape hatch.
         let a = report(42001, 1.0, 1000.0);
         let mut b = report(42002, 1.0, 1000.0);
         b.operations.get_mut("match_by_index").unwrap().levels[0]
@@ -1329,12 +1387,16 @@ mod tests {
         let g = regression_guard(&a, &b);
         let md = regression_markdown(&analyze_server(&a, &b, &g, &Thresholds::builtin()));
         assert!(
-            md.contains("> ⚠ gated metric server_ms.p50 is missing/invalid"),
+            md.contains("> ⚠ gated metric server_ms.p50 (the default gate) is missing/invalid"),
             "advisory line: {md}"
         );
         assert!(
-            md.contains("match_by_index — those cells have no verdict"),
+            md.contains("match_by_index — those cells have NO verdict"),
             "{md}"
+        );
+        assert!(
+            md.contains("re-run with `--gated-metric total-ms`"),
+            "escape hatch named: {md}"
         );
         assert!(md.contains("⚠ no comparable cells"), "{md}");
     }
@@ -1347,14 +1409,8 @@ mod tests {
         let b = report(42002, 1.0, 1000.0);
         let g = regression_guard(&a, &b);
 
-        let total = summarize_gate(&a, &b, &g, &Thresholds::builtin());
-        assert_eq!(total.gated_metric, "total_ms.p50");
-        assert!(
-            !total.to_markdown().contains("gated metric:"),
-            "default sticky comment stays byte-identical"
-        );
-
-        let server = summarize(&analyze_server(&a, &b, &g, &Thresholds::builtin()));
+        // Default: server-ms — carried in the summary JSON and named in the sticky comment.
+        let server = summarize_gate(&a, &b, &g, &Thresholds::builtin());
         assert_eq!(server.gated_metric, "server_ms.p50");
         let json = server.to_json().unwrap();
         assert!(
@@ -1364,6 +1420,19 @@ mod tests {
         let md = server.to_markdown();
         assert!(
             md.contains("_gated metric: `server_ms.p50` (server-reported execution time)_"),
+            "{md}"
+        );
+
+        // total-ms opt-in: carried and named as the non-default escape hatch.
+        let total = summarize(&analyze_total(&a, &b, &g, &Thresholds::builtin()));
+        assert_eq!(total.gated_metric, "total_ms.p50");
+        let md = total.to_markdown();
+        assert!(
+            md.contains("_gated metric: `total_ms.p50` (client-observed total latency"),
+            "{md}"
+        );
+        assert!(
+            md.contains("the default gate is `server_ms.p50`"),
             "{md}"
         );
     }
@@ -1995,7 +2064,7 @@ mod tests {
         assert!(json.contains("\"overall_verdict\": \"regressed\""), "{json}");
         assert!(json.contains("\"budget_profile\": \"strict\""), "{json}");
         assert!(json.contains("\"divergence_policy\": \"gate\""), "{json}");
-        assert!(json.contains("\"gated_metric\": \"total_ms.p50\""), "{json}");
+        assert!(json.contains("\"gated_metric\": \"server_ms.p50\""), "{json}");
         // No `--elapsed-secs` ⇒ explicit null (the field is always present).
         assert!(json.contains("\"elapsed_secs\": null"), "{json}");
     }

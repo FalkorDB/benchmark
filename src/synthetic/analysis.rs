@@ -23,12 +23,12 @@ use std::collections::{BTreeMap, BTreeSet};
 /// not a silent extension.
 pub const ANALYSIS_SCHEMA_VERSION: u32 = 2;
 
-/// The gated metric id carried in [`RegressionAnalysis::gated_metric`] under the default
+/// The gated metric id carried in [`RegressionAnalysis::gated_metric`] under the opt-in
 /// [`GatedMetric::TotalMs`]: the total-latency median is gated; every other metric is
 /// informational context.
 pub const GATED_METRIC: &str = "total_ms.p50";
 
-/// The gated metric id carried in [`RegressionAnalysis::gated_metric`] under
+/// The gated metric id carried in [`RegressionAnalysis::gated_metric`] under the default
 /// [`GatedMetric::ServerMs`]: the server-reported execution-time median is gated.
 pub const SERVER_GATED_METRIC: &str = "server_ms.p50";
 
@@ -36,15 +36,17 @@ pub const SERVER_GATED_METRIC: &str = "server_ms.p50";
 /// (`report --regression --gated-metric`). The budget is applied to this metric's p50 pair; the
 /// tails/throughput `context:` line follows the same metric so a cell never mixes clocks.
 /// Client scheduling + network jitter pollutes `total_ms`; gating on the server-reported
-/// execution time removes that noise entirely. There is **never** a silent fallback: a cell whose
+/// execution time removes that noise entirely, which is why **server-ms is the default gate**
+/// (maintainer decision: only the server execution time is measured; the total round trip is an
+/// explicit opt-in). There is **never** a silent fallback: a cell whose
 /// selected median is missing/invalid on either side gets a [`Verdict::NotApplicable`] and the op
 /// is named in one advisory warning.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum GatedMetric {
-    /// Client-observed total latency (`total_ms.p50`) — the default, today's behavior.
-    #[default]
+    /// Client-observed total latency (`total_ms.p50`) — explicit opt-in escape hatch.
     TotalMs,
-    /// Server-reported execution time (`server_ms.p50`).
+    /// Server-reported execution time (`server_ms.p50`) — the default gate.
+    #[default]
     ServerMs,
 }
 
@@ -399,8 +401,8 @@ pub struct RegressionAnalysis {
     pub meta: AnalysisMeta,
     pub budget_profile: BudgetProfile,
     pub divergence_policy: DivergencePolicy,
-    /// The gated metric id ([`GatedMetric::id`] — [`GATED_METRIC`] by default,
-    /// [`SERVER_GATED_METRIC`] under `--gated-metric server-ms`); everything else is
+    /// The gated metric id ([`GatedMetric::id`] — [`SERVER_GATED_METRIC`] by default,
+    /// [`GATED_METRIC`] under the `--gated-metric total-ms` opt-in); everything else is
     /// informational.
     pub gated_metric: String,
     pub status: ComparisonStatus,
@@ -813,9 +815,10 @@ pub fn analyze(
         // Missing-data guard for the selectable metric: a cell measured on BOTH sides whose
         // server_ms median is missing/invalid (≤ 0 / non-finite — a report predating server-time
         // capture, or an engine that doesn't report execution time) is N/A, and the op is named
-        // in one warning below. `total_ms` is the always-captured wall clock, so the default
-        // gating stays byte-identical to today (no warning). Diverged/skipped ops are already
-        // N/A with their own, louder markers.
+        // in one loud warning below — this now triggers by default, since server-ms is the
+        // default gate. `total_ms` is the always-captured wall clock, so the opt-in total-ms
+        // gating never degrades (no warning). Diverged/skipped ops are already N/A with their
+        // own, louder markers.
         if options.gated_metric == GatedMetric::ServerMs
             && oa.correctness != Correctness::Diverged
             && oa.skipped_baseline.is_none()
@@ -869,9 +872,11 @@ pub fn analyze(
 
     if !metric_degraded.is_empty() {
         warnings.push(format!(
-            "gated metric {SERVER_GATED_METRIC} is missing/invalid on ≥1 side for {} op(s): {} — \
-             those cells have no verdict (N/A); the report predates server-time capture or the \
-             engine does not report execution time, and there is no fallback to total_ms",
+            "gated metric {SERVER_GATED_METRIC} (the default gate) is missing/invalid on ≥1 side \
+             for {} op(s): {} — those cells have NO verdict (N/A); the report predates \
+             server-time capture or the engine does not report execution time. There is no \
+             silent fallback to total_ms — re-run with `--gated-metric total-ms` to gate on the \
+             client-observed total latency instead",
             metric_degraded.len(),
             metric_degraded.join(", ")
         ));
@@ -916,7 +921,9 @@ mod tests {
         LevelMetrics {
             throughput_ops_per_sec: 1000.0,
             metrics: MetricSet {
-                server_ms: summ(median * 0.2),
+                // Both clocks carry the same medians so metric-agnostic tests behave identically
+                // under either gate; metric-disagreement tests override via `set_server_median`.
+                server_ms: summ(median),
                 total_ms: summ(median),
                 non_internal_ms: summ(median * 0.8),
                 cached_false_rate: 0.0,
@@ -998,7 +1005,8 @@ mod tests {
         )
     }
 
-    /// Analyze gating on the server-reported execution time (`--gated-metric server-ms`).
+    /// Analyze gating on the server-reported execution time — the default
+    /// (`--gated-metric server-ms`), spelled out for symmetry with [`total_gate`].
     fn server_gate(
         a: &Report,
         b: &Report,
@@ -1016,8 +1024,27 @@ mod tests {
         )
     }
 
+    /// Analyze gating on the client-observed total latency (the `--gated-metric total-ms`
+    /// opt-in escape hatch).
+    fn total_gate(
+        a: &Report,
+        b: &Report,
+    ) -> RegressionAnalysis {
+        let g = regression_guard(a, b);
+        analyze(
+            a,
+            b,
+            &g,
+            &Thresholds::builtin(),
+            &AnalysisOptions {
+                gated_metric: GatedMetric::TotalMs,
+                ..Default::default()
+            },
+        )
+    }
+
     /// Overwrite `op`'s cached C=1 `server_ms` summary (the fabricated reports have exactly one
-    /// level), decoupling it from the `metrics()` helper's fixed server = 0.2·total ratio.
+    /// level), decoupling it from the `metrics()` helper's shared server = total medians.
     fn set_server_median(
         rep: &mut Report,
         op: &str,
@@ -1470,7 +1497,7 @@ mod tests {
         assert_eq!(an.meta.baseline.warmup, 200);
         assert_eq!(an.meta.baseline.concurrency, vec![1]);
         assert_eq!(an.elapsed_secs, Some(12.5));
-        assert_eq!(an.gated_metric, "total_ms.p50");
+        assert_eq!(an.gated_metric, "server_ms.p50");
         assert_eq!(an.budget_profile, BudgetProfile::Strict);
         assert_eq!(an.divergence_policy, DivergencePolicy::Gate);
         // The thresholds echo carries the resolved default budget.
@@ -1631,7 +1658,7 @@ mod tests {
             "both".parse::<GatedMetric>().unwrap_err(),
             "unknown gated metric 'both' (expected 'total-ms' or 'server-ms')"
         );
-        assert_eq!(GatedMetric::default(), GatedMetric::TotalMs);
+        assert_eq!(GatedMetric::default(), GatedMetric::ServerMs);
         assert_eq!(GatedMetric::TotalMs.id(), GATED_METRIC);
         assert_eq!(GatedMetric::ServerMs.id(), SERVER_GATED_METRIC);
         for m in [GatedMetric::TotalMs, GatedMetric::ServerMs] {
@@ -1643,13 +1670,14 @@ mod tests {
     fn server_ms_gating_ignores_a_total_only_regression() {
         // The candidate doubles its client-observed total latency (+100 %, way over budget) but
         // its server-reported execution time grows only 5 % — pure client/network noise. The
-        // default gate regresses; `--gated-metric server-ms` passes, and the cells carry the
-        // server medians (and server tails in the context line), not the total ones.
-        let a = rpt("main", 42001, &[("match_by_index", 10.0, Some("d1"))]);
+        // opt-in total-ms gate regresses; the default (server-ms) passes, and the cells carry
+        // the server medians (and server tails in the context line), not the total ones.
+        let mut a = rpt("main", 42001, &[("match_by_index", 10.0, Some("d1"))]);
         let mut b = rpt("pr", 42002, &[("match_by_index", 20.0, Some("d1"))]);
-        set_server_median(&mut b, "match_by_index", 2.1); // baseline server = 10.0 * 0.2 = 2.0
+        set_server_median(&mut a, "match_by_index", 2.0);
+        set_server_median(&mut b, "match_by_index", 2.1);
 
-        let total = gate(&a, &b);
+        let total = total_gate(&a, &b);
         assert_eq!(total.verdict, OverallVerdict::Regressed);
         assert_eq!(total.gated_metric, GATED_METRIC);
         assert!(!total.gated_on_server_ms());
@@ -1684,12 +1712,13 @@ mod tests {
     #[test]
     fn server_ms_gating_catches_a_server_only_regression() {
         // Mirror image: totals stay within budget (+4 %, under the 0.5 ms floor too) while the
-        // server-reported execution time doubles. Only server-ms gating regresses.
-        let a = rpt("main", 42001, &[("match_by_index", 10.0, Some("d1"))]);
+        // server-reported execution time doubles. Only server-ms gating (the default) regresses.
+        let mut a = rpt("main", 42001, &[("match_by_index", 10.0, Some("d1"))]);
         let mut b = rpt("pr", 42002, &[("match_by_index", 10.4, Some("d1"))]);
-        set_server_median(&mut b, "match_by_index", 4.0); // baseline server = 2.0
+        set_server_median(&mut a, "match_by_index", 2.0);
+        set_server_median(&mut b, "match_by_index", 4.0);
 
-        assert_eq!(gate(&a, &b).verdict, OverallVerdict::Pass);
+        assert_eq!(total_gate(&a, &b).verdict, OverallVerdict::Pass);
         let server = server_gate(&a, &b);
         assert_eq!(server.verdict, OverallVerdict::Regressed);
         assert_eq!(server.regressed_cells, 1);
@@ -1701,9 +1730,10 @@ mod tests {
     #[test]
     fn missing_server_median_yields_na_cell_and_one_advisory_warning() {
         // One clean op and one whose candidate reports no usable server time (median 0 — e.g. an
-        // engine that doesn't report execution time). Under server-ms gating the degraded cell is
-        // N/A — never a silent fallback to total_ms — and ONE warning names exactly the affected
-        // op. The default total-ms gating of the same pair stays warning-free (byte-identical).
+        // engine that doesn't report execution time). Under the default server-ms gating the
+        // degraded cell is N/A — never a silent fallback to total_ms — and ONE loud warning names
+        // exactly the affected op and the escape hatch. The total-ms opt-in of the same pair
+        // stays warning-free.
         let a = rpt(
             "main",
             42001,
@@ -1746,9 +1776,13 @@ mod tests {
             !warning.contains("match_by_index"),
             "clean op not named: {warning}"
         );
-        assert!(warning.contains("no fallback to total_ms"), "{warning}");
+        assert!(warning.contains("no silent fallback to total_ms"), "{warning}");
+        assert!(
+            warning.contains("re-run with `--gated-metric total-ms`"),
+            "escape hatch named: {warning}"
+        );
 
-        let total = gate(&a, &b);
+        let total = total_gate(&a, &b);
         assert_eq!(total.verdict, OverallVerdict::Pass);
         assert_eq!(
             total.comparable_cells, 2,
@@ -1756,7 +1790,7 @@ mod tests {
         );
         assert!(
             total.warnings.iter().all(|w| !w.contains("gated metric")),
-            "no degraded-metric warning under the default gating: {:?}",
+            "no degraded-metric warning under the total-ms opt-in: {:?}",
             total.warnings
         );
     }

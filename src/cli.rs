@@ -655,7 +655,7 @@ pub enum SyntheticCommands {
             value_name = "METRIC",
             value_parser = ["total-ms", "server-ms"],
             requires = "regression",
-            help = "with --diff --regression: which latency metric's p50 median the budget verdicts gate on. `total-ms` (default): client-observed total latency, today's behavior. `server-ms`: server-reported execution time — immune to client scheduling and network jitter; a cell whose server p50 is missing/invalid on either side is N/A and the op is named in an advisory warning (never a silent fallback to total-ms)"
+            help = "with --diff --regression: which latency metric's p50 median the budget verdicts gate on. `server-ms` (default): server-reported execution time — immune to client scheduling and network jitter; a cell whose server p50 is missing/invalid on either side is N/A and the op is named in an advisory warning (never a silent fallback). `total-ms` (explicit opt-in): client-observed total latency, including client scheduling and network time"
         )]
         gated_metric: Option<String>,
     },
