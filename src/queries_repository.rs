@@ -46,17 +46,7 @@ impl Default for AlgorithmQuerySelection {
 }
 
 #[derive(
-    Debug,
-    Clone,
-    Copy,
-    Serialize,
-    Deserialize,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    ValueEnum,
-    Default,
+    Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Default,
 )]
 #[serde(rename_all = "kebab-case")]
 #[value(rename_all = "kebab-case")]
@@ -79,7 +69,6 @@ impl QueryCoverageProfile {
         matches!(self, QueryCoverageProfile::FixtureDependent)
     }
 }
-
 
 fn is_algorithm_query_name(name: &str) -> bool {
     ALGORITHM_QUERY_NAMES.contains(&name)
@@ -935,26 +924,6 @@ impl UsersQueriesRepository {
                         .build()
                 },
             )
-            .add_query(
-                "exact_5_hop_traverse_count",
-                QueryType::Read,
-                |random, _flavour| {
-                    QueryBuilder::new()
-                        .text("MATCH (s:User {id: $id})-[:Friend*5..5]->(t:User) RETURN count(t) AS cnt")
-                        .param("id", random.random_vertex())
-                        .build()
-                },
-            )
-            .add_query(
-                "exact_6_hop_traverse_count",
-                QueryType::Read,
-                |random, _flavour| {
-                    QueryBuilder::new()
-                        .text("MATCH (s:User {id: $id})-[:Friend*6..6]->(t:User) RETURN count(t) AS cnt")
-                        .param("id", random.random_vertex())
-                        .build()
-                },
-            )
             .add_query("count_users_plain", QueryType::Read, |_random, _flavour| {
                 QueryBuilder::new()
                     .text("MATCH (u:User) RETURN count(u) AS cnt")
@@ -994,28 +963,49 @@ impl UsersQueriesRepository {
             });
         if query_coverage_profile.includes_extended_core() && !matches!(flavour, Flavour::Memgraph)
         {
-            queries_builder = queries_builder.add_query(
-                "temporal_spatial_roundtrip",
-                QueryType::Read,
-                |_random, flavour| {
-                    let distance_function = match flavour {
-                        Flavour::Neo4j => "point.distance",
-                        _ => "distance",
-                    };
-                    QueryBuilder::new()
-                        .text(format!(
-                            "RETURN \
-                                date('2024-01-01') AS d, \
-                                localtime('12:30:00') AS t, \
-                                duration('P2DT3H') AS dur, \
-                                {distance_function}( \
-                                    point({{latitude: 32.1, longitude: 34.8}}), \
-                                    point({{latitude: 32.2, longitude: 34.9}}) \
-                                ) AS dist"
-                        ))
-                        .build()
-                },
-            );
+            queries_builder = queries_builder
+                .add_query(
+                    "exact_5_hop_traverse_count",
+                    QueryType::Read,
+                    |random, _flavour| {
+                        QueryBuilder::new()
+                            .text("MATCH (s:User {id: $id})-[:Friend*5..5]->(t:User) RETURN count(t) AS cnt")
+                            .param("id", random.random_vertex())
+                            .build()
+                    },
+                )
+                .add_query(
+                    "exact_6_hop_traverse_count",
+                    QueryType::Read,
+                    |random, _flavour| {
+                        QueryBuilder::new()
+                            .text("MATCH (s:User {id: $id})-[:Friend*6..6]->(t:User) RETURN count(t) AS cnt")
+                            .param("id", random.random_vertex())
+                            .build()
+                    },
+                )
+                .add_query(
+                    "temporal_spatial_roundtrip",
+                    QueryType::Read,
+                    |_random, flavour| {
+                        let distance_function = match flavour {
+                            Flavour::Neo4j => "point.distance",
+                            _ => "distance",
+                        };
+                        QueryBuilder::new()
+                            .text(format!(
+                                "RETURN \
+                                    date('2024-01-01') AS d, \
+                                    localtime('12:30:00') AS t, \
+                                    duration('P2DT3H') AS dur, \
+                                    {distance_function}( \
+                                        point({{latitude: 32.1, longitude: 34.8}}), \
+                                        point({{latitude: 32.2, longitude: 34.9}}) \
+                                    ) AS dist"
+                            ))
+                            .build()
+                    },
+                );
         }
 
         if query_coverage_profile.includes_fixture_dependent() {
@@ -1105,7 +1095,7 @@ impl UsersQueriesRepository {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PreparedQuery {
     #[serde(default)]
     pub q_id: u16,
