@@ -610,7 +610,8 @@ just synthetic-compare-versions demo falkor://127.0.0.1:6379 falkor://127.0.0.1:
   passes **`--elapsed-secs <n>`** — a compute-time line (benchmark + reporting) for the run. Each cell
   row also prints the **effective `p50 guard`** applied to it (e.g. `15% AND 0.5 ms`, per-op×C
   overrides included) and the absolute `Δms`, and folds **p90/p99 + throughput** onto a smaller,
-  clearly non-gated `context:` line — the verdict stays **p50-only**. Each op's tables are wrapped in
+  clearly non-gated `context:` line — under the default server-ms gate that line also carries the
+  **demoted client-observed total p50** — the verdict stays **p50-only**. Each op's tables are wrapped in
   a **collapsed `<details>`** (with the op's 🟢/🔴 verdict on the summary row) so the PR sticky
   comment stays compact — the reader expands only the ops they care about.
 - Every regression comparison is computed **once** into a single analysis model and rolled up into a
@@ -656,7 +657,9 @@ just synthetic-compare-versions demo falkor://127.0.0.1:6379 falkor://127.0.0.1:
     only the server-reported execution time is measured — is immune to client scheduling and
     network jitter. `total-ms` is an explicit opt-in escape hatch gating the client-observed total
     latency (including client scheduling and network time). The p90/p99 tails on each cell's
-    `context:` line follow the selected metric, so a cell never mixes clocks. If the server p50 is
+    `context:` line follow the selected metric, so a cell never mixes clocks; under the default
+    server-ms gate the client-observed total p50 is **demoted to that `context:` line** —
+    visible, informational, never gated. If the server p50 is
     missing/invalid on either side of a cell (a report predating server-time capture, or an engine
     that doesn't report execution time) that cell's verdict is **N/A** and the affected ops are
     named in **one loud advisory warning** that also names the `total-ms` escape hatch — there is

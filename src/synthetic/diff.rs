@@ -236,20 +236,26 @@ fn percentiles(m: &LevelMetrics) -> String {
     format!("{:.3} / {:.3} / {:.3} / {:.3}", s.median, s.p90, s.p95, s.p99)
 }
 
-/// A regression-table latency cell: the gated **p50** on the primary line, with p90/p95/p99 and
-/// throughput folded onto a smaller `context:` line (informational, never gated, appended only
-/// when the report carries it). `—` only when the side's p50 is absent. Values are
-/// fixed-precision measurements, so no operator-supplied text is interpolated (no `md_cell`
-/// escaping needed).
+/// A regression-table latency cell: the gated **p50** on the primary line, with p90/p95/p99,
+/// throughput and — under the server-ms gate — the demoted client-observed total p50 folded onto
+/// a smaller `context:` line (informational, never gated, appended only when the report carries
+/// it). `—` only when the side's p50 is absent. Values are fixed-precision measurements, so no
+/// operator-supplied text is interpolated (no `md_cell` escaping needed).
 fn latency_cell(
     p50: Option<f64>,
     ctx: Option<&CellContextSide>,
 ) -> String {
     match (p50, ctx) {
-        (Some(p50), Some(c)) => format!(
-            "{:.3}<br><sub>context: p90 {:.3} · p95 {:.3} · p99 {:.3} · {:.0} op/s</sub>",
-            p50, c.p90_ms, c.p95_ms, c.p99_ms, c.throughput_ops_per_sec
-        ),
+        (Some(p50), Some(c)) => {
+            let total = c
+                .total_p50_ms
+                .map(|t| format!(" · total p50 {t:.3}"))
+                .unwrap_or_default();
+            format!(
+                "{:.3}<br><sub>context: p90 {:.3} · p95 {:.3} · p99 {:.3} · {:.0} op/s{}</sub>",
+                p50, c.p90_ms, c.p95_ms, c.p99_ms, c.throughput_ops_per_sec, total
+            )
+        }
         (Some(p50), None) => format!("{p50:.3}"),
         (None, _) => "—".to_string(),
     }
@@ -387,7 +393,8 @@ pub fn regression_markdown(analysis: &RegressionAnalysis) -> String {
     if analysis.gated_on_server_ms() {
         head.push_str(
             "\n**Gated metric: `server_ms.p50`** (default) — the server-reported execution time; \
-             client-observed total latency is not part of any verdict in this comparison.\n",
+             client-observed total latency is demoted to the `context:` line and is not part of \
+             any verdict in this comparison.\n",
         );
     } else {
         head.push_str(
@@ -470,16 +477,23 @@ pub fn regression_markdown(analysis: &RegressionAnalysis) -> String {
     } else {
         "Only **p50** of `total_ms` (client-observed total latency) is gated"
     };
+    // The context descriptor matches what the cells actually fold in: under the server gate the
+    // client-observed total p50 rides along as demoted context.
+    let context_clause = if analysis.gated_on_server_ms() {
+        "the `context:` line (p90/p95/p99 · throughput · client-observed total p50)"
+    } else {
+        "the `context:` line (p90/p95/p99 · throughput)"
+    };
     out.push_str(&match analysis.divergence_policy {
         DivergencePolicy::Gate => format!(
             "\n🟢 = faster or within budget · 🔴 = slower than budget **or** results differ · \
-             N/A = no perf verdict. {metric_clause} — the `context:` line (p90/p95/p99 · throughput) \
+             N/A = no perf verdict. {metric_clause} — {context_clause} \
              and `Δms` are informational, never part of the verdict. Non-blocking.\n"
         ),
         DivergencePolicy::Advisory => format!(
             "\n🟢 = faster or within budget · 🔴 = slower than budget · ⚠ = results differ \
              (advisory — the engines did different work, so perf is N/A) · N/A = no perf verdict. \
-             {metric_clause} — the `context:` line (p90/p95/p99 · throughput) and `Δms` are \
+             {metric_clause} — {context_clause} and `Δms` are \
              informational, never part of the verdict. Non-blocking.\n"
         ),
     });
@@ -1295,8 +1309,12 @@ mod tests {
         assert!(md.contains("p50 (ms)") && md.contains("p50 guard (>% AND >ms)"), "{md}");
         // Δp50 carries the signed absolute ms delta so the floor is auditable.
         assert!(md.contains("(+0.100)"), "Δms missing: {md}");
-        // p90/p99 + throughput are folded onto the context line (not their own columns).
-        assert!(md.contains("<br><sub>context: p90 ") && md.contains("op/s</sub>"), "{md}");
+        // p90/p99 + throughput are folded onto the context line (not their own columns), with
+        // the demoted client-observed total p50 riding along under the default server gate.
+        assert!(
+            md.contains("<br><sub>context: p90 ") && md.contains("op/s · total p50 1.000</sub>"),
+            "{md}"
+        );
         // The per-line guard shows the resolved default (10%) + floor.
         assert!(md.contains("10% AND 0.5 ms"), "guard cell: {md}");
         // Legend states the gate is p50-only, naming the default gated metric.
@@ -1348,6 +1366,20 @@ mod tests {
             md.contains("0.200") && md.contains("0.400"),
             "server medians in cells: {md}"
         );
+        // The wall clock is demoted, not hidden: each side's total p50 rides on the context
+        // line, and the legend says so.
+        assert!(
+            md.contains("· total p50 1.000") && md.contains("· total p50 2.000"),
+            "demoted total p50 in context: {md}"
+        );
+        assert!(
+            md.contains("throughput · client-observed total p50)"),
+            "legend names the demoted total: {md}"
+        );
+        assert!(
+            md.contains("demoted to the `context:` line"),
+            "header states the demotion: {md}"
+        );
 
         // total-ms opt-in: named as such, and the total-latency regression is caught.
         let md = regression_markdown(&analyze_total(&a, &b, &g, &Thresholds::builtin()));
@@ -1367,6 +1399,9 @@ mod tests {
             md.contains("1.000") && md.contains("2.000"),
             "total medians in cells: {md}"
         );
+        // No duplicate: the primary p50 already is the wall clock, so the context line carries
+        // only tails + throughput.
+        assert!(!md.contains("· total p50"), "no demoted total under total-ms gating: {md}");
     }
 
     #[test]

@@ -108,8 +108,9 @@ question §8.1.)
 > **Later change — `--gated-metric`:** the gated median (and the context tails above) now
 > **defaults to the server-reported `server_ms`** (maintainer decision: only the server execution
 > time is measured); `report --regression --gated-metric total-ms` is the explicit opt-in that
-> restores the client-observed `total_ms` gate described in this table. The gate mechanics are
-> unchanged either way.
+> restores the client-observed `total_ms` gate described in this table. Under the default server
+> gate the client-observed total p50 is **demoted to the `context:` line** (informational, never
+> gated) so the wall clock stays visible. The gate mechanics are unchanged either way.
 
 ## 6. Data availability (no new collection)
 

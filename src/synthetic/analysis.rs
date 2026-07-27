@@ -328,14 +328,20 @@ pub struct AnalysisMeta {
 }
 
 /// One side's informational (never gated) tail/throughput context for a cell. The tails are read
-/// from the **selected gated metric's** summary (total-ms by default, server-ms under
-/// `--gated-metric server-ms`) so they always describe the same clock as the gated p50.
+/// from the **selected gated metric's** summary (server-ms by default, total-ms under
+/// `--gated-metric total-ms`) so they always describe the same clock as the gated p50.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct CellContextSide {
     pub p90_ms: f64,
     pub p95_ms: f64,
     pub p99_ms: f64,
     pub throughput_ops_per_sec: f64,
+    /// The client-observed total-latency median (`total_ms.p50`), demoted to informational
+    /// context under the default server-ms gate: the benchmark measures server execution time,
+    /// so the wall clock stays visible but never drives a verdict. `None` under total-ms gating
+    /// (the primary p50 already is that clock) or when the side has no valid total median.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_p50_ms: Option<f64>,
 }
 
 /// Informational context for a cell (both sides optional — a side may not have measured it).
@@ -603,11 +609,17 @@ fn context_side(
     m: &LevelMetrics,
 ) -> CellContextSide {
     let s = metric.summary(m);
+    // Under the server-ms gate the wall clock rides along as demoted, informational context;
+    // under total-ms gating the primary p50 already is the wall clock, so nothing is duplicated.
+    let total = m.metrics.total_ms.median;
+    let total_p50_ms = (metric == GatedMetric::ServerMs && total.is_finite() && total > 0.0)
+        .then_some(total);
     CellContextSide {
         p90_ms: s.p90,
         p95_ms: s.p95,
         p99_ms: s.p99,
         throughput_ops_per_sec: m.throughput_ops_per_sec,
+        total_p50_ms,
     }
 }
 
@@ -1725,6 +1737,40 @@ mod tests {
         let cell = &server.ops["match_by_index"].cells[0];
         assert_eq!(cell.perf_verdict, Verdict::Regressed);
         assert!((cell.delta_ms.unwrap() - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn server_gate_demotes_total_p50_to_cell_context() {
+        // Under the default server-ms gate the client-observed total median stays visible as
+        // demoted, informational context; the total-ms opt-in carries no duplicate (its primary
+        // p50 already is the wall clock). The cells JSON mirrors that: the additive optional
+        // field is omitted entirely when absent, so total-ms analyses are byte-identical to
+        // before.
+        let mut a = rpt("main", 42001, &[("match_by_index", 10.0, Some("d1"))]);
+        let mut b = rpt("pr", 42002, &[("match_by_index", 10.4, Some("d1"))]);
+        set_server_median(&mut a, "match_by_index", 2.0);
+        set_server_median(&mut b, "match_by_index", 2.1);
+
+        let server = server_gate(&a, &b);
+        let cell = &server.ops["match_by_index"].cells[0];
+        assert_eq!(cell.baseline_p50_ms, Some(2.0), "primary p50 is the server median");
+        assert_eq!(cell.context.baseline.unwrap().total_p50_ms, Some(10.0));
+        assert_eq!(cell.context.candidate.unwrap().total_p50_ms, Some(10.4));
+        assert!(server.to_json().unwrap().contains("total_p50_ms"));
+
+        let total = total_gate(&a, &b);
+        let cell = &total.ops["match_by_index"].cells[0];
+        assert_eq!(cell.context.baseline.unwrap().total_p50_ms, None);
+        assert!(!total.to_json().unwrap().contains("total_p50_ms"));
+
+        // A side with no usable wall clock (total median 0) omits the context field; the
+        // server-gated verdict is untouched.
+        let mut c = rpt("pr", 42003, &[("match_by_index", 0.0, Some("d1"))]);
+        set_server_median(&mut c, "match_by_index", 2.1);
+        let server = server_gate(&a, &c);
+        let cell = &server.ops["match_by_index"].cells[0];
+        assert_eq!(cell.perf_verdict, Verdict::Ok);
+        assert_eq!(cell.context.candidate.unwrap().total_p50_ms, None);
     }
 
     #[test]
