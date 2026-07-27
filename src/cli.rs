@@ -650,6 +650,14 @@ pub enum SyntheticCommands {
             help = "with --diff --regression: how a result divergence affects the verdict. `gate` (default): diverged op is 🔴 and fails the comparison. `advisory`: diverged op is ⚠, perf cells stay N/A, overall verdict caps at advisory — for cross-engine runs where engines legitimately differ"
         )]
         divergence_policy: Option<String>,
+        #[arg(
+            long = "gated-metric",
+            value_name = "METRIC",
+            value_parser = ["total-ms", "server-ms"],
+            requires = "regression",
+            help = "with --diff --regression: which latency metric's p50 median the budget verdicts gate on. `total-ms` (default): client-observed total latency, today's behavior. `server-ms`: server-reported execution time — immune to client scheduling and network jitter; a cell whose server p50 is missing/invalid on either side is N/A and the op is named in an advisory warning (never a silent fallback to total-ms)"
+        )]
+        gated_metric: Option<String>,
     },
 }
 
@@ -812,6 +820,32 @@ mod tests {
             "/tmp/does-not-matter",
         ])
         .is_err());
+    }
+
+    #[test]
+    fn cli_gated_metric_flag_parses_known_values_and_requires_regression() {
+        use clap::Parser;
+        let report = |extra: &[&str]| {
+            let mut argv = vec![
+                "benchmark",
+                "synthetic",
+                "report",
+                "--diff",
+                "a.json",
+                "b.json",
+            ];
+            argv.extend_from_slice(extra);
+            Cli::try_parse_from(argv)
+        };
+        // Both known values parse; the flag is optional (default total-ms applies downstream).
+        assert!(report(&["--regression", "--gated-metric", "total-ms"]).is_ok());
+        assert!(report(&["--regression", "--gated-metric", "server-ms"]).is_ok());
+        assert!(report(&["--regression"]).is_ok());
+        // Unknown values are rejected by clap's value_parser.
+        assert!(report(&["--regression", "--gated-metric", "p50"]).is_err());
+        assert!(report(&["--regression", "--gated-metric", "server_ms"]).is_err());
+        // The flag is regression-only.
+        assert!(report(&["--gated-metric", "server-ms"]).is_err());
     }
 
     #[test]

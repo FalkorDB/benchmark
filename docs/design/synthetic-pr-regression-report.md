@@ -28,7 +28,7 @@ at a glance (🟢 good / 🔴 regressed). It never fails the PR.
 | Coloring | 🟢 / 🔴 emoji per cell in the Markdown table. |
 | Sweep | full concurrency `1,2,4,8,16,32` × both cache modes. |
 | Verdict rule | 🟢 if PR is **faster** *or* **slower within budget**; 🔴 if slower beyond budget **and** the absolute p50 delta exceeds a noise floor; diverged op → correctness-🔴, perf verdict **N/A**. |
-| Metric definition | `p50` = the **total-latency median** (`total_ms` p50) of a cell. |
+| Metric definition | `p50` = the **total-latency median** (`total_ms` p50) of a cell. *(Later addition: `--gated-metric server-ms` gates the server-reported execution-time median instead; `total-ms` stays the default.)* |
 | Tool ref | a **separate** `SYNTHETIC_BENCHMARK_REF` **pinned to an immutable commit SHA** (tagged for reference) — the A/B's `BENCHMARK_REF=v2.2` is left untouched. |
 | Failure handling | the synthetic job is **non-blocking** (allowed-to-fail / not a required check); any tool/infra failure posts a "benchmark unavailable" note instead of blocking. |
 | Trigger scope | PR-triggered runs only (dispatch has no PR); **arch-specific** comment markers to avoid x86/arm races. |
@@ -69,7 +69,9 @@ column headers (falling back to `A (baseline)` / `B (candidate)` when absent), s
 
 New optional flag `--thresholds <file.toml>` (see A3 for the mode flag it accompanies). The tool
 ships a built-in default (budget 10 %, `metric = "p50"`, a small absolute floor); the file
-overrides. `p50` means the cell's **total-latency median** (`total_ms` p50). Format (lives in
+overrides. `p50` means the cell's **total-latency median** (`total_ms` p50). *(Later addition: the
+`--gated-metric` flag can point the gate at the `server_ms` median instead — the budget shapes
+below apply to whichever metric is selected.)* Format (lives in
 `falkordb-rs-next-gen`, TOML to match `synthetic-bench.toml`):
 
 ```toml

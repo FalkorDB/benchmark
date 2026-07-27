@@ -594,7 +594,8 @@ just synthetic-compare-versions demo falkor://127.0.0.1:6379 falkor://127.0.0.1:
   synthetic-compare-versions` runs `run --recording` against both endpoints then `report --diff`.
 - **`benchmark synthetic report --diff <A.json> <B.json> --regression [--thresholds t.toml]`** is a
   **non-fatal, colored** variant for a per-PR regression report: each op × cache-mode × concurrency
-  cell gets a **🟢 / 🔴 / N/A** verdict on **p50** — 🟢 if the candidate (B) is faster or slower
+  cell gets a **🟢 / 🔴 / N/A** verdict on **p50** (of the client-observed `total_ms` by default —
+  see `--gated-metric`) — 🟢 if the candidate (B) is faster or slower
   within budget, 🔴 if slower beyond it. The budget is a `budget_pct` plus an absolute `floor_ms`
   noise guard, defaulting to 10 % / 0.5 ms and overridable per-operation and per-operation×concurrency
   in a TOML file (`[default]` + `[op.<name>]` with a `concurrency` inline table). `<name>` may be a
@@ -650,6 +651,16 @@ just synthetic-compare-versions demo falkor://127.0.0.1:6379 falkor://127.0.0.1:
     `[cross-engine.op.<name>]` sections (same shape as the top-level `[default]`/`[op.<name>]`,
     typically looser for engine-vs-engine noise) and **errors** if the TOML doesn't define them —
     there is no silent fallback to the strict budgets.
+  - **`--gated-metric <total-ms|server-ms>`** (default `total-ms`) selects **which latency metric's
+    p50** the budget verdicts gate on. `total-ms` is the client-observed total latency — today's
+    behavior, unchanged. `server-ms` gates the **server-reported execution time** instead, removing
+    client scheduling and network jitter from the verdict entirely; the p90/p99 tails on each cell's
+    `context:` line follow the selected metric, so a cell never mixes clocks. If the server p50 is
+    missing/invalid on either side of a cell (a report predating server-time capture, or an engine
+    that doesn't report execution time) that cell's verdict is **N/A** and the affected ops are
+    named in **one advisory warning** — there is **never** a silent fallback to `total-ms`. The
+    choice is echoed as `gated_metric` in the report header, the `--summary` JSON and the `--cells`
+    model.
 
 A `--cells` file deserializes straight back into the tool's public `RegressionAnalysis` type, so
 downstream tooling consumes the analysis without re-parsing Markdown (compiled and type-checked as

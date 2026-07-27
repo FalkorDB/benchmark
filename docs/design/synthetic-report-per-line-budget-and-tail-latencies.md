@@ -105,6 +105,10 @@ question §8.1.)
 
 `p95` is also computed but **left out** (§8.2). Tail **Δ**s are left out (§8.3).
 
+> **Later addition — `--gated-metric`:** `report --regression --gated-metric server-ms` swaps the
+> gated median (and the context tails above) from `total_ms` to the server-reported `server_ms`;
+> the gate mechanics in this table are unchanged and `total-ms` remains the default.
+
 ## 6. Data availability (no new collection)
 
 - `Summary` already carries `median`/`p90`/`p95`/`p99` (`src/synthetic/stats.rs`); percentiles are a
