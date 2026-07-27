@@ -77,14 +77,15 @@ This is what makes **default-on** safe:
   `--budget-profile strict --divergence-policy gate` and
   `--budget-profile cross-engine --divergence-policy advisory` — write ops flow into the same
   summary v3 + cells v2 artifacts (`tier: full`, `correctness: not_gated`, `op_outcome`,
-  10 comparable cells), budgets resolve for the dynamic op names (#255), and the existing
-  thresholds file needs no new entries.
+  10 comparable cells), and budgets resolve for the dynamic op names (#255) — no new thresholds
+  entry is *required* for the tool to run, but §5.7 deliberately pre-seeds one strict override
+  (`[op.single_edge_update]`) before enabling the gate.
 
 ## 5. Part B — `falkordb-rs-next-gen` changes (all on the `barakb/synthetic-pr-regression` branch, PR #745)
 
 ### 5.1 Pass ordering (protect the strongest signals first)
 
-```
+```text
 record reads (offline)
 measure pr reads → measure main reads          (fatal on failure, as today)
 report main-pr reads → persist                 → assemble (incremental)
