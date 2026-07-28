@@ -278,8 +278,13 @@ pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
     let mut operations = BTreeMap::new();
     // Skipped ops get an empty-levels entry carrying the skip reason (BTreeMap renders by key),
     // so the report keeps the full recorded op set and the diff/regression guards can tell
-    // "skipped" from "not recorded".
+    // "skipped" from "not recorded". The example query still shows what *would* have run.
     for (name, reason) in &skipped {
+        let example = bundle
+            .commands
+            .iter()
+            .find(|(op, _)| op.name() == name)
+            .and_then(|(_, cyphers)| cyphers.first().cloned());
         operations.insert(
             name.clone(),
             crate::synthetic::report::OperationReport {
@@ -287,6 +292,7 @@ pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
                 result_digest: None,
                 policy: None,
                 skipped: Some(reason.clone()),
+                example_query: example,
             },
         );
     }
@@ -539,6 +545,9 @@ pub async fn run(config: &ReplayConfig) -> BenchmarkResult<Report> {
             // runs that measured the same workload under different per-op conditions.
             op_report.policy =
                 (!entry.budget.is_inherit()).then(|| op_config.resolved_policy(&op_concurrency));
+            // The op's first recorded command — its cached-mode measured text — is the report's
+            // deterministic representative query.
+            op_report.example_query = corpus.first().cloned();
             operations.insert(op.name().to_string(), op_report);
         }
         Ok(())
@@ -756,6 +765,9 @@ async fn measure_write_op(
         // diff/baseline guards always refuse cross-policy comparisons of write cells.
         policy: Some(op_config.resolved_policy(op_concurrency)),
         skipped: None,
+        // The first recorded write command — its cached-mode measured text — is the report's
+        // deterministic representative query.
+        example_query: corpus.first().cloned(),
     })
 }
 

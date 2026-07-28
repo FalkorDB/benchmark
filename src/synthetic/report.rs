@@ -242,6 +242,17 @@ pub struct OperationReport {
     /// policy; the diff/regression guards treat it as **neither a pass nor a divergence**.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skipped: Option<String>,
+    /// A deterministic representative Cypher text for this op: its **first** measured command —
+    /// the first recorded command for a `--recording` run, the first rendered corpus query for a
+    /// generated read, and a canonical rendering (run-token 0, worker 0, seq 0, with the
+    /// run-independent `BenchScratch_RUN` placeholder label) for a catalog write, whose real
+    /// per-run scratch label carries a random nonce. This is the **cached-mode base text**;
+    /// uncached mode appends a per-invocation cache-buster comment. Extraction is deterministic
+    /// (never sampled), so the same inputs always yield the same text. A capability-skipped op
+    /// still carries its first recorded command (what *would* have run). `None` on reports
+    /// written before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub example_query: Option<String>,
 }
 
 impl OperationReport {
@@ -737,6 +748,7 @@ mod tests {
                 result_digest: None,
                 policy: None,
                 skipped: None,
+                example_query: Some("RETURN 1".to_string()),
             },
         );
         Report {
@@ -1056,6 +1068,7 @@ mod tests {
                 result_digest: None,
                 policy: None,
                 skipped: None,
+                example_query: None,
             },
         );
         ops.insert(
@@ -1070,6 +1083,7 @@ mod tests {
                 result_digest: None,
                 policy: None,
                 skipped: None,
+                example_query: None,
             },
         );
         ops.insert(
@@ -1093,6 +1107,7 @@ mod tests {
                 result_digest: None,
                 policy: None,
                 skipped: None,
+                example_query: None,
             },
         );
         r.operations = ops;

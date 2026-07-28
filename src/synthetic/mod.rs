@@ -49,7 +49,7 @@ use crate::synthetic::report::{
     DatasetInfo, LevelMetrics, LevelReport, Meta, OperationReport, OpPolicy, Report,
 };
 use crate::synthetic::thresholds::BudgetProfile;
-use crate::synthetic::writes::{verify_mutation, WritePlan, WriteScratch};
+use crate::synthetic::writes::{verify_mutation, WritePlan, WriteScratch, CANONICAL_SCRATCH_LABEL};
 use clap::ValueEnum;
 use falkordb::{AsyncGraph, ConnectionStrategy, FalkorClientBuilder};
 use futures::StreamExt;
@@ -416,6 +416,28 @@ fn render_cypher(
         // timed path); only uncached allocates to append its unique cache-buster comment.
         CacheMode::Cached => Cow::Borrowed(base),
         CacheMode::Uncached => Cow::Owned(format!("{} /* co{:x}-{} */", base, run_token, uid)),
+    }
+}
+
+/// The deterministic representative Cypher text a generated run records as the op's
+/// [`OperationReport::example_query`] — the **cached-mode base text** of its first invocation.
+/// Reads use their first pre-rendered corpus query verbatim. A catalog write renders invocation 0
+/// against a **canonical scratch** (run-token 0, worker 0), then swaps its label for the
+/// run-independent [`CANONICAL_SCRATCH_LABEL`]: a real worker's label folds in the run's random
+/// nonce, so rendering with the live scratch would make otherwise-identical reports differ
+/// byte-for-byte run to run — only that label differs from the measured text.
+fn example_query(
+    op_spec: &OperationSpec,
+    rendered: &[String],
+    reset_every: usize,
+) -> BenchmarkResult<Option<String>> {
+    match &op_spec.write {
+        Some(plan) => {
+            let scratch = WriteScratch::new(0, 0, reset_every)?;
+            let text = (plan.render)(&scratch, 0)?.to_cypher();
+            Ok(Some(text.replace(&scratch.label(), CANONICAL_SCRATCH_LABEL)))
+        }
+        None => Ok(rendered.first().cloned()),
     }
 }
 
@@ -814,6 +836,9 @@ pub async fn run(config: &Config) -> BenchmarkResult<Report> {
         // render per-invocation, so this is unused for them). This is the same string a recorded
         // bundle stores, so a generated run and a `--recording` run measure identically.
         let rendered: Arc<Vec<String>> = Arc::new(corpus.iter().map(|q| q.to_cypher()).collect());
+        // Extracted before the measurement (which consumes the corpus): the op's deterministic
+        // representative query for the report.
+        let example = example_query(&op_spec, &rendered, config.reset_every)?;
         let mut op_report = measure_op(
             &op_config,
             &op_concurrency,
@@ -828,6 +853,7 @@ pub async fn run(config: &Config) -> BenchmarkResult<Report> {
         // global knob (all-INHERIT today), so a cross-run comparison can guard it per-op.
         op_report.policy =
             (op_spec.budget != OpBudget::INHERIT).then(|| op_config.resolved_policy(&op_concurrency));
+        op_report.example_query = example;
         operations.insert(op.as_str().to_string(), op_report);
     }
 
@@ -1212,6 +1238,7 @@ pub(crate) async fn measure_op(
         result_digest: None,
         policy: None,
         skipped: None,
+        example_query: None,
     })
 }
 
@@ -2046,6 +2073,36 @@ mod tests {
             }
         }
         assert_eq!(all_uids.len(), concurrency * depth * (warmup + per_lane));
+    }
+
+    #[test]
+    fn example_query_uses_the_first_rendered_read() {
+        let op_spec = spec(OpName::MatchByIndex);
+        let rendered = vec!["MATCH (one) RETURN one".to_string(), "MATCH (two)".to_string()];
+        let ex = example_query(&op_spec, &rendered, 512).unwrap();
+        assert_eq!(ex.as_deref(), Some("MATCH (one) RETURN one"), "first corpus query verbatim");
+        // Defensive: an empty corpus (impossible via build_corpus) yields no example, not a panic.
+        assert_eq!(example_query(&op_spec, &[], 512).unwrap(), None);
+    }
+
+    #[test]
+    fn example_query_renders_writes_with_the_canonical_label() {
+        // A catalog write renders invocation 0 against the canonical scratch and swaps the label
+        // for the run-independent placeholder, so identical runs report identical examples.
+        for op in [OpName::CreateNode, OpName::CreateEdge, OpName::DeleteNode] {
+            let op_spec = spec(op);
+            let first = example_query(&op_spec, &[], 512).unwrap().unwrap();
+            let second = example_query(&op_spec, &[], 512).unwrap().unwrap();
+            assert_eq!(first, second, "{op:?}: deterministic across calls");
+            assert!(
+                first.contains(CANONICAL_SCRATCH_LABEL),
+                "{op:?}: canonical placeholder label: {first}"
+            );
+            assert!(
+                !first.contains("BenchScratch_0"),
+                "{op:?}: raw run-token-0 label must be canonicalized: {first}"
+            );
+        }
     }
 
     #[test]

@@ -25,6 +25,37 @@ pub struct Summary {
     pub stddev: f64,
 }
 
+impl Summary {
+    /// **Sample** standard deviation of the retained samples — Bessel-corrected (n−1 denominator):
+    /// `s = stddev · √(n/(n−1))`, exact because the stored [`Self::stddev`] is the population σ
+    /// over the same `n` values. The n−1 denominator is deliberate: the retained samples are a
+    /// *sample* of the operation's latency distribution, and the population formula would
+    /// understate its dispersion (most at small `n`). `None` when `n < 2` (dispersion of a single
+    /// sample is undefined) or the stored σ is negative (impossible from this tool — only a
+    /// corrupted/foreign report) or the result is non-finite — never a nonsensical value that
+    /// could poison a report.
+    pub fn sample_stddev(&self) -> Option<f64> {
+        if self.n < 2 || self.stddev < 0.0 {
+            return None;
+        }
+        let s = self.stddev * (self.n as f64 / (self.n as f64 - 1.0)).sqrt();
+        s.is_finite().then_some(s)
+    }
+
+    /// Coefficient of variation, in percent: `100 · sample_stddev / mean` — the dispersion of the
+    /// retained samples relative to their own scale, so cells of very different magnitudes are
+    /// comparable at a glance. `None` whenever [`Self::sample_stddev`] is undefined or the mean is
+    /// non-finite or non-positive (a ratio to a ≤ 0 denominator is meaningless for latencies).
+    pub fn cv_pct(&self) -> Option<f64> {
+        let s = self.sample_stddev()?;
+        if !(self.mean.is_finite() && self.mean > 0.0) {
+            return None;
+        }
+        let cv = s / self.mean * 100.0;
+        cv.is_finite().then_some(cv)
+    }
+}
+
 /// The Tukey multiplier that classifies a *severe* outlier (`3·IQR`); mild would be `1.5`.
 const SEVERE_IQR_MULTIPLIER: f64 = 3.0;
 
@@ -217,5 +248,51 @@ mod tests {
     fn stddev_of_constant_is_zero() {
         let s = summarize(&[5.0, 5.0, 5.0, 5.0, 5.0]).unwrap();
         assert!(approx(s.stddev, 0.0));
+    }
+
+    #[test]
+    fn sample_stddev_applies_bessel_correction() {
+        // For [2, 4, 4, 4, 5, 5, 7, 9]: population σ = 2, sample s = √(32/7) ≈ 2.13809.
+        let s = summarize(&[2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0]).unwrap();
+        assert!(approx(s.stddev, 2.0));
+        assert!(approx(s.sample_stddev().unwrap(), (32.0f64 / 7.0).sqrt()));
+    }
+
+    #[test]
+    fn sample_stddev_undefined_below_two_samples() {
+        // n = 1: the n−1 denominator would divide by zero — must be None, not a panic/NaN.
+        let s = summarize(&[42.0]).unwrap();
+        assert_eq!(s.n, 1);
+        assert_eq!(s.sample_stddev(), None);
+        assert_eq!(s.cv_pct(), None);
+        // A synthetic n = 0 summary (never produced by `summarize`, but reachable through serde).
+        let zero = Summary { n: 0, ..s };
+        assert_eq!(zero.sample_stddev(), None);
+        assert_eq!(zero.cv_pct(), None);
+        // A negative stored σ (corrupted/foreign report): invalid, not a negative "deviation".
+        let corrupt = Summary { n: 4, stddev: -1.0, ..s };
+        assert_eq!(corrupt.sample_stddev(), None);
+        assert_eq!(corrupt.cv_pct(), None);
+    }
+
+    #[test]
+    fn cv_pct_is_relative_sample_dispersion() {
+        // mean = 5, sample s = √(32/7) → CV = 100·s/5 ≈ 42.76%.
+        let s = summarize(&[2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0]).unwrap();
+        assert!(approx(s.cv_pct().unwrap(), (32.0f64 / 7.0).sqrt() / 5.0 * 100.0));
+        // A constant series has zero dispersion → CV 0%.
+        let flat = summarize(&[5.0, 5.0, 5.0, 5.0]).unwrap();
+        assert!(approx(flat.cv_pct().unwrap(), 0.0));
+    }
+
+    #[test]
+    fn cv_pct_undefined_for_nonpositive_or_nonfinite_mean() {
+        let base = summarize(&[1.0, 2.0, 3.0]).unwrap();
+        // Zeroed/negative means (an invalid server-time summary) must not divide.
+        assert_eq!(Summary { mean: 0.0, ..base.clone() }.cv_pct(), None);
+        assert_eq!(Summary { mean: -1.0, ..base.clone() }.cv_pct(), None);
+        assert_eq!(Summary { mean: f64::NAN, ..base.clone() }.cv_pct(), None);
+        // A non-finite stored σ (hand-crafted/corrupt) degrades to None, never NaN.
+        assert_eq!(Summary { stddev: f64::NAN, ..base }.sample_stddev(), None);
     }
 }

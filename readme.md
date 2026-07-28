@@ -618,7 +618,15 @@ just synthetic-compare-versions demo falkor://127.0.0.1:6379 falkor://127.0.0.1:
   level (throughput + **server-time** p50/p90/p95/p99 with deltas; the client-observed total p50
   rides along as an informational sub-line, and a side without a valid server time — e.g. a report
   predating server-time capture — degrades that
-  latency cell to `—` — no silent fallback). The §6.3 **oracle attestation** is
+  latency cell to `—` — no silent fallback). Each side also gets a compact **`n / σ (ms) / CV`**
+  column with its **within-run** dispersion of `server_ms`: `n` = samples retained after
+  severe-outlier removal (pooled across the C workers), `σ` = their **sample** standard deviation
+  (n−1 denominator), `CV` = 100·σ/mean — dispersion *within* that run, not run-to-run noise; σ/CV
+  degrade to `—` alongside the server latency columns. Every op section opens with a **collapsed
+  `example query`** block showing the op's deterministic first measured command (cached-mode base
+  text, truncated past 600 chars; recorded repo-read shapes are documented in
+  [`QUERY_EXPLANATIONS_AND_SAMPLES.md`](QUERY_EXPLANATIONS_AND_SAMPLES.md)). The §6.3 **oracle
+  attestation** is
   guarded the same way: a one-sided or differing `meta.oracle_verified` aborts (the runs did not run
   the same correctness tier — a re-hashed oracle→v2 downgrade looks exactly like this), the per-side
   attestation renders as an **outcome oracle** header row, and a pair of *un*-attested runs over
@@ -642,9 +650,11 @@ just synthetic-compare-versions demo falkor://127.0.0.1:6379 falkor://127.0.0.1:
   passes **`--elapsed-secs <n>`** — a compute-time line (benchmark + reporting) for the run. Each cell
   row also prints the **effective `p50 guard`** applied to it (e.g. `15% AND 0.5 ms`, per-op×C
   overrides included) and the absolute `Δms`, and folds **p90/p99 + throughput** onto a smaller,
-  clearly non-gated `context:` line — under the default server-ms gate that line also carries the
+  clearly non-gated `context:` line — with each side's **within-run `n/σ/CV`** of `server_ms`
+  (same definitions as the `--diff` columns) and, under the default server-ms gate, the
   **demoted client-observed total p50** — the verdict stays **p50-only**. Each op's tables are wrapped in
-  a **collapsed `<details>`** (with the op's 🟢/🔴 verdict on the summary row) so the PR sticky
+  a **collapsed `<details>`** (with the op's 🟢/🔴 verdict on the summary row, and a nested
+  collapsed `example query` block showing its deterministic first measured command) so the PR sticky
   comment stays compact — the reader expands only the ops they care about.
 - Every regression comparison is computed **once** into a single analysis model and rolled up into a
   four-state **overall verdict**: **not comparable** (workload/config mismatch — nothing else
@@ -672,6 +682,12 @@ just synthetic-compare-versions demo falkor://127.0.0.1:6379 falkor://127.0.0.1:
     attestation when present, thresholds echo) plus every
     op × cache-mode × concurrency cell with baseline/candidate p50, `delta_pct`/`delta_ms`, the
     resolved budget and the per-cell verdict — source material for an interactive report page.
+    Each cell's per-side `context` also carries the within-run measurement stats — `n` (retained
+    samples; `0` in files written before the field existed), `n_server` (server-timed cohort,
+    omitted when the side has no valid server time), `server_stddev_ms`/`server_cv_pct` and
+    `total_stddev_ms`/`total_cv_pct` (sample σ, n−1; omitted when undefined) — and each op an
+    additive `example_query` (its deterministic first measured command, candidate's when both
+    sides carry one; omitted when neither does).
     Skipped ops carry their reason in `skipped_baseline`/`skipped_candidate` (omitted otherwise).
   - **`--divergence-policy <gate|advisory>`** (default `gate`) sets how a result divergence lands:
     under `gate` a diverged op is 🔴 and fails the comparison; under `advisory` (for cross-engine
