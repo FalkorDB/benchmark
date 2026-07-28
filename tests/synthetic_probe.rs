@@ -34,6 +34,7 @@ fn base_config(graph: &str) -> Config {
         server_timeout_ms: 5_000,
         client_deadline_ms: 6_000,
         cache: CacheSelection::Both,
+        pipeline_depth: 1,
         out: "synthetic-report.json".to_string(),
         server_image: None,
         label: None,
@@ -633,6 +634,121 @@ async fn concurrency_sweep_produces_per_level_throughput_and_percentiles() {
 
 #[tokio::test]
 #[ignore = "requires a running FalkorDB server"]
+async fn pipelined_reads_keep_totals_uniqueness_and_positive_throughput() {
+    // `pipeline_depth: 4`: each of the C connection slots carries 4 closed-loop lanes over one
+    // multiplexed socket. The level must still account for exactly C × samples invocations per
+    // cache mode (120 divides by 4), report positive throughput at the swept concurrencies (lanes
+    // are not extra levels), and keep uncached uid-uniqueness — every lane claims a disjoint uid
+    // block, so a collision would surface here as a cached plan hit in uncached mode.
+    let graph = "syn_it_pipelined";
+    seed_user_graph(graph, 200).await;
+
+    let samples = 120; // divisible by depth 4 ⇒ level totals stay exactly C × samples
+    let report = run(&Config {
+        graph: graph.to_string(),
+        ops: vec![OpName::MatchByIndex],
+        samples,
+        warmup: 20,
+        concurrency: vec![1, 2],
+        cache: CacheSelection::Both,
+        pipeline_depth: 4,
+        ..base_config(graph)
+    })
+    .await
+    .expect("pipelined sweep should succeed");
+
+    assert!(
+        report.meta.connection.contains("pipelined read lanes"),
+        "meta.connection must reflect the lane fan-out, got '{}'",
+        report.meta.connection
+    );
+
+    let op = report.operations.get("match_by_index").expect("op present");
+    assert_eq!(
+        op.levels.iter().map(|l| l.concurrency).collect::<Vec<_>>(),
+        vec![1, 2],
+        "reported levels stay the swept concurrencies (lanes are not extra levels)"
+    );
+    for lvl in &op.levels {
+        let c = lvl.concurrency;
+        for (mode, lm) in [("cached", &lvl.cached), ("uncached", &lvl.uncached)] {
+            let lm = lm
+                .as_ref()
+                .unwrap_or_else(|| panic!("C={c} missing {mode} metrics"));
+            assert_eq!(
+                lm.metrics.server_ms.n + lm.metrics.server_ms.removed,
+                c * samples,
+                "C={c} {mode}: the lanes must measure exactly C × samples invocations in total"
+            );
+            assert!(
+                lm.throughput_ops_per_sec > 0.0,
+                "C={c} {mode}: throughput must be positive"
+            );
+        }
+        let uncached = &lvl.uncached.as_ref().unwrap().metrics;
+        assert!(
+            uncached.cached_false_rate > 0.5,
+            "C={c}: uncached mode must still miss the plan cache (uid uniqueness across lanes), got {}",
+            uncached.cached_false_rate
+        );
+    }
+    drop_graph(graph).await;
+}
+
+#[tokio::test]
+#[ignore = "requires a running FalkorDB server"]
+async fn pipeline_depth_leaves_write_ops_on_the_plain_closed_loop() {
+    // With `pipeline_depth: 4` configured, write ops still run the plain closed loop (depth 1):
+    // a green run is itself the proof — the write path's per-sample `nodes_created == 1`
+    // verification and untimed window resets don't tolerate pipelined lanes — and the level still
+    // accounts for exactly C × samples with the run's scratch fully cleaned up.
+    let graph = "syn_it_pipelined_writes";
+    let seeded_users: i64 = 50;
+    seed_user_graph(graph, seeded_users).await;
+
+    let samples = 60;
+    let report = run(&Config {
+        graph: graph.to_string(),
+        ops: vec![OpName::CreateNode],
+        samples,
+        warmup: 10,
+        concurrency: vec![2],
+        reset_every: 50,
+        cache: CacheSelection::Cached,
+        pipeline_depth: 4,
+        ..base_config(graph)
+    })
+    .await
+    .expect("write sweep with a configured pipeline depth should still succeed at depth 1");
+
+    // A write-only run never pipelines, so its metadata must say so too.
+    assert!(
+        !report.meta.connection.contains("pipelined"),
+        "write-only runs report the plain pooled connection, got '{}'",
+        report.meta.connection
+    );
+
+    let op = report.operations.get("create_node").expect("op present");
+    let lvl = only_level(op);
+    let m = lvl.cached.as_ref().expect("cached metrics present");
+    assert_eq!(
+        m.metrics.server_ms.n + m.metrics.server_ms.removed,
+        lvl.concurrency * samples,
+        "writes ignore the pipeline depth: totals stay exactly C × samples"
+    );
+
+    // No scratch may leak (the seeded :User data is all that remains).
+    let mut g = open_graph(&endpoint(), graph).await.expect("reopen graph");
+    assert_eq!(
+        scalar_i64(&mut g, "MATCH (n) RETURN count(n)").await,
+        seeded_users,
+        "no scratch nodes may remain after the run's post-level cleanup"
+    );
+    drop_graph(graph).await;
+}
+
+#[tokio::test]
+#[ignore = "requires a running FalkorDB server"]
 async fn write_ops_run_isolated_sweep_and_clean_up() {
     // create_node + merge_miss at C=8 over several sawtooth windows. A green run is itself the
     // isolation proof: every sample verifies `nodes_created == 1`, so if two of the 8 workers ever
@@ -1085,6 +1201,7 @@ fn replay_config(dir: &std::path::Path, graph: &str, out: &str, load: bool) -> R
         server_image: None,
         label: None,
         require_oracle: false,
+        pipeline_depth: 1,
     }
 }
 
@@ -1548,6 +1665,7 @@ async fn record_and_replay_via_run_command() {
         recording: Some(out_dir),
         no_load: false,
         require_oracle: false,
+        pipeline_depth: None,
     })
     .await
     .expect("run --recording via run_command");
@@ -1557,6 +1675,111 @@ async fn record_and_replay_via_run_command() {
     assert!(written.contains("result_digest"));
     // The Markdown sibling is written too.
     assert!(std::path::Path::new(&report_out.replace(".json", ".md")).exists());
+
+    std::fs::remove_dir_all(&dir).ok();
+    drop_graph(graph).await;
+}
+
+/// Sanity-mirror: one recorded bundle, replayed at depth 1 and depth 4 with identical samples,
+/// must publish the **same** `workload_hash` and per-op `result_digest`s — the digest comes from
+/// the untimed single-flight reference pass, so pipelining the measured loop must not perturb it.
+/// This is the local `report --diff` comparability bar the pipelined mode has to clear.
+#[tokio::test]
+#[ignore = "requires a running FalkorDB server"]
+async fn replay_digests_are_identical_across_pipeline_depths() {
+    use benchmark::cli::SyntheticCommands;
+    use benchmark::synthetic::run_command;
+
+    let graph = "syn_it_depth_digests";
+    drop_graph(graph).await;
+    let dir = temp_bundle_dir("syn-it-depth");
+    let out_dir = dir.to_string_lossy().into_owned();
+
+    run_command(SyntheticCommands::Record {
+        config: None,
+        graph: Some(graph.to_string()),
+        ops: vec![
+            benchmark::cli::OpSelector::One(OpName::MatchByIndex),
+            benchmark::cli::OpSelector::One(OpName::AggregateCount),
+        ],
+        all_reads: false,
+        tier: None,
+        repo_reads: None,
+        repo_algorithms: false,
+        repo_writes: false,
+        seed: Some(23),
+        nodes: Some(400),
+        edges: Some(1200),
+        oracle: None,
+        out_dir: out_dir.clone(),
+    })
+    .await
+    .expect("record via run_command");
+
+    let replay = |depth: Option<usize>, out: String, load: bool| {
+        let out_dir = out_dir.clone();
+        async move {
+            run_command(SyntheticCommands::Run {
+                config: None,
+                endpoint: Some(endpoint()),
+                graph: None,
+                ops: vec![],
+                all_reads: false,
+                tier: None,
+                samples: Some(120), // divisible by 4 ⇒ identical totals at both depths
+                warmup: Some(10),
+                concurrency: vec![1, 2],
+                reset_every: None,
+                seed: None,
+                cache: Some(benchmark::synthetic::CacheSelection::Both),
+                server_timeout_ms: None,
+                client_deadline_ms: None,
+                out: Some(out),
+                server_image: None,
+                label: None,
+                generate: false,
+                nodes: None,
+                edges: None,
+                recording: Some(out_dir),
+                no_load: !load,
+                require_oracle: false,
+                pipeline_depth: depth.map(|d| std::num::NonZeroUsize::new(d).unwrap()),
+            })
+            .await
+        }
+    };
+
+    let out1 = dir.join("depth1.json").to_string_lossy().into_owned();
+    let out4 = dir.join("depth4.json").to_string_lossy().into_owned();
+    replay(None, out1.clone(), true)
+        .await
+        .expect("depth-1 replay");
+    // Second replay reuses the already-loaded graph (no_load) — same dataset, same digests.
+    replay(Some(4), out4.clone(), false)
+        .await
+        .expect("depth-4 replay");
+
+    let parse = |path: &str| -> serde_json::Value {
+        serde_json::from_str(&std::fs::read_to_string(path).expect("report exists"))
+            .expect("valid report JSON")
+    };
+    let (r1, r4) = (parse(&out1), parse(&out4));
+
+    // Identical workload identity…
+    let hash = |r: &serde_json::Value| r["meta"]["dataset"]["workload_hash"].as_str().unwrap().to_string();
+    assert_eq!(hash(&r1), hash(&r4), "workload_hash must not depend on pipeline depth");
+    // …and identical per-op result digests (both ops must actually carry one).
+    for op in ["match_by_index", "aggregate_count"] {
+        let digest = |r: &serde_json::Value| {
+            r["operations"][op]["result_digest"].as_str().map(str::to_owned)
+        };
+        let (d1, d4) = (digest(&r1), digest(&r4));
+        assert!(d1.is_some(), "{op}: depth-1 replay must publish a result digest");
+        assert_eq!(d1, d4, "{op}: result digest must not depend on pipeline depth");
+    }
+    // The pipelined run's metadata reflects the lane fan-out; the default run's doesn't.
+    assert!(r1["meta"]["connection"].as_str().unwrap().contains("pool(size=1)"));
+    assert!(r4["meta"]["connection"].as_str().unwrap().contains("pipelined read lanes"));
 
     std::fs::remove_dir_all(&dir).ok();
     drop_graph(graph).await;
@@ -2021,6 +2244,7 @@ async fn replay_concurrency_sweep_verifies_results_and_reports_levels() {
         server_image: None,
         label: None,
         require_oracle: false,
+        pipeline_depth: 1,
     };
     // If any op returned different results at C=4 vs the single-flight reference, run() errors here.
     // The two LIMIT ops (expand_hops_5, aggregate_group) are totally ordered, so their value digests

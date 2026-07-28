@@ -46,6 +46,36 @@ which extra concurrency mostly inflates the tail. The highest-throughput level i
 `<- knee` in the console table. A single-level sweep (`--concurrency 1`) reproduces the classic
 single-connection latency measurement plus its achieved throughput.
 
+### Pipelined reads (`--pipeline-depth K`)
+
+By default (depth `1`) the loop above is **honest single-flight**: a worker's next command leaves
+the client only after the previous reply fully arrived, so client-side scheduling gaps (tokio
+wakeup jitter, CPU contention) become gaps in the server's arrival stream. When the metric that
+matters is **`server_ms`** (the regression gate's), `--pipeline-depth K` (K > 1, `synthetic run`;
+TOML `pipeline_depth`) removes those gaps for **read** ops: each of the `C` connection slots
+becomes one **multiplexed** socket carrying `K` cloned closed-loop lanes, keeping `K` commands
+concurrently in flight per connection. FalkorDB executes a connection's commands **serially** (a
+blocked connection is never parsed for its next command), so server-side concurrency stays `C`;
+the connection's input buffer just never runs dry — the server **self-paces**. Consequences:
+
+- `server_ms` stops seeing client arrival jitter; `total_ms` inflates (a reply queues behind up to
+  `K−1` earlier ones) and is informational only.
+- Each lane measures `ceil(samples / K)` invocations: a level completes ≥ `C × samples`, exactly
+  `C × samples` when `K` divides `--samples` (pick such a value for identical totals across
+  depths). Reported concurrency stays `C`; lanes are not extra levels.
+- Every lane claims its own disjoint uncached-uid block and a distinct corpus offset
+  (`w × K + lane`), so uncached mode still misses the plan cache on every invocation.
+- The per-op `result_digest` comes from the untimed single-flight reference pass, so digests are
+  depth-independent — depth-1 and depth-K runs of one workload stay comparable under
+  `report --diff`.
+- **Write** ops always run the plain closed loop regardless of `K`: their per-sample mutation
+  verification and untimed window-boundary resets don't tolerate a second in-flight command.
+
+The related global `--client-threads N` flag caps the binary's tokio worker threads (default: one
+per core; the runtime stays multi-threaded even at `N=1`), useful when the client is pinned to a
+dedicated CPU subset. The [architecture document](docs/synthetic-benchmark-architecture.md)
+diagrams the in-flight model, the threads-vs-depth relation, and the measured A/A precision.
+
 ### Cache modes per level
 
 Every level is still measured under **both** plan-cache conditions, with the derived compilation

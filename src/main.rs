@@ -199,10 +199,30 @@ fn worker_progress_batch_size(total_queries: usize) -> u32 {
     }
 }
 
-#[tokio::main]
-async fn main() -> BenchmarkResult<()> {
-    let mut cmd = Cli::command();
+/// Build the tokio runtime the whole binary runs on: multi-thread flavor, optionally capping the
+/// worker threads via `--client-threads N` (default: tokio's default, one per core). Always
+/// `new_multi_thread`, even for N=1 — the FalkorDB client rejects a current-thread runtime
+/// (`RuntimeFlavor::CurrentThread`) and uses `task::block_in_place`.
+fn build_runtime(client_threads: Option<std::num::NonZeroUsize>) -> BenchmarkResult<tokio::runtime::Runtime> {
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    if let Some(threads) = client_threads {
+        builder.worker_threads(threads.get());
+    }
+    builder
+        .enable_all()
+        .build()
+        .map_err(|e| OtherError(format!("failed to build the tokio runtime: {e}")))
+}
+
+/// Entry point: parse the CLI synchronously, then run the async body on the manually built
+/// runtime so `--client-threads` is honored from the very first task.
+fn main() -> BenchmarkResult<()> {
     let cli = Cli::parse();
+    build_runtime(cli.client_threads)?.block_on(async_main(cli))
+}
+
+async fn async_main(cli: Cli) -> BenchmarkResult<()> {
+    let mut cmd = Cli::command();
 
     let filter = EnvFilter::from_default_env().add_directive(LevelFilter::INFO.into());
     let subscriber = fmt()
@@ -2311,4 +2331,26 @@ async fn init_memgraph(
 
     info!("---> Done");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_runtime;
+    use std::num::NonZeroUsize;
+
+    #[test]
+    fn build_runtime_caps_worker_threads_and_stays_multi_thread() {
+        // `--client-threads N` caps the pool exactly; the flavor stays multi_thread even for N=1
+        // (the FalkorDB client rejects a current-thread runtime and uses `block_in_place`).
+        for n in [1usize, 3] {
+            let rt = build_runtime(NonZeroUsize::new(n)).expect("runtime builds");
+            assert_eq!(rt.metrics().num_workers(), n);
+            // block_in_place is only legal on a multi-thread runtime — proves the flavor.
+            rt.block_on(async { tokio::task::block_in_place(|| ()) });
+        }
+        // Absent → tokio's default (one worker per core), and the runtime still runs futures.
+        let rt = build_runtime(None).expect("runtime builds");
+        assert!(rt.metrics().num_workers() >= 1);
+        assert_eq!(rt.block_on(async { 21 * 2 }), 42);
+    }
 }

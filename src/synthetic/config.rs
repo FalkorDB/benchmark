@@ -31,6 +31,8 @@ pub struct FileConfig {
     pub reset_every: Option<usize>,
     pub seed: Option<u64>,
     pub cache: Option<CacheSelection>,
+    /// READ-op pipelining depth `K` (default 1 = the plain closed loop; see `Config::pipeline_depth`).
+    pub pipeline_depth: Option<usize>,
     pub server_timeout_ms: Option<i64>,
     pub client_deadline_ms: Option<u64>,
     pub out: Option<String>,
@@ -97,6 +99,8 @@ pub struct CliOverrides {
     pub generate: bool,
     pub nodes: Option<usize>,
     pub edges: Option<usize>,
+    /// `--pipeline-depth` READ-op pipelining depth (`None` = not passed; must be ≥ 1).
+    pub pipeline_depth: Option<usize>,
 }
 
 /// Merge CLI overrides over an optional file config to produce the final [`Config`].
@@ -165,9 +169,22 @@ pub fn resolve(
         server_timeout_ms: default_server_timeout_ms,
         client_deadline_ms: default_client_deadline_ms,
         cache: default_cache,
+        pipeline_depth: default_pipeline_depth,
         out: default_out,
         ..
     } = defaults;
+
+    // The pipelining depth must be ≥ 1 wherever it came from (clap already enforces the CLI flag;
+    // the TOML file is validated here).
+    let pipeline_depth = cli
+        .pipeline_depth
+        .or(file.pipeline_depth)
+        .unwrap_or(default_pipeline_depth);
+    if pipeline_depth == 0 {
+        return Err(OtherError(
+            "pipeline_depth must be >= 1 (1 = no pipelining)".to_string(),
+        ));
+    }
 
     Ok(Config {
         endpoint: cli.endpoint.or(file.endpoint).unwrap_or(default_endpoint),
@@ -193,6 +210,7 @@ pub fn resolve(
             .or(file.client_deadline_ms)
             .unwrap_or(default_client_deadline_ms),
         cache: cli.cache.or(file.cache).unwrap_or(default_cache),
+        pipeline_depth,
         out: cli.out.or(file.out).unwrap_or(default_out),
         server_image: cli.server_image,
         label: cli.label,
@@ -310,6 +328,58 @@ mod tests {
         let cfg =
             FileConfig::from_toml("operations = [\"create_node\"]\nreset_every = 12345\n").unwrap();
         assert_eq!(cfg.reset_every, Some(12345));
+    }
+
+    #[test]
+    fn pipeline_depth_precedence_cli_over_file_over_default() {
+        // CLI wins over the file.
+        let file = FileConfig {
+            operations: Some(vec![OpName::MatchByIndex]),
+            pipeline_depth: Some(2),
+            ..Default::default()
+        };
+        let cli = CliOverrides {
+            pipeline_depth: Some(4),
+            ..Default::default()
+        };
+        assert_eq!(resolve(cli, Some(file.clone())).unwrap().pipeline_depth, 4);
+
+        // No CLI ⇒ the file's value.
+        assert_eq!(
+            resolve(CliOverrides::default(), Some(file))
+                .unwrap()
+                .pipeline_depth,
+            2
+        );
+
+        // Neither CLI nor file ⇒ depth 1, the plain closed loop (today's behaviour).
+        let bare = FileConfig {
+            operations: Some(vec![OpName::MatchByIndex]),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve(CliOverrides::default(), Some(bare))
+                .unwrap()
+                .pipeline_depth,
+            1
+        );
+        assert_eq!(Config::default().pipeline_depth, 1);
+    }
+
+    #[test]
+    fn pipeline_depth_parses_from_toml_and_rejects_zero() {
+        let cfg = FileConfig::from_toml("operations = [\"match_by_index\"]\npipeline_depth = 4\n")
+            .unwrap();
+        assert_eq!(cfg.pipeline_depth, Some(4));
+
+        // A zero depth in the file is rejected by resolve() (clap already rejects it on the CLI).
+        let zero = FileConfig {
+            operations: Some(vec![OpName::MatchByIndex]),
+            pipeline_depth: Some(0),
+            ..Default::default()
+        };
+        let err = resolve(CliOverrides::default(), Some(zero)).unwrap_err();
+        assert!(err.to_string().contains("pipeline_depth must be >= 1"));
     }
 
     #[test]

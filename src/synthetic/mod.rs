@@ -440,6 +440,15 @@ pub struct Config {
     pub server_timeout_ms: i64,
     pub client_deadline_ms: u64,
     pub cache: CacheSelection,
+    /// READ-op pipelining depth `K` (default 1 = the plain closed loop). At `K > 1` each of a
+    /// level's `C` connections becomes one **multiplexed** socket carrying `K` closed-loop lanes,
+    /// keeping `K` commands in flight per connection so the server always has the next command
+    /// queued (self-pacing — client scheduling jitter can't perturb the arrival pattern). FalkorDB
+    /// executes a connection's commands serially, so server-side concurrency stays `C`; only
+    /// client-observed `total_ms` inflates (a command waits behind its lane-mates). Write ops
+    /// always measure at depth 1 (their per-sample verification and untimed resets are
+    /// closed-loop by design).
+    pub pipeline_depth: usize,
     pub out: String,
     pub server_image: Option<String>,
     /// Optional display name for this run (e.g. `pr`/`main`), recorded into the report.
@@ -463,6 +472,7 @@ impl Default for Config {
             server_timeout_ms: 5_000,
             client_deadline_ms: 6_000,
             cache: CacheSelection::Both,
+            pipeline_depth: 1,
             out: "synthetic-report.json".to_string(),
             server_image: None,
             label: None,
@@ -556,6 +566,19 @@ pub(crate) fn redact_endpoint(endpoint: &str) -> String {
     }
 }
 
+/// Parse `endpoint` into a [`falkordb::FalkorConnectionInfo`] without ever echoing credentials:
+/// the error carries only the [redacted](redact_endpoint) endpoint. The underlying parse detail is
+/// deliberately dropped — the vendored client wraps the URL parser's own text
+/// (`FalkorDBError::InvalidConnectionInfo(String)`), which can quote the raw connection string.
+fn parse_endpoint(endpoint: &str) -> BenchmarkResult<falkordb::FalkorConnectionInfo> {
+    endpoint.try_into().map_err(|_| {
+        OtherError(format!(
+            "invalid endpoint '{}': connection string failed to parse",
+            redact_endpoint(endpoint)
+        ))
+    })
+}
+
 /// Open a single-connection [`falkordb::AsyncGraph`] handle for `endpoint` on graph `graph_name`.
 ///
 /// Uses a one-socket pool so latency is honest single-flight (the client otherwise defaults to 8
@@ -564,22 +587,86 @@ pub async fn open_graph(
     endpoint: &str,
     graph_name: &str,
 ) -> BenchmarkResult<falkordb::AsyncGraph> {
-    let connection_info = endpoint.try_into().map_err(|e| {
-        OtherError(format!(
-            "invalid endpoint '{}': {:?}",
-            redact_endpoint(endpoint),
-            e
-        ))
-    })?;
-
     let client = FalkorClientBuilder::new_async()
-        .with_connection_info(connection_info)
+        .with_connection_info(parse_endpoint(endpoint)?)
         .with_connection_strategy(ConnectionStrategy::Pooled {
             size: nonzero::nonzero!(1u8),
         })
         .build()
         .await?;
     Ok(client.select_graph(graph_name))
+}
+
+/// Open a **pipelining** [`falkordb::AsyncGraph`] handle: ONE multiplexed socket whose cheap
+/// clones share it, so `K` closed-loop lanes cloned from this handle keep `K` commands
+/// concurrently in flight on a single connection (the transport pipelines them; responses return
+/// in order). Backs `--pipeline-depth K > 1`; the default measurement path stays [`open_graph`]'s
+/// honest single-flight `Pooled { size: 1 }`.
+async fn open_graph_pipelined(
+    endpoint: &str,
+    graph_name: &str,
+) -> BenchmarkResult<falkordb::AsyncGraph> {
+    let client = FalkorClientBuilder::new_async()
+        .with_connection_info(parse_endpoint(endpoint)?)
+        .with_connection_strategy(ConnectionStrategy::Multiplexed {
+            connections: nonzero::nonzero!(1u8),
+        })
+        .build()
+        .await?;
+    Ok(client.select_graph(graph_name))
+}
+
+/// The effective pipelining depth for one measured op: reads honor the configured
+/// `--pipeline-depth` (min 1); writes always run the plain closed loop (depth 1) — their
+/// per-sample mutation verification and untimed window-boundary resets don't tolerate a second
+/// in-flight command on the connection. Recorded writes measure with `write: None` but
+/// `kind: Write`, so the gate is on the query kind, not the write plan.
+fn effective_pipeline_depth(
+    kind: QueryType,
+    configured: usize,
+) -> usize {
+    match kind {
+        QueryType::Read => configured.max(1),
+        QueryType::Write => 1,
+    }
+}
+
+/// Measured invocations per closed-loop lane at pipelining depth `depth`: each of a connection's
+/// `depth` lanes runs `ceil(samples / depth)` invocations, so a level completes **at least**
+/// `C × samples` invocations (exactly `C × samples` when `samples` divides evenly — pick such a
+/// `--samples` to keep totals identical across depths).
+fn lane_samples(
+    samples: usize,
+    depth: usize,
+) -> usize {
+    samples.div_ceil(depth.max(1))
+}
+
+/// The decorrelating corpus offset for one closed-loop lane: lanes globally index `w × depth + l`
+/// (worker slot `w`, lane `l`), so every lane starts its corpus cycle at a distinct offset —
+/// exactly today's `w % corpus.len()` when `depth == 1`.
+fn lane_corpus_offset(
+    worker: usize,
+    depth: usize,
+    lane: usize,
+    corpus_len: usize,
+) -> usize {
+    (worker * depth + lane) % corpus_len.max(1)
+}
+
+/// The report's human-readable connection description: the honest single-flight default, or the
+/// multiplexed lane fan-out under `--pipeline-depth K > 1` (informational — never guarded by the
+/// diff/regression comparability checks, so a depth-1 and a depth-K run of the same workload stay
+/// comparable on server_ms).
+pub(crate) fn connection_description(pipeline_depth: usize) -> String {
+    if pipeline_depth > 1 {
+        format!(
+            "multiplexed(1) per worker × {} pipelined read lanes",
+            pipeline_depth
+        )
+    } else {
+        "pool(size=1) per worker".to_string()
+    }
 }
 
 /// Run the probe: connect (single connection), collect server provenance, sample the graph to seed
@@ -692,6 +779,13 @@ pub async fn run(config: &Config) -> BenchmarkResult<Report> {
     let uid_alloc = AtomicU64::new(0);
 
     let mut operations = BTreeMap::new();
+    // Write ops always measure at depth 1, so a run with no reads reports the plain pooled
+    // connection whatever depth was configured (computed before `ops` is consumed below).
+    let effective_meta_depth = if ops.iter().any(|op| op.kind() == QueryType::Read) {
+        config.pipeline_depth
+    } else {
+        1
+    };
     // Capture each op's corpus fingerprint (in execution order) so the corpus_hash reflects the
     // exact rendered workload — parameter values included — not just the op names.
     let mut op_fingerprints: Vec<(OpName, String)> = Vec::with_capacity(ops.len());
@@ -765,7 +859,7 @@ pub async fn run(config: &Config) -> BenchmarkResult<Report> {
             corpus_size: CORPUS_SIZE,
             server_timeout_ms: config.server_timeout_ms,
             client_deadline_ms: config.client_deadline_ms,
-            connection: "pool(size=1) per worker".to_string(),
+            connection: connection_description(effective_meta_depth),
             started_at_epoch_secs,
             server,
             host: host::collect(),
@@ -1156,6 +1250,12 @@ async fn run_scratch_cleanup(
 /// open `C` single-socket connections (one per worker), drive them to completion, and summarize the
 /// pooled samples plus the achieved throughput.
 ///
+/// At `pipeline_depth K > 1` (reads only — see [`effective_pipeline_depth`]) each of the `C`
+/// connection slots becomes one **multiplexed** socket fanned into `K` closed-loop lanes: the
+/// engine drives `C × K` lanes, each measuring [`lane_samples`] invocations, so at most `K`
+/// commands are in flight per connection while server-side concurrency stays `C` (FalkorDB
+/// executes a connection's commands serially). The reported level keeps `concurrency = C`.
+///
 /// For write ops each worker gets an isolated [`WriteScratch`] and its untimed setup runs before the
 /// window. The run's scratch is dropped afterward on a fresh connection whether or not the level
 /// errored, so a failed write level never leaks scratch into the next one. A cleanup failure on the
@@ -1181,9 +1281,15 @@ async fn measure_level(
         config.warmup
     };
 
-    // Each worker claims a disjoint id block wide enough for its warm-up + measured invocations, so
-    // no two workers (here or at any other level) ever render the same uncached query text.
-    let block = (effective_warmup + config.samples) as u64;
+    // Reads honor `--pipeline-depth`; writes always run the plain closed loop. At depth 1 every
+    // value below (lane count, per-lane samples, uid blocks, corpus offsets) is byte-identical to
+    // the pre-pipelining behaviour.
+    let depth = effective_pipeline_depth(target.kind, config.pipeline_depth);
+    let samples_per_lane = lane_samples(config.samples, depth);
+
+    // Each lane claims a disjoint id block wide enough for its warm-up + measured invocations, so
+    // no two lanes (here or at any other level) ever render the same uncached query text.
+    let block = (effective_warmup + samples_per_lane) as u64;
 
     // The untimed write hooks (setup/reset/cleanup) can touch a whole window of nodes, so give them
     // a generous deadline independent of the tight per-op measurement deadline.
@@ -1204,8 +1310,33 @@ async fn measure_level(
     // into a Result so a partway failure routes through the scratch cleanup below instead of leaking
     // the nodes earlier workers already created.
     let build_workers = async {
-        let mut workers = Vec::with_capacity(concurrency);
+        let mut workers = Vec::with_capacity(concurrency * depth);
         for w in 0..concurrency {
+            if depth > 1 {
+                // Pipelined reads: ONE multiplexed socket for this connection slot; its K cloned
+                // lanes pipeline their in-flight commands over it. Each lane claims its own
+                // disjoint uid block and a distinct decorrelating corpus offset.
+                let graph = open_graph_pipelined(&config.endpoint, &config.graph).await?;
+                for lane in 0..depth {
+                    let uid_base = uid_alloc.fetch_add(block, Ordering::Relaxed);
+                    workers.push(GraphWorker {
+                        graph: graph.clone(),
+                        kind: target.kind,
+                        mode,
+                        run_token,
+                        uid_base,
+                        server_timeout_ms: config.server_timeout_ms,
+                        client_deadline,
+                        hook_server_timeout_ms,
+                        hook_deadline,
+                        source: WorkerSource::Read {
+                            corpus: Arc::clone(corpus),
+                            corpus_offset: lane_corpus_offset(w, depth, lane, corpus.len()),
+                        },
+                    });
+                }
+                continue;
+            }
             let mut graph = open_graph(&config.endpoint, &config.graph).await?;
             let uid_base = uid_alloc.fetch_add(block, Ordering::Relaxed);
             let source = match &target.write {
@@ -1250,7 +1381,7 @@ async fn measure_level(
     // so the single cleanup path below runs for both outcomes (a partially set-up populated band
     // must never leak). The build/setup error is what we ultimately propagate.
     let run = match build_workers {
-        Ok(workers) => run_closed_loop(workers, effective_warmup, config.samples).await,
+        Ok(workers) => run_closed_loop(workers, effective_warmup, samples_per_lane).await,
         Err(e) => Err(e),
     };
 
@@ -1403,6 +1534,7 @@ pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkRes
             recording,
             no_load,
             require_oracle,
+            pipeline_depth,
         } => {
             // Expand `--op all` / `--op '*'` to the concrete read ops before anything else.
             let ops = crate::cli::expand_op_selectors(&ops);
@@ -1436,6 +1568,7 @@ pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkRes
                     server_image,
                     label,
                     require_oracle,
+                    pipeline_depth: pipeline_depth.map_or(1, std::num::NonZeroUsize::get),
                 };
                 return replay::run_and_report(&replay_config).await;
             }
@@ -1468,6 +1601,7 @@ pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkRes
                 generate,
                 nodes,
                 edges,
+                pipeline_depth: pipeline_depth.map(std::num::NonZeroUsize::get),
             };
             let file = config::FileConfig::load(config_path.as_deref())?;
             let config = config::resolve(overrides, file)?;
@@ -1529,6 +1663,7 @@ pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkRes
                 generate: true,
                 nodes,
                 edges,
+                pipeline_depth: None,
             };
             let file = config::FileConfig::load(config_path.as_deref())?;
             let resolved = config::resolve(overrides, file)?;
@@ -1825,6 +1960,93 @@ async fn report_command(
 mod tests {
     use super::*;
     use crate::query::QueryBuilder;
+
+    #[test]
+    fn effective_pipeline_depth_pipelines_reads_only() {
+        // Reads honor the configured depth (with a ≥1 floor)…
+        assert_eq!(effective_pipeline_depth(QueryType::Read, 1), 1);
+        assert_eq!(effective_pipeline_depth(QueryType::Read, 4), 4);
+        assert_eq!(effective_pipeline_depth(QueryType::Read, 0), 1);
+        // …while writes always run the plain closed loop, whatever was configured (their
+        // per-sample verification + untimed resets don't tolerate pipelining).
+        assert_eq!(effective_pipeline_depth(QueryType::Write, 1), 1);
+        assert_eq!(effective_pipeline_depth(QueryType::Write, 4), 1);
+    }
+
+    #[test]
+    fn lane_samples_splits_evenly_and_rounds_up() {
+        // depth 1 = today's behaviour, verbatim.
+        assert_eq!(lane_samples(1000, 1), 1000);
+        // An even split keeps the level total exactly C × samples.
+        assert_eq!(lane_samples(1000, 4), 250);
+        // An uneven split rounds UP so a level never measures fewer than C × samples.
+        assert_eq!(lane_samples(1001, 4), 251);
+        assert_eq!(lane_samples(1, 8), 1);
+        // A zero depth is floored to 1 (defensive; effective_pipeline_depth already floors).
+        assert_eq!(lane_samples(10, 0), 10);
+    }
+
+    #[test]
+    fn lane_corpus_offset_is_todays_offset_at_depth_1_and_distinct_across_lanes() {
+        let corpus_len = 256;
+        // depth 1 reproduces the historical `w % corpus.len()` exactly.
+        for w in 0..40 {
+            assert_eq!(lane_corpus_offset(w, 1, 0, corpus_len), w % corpus_len);
+        }
+        // Lanes index globally (w × depth + lane): all C × K offsets are distinct while
+        // C × K ≤ corpus_len, so every lane starts its cycle somewhere different.
+        let depth = 4;
+        let concurrency = 8;
+        let mut seen = std::collections::HashSet::new();
+        for w in 0..concurrency {
+            for lane in 0..depth {
+                assert!(
+                    seen.insert(lane_corpus_offset(w, depth, lane, corpus_len)),
+                    "offset collision at worker {w} lane {lane}"
+                );
+            }
+        }
+        // Wraps modulo the corpus length…
+        assert_eq!(lane_corpus_offset(100, 4, 3, corpus_len), (100 * 4 + 3) % corpus_len);
+        // …and an empty corpus can't divide by zero (defensive floor).
+        assert_eq!(lane_corpus_offset(3, 4, 2, 0), 0);
+    }
+
+    #[test]
+    fn connection_description_reflects_pipeline_depth() {
+        // Depth 1 keeps the historical string byte-identical (report metadata compatibility).
+        assert_eq!(connection_description(1), "pool(size=1) per worker");
+        assert_eq!(connection_description(0), "pool(size=1) per worker");
+        assert_eq!(
+            connection_description(4),
+            "multiplexed(1) per worker × 4 pipelined read lanes"
+        );
+    }
+
+    /// Simulate `measure_level`'s uid-block claiming across lanes: every lane claims a disjoint
+    /// block sized for its warm-up + measured invocations, so no two lanes can ever render the
+    /// same uncached uid — the exact invariant uncached mode's plan-cache-miss guarantee needs.
+    #[test]
+    fn lane_uid_blocks_are_disjoint_across_a_pipelined_level() {
+        let warmup = 3usize;
+        let samples = 10usize;
+        let depth = 4usize;
+        let concurrency = 8usize;
+        let per_lane = lane_samples(samples, depth);
+        let block = (warmup + per_lane) as u64;
+        let uid_alloc = AtomicU64::new(0);
+        let mut all_uids = std::collections::HashSet::new();
+        for _lane in 0..concurrency * depth {
+            let uid_base = uid_alloc.fetch_add(block, Ordering::Relaxed);
+            for seq in 0..(warmup + per_lane) as u64 {
+                assert!(
+                    all_uids.insert(uid_base + seq),
+                    "uid collision at base {uid_base} seq {seq}"
+                );
+            }
+        }
+        assert_eq!(all_uids.len(), concurrency * depth * (warmup + per_lane));
+    }
 
     #[test]
     fn op_name_maps_are_consistent() {
@@ -2361,6 +2583,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn open_graph_pipelined_rejects_malformed_endpoint() {
+        // Same parse-time guard as `open_graph`, on the multiplexed path — no server needed.
+        // (`AsyncGraph` isn't `Debug`, so unwrap the error arm by hand.)
+        let err = match open_graph_pipelined("falkor://host:notaport", "g").await {
+            Ok(_) => panic!("malformed endpoint must fail"),
+            Err(e) => e,
+        };
+        assert!(err.to_string().contains("invalid endpoint"));
+    }
+
+    #[test]
+    fn parse_endpoint_error_never_echoes_credentials() {
+        // The underlying parser's message can quote the raw connection string, so the mapped
+        // error must carry only the redacted endpoint — never the password.
+        let err = match parse_endpoint("falkor://user:hunter2@host:notaport") {
+            Ok(_) => panic!("malformed endpoint must fail"),
+            Err(e) => e,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("invalid endpoint"));
+        assert!(!msg.contains("hunter2"), "credential leaked: {msg}");
+    }
+
+    #[tokio::test]
     async fn run_command_list_ops_needs_no_server() {
         // The catalog path is pure output.
         assert!(run_command(crate::cli::SyntheticCommands::ListOps)
@@ -2405,6 +2651,7 @@ mod tests {
             recording: None,
             no_load: false,
             require_oracle: false,
+            pipeline_depth: None,
         };
         assert!(run_command(command).await.is_err());
         let _ = std::fs::remove_file(&cfg_path);
@@ -2588,6 +2835,7 @@ mod tests {
             server_image: None,
             label: None,
             require_oracle: false,
+            pipeline_depth: 1,
         };
         let err = crate::synthetic::replay::run(&replay_cfg).await.unwrap_err();
         assert!(
@@ -2901,6 +3149,7 @@ mod tests {
             recording: None,
             no_load: false,
             require_oracle: false,
+            pipeline_depth: None,
         };
         let err = run_command(command).await.expect_err("no ops ⇒ error");
         assert!(
@@ -2937,6 +3186,7 @@ mod tests {
             recording: Some("/nonexistent/rec".to_string()),
             no_load: false,
             require_oracle: false,
+            pipeline_depth: None,
         };
         let err = run_command(command).await.expect_err("recording + generate ⇒ error");
         assert!(format!("{err}").contains("--recording"), "got: {err}");
@@ -2970,6 +3220,7 @@ mod tests {
             recording: None,
             no_load: false,
             require_oracle: true,
+            pipeline_depth: None,
         };
         let err = run_command(command).await.expect_err("--require-oracle without --recording");
         assert!(

@@ -202,8 +202,35 @@ saturates, after which extra concurrency mostly inflates the tail — the highes
 flagged as the `<- knee`. A single-level sweep (`--concurrency 1`) reproduces the classic
 single-connection latency measurement plus its achieved throughput.
 
+##### Pipelined reads (`--pipeline-depth`) and `--client-threads`
+
+Two opt-in flags decouple **client scheduling jitter** from the server-side numbers when the gated
+metric is `server_ms` (as in the recorded-replay regression gate):
+
+- **`--pipeline-depth K`** (`synthetic run`; TOML `pipeline_depth`; default `1` = exactly the
+  closed loop described above). For **read** ops, each of the `C` connection slots becomes one
+  multiplexed socket carrying `K` closed-loop lanes, keeping `K` commands concurrently in flight
+  per connection. FalkorDB executes a connection's commands **serially** (a blocked connection is
+  never parsed for its next command), so server-side concurrency stays `C` — but the socket's input
+  buffer is never empty, so the server **self-paces**: a lane's next command is already queued when
+  the previous one finishes, and client-side scheduling gaps stop perturbing the arrival pattern.
+  Expect `total_ms` to inflate (a reply waits behind up to `K−1` others — informational only) while
+  `server_ms` tightens. Each lane measures `ceil(samples / K)` invocations, so a level still
+  completes ≥ `C × samples` (exactly `C × samples` when `K` divides `--samples` — pick such a
+  value). Uncached uid-uniqueness and the per-op `result_digest` (captured by the untimed reference
+  pass) are depth-independent, so depth-1 and depth-K runs of the same workload stay comparable
+  under `report --diff`. **Write** ops always run the plain closed loop regardless of `K` (their
+  per-sample verification and untimed window resets don't tolerate pipelining).
+- **`--client-threads N`** (global) caps the tokio worker threads of the whole binary (default:
+  one per core). On a machine that partitions CPUs between server and client, pinning the client
+  to a few dedicated threads removes runtime-scheduler migration noise. The runtime stays
+  multi-threaded even at `N=1`.
+
 See [`synthetic-benchmark.md`](synthetic-benchmark.md) for the concurrency model, the report schema
-(`operations[].levels[]`), and how to read the curve in depth.
+(`operations[].levels[]`), and how to read the curve in depth, and the [synthetic benchmark
+architecture](docs/synthetic-benchmark-architecture.md) for the full picture in diagrams — CPU
+pinning in CI, the in-flight gating model (closed loop vs pipelined lanes), the write choreography,
+threads-vs-depth, and the measured run-to-run precision.
 
 #### Operation catalog
 
@@ -437,8 +464,9 @@ load-script *and* the measured commands — then **run that identical bundle** a
 the commands each run), `run --recording` loads the recorded graph and measures the recorded commands
 through the closed-loop engine (the full concurrency sweep + cached/uncached modes), so the only
 variable is the FalkorDB version. See the full walkthrough in the
-[synthetic benchmark tutorial](docs/synthetic-benchmark-tutorial.md), and task-oriented recipes in
-the [synthetic benchmark cookbook](docs/synthetic-benchmark-cookbook.md).
+[synthetic benchmark tutorial](docs/synthetic-benchmark-tutorial.md), task-oriented recipes in
+the [synthetic benchmark cookbook](docs/synthetic-benchmark-cookbook.md), and the architecture
+in diagrams in the [synthetic benchmark architecture](docs/synthetic-benchmark-architecture.md).
 
 ```bash
 # 1. record a bundle OFFLINE (no server) into recordings/demo/
@@ -533,7 +561,8 @@ just synthetic-compare-versions demo falkor://127.0.0.1:6379 falkor://127.0.0.1:
   fails too). Capture is a record-time-only cost (the two
   full passes over the 1 000-node/5 000-edge repo-writes bundle take ~18 min); plain (oracle-free)
   v1/v2 bundles stay byte-identical.
-- **`benchmark synthetic run --recording <dir> [--concurrency … --cache …]`** drops + loads +
+- **`benchmark synthetic run --recording <dir> [--concurrency … --cache … --pipeline-depth …]`**
+  drops + loads +
   **count-verifies** the recorded graph, then measures the recorded commands across the concurrency
   sweep + cache modes, writing a report plus a per-op **`result_digest`** (a hash of the result
   values). It also **verifies results are identical at the highest concurrency** (an untimed
