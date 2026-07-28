@@ -227,7 +227,10 @@ metric is `server_ms` (as in the recorded-replay regression gate):
   multi-threaded even at `N=1`.
 
 See [`synthetic-benchmark.md`](synthetic-benchmark.md) for the concurrency model, the report schema
-(`operations[].levels[]`), and how to read the curve in depth.
+(`operations[].levels[]`), and how to read the curve in depth, and the [synthetic benchmark
+architecture](docs/synthetic-benchmark-architecture.md) for the full picture in diagrams — CPU
+pinning in CI, the in-flight gating model (closed loop vs pipelined lanes), the write choreography,
+threads-vs-depth, and the measured run-to-run precision.
 
 #### Operation catalog
 
@@ -461,8 +464,9 @@ load-script *and* the measured commands — then **run that identical bundle** a
 the commands each run), `run --recording` loads the recorded graph and measures the recorded commands
 through the closed-loop engine (the full concurrency sweep + cached/uncached modes), so the only
 variable is the FalkorDB version. See the full walkthrough in the
-[synthetic benchmark tutorial](docs/synthetic-benchmark-tutorial.md), and task-oriented recipes in
-the [synthetic benchmark cookbook](docs/synthetic-benchmark-cookbook.md).
+[synthetic benchmark tutorial](docs/synthetic-benchmark-tutorial.md), task-oriented recipes in
+the [synthetic benchmark cookbook](docs/synthetic-benchmark-cookbook.md), and the architecture
+in diagrams in the [synthetic benchmark architecture](docs/synthetic-benchmark-architecture.md).
 
 ```bash
 # 1. record a bundle OFFLINE (no server) into recordings/demo/

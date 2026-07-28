@@ -73,7 +73,8 @@ the connection's input buffer just never runs dry — the server **self-paces**.
 
 The related global `--client-threads N` flag caps the binary's tokio worker threads (default: one
 per core; the runtime stays multi-threaded even at `N=1`), useful when the client is pinned to a
-dedicated CPU subset.
+dedicated CPU subset. The [architecture document](docs/synthetic-benchmark-architecture.md)
+diagrams the in-flight model, the threads-vs-depth relation, and the measured A/A precision.
 
 ### Cache modes per level
 
