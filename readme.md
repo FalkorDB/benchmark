@@ -1,5 +1,7 @@
 [![Cargo Build & Test](https://github.com/FalkorDB/benchmark/actions/workflows/ci.yml/badge.svg)](https://github.com/FalkorDB/benchmark/actions/workflows/ci.yml)
-[![License](https://img.shields.io/github/license/falkordb/benchmark.svg)](https://github.com/falkordb/benchmark/blob/main/LICENSE)
+[![Code Coverage](https://github.com/FalkorDB/benchmark/actions/workflows/coverage.yml/badge.svg)](https://github.com/FalkorDB/benchmark/actions/workflows/coverage.yml)
+[![codecov](https://codecov.io/gh/FalkorDB/benchmark/graph/badge.svg)](https://codecov.io/gh/FalkorDB/benchmark)
+[![License](https://img.shields.io/github/license/falkordb/benchmark.svg)](https://github.com/falkordb/benchmark/blob/master/LICENSE)
 [![Discord](https://img.shields.io/discord/1146782921294884966.svg?style=social&logo=discord)](https://discord.com/invite/99y2Ubh6tg)
 [![Twitter](https://img.shields.io/twitter/follow/falkordb?style=social)](https://twitter.com/falkordb)
 
@@ -10,6 +12,7 @@
 - [System Requirements](#system-requirements)
   - [Prerequisites](#prerequisites)
   - [Installation Steps](#installation-steps)
+- [Development](#development)
 - [Run the benchmark](#run-the-benchmark)
   - [Run via helper scripts](#run-via-helper-scripts)
   - [CLI workflow](#cli-workflow)
@@ -96,6 +99,718 @@ from `~/`
 - enable autocomplete `source <(./target/release/benchmark generate-auto-complete bash)`
 - copy the falkor shared lib to `cp ~/FalkorDB/bin/linux-x64-release/src/falkordb.so .`
 
+## Development
+
+Automation for this repo is driven by [`just`](https://github.com/casey/just) — run `just --list`
+to see every recipe. CI installs `just` and runs these same recipes, so whatever CI checks you can
+reproduce locally with the identical command.
+
+Install `just` (`cargo install just` or `brew install just`) and, for coverage,
+[`cargo-llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov) (`cargo install cargo-llvm-cov`).
+Building the Rust crate also needs `protoc` (`sudo apt-get install -y protobuf-compiler` or
+`brew install protobuf`).
+
+### Build, lint and test
+
+```bash
+just build            # build all targets/features
+just clippy           # strict clippy (warnings denied)
+just test             # run the unit + integration test suite
+just test-one query_builder  # run a single test by name filter
+just ci               # everything the Rust CI runs: build + clippy + test
+```
+
+### Documentation checks
+
+Markdown docs are validated in CI (the `Docs validation` workflow) and locally with the same recipe:
+
+```bash
+just doc-check        # all doc checks: links + shell examples
+just doc-links        # offline broken-link + anchor check (lychee) over tracked *.md
+just doc-shell        # bash -n syntax-check the shell (bash/sh) examples in the docs
+```
+
+`just doc-links` runs [`lychee`](https://github.com/lycheeverse/lychee) in `--offline` mode, so it
+verifies relative and same-file anchor links without network access (external URLs are skipped to
+keep CI stable). It needs the `lychee` binary on your `PATH` — install it locally with
+`cargo install lychee` or `brew install lychee` (CI installs it automatically via
+`taiki-e/install-action`). Rust code blocks in the docs are compiled as doctests by `just test`
+(via `src/doc_examples.rs`). Because doctests are run as well as compiled, fence an example that
+should type-check but not execute with `rust,no_run`, and one that should not compile at all with
+`rust,ignore` (or a non-Rust language) so it is skipped.
+
+### Code coverage
+
+```bash
+just coverage-local   # spin up a Docker FalkorDB, generate codecov.json, tear it down
+just coverage         # generate codecov.json via cargo-llvm-cov (needs a reachable FalkorDB)
+just coverage-html    # open a browsable HTML coverage report (needs a reachable FalkorDB)
+```
+
+`just coverage` runs the unit tests **and** the `#[ignore]`d integration tests
+(`--include-ignored`) so server-backed code is measured, so it needs a reachable FalkorDB — set
+`FALKORDB_HOST`/`FALKORDB_PORT`, or use `just coverage-local` to spin one up in Docker. The
+`coverage` CI job provides a FalkorDB service container.
+
+Coverage is uploaded to [Codecov](https://codecov.io/gh/FalkorDB/benchmark) by the `coverage`
+workflow. Please cover new code with tests and keep coverage high — **patch coverage must stay
+≥ 90%** (enforced by `codecov.yml`).
+
+### Synthetic per-operation benchmark (experimental)
+
+Measures a curated suite of **read and write operations in isolation** — one at a time, selectable —
+capturing on every invocation both the **server time** (FalkorDB's reported internal execution time)
+and the **total time** (end-to-end client round-trip), then summarizing them with severe-outlier
+removal (Tukey fences, like Criterion.rs) and writing a JSON report with one block per operation. For
+each operation it sweeps a list of **concurrency levels**, so the report traces how latency
+(including the p99 tail) changes as achieved throughput rises — the latency-vs-throughput curve and
+its saturation "knee". This is Part 5 of a larger tool (see the design epic
+[#200](https://github.com/FalkorDB/benchmark/issues/200)); it can **generate its own reproducible
+dataset**, sweep concurrency, and measure **write operations** with steady-state isolation (see
+[Write operations](#write-operations-steady-state-isolation) below).
+
+Each operation is measured under two plan-cache conditions so you can see the cost of expression
+**compilation** separately from execution:
+
+- **cached** — the plan is reused (warm cache), so only execution is measured;
+- **uncached** — every invocation is forced to miss the plan cache (a unique query-text token), so
+  it recompiles each time, exposing compilation cost.
+
+`compilation_ms ≈ uncached − cached` server time. (FalkorDB's `CACHE_SIZE` can't be set to `0` and
+is load-time only, so the uncached condition is produced client-side and verified via the response's
+`cached_execution` flag; the server's actual `CACHE_SIZE` is recorded in the report.) Use `--cache
+cached|uncached|both` (default `both`).
+
+#### Concurrency sweep (latency vs throughput)
+
+Every operation is measured at each level of a configurable **concurrency sweep** (`--concurrency`,
+default `1,2,4,8,16,32`). Each level `C` runs a **closed-loop** engine: `C` worker tasks, each with
+its own dedicated connection, fire one query, await it to completion (row draining included), then
+immediately fire the next — so there are at most `C` requests in flight (one outstanding per active
+worker). After a discarded
+warm-up window, every worker measures in a shared window; the level reports the pooled latency
+percentiles (p50/p90/p95/p99) and the **achieved throughput** (`completed ÷ window`, ops/sec).
+
+Because a new request is issued only after the previous one *completes*, the reported throughput is
+**achieved, not offered** — it can never exceed the server's own service rate. The measured
+latencies therefore describe behaviour *at that achieved rate*: a closed loop does not model a fixed
+external arrival rate, so it neither reproduces nor corrects for
+[coordinated omission](https://www.scylladb.com/2021/04/22/on-coordinated-omission/) — quantifying
+the tail under a target offered load needs open-loop / arrival-rate testing (future work). Read the
+curve by following latency as `C` (and throughput) rise: throughput climbs until the server
+saturates, after which extra concurrency mostly inflates the tail — the highest-throughput level is
+flagged as the `<- knee`. A single-level sweep (`--concurrency 1`) reproduces the classic
+single-connection latency measurement plus its achieved throughput.
+
+##### Pipelined reads (`--pipeline-depth`) and `--client-threads`
+
+Two opt-in flags decouple **client scheduling jitter** from the server-side numbers when the gated
+metric is `server_ms` (as in the recorded-replay regression gate):
+
+- **`--pipeline-depth K`** (`synthetic run`; TOML `pipeline_depth`; default `1` = exactly the
+  closed loop described above). For **read** ops, each of the `C` connection slots becomes one
+  multiplexed socket carrying `K` closed-loop lanes, keeping `K` commands concurrently in flight
+  per connection. FalkorDB executes a connection's commands **serially** (a blocked connection is
+  never parsed for its next command), so server-side concurrency stays `C` — but the socket's input
+  buffer is never empty, so the server **self-paces**: a lane's next command is already queued when
+  the previous one finishes, and client-side scheduling gaps stop perturbing the arrival pattern.
+  Expect `total_ms` to inflate (a reply waits behind up to `K−1` others — informational only) while
+  `server_ms` tightens. Each lane measures `ceil(samples / K)` invocations, so a level still
+  completes ≥ `C × samples` (exactly `C × samples` when `K` divides `--samples` — pick such a
+  value). Uncached uid-uniqueness and the per-op `result_digest` (captured by the untimed reference
+  pass) are depth-independent, so depth-1 and depth-K runs of the same workload stay comparable
+  under `report --diff`. **Write** ops always run the plain closed loop regardless of `K` (their
+  per-sample verification and untimed window resets don't tolerate pipelining).
+- **`--client-threads N`** (global) caps the tokio worker threads of the whole binary (default:
+  one per core). On a machine that partitions CPUs between server and client, pinning the client
+  to a few dedicated threads removes runtime-scheduler migration noise. The runtime stays
+  multi-threaded even at `N=1`.
+
+See [`synthetic-benchmark.md`](synthetic-benchmark.md) for the concurrency model, the report schema
+(`operations[].levels[]`), and how to read the curve in depth, and the [synthetic benchmark
+architecture](docs/synthetic-benchmark-architecture.md) for the full picture in diagrams — CPU
+pinning in CI, the in-flight gating model (closed loop vs pipelined lanes), the write choreography,
+threads-vs-depth, and the measured run-to-run precision.
+
+#### Operation catalog
+
+Select operations with `--op <name>` (repeatable and comma-separated), `--all-reads`, or
+`--tier <core|full>`. `--all-reads`
+selects every **read** op; **write** ops (`create_node`, `merge_miss`, `create_edge`, `set_property`,
+`delete_node`, `merge_hit`) are opt-in via `--op` so a
+sweep never mutates a graph unless you ask. `--tier core` selects a small, cheap, representative read
+subset gated on every PR; `--tier full` selects every read op (same as `--all-reads`, run
+nightly/on-demand). `--tier` is mutually exclusive with `--op`/`--all-reads`, and only ever selects
+reads (write ops are `full`-tier but stay opt-in). All read ops except `return_const` target the benchmark's
+`:User {id, age}` / `(:User)-[:Friend {bench_capacity}]->(:User)` schema (with indexes on both
+`:User(id)` and `:User(age)`, mirroring the A/B baseline fixture). Most draw
+their parameters from `:User` ids sampled out of
+`--graph` (`shortest_path` needs two, `match_by_index`/`expand_*`/`aggregate_*`/`property_projection`
+one); `return_const` and `match_by_label_scan` need no seed ids (they vary a constant / a scan
+modulus). Write ops need no seed ids either — they target their own scratch namespace (see
+[Write operations](#write-operations-steady-state-isolation)). Either point `--graph` at a graph that
+already holds that schema, or let the tool **generate a reproducible one** (see
+[Generating a dataset](#generating-a-reproducible-dataset) below). Every query projects **scalars**
+(never whole nodes) and is parameterized; the corpus is seeded (`--seed`) so the same seed yields an
+identical corpus.
+
+| Operation | Tier | What it measures | Cypher (body) |
+|---|---|---|---|
+| `return_const` | `core` | round-trip / parse+exec baseline (no dataset) | `RETURN $i AS x` |
+| `match_by_index` | `core` | point lookup on the `:User(id)` index | `MATCH (n:User {id: $id}) RETURN n.id` |
+| `match_by_label_scan` | `core` | full `:User` label scan (non-indexable predicate) | `MATCH (n:User) WHERE n.id % $modulus = 0 RETURN count(n) AS c` |
+| `expand_1_hop` | `core` | 1-hop `:Friend` expansion | `MATCH (s:User {id: $id})-[:Friend]->(n:User) RETURN n.id` |
+| `expand_hops_5` | `full` | fixed 5-hop `:Friend` expansion | `MATCH (s:User {id: $id})-[:Friend*5..5]->(n:User) RETURN DISTINCT n.id LIMIT 100` |
+| `aggregate_count` | `core` | count a node's 1-hop neighbours | `MATCH (s:User {id: $id})-[:Friend]->(n:User) RETURN count(n) AS c` |
+| `aggregate_group` | `full` | group neighbours by age with counts | `MATCH (s:User {id: $id})-[:Friend]->(n:User) RETURN n.age AS age, count(*) AS c ORDER BY c DESC LIMIT 10` |
+| `shortest_path` | `full` | bounded shortest `:Friend` path between two nodes | `MATCH (s:User {id: $from}), (t:User {id: $to}) WITH shortestPath((s)-[:Friend*1..6]->(t)) AS p RETURN coalesce(length(p), -1) AS len` |
+| `property_projection` | `core` | project scalar properties of an indexed node | `MATCH (n:User {id: $id}) RETURN n.id, n.age` |
+| `create_node` *(write)* | `full` | create a fresh scratch node each invocation | `CREATE (n:BenchScratch_<run> {id: $id}) RETURN n.id` |
+| `merge_miss` *(write)* | `full` | `MERGE` a fresh scratch node (always misses → creates) | `MERGE (n:BenchScratch_<run> {id: $id}) RETURN n.id` |
+| `create_edge` *(write)* | `full` | create a fresh edge between two scratch nodes | `MATCH (a:BenchScratch_<run> {id: $src}), (b:BenchScratch_<run> {id: $dst}) CREATE (a)-[:BenchEdge]->(b)` |
+| `set_property` *(write)* | `full` | set one property on a pre-created scratch node | `MATCH (n:BenchScratch_<run> {id: $id}) WHERE n.touched IS NULL SET n.touched = $id` |
+| `delete_node` *(write)* | `full` | delete a pre-created scratch node | `MATCH (n:BenchScratch_<run> {id: $id}) DELETE n` |
+| `merge_hit` *(write)* | `full` | `MERGE` an existing scratch node (always hits) | `MERGE (n:BenchScratch_<run> {id: $id}) RETURN n.id` |
+
+Because `OpName` is a clap `ValueEnum`, `--op <TAB>` completes the operation names once you've
+installed completion (`benchmark generate-auto-complete <shell>`), and `just synthetic-ops` (or
+`benchmark synthetic list-ops`) prints the catalog.
+
+Set up and run, start to end:
+
+```bash
+# 1. start a FalkorDB server (use a tagged image, not :edge, for meaningful version numbers)
+docker run -d --rm -p 6379:6379 falkordb/falkordb:latest
+
+# 2. build the tool (needs protoc; see Prerequisites)
+just build
+
+# 3. list the available operations
+just synthetic-ops
+
+# 4. run the probe over several ops (records the exact server image so results are reproducible)
+IMAGE=$(docker inspect --format '{{index .RepoDigests 0}}' falkordb/falkordb:latest)
+just synthetic-bench --endpoint falkor://127.0.0.1:6379 --graph main \
+    --op match_by_index,expand_1_hop,aggregate_count --samples 500 --warmup 100 \
+    --concurrency 1,4,16,32 --cache both --seed 42 --server-image "$IMAGE" \
+    --out synthetic-report.json
+# ...or measure the whole read catalog at once:
+just synthetic-bench --graph main --all-reads --samples 500
+# ...or sweep a single operation (uses the default 1,2,4,8,16,32 concurrency sweep):
+just synthetic-bench-one match_by_index
+```
+
+Sample output (one block per selected op; one table row per concurrency level, per cache mode):
+
+```text
+synthetic benchmark — endpoint falkor://127.0.0.1:6379  graph main  samples 500  warmup 100  concurrency [1,4,16,32]  seed 42  connection pool(size=1) per worker
+server — falkordb module ver 4.20.1  redis 8.6.3  CACHE_SIZE 25
+server image: falkordb/falkordb@sha256:9042fdc4...
+client host — bench-01 · Linux 6.8 Ubuntu 24.04 · Intel(R) Xeon(R) (8c/16t) · 32.0 GiB · x86_64
+
+match_by_index
+  [cached — plan reused, execution only]
+    C    throughput(ops/s)   server p50/p90/p95/p99             total p50/p90/p95/p99              miss%
+    1              2950     0.081 / 0.130 / 0.150 / 0.200     0.330 / 0.470 / 0.500 / 0.900     0.0
+    4             11800     0.090 / 0.160 / 0.170 / 0.260     0.340 / 0.500 / 0.520 / 1.100     0.0
+   16             30400     0.180 / 0.700 / 0.900 / 1.900     0.600 / 1.800 / 2.100 / 4.200     0.0
+   32             41200     0.350 / 1.400 / 1.700 / 3.400     0.780 / 3.400 / 3.900 / 7.900     0.0  <- knee
+  [uncached — plan-cache miss each run, execution + compilation]
+    C    throughput(ops/s)   server p50/p90/p95/p99             total p50/p90/p95/p99              miss%
+    1              2100     0.106 / 0.160 / 0.180 / 0.240     0.360 / 0.500 / 0.540 / 0.960   100.0
+   ...
+  compilation_ms (median uncached-cached server time) by level:
+    C=1    0.025
+    C=32   0.040
+
+expand_1_hop
+  ...
+report written to synthetic-report.json
+markdown written to synthetic-report.md
+```
+
+Alongside the JSON, the tool writes a **PR-pasteable Markdown report** (`<out>.md`, e.g.
+`synthetic-report.md`) — a metadata table plus the same per-op latency-vs-throughput tables, ready
+to drop into a pull request.
+
+The report's `meta.server` block records the FalkorDB module version, `redis_version`/`build_id`,
+`CACHE_SIZE`, and the operator-supplied `--server-image` (FalkorDB does not expose a graph-module
+git SHA to clients, so the image digest is the reproducible build identity). A `:edge` image reports
+a `999999` placeholder version and the tool warns you to use a tagged image for comparisons.
+`meta.host` records the **client** machine that ran the probe (OS, CPU, cores, memory, arch, via
+`sysinfo`); the hostname is kept in the JSON/console but omitted from the Markdown.
+
+#### Write operations (steady-state isolation)
+
+Write ops measure mutation latency/throughput without the graph drifting between samples, so write
+numbers stay comparable across a long sweep. Six ops are available: `create_node`, `merge_miss`,
+`create_edge`, `set_property`, `delete_node`, and `merge_hit`. Only the operation itself is inside
+the timer; setup/reset/cleanup run in **untimed** hooks that abort the sample on failure. The
+isolation model:
+
+- **Scratch namespace.** A run writes only to a **run-unique label** `BenchScratch_<run_token>` (a
+  random per-run hex nonce), so a sweep never touches your real data or another run's scratch. The
+  label is shared by all workers of a run (keeping the plan cache warm), and the run's scratch is
+  dropped (`DETACH DELETE`, edges included) on a fresh connection after each level — even if the
+  level errored — so nothing leaks into the next op/level.
+- **Disjoint per-worker keys.** At concurrency `C`, worker `w` owns the key band
+  `[w·reset_every, (w+1)·reset_every − 1]` and uses `window_key = w·reset_every + (seq mod
+  reset_every)` for invocation `seq`. Bands never overlap, so concurrent writers never collide, and
+  within a window every key is unique — so `merge_miss` always misses (creates), `delete_node`
+  deletes each node exactly once, `create_edge` never duplicates an edge, and identities never
+  repeat. Keys are **run-independent** (only the label carries the nonce), so the workload stays
+  comparable across runs; `(w+1)·reset_every` must fit `i32` (FalkorDB params), which bounds
+  `reset_every × C`.
+- **Empty- vs populated-band ops.** `create_node`/`merge_miss` keep their band **empty** (they
+  create into it). The ops that need existing targets — `create_edge`, `set_property`, `delete_node`,
+  `merge_hit` — keep their band **populated**: an untimed setup pre-creates `reset_every` nodes (one
+  per key) so every invocation has a target.
+- **Run-level reset (sawtooth).** Every `reset_every` operations — counted over the **global**
+  warm-up + measured sequence — each worker runs an untimed reset before its band is reused, bounding
+  write drift to one sawtooth window. Empty-band ops clear the band; populated-band ops clear **and
+  refill** it with `reset_every` fresh clean nodes (so `delete_node` gets its nodes back and
+  `set_property` always writes a brand-new property). `merge_hit` never mutates, so its band is set
+  up once and its reset is a no-op. Tune the cadence with `--reset-every N` (config `reset_every`,
+  default 50000); a smaller `N` keeps the graph tighter but spends more time in setup/reset.
+- **Per-sample verification.** Each write checks FalkorDB's mutation counters against the operation's
+  intent (`create_node`/`merge_miss` ⇒ one node created; `create_edge` ⇒ one relationship;
+  `set_property` ⇒ one property set; `delete_node` ⇒ one node deleted; `merge_hit` ⇒ **no** mutation
+  — a pure match), so a silent no-op fails loudly rather than producing a fast, misleading sample.
+  `set_property`'s `WHERE n.touched IS NULL` makes this self-checking: a broken reset would match
+  nothing and fail verification instead of silently measuring a redundant write.
+
+**Limitations.**
+- **Steady state, not a fixed arrival rate.** The reset produces a sawtooth in graph size within each
+  window; it bounds drift, it does not eliminate it.
+- **Reset is untimed but not free.** At high `C` a worker's reset (which can delete/recreate a whole
+  window of nodes) contends with other workers on the server and counts toward achieved throughput,
+  so keep `reset_every` modest for write sweeps.
+- **Scratch lookups are unindexed.** The populated-band ops (and `merge_miss`) match on the
+  run-unique label without an index, so they include a label-scoped lookup cost; a coordinated
+  run-level index is a possible future refinement.
+
+```bash
+# measure the write ops over a concurrency sweep, resetting each worker's scratch every 5k ops
+just synthetic-bench --graph bench \
+    --op create_node,merge_miss,create_edge,set_property,delete_node,merge_hit \
+    --concurrency 1,8,32 --reset-every 5000 --samples 500
+```
+
+#### Generating a reproducible dataset
+
+Instead of measuring whatever graph the endpoint already holds, the tool can **generate its own**
+seeded `:User {id, age}` / `(:User)-[:Friend]->(:User)` graph so results are controlled and
+comparable across runs, machines and FalkorDB versions. Pass `--generate` with `--nodes`/`--edges`:
+
+```bash
+just synthetic-bench --graph bench --generate --nodes 100000 --edges 1000000 \
+    --op match_by_index,expand_hops_5,aggregate_count --samples 500 --seed 42
+```
+
+- `--generate` is **destructive**: it drops and rewrites `--graph` (so it's opt-in on the CLI and is
+  never authorized by a config file alone). It creates the `:User(id)` index, then bulk-loads the
+  nodes and edges via `UNWIND` batches.
+- The graph is generated deterministically from `--seed`: `edges` must be `≥ nodes` (a ring backbone
+  guarantees connectivity for expansions/shortest paths) and `≤ nodes × (nodes − 1)`; `edges` counts
+  relationships. The generated graph is always **simple** — no self-loops and no parallel
+  `(src, dst)` `:Friend` pairs — so whole-graph algorithms like `algo.maxFlow` (which rejects
+  multigraphs) run on it. The same seed + knobs reproduce the exact same graph and the same
+  operation corpora everywhere.
+- When a dataset is generated, the report's `meta.dataset` records `{seed, nodes, edges,
+  workload_hash}`. **`workload_hash`** (`sha256:…`) is a stable fingerprint of the whole workload —
+  the dataset knobs, the selected operations (in order) and their query bodies, and the sampled input
+  pools. **Only compare runs whose `workload_hash` matches**; a different hash means a different
+  workload. (For an externally-supplied graph the tool can't fingerprint the data, so no
+  `workload_hash` is emitted. Older reports used the field name `corpus_hash`, still accepted on
+  read.)
+
+#### Config file (`synthetic-bench.toml`)
+
+For a growing knob set you can put the configuration in a `synthetic-bench.toml` file (auto-detected
+in the working directory, or pass `--config <path>`). Any CLI flag **overrides** the file, which in
+turn overrides the built-in defaults; generation still requires the explicit `--generate` flag.
+
+```toml
+# synthetic-bench.toml
+seed = 42
+nodes = 100000
+edges = 1000000
+operations = ["match_by_index", "expand_hops_5", "aggregate_count"]
+samples = 500
+concurrency = [1, 4, 16, 32]   # closed-loop worker counts to sweep (default 1,2,4,8,16,32)
+cache = "both"           # cached | uncached | both
+reset_every = 50000      # write-op scratch reset cadence (ops per sawtooth window); read ops ignore it
+# endpoint / graph / warmup / server_timeout_ms / client_deadline_ms / out are all optional
+```
+
+```bash
+just synthetic-bench --generate     # reads synthetic-bench.toml, builds the dataset, runs the ops
+```
+
+Unknown keys and misspelled operation names are rejected with a clear error, and operation names use
+the same spelling as `--op` (e.g. `expand_1_hop`).
+
+To run the integration test against a live server:
+
+```bash
+just synthetic-it     # uses FALKORDB_HOST/FALKORDB_PORT, default 127.0.0.1:6379
+```
+
+#### Record / run / report: the same workload across versions (recommended)
+
+For a rigorous comparison of two FalkorDB versions, **record the workload once** — the dataset
+load-script *and* the measured commands — then **run that identical bundle** against each version and
+**diff the reports**. Unlike the Criterion baselines below (which regenerate the graph and re-derive
+the commands each run), `run --recording` loads the recorded graph and measures the recorded commands
+through the closed-loop engine (the full concurrency sweep + cached/uncached modes), so the only
+variable is the FalkorDB version. See the full walkthrough in the
+[synthetic benchmark tutorial](docs/synthetic-benchmark-tutorial.md), task-oriented recipes in
+the [synthetic benchmark cookbook](docs/synthetic-benchmark-cookbook.md), and the architecture
+in diagrams in the [synthetic benchmark architecture](docs/synthetic-benchmark-architecture.md).
+
+```bash
+# 1. record a bundle OFFLINE (no server) into recordings/demo/
+just synthetic-record demo --graph tutorial_demo \
+  --op match_by_index,expand_1_hop,aggregate_count --seed 42 --nodes 1000 --edges 5000
+# 2. compare version A (:6379) vs version B (:6380) on that identical bundle
+just synthetic-compare-versions demo falkor://127.0.0.1:6379 falkor://127.0.0.1:6380
+```
+
+- **`just synthetic-record <name> [flags]`** writes `recordings/<name>/` = `manifest.json` +
+  `graph.jsonl` (load statements) + `commands/<op>.jsonl`, plus a length-framed **`workload_hash`**
+  over the graph *and* the commands (so any later edit is detected on load). It is **offline** — a
+  pure function of the seed + knobs — and reads `synthetic-bench.toml` for defaults. Select ops with
+  `--op <names>`, or **`--op all`** (or `--op '*'`) for every read operation. Alternatively,
+  **`--repo-reads <core|full>`** records the A/B benchmark's non-algorithm **read shapes**
+  straight from `queries_repository` (auto-discovered, then annotated with a coverage profile + tier +
+  result policy + capability): `core` is the small per-PR subset, `full` is all 50 reads — the 46
+  baseline reads, the ExtendedCore `temporal_spatial_roundtrip` (which round-trips deterministic
+  temporal/spatial values), and the 3 FixtureDependent fulltext/vector reads. Each shape's corpus is
+  rendered **once** here from the seed and recorded verbatim (record-once → replay-verbatim), so the
+  bundle stays byte-identical across runs; shapes whose result set isn't byte-stable (a `LIMIT`
+  without `ORDER BY`, or the fulltext/vector **top-k** reads) are still recorded + timed but marked
+  **result-N/A** so replay never gates their digest. The FixtureDependent reads additionally need a
+  fulltext/vector **fixture** (index DDL + seed data); when a `full` selection includes them the tool
+  bakes that fixture into the recorded graph **once**, so every replay endpoint gets the identical
+  fixture. (That fixture uses FalkorDB-specific DDL/procedures, so these shapes are for the
+  FalkorDB-vs-FalkorDB A/B — two FalkorDB versions — not cross-database runs.)
+  Each shape also pins a **per-op corpus size** (every current read shape uses the full 256-command
+  corpus) and an optional **per-op budget** — overrides for `samples`/`warmup`/`concurrency`/`cache`
+  and the timeouts, written into the manifest's `budget` field (omitted when fully inherited, so
+  existing bundles are unchanged). The budget is **replay policy, not workload content**: it is not
+  folded into the `workload_hash`. This is the plumbing that lets whole-graph algorithm shapes
+  (~40–80 ms/call) record a 1-command corpus with a tight budget instead of the default 256×sweep.
+  `--repo-reads` is mutually exclusive with `--op`/`--all-reads`/`--tier`.
+  **`--repo-algorithms`** additionally records the **4 opt-in whole-graph algorithm read shapes**
+  (`algo.pageRank` / `algo.maxFlow` / `algo.MSF` / `algo.HarmonicCentrality`), each with a tight
+  per-op budget (25 samples, warm-up 2, C=1, cached-only, 60 s server timeout) and a reduced corpus
+  (1 command for the parameterless shapes; a small seeded set of distinct `(source, target)` pairs for maxFlow).
+  `algo_max_flow_single_pair` and `algo_msf_summary` are **digest-gated** — their values are unique
+  for the fixed graph and verified byte-stable across independent replays — while
+  `algo_pagerank_summary`/`algo_harmonic_summary` stay **result-N/A** (arbitrary/iterative floats),
+  adding latency/trend coverage without joining the divergence gate. Each shape also records its
+  required procedure (`capability` in the
+  manifest — replay policy like `budget`, not folded into the `workload_hash`): at replay a single
+  `CALL dbms.procedures()` probe **skips** any op whose procedure the engine lacks (reported, never
+  executed) instead of failing the run. Only algorithm shapes carry a capability — read shapes
+  (including the fulltext/vector fixture reads, whose index DDL loads with the graph before any
+  probe) stay capability-free, so a `--repo-reads` replay never probes. The selector is
+  **orthogonal** to `--repo-reads` (combinable with it or usable alone; also mutually exclusive
+  with `--op`/`--all-reads`/`--tier`): algorithm shapes are
+  **never** part of `--repo-reads full` nor the per-PR `synthetic-verify` gate. They need no extra
+  fixture — every generated graph is **simple** (no parallel `:Friend` edges, which `algo.maxFlow`
+  rejects) and every `:Friend` edge carries the `bench_capacity` property the flow/MSF shapes use.
+  **`--repo-writes`** records the A/B benchmark's **10 write shapes** from `queries_repository`
+  (`CREATE`/`SET`/`MERGE`/`DETACH DELETE`/`REMOVE`/`FOREACH` — e.g. `single_vertex_write`,
+  `merge_friend_edge_upsert`, `detach_delete_user`) as a **single-kind write bundle** in
+  **recording format v2**, whose `workload_hash` additionally binds each op's read/write **kind**
+  (v1 read bundles hash byte-identically to before). Same render-once discipline and full
+  256-command corpora as the reads. The recorded graph ends with a **prepared-state statement**
+  (design §6.4: every `User` gains `rpc_social_credit` + `:TemporaryLabel`, deterministically) so
+  the `REMOVE` shape mutates state that actually exists — re-established by every base restore and
+  hash-bound like every other load statement. Every write shape pins a **C=1 budget**
+  (100 samples, warm-up 10) — recorded write replay is **C=1 by policy** (design §6.5 decision:
+  the recorded corpora interleave on shared node ids across any contiguous worker split, and a
+  partitioned-correct C>1 replay would take corpus-partitioning engineering that is deliberately
+  not built; enforced at record *and* replay, while concurrent write **scaling** remains the live
+  `--write-ops` probe's job via per-worker scratch partitioning) — and is **result-N/A by
+  design** — this is the **latency tier** of the
+  writes design: mutation outcomes (result stats/counters) are state- and value-dependent, so
+  nothing is asserted about them. Write bundles are single-kind, so `--repo-writes` is mutually
+  exclusive with **every** read selector (`--op`/`--all-reads`/`--tier`/`--repo-reads`/
+  `--repo-algorithms`); writes never enter `--repo-reads`, any tier, or the per-PR
+  `synthetic-verify` gate.
+  Adding **`--oracle <endpoint>`** (write bundles only) additionally captures the **§6.3/§6.4
+  outcome oracle**: every **oracle-eligible** write command (9 of the 10 shapes — the §6.3
+  deterministic subset plus, since §6.4, `detach_delete_user` (variable per-command delete counts,
+  reproducible from the restored base) and `remove_user_property_and_label` (real removals against
+  the prepared state); only `single_edge_update` stays excluded (server `rand()`)) runs once
+  against the recorded **pristine base** on
+  that live FalkorDB endpoint — restored before every invocation — recording the mutation counters
+  it reports; a **second full pass** must reproduce every outcome exactly (determinism is proven at
+  record time, or the record fails naming the op/seq). The capture covers each eligible op's
+  **complete command corpus** (per-command outcomes, no sampling), and the resulting **format v4**
+  bundle must carry an oracle for **exactly** the eligible set — full corpus per op, none anywhere
+  else — enforced at load, attach and replay, so oracle coverage can never silently shrink
+  (format **v3** is the frozen pre-§6.4 seven-op layout — no prepared phase — and legacy v3
+  bundles still load and replay under their own exact-set rule). The
+  outcomes are **bound into the `workload_hash`**, and the endpoint's graph is left restored — on
+  failure too, with the restored **content** verified against the pristine post-load digests (a
+  dual capture+restore failure surfaces both errors; the *initial* setup load is under the same
+  discipline — a mid-load failure triggers one recovery restore and a combined error when that
+  fails too). Capture is a record-time-only cost (the two
+  full passes over the 1 000-node/5 000-edge repo-writes bundle take ~18 min); plain (oracle-free)
+  v1/v2 bundles stay byte-identical.
+- **`benchmark synthetic run --recording <dir> [--concurrency … --cache … --pipeline-depth …]`**
+  drops + loads +
+  **count-verifies** the recorded graph, then measures the recorded commands across the concurrency
+  sweep + cache modes, writing a report plus a per-op **`result_digest`** (a hash of the result
+  values). It also **verifies results are identical at the highest concurrency** (an untimed
+  concurrent pass) so a wrong result under concurrency is a hard fail. Ops whose manifest entry
+  carries a **`budget`** are measured under that budget (their own sweep/cache/samples/timeouts —
+  validated like the global config) while every other op uses the run's global knobs; the report's
+  `meta` echoes the global knobs, and each budgeted op's **resolved effective policy** is persisted
+  on its report entry (`policy`), so `report --diff`/`--regression` and the Criterion baseline
+  guard **refuse per-op** to compare runs that measured the same workload under different per-op
+  conditions (budgets are outside the `workload_hash`, so this is what guards them).
+  **Result-N/A** ops skip the full untimed reference capture — only
+  their first command is probed (fail-fast) — since no digest is ever gated on them. Ops whose
+  manifest entry carries a **`capability`** (a required procedure name) are checked against the
+  engine's `dbms.procedures()` registry up front (one probe per run, case-insensitive): a missing
+  procedure **skips** the op entirely — never executed, reported with `skipped: <reason>` and no
+  levels/digest/policy — so a recording with algorithm shapes still replays cleanly on an engine
+  without them. `--no-load`
+  skips the reload
+  for a load-once / run-many flow (still count-verifying first). `just synthetic-replay <name>
+  <endpoint>` wraps this. Pass **`--label <name>`** (e.g. `pr`/`main`) to name the run — the label
+  becomes the column header in `report --diff`/`--regression`.
+  A **write bundle** (recorded with `--repo-writes`) replays through `GRAPH.QUERY` (writes are
+  rejected by the read path's `GRAPH.RO_QUERY`) at **C=1 only** — the guard refuses any other
+  effective sweep, since budgets sit outside the `workload_hash` and could otherwise be tampered
+  wider — and the base graph is **reset (drop + reload + count-verify) before every measured
+  cell** (op × cache mode), bounding mutation drift to one cell's invocations. Nothing is asserted
+  about write results or counters (`result_digest` stays `null`; latency tier). The replay ends
+  with an **error-safe final restore** — on success *and* failure the recorded base is reloaded
+  and its node/edge **content digests** are verified against the pristine post-load capture, so a
+  write replay never silently leaves a mutated graph behind (a dual measurement+restore failure
+  surfaces **both** errors). `--no-load` is refused for write bundles, a bundle can never mix
+  reads with writes, and a write op can never be capability-gated (capabilities are unhashed, so
+  a crafted one could otherwise skip-shrink the ten-shape coverage). When the bundle carries a
+  **§6.3 outcome oracle** (format v4 — or the frozen legacy v3 — recorded with `--oracle`),
+  replay first runs an untimed
+  **correctness pass**: every recorded outcome is re-verified — pristine base restored before
+  each invocation, command run once, engine counters required to **equal** the recorded stats —
+  and any divergence **hard-fails the replay** naming the op/seq/command (an engine that no
+  longer effects the recorded outcome is doing *different work*, so measuring its latency would
+  poison the A/B trend silently). The pass re-checks the exact-set rule (every eligible op, full
+  corpus) against the bundle's format version and the report's `meta.oracle_verified` attests the
+  verified coverage (op → outcome
+  count) — absent for oracle-less runs — so an oracle→v2 downgrade is visible when comparing runs.
+  Only then are latencies measured, exactly as for a plain write bundle. Because a re-hashed
+  oracle→v2 strip is byte-indistinguishable from a legitimate latency-tier recording (v2 hashes
+  never covered oracle data), pass **`--require-oracle`** whenever the bundle is *expected* to
+  carry the correctness tier: the replay then refuses (offline, before any connection) a write
+  bundle without an oracle, and errors on a read bundle (reads have none).
+- **`benchmark synthetic report --diff <A.json> <B.json> [--out diff.md]`** **guards** the pair (it
+  aborts unless the `workload_hash` **and** every op's `result_digest` match, so a version returning
+  wrong/empty results faster can't masquerade as an improvement — the version difference itself is
+  expected and recorded), then writes a **Markdown diff** across every op × cache-mode × concurrency
+  level (throughput + **server-time** p50/p90/p95/p99 with deltas; the client-observed total p50
+  rides along as an informational sub-line, and a side without a valid server time — e.g. a report
+  predating server-time capture — degrades that
+  latency cell to `—` — no silent fallback). Each side also gets a compact **`n / σ (ms) / CV`**
+  column with its **within-run** dispersion of `server_ms`: `n` = samples retained after
+  severe-outlier removal (pooled across the C workers), `σ` = their **sample** standard deviation
+  (n−1 denominator), `CV` = 100·σ/mean — dispersion *within* that run, not run-to-run noise; σ/CV
+  degrade to `—` alongside the server latency columns. Every op section opens with a **collapsed
+  `example query`** block showing the op's deterministic first measured command (cached-mode base
+  text, truncated past 600 chars; recorded repo-read shapes are documented in
+  [`QUERY_EXPLANATIONS_AND_SAMPLES.md`](QUERY_EXPLANATIONS_AND_SAMPLES.md)). The §6.3 **oracle
+  attestation** is
+  guarded the same way: a one-sided or differing `meta.oracle_verified` aborts (the runs did not run
+  the same correctness tier — a re-hashed oracle→v2 downgrade looks exactly like this), the per-side
+  attestation renders as an **outcome oracle** header row, and a pair of *un*-attested runs over
+  oracle-eligible write ops gets a prominent latency-tier-only warning. `just
+  synthetic-compare-versions` runs `run --recording` against both endpoints then `report --diff`.
+- **`benchmark synthetic report --diff <A.json> <B.json> --regression [--thresholds t.toml]`** is a
+  **non-fatal, colored** variant for a per-PR regression report: each op × cache-mode × concurrency
+  cell gets a **🟢 / 🔴 / N/A** verdict on **p50** (of the server-reported `server_ms` by default —
+  see `--gated-metric`) — 🟢 if the candidate (B) is faster or slower
+  within budget, 🔴 if slower beyond it. The budget is a `budget_pct` plus an absolute `floor_ms`
+  noise guard, defaulting to 10 % / 0.5 ms and overridable per-operation and per-operation×concurrency
+  in a TOML file (`[default]` + `[op.<name>]` with a `concurrency` inline table). `<name>` may be a
+  catalog op (`synthetic list-ops`) **or** any recorded shape — a repo read (e.g.
+  `single_vertex_read`) or an algorithm shape (e.g. `algo_max_flow_single_pair`);
+  every measured op resolves a budget — string-keyed override first, else `[default]`; catalog ops
+  and recorded shapes also roll into their coverage tier (algorithm shapes count as `full`). Unlike `--diff`,
+  it **never aborts**: an op whose `result_digest` differs is shown 🔴 with a `⚠ results differ`
+  note and a perf verdict of **N/A** (a mismatched workload/config renders the whole report
+  *not comparable*). The report **header echoes the resolved thresholds** (the default budget/floor
+  plus any per-op and per-op×concurrency overrides) with a one-line 🟢/🔴 rule, and — when the caller
+  passes **`--elapsed-secs <n>`** — a compute-time line (benchmark + reporting) for the run. Each cell
+  row also prints the **effective `p50 guard`** applied to it (e.g. `15% AND 0.5 ms`, per-op×C
+  overrides included) and the absolute `Δms`, and folds **p90/p99 + throughput** onto a smaller,
+  clearly non-gated `context:` line — with each side's **within-run `n/σ/CV`** of `server_ms`
+  (same definitions as the `--diff` columns) and, under the default server-ms gate, the
+  **demoted client-observed total p50** — the verdict stays **p50-only**. Each op's tables are wrapped in
+  a **collapsed `<details>`** (with the op's 🟢/🔴 verdict on the summary row, and a nested
+  collapsed `example query` block showing its deterministic first measured command) so the PR sticky
+  comment stays compact — the reader expands only the ops they care about.
+- Every regression comparison is computed **once** into a single analysis model and rolled up into a
+  four-state **overall verdict**: **not comparable** (workload/config mismatch — nothing else
+  counts) ▸ **regressed** (≥1 cell over budget, or a divergence under the `gate` policy) ▸
+  **advisory** (⚠ — a divergence under the `advisory` policy, or **zero comparable cells**, which is
+  never a green pass) ▸ **pass** (≥1 comparable cell, nothing wrong). Version/image mismatches are
+  advisory *warnings*, never comparability guards. A **one-sided or differing §6.3 oracle
+  attestation** (`meta.oracle_verified`) *is* a comparability guard — the runs did not run the same
+  correctness tier, so the pair renders **not comparable** — while two *un*-attested runs over
+  oracle-eligible write ops stay comparable with a prominent latency-tier-only warning (both rules
+  shared with the strict `--diff` guard, which also renders the per-side **outcome oracle** header
+  row). An op **skipped** on either side (capability
+  probe — the engine lacks its required procedure) is **neither a pass nor a divergence** under
+  both policies: its perf cells are N/A, it never gates or caps the verdict, it is tallied in its
+  own **`skipped`** bucket (⏭ in the reports) and exempt from the per-op policy/digest guards —
+  though all-skipped still lands in the zero-comparable-cells advisory, never a green pass.
+  Optional flags (all with `--regression`):
+  - **`--summary <file>`** writes a compact machine-usable JSON summary (schema **v3**:
+    `overall_verdict`, headline, per-tier 🟢/🔴/⚠/⏭/N-A `totals` incl. the `diverged` and `skipped`
+    buckets, worst
+    offenders, `budget_profile`, `divergence_policy`, `gated_metric`, `elapsed_secs`, and a stable
+    `slug` for linking the externally-hosted full report) — small enough for a PR comment.
+  - **`--cells <file>`** writes the **full analysis model** as JSON (schema v2): the meta block
+    (labels, module versions, images, `workload_hash`, samples/warmup, per-side `oracle_verified`
+    attestation when present, thresholds echo) plus every
+    op × cache-mode × concurrency cell with baseline/candidate p50, `delta_pct`/`delta_ms`, the
+    resolved budget and the per-cell verdict — source material for an interactive report page.
+    Each cell's per-side `context` also carries the within-run measurement stats — `n` (retained
+    samples; `0` in files written before the field existed), `n_server` (server-timed cohort,
+    omitted when the side has no valid server time), `server_stddev_ms`/`server_cv_pct` and
+    `total_stddev_ms`/`total_cv_pct` (sample σ, n−1; omitted when undefined) — and each op an
+    additive `example_query` (its deterministic first measured command, candidate's when both
+    sides carry one; omitted when neither does).
+    Skipped ops carry their reason in `skipped_baseline`/`skipped_candidate` (omitted otherwise).
+  - **`--divergence-policy <gate|advisory>`** (default `gate`) sets how a result divergence lands:
+    under `gate` a diverged op is 🔴 and fails the comparison; under `advisory` (for cross-engine
+    runs, where different engines can legitimately return different results) it is ⚠, counts in the
+    `diverged` bucket and caps the overall verdict at *advisory*. Under **both** policies the
+    diverged op's perf cells stay **N/A** — different work makes a latency comparison meaningless —
+    while its raw medians/deltas remain visible for diagnosis.
+  - **`--budget-profile <strict|cross-engine>`** (default `strict`) selects which budget profile of
+    the thresholds TOML applies. `cross-engine` reads the optional `[cross-engine.default]` /
+    `[cross-engine.op.<name>]` sections (same shape as the top-level `[default]`/`[op.<name>]`,
+    typically looser for engine-vs-engine noise) and **errors** if the TOML doesn't define them —
+    there is no silent fallback to the strict budgets.
+  - **`--gated-metric <total-ms|server-ms>`** (default `server-ms`) selects **which latency
+    metric's p50** the budget verdicts gate on. `server-ms` — the default, by maintainer decision:
+    only the server-reported execution time is measured — is immune to client scheduling and
+    network jitter. `total-ms` is an explicit opt-in escape hatch gating the client-observed total
+    latency (including client scheduling and network time). The p90/p99 tails on each cell's
+    `context:` line follow the selected metric, so a cell never mixes clocks; under the default
+    server-ms gate the client-observed total p50 is **demoted to that `context:` line** —
+    visible, informational, never gated. If the **selected metric's** p50 is missing/invalid
+    (≤ 0 / non-finite) on either side of a cell — whichever metric is gated — that cell's
+    verdict is **N/A**; there is **never** a silent fallback to the other clock. Under the
+    default `server-ms` gate (a report predating server-time capture, or an engine that doesn't
+    report execution time) the affected ops are additionally named in **one loud advisory
+    warning** that also names the `total-ms` escape hatch; `total_ms` is the always-captured
+    wall clock, so total-ms gating degrades this way only on a malformed report (N/A cells, no
+    dedicated warning). The choice is echoed as `gated_metric` in the report header, the
+    `--summary` JSON and the `--cells` model; the Markdown header and legend always name the gated
+    metric. *(Note: the default gate **changed** from `total-ms` to `server-ms`; pass
+    `--gated-metric total-ms` explicitly to reproduce the old behavior.)*
+
+A `--cells` file deserializes straight back into the tool's public `RegressionAnalysis` type, so
+downstream tooling consumes the analysis without re-parsing Markdown (compiled and type-checked as
+a doctest — see `src/doc_examples.rs`):
+
+```rust,no_run
+use benchmark::synthetic::analysis::RegressionAnalysis;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let cells: RegressionAnalysis =
+        serde_json::from_str(&std::fs::read_to_string("cells.json")?)?;
+    let (emoji, headline) = cells.verdict_line();
+    println!("{emoji} {headline}");
+    for (op, analysis) in &cells.ops {
+        for cell in &analysis.cells {
+            // `delta_pct` is present whenever both p50s are measurable — including diverged
+            // cells whose verdict is N/A (the delta stays visible for diagnosis).
+            if let Some(delta) = cell.delta_pct {
+                println!(
+                    "{op} C={} ({:?}): {delta:+.1}% of a {}% budget",
+                    cell.concurrency, cell.cache_mode, cell.budget.budget_pct
+                );
+            }
+        }
+    }
+    Ok(())
+}
+```
+- **`just synthetic-sanity`** self-checks the tool: it records the same workload twice (asserting an
+  identical `workload_hash` — deterministic recording), then `run --recording` at C=1,4 + `report
+  --diff` (incl. the C>1 result verification), then a `report --regression` pass exercising a
+  `[cross-engine]` budget profile, `--divergence-policy advisory` and the `--summary`/`--cells`
+  machine artifacts — all against a throwaway Docker FalkorDB. Latency is not
+  asserted (it is environment-dependent noise — see the tutorial).
+- **`just synthetic-verify`** is the CI **non-divergence gate**: it records **all** A/B read shapes
+  (`--repo-reads full`, on a small determinism-oracle graph) and runs `run --recording` **twice**
+  against the same throwaway FalkorDB at concurrency 1 & 8, uncached (mirroring the per-PR CI
+  matrix), failing if `report --diff` finds a different `workload_hash` or any per-op result digest
+  — i.e. the two runs on one machine must not diverge. Latency is not asserted. The CI job publishes
+  the A/B report to the job summary and upserts it as a **sticky PR comment** so the diff is
+  viewable inline in the PR.
+- `recordings/` is git-ignored (regenerable bundles).
+
+#### Version-comparison baselines (Criterion, C=1)
+
+To track a **read** operation's latency **between FalkorDB versions**, save a
+[Criterion](https://github.com/bheisler/criterion.rs) C=1 single-flight baseline on one version and
+compare against it on another. The workload (dataset + operations) comes from `synthetic-bench.toml`,
+so both runs measure exactly the same thing — and `synthetic-compare` **guards** that with the
+`workload_hash` before it will compare, refusing to put mismatched workloads side by side. (This path
+regenerates per run; for a rigorous cross-version comparison prefer **record / replay** above.)
+
+```bash
+# on FalkorDB version A (needs a synthetic-bench.toml with nodes/edges/operations)
+just synthetic-baseline v4.2.1
+# ...upgrade FalkorDB, then on version B:
+just synthetic-compare v4.2.1
+```
+
+```text
+⚠ server image changed: falkordb@sha256:aaa… → falkordb@sha256:bbb…
+baseline guard: OK — same workload, safe to compare
+synthetic/match_by_index/total_ms
+    time:   [297 µs 303 µs 310 µs]
+    change: [-9.4% -8.1% -6.7%] (p = 0.00 < 0.05)   Performance has improved.
+```
+
+How it works:
+
+- **`just synthetic-baseline <name>`** (re)generates the dataset from `synthetic-bench.toml`, captures
+  that run's `workload_hash` + FalkorDB module version into `baselines/<name>.json`, then saves the
+  Criterion baseline `<name>` (single-flight C=1 read latencies + browsable HTML plots under
+  `target/criterion/`).
+- **`just synthetic-compare <name>`** captures the current run's identity, runs the **guard**
+  (`benchmark synthetic report --diff`) — which **aborts** if the `workload_hash` differs (or is
+  absent, i.e. an external, unfingerprintable graph) — then runs Criterion against the saved baseline.
+- The **FalkorDB version is the subject** of the comparison, so a version change is *recorded and
+  displayed*, never a reason to abort; the guard only warns when the two versions are identical (no
+  delta to measure) or the dev `999999` placeholder (use tagged images). The **workload** is the hard
+  gate. Baselines therefore require a **generated** dataset (so the workload is fingerprintable);
+  write ops are out of scope (their per-invocation reset lifecycle doesn't fit Criterion's model).
+- `synthetic-bench.toml` and `baselines/` are git-ignored (per-user config + local baselines).
+
+### UI dashboard (`ui/`)
+
+```bash
+just ui-install       # npm ci
+just ui-lint          # lint
+just ui-build         # production build
+just ui-dev           # start the dev server
+just ui-smoke         # Playwright smoke test (starts its own dev server)
+```
+
 #### run the benchmark
 ##### run via helper scripts
 
@@ -165,7 +880,7 @@ docker-compose up
 
 The benchmark is a cli tool that can be used to run the benchmarks
 
-```bash
+```text
 ➜  cargo run  --bin benchmark -- --help                                                                  git:(prometheus|✚7…3
     
 Usage: benchmark <COMMAND>

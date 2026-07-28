@@ -1,6 +1,9 @@
 import { Locator, Page } from "playwright";
 import BasePage from "../../infra/ui/basePage";
 
+type ChartDataEntry = { key: string; value: unknown };
+type WindowWithChartData = Window & { allChartData?: ChartDataEntry[] };
+
 export default class NavBarComponent extends BasePage {
   private async navigateAndWaitForPopup(
     clickAction: () => Promise<void>
@@ -177,17 +180,18 @@ export default class NavBarComponent extends BasePage {
     });
   }
 
-  async getGraphDetails(): Promise<any> {
+  async getGraphDetails(): Promise<ChartDataEntry[]> {
     try {
       await this.page.waitForFunction(
-        () =>
-          typeof (window as any).allChartData !== "undefined" &&
-          (window as any).allChartData !== null,
+        () => {
+          const data = (window as WindowWithChartData).allChartData;
+          return typeof data !== "undefined" && data !== null;
+        },
         { timeout: 5000 }
       );
-      const graphData = await this.page.evaluate(() => {
-        return (window as any).allChartData;
-      });
+      const graphData = await this.page.evaluate(
+        () => (window as WindowWithChartData).allChartData
+      );
 
       if (!graphData) {
         throw new Error("Graph data is not available in window.allChartData.");

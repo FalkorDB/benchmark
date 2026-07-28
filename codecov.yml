@@ -1,0 +1,23 @@
+coverage:
+  status:
+    project:
+      default:
+        # Allow small dips in overall coverage between runs.
+        threshold: 2%
+    patch:
+      default:
+        # New code must be well covered: fail the patch check below 90% of changed
+        # lines. Server-backed paths are exercised by the coverage job's FalkorDB
+        # service (the integration tests run with `--include-ignored`).
+        target: 90%
+        threshold: 0%
+
+# The Next.js dashboard (ui/) and the vendored FalkorDB client (vendor/) are not
+# part of the Rust crate's unit tests, so they're excluded from coverage reporting.
+# The Criterion harness (benches/) is a live-server bench, not run under `cargo test`,
+# so its substantive logic lives in the (covered) library and the harness is excluded.
+ignore:
+  - "ui"
+  - "vendor"
+  - "scripts"
+  - "benches"

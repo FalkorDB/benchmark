@@ -1,0 +1,31 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+# CodeRabbit configuration — https://docs.coderabbit.ai/reference/configuration
+language: en-US
+reviews:
+  profile: chill
+  request_changes_workflow: false
+  # Don't post CodeRabbit's "CodeRabbit" commit-status check at all. A transient "Review rate
+  # limited" status shows up red before CodeRabbit reads this config, and `fail_commit_status: false`
+  # doesn't govern it, so the only reliable fix is to disable the status mirror entirely (same fix as
+  # FalkorDB/JFalkorDB). CodeRabbit still posts its review comments + walkthrough — only the pass/fail
+  # commit-status check is dropped, so a rate-limit hiccup can't turn a PR's checks red. Takes effect
+  # repo-wide once merged to the default branch.
+  commit_status: false
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches:
+      - master
+  # Don't review vendored code or large generated/data artifacts — they aren't hand-maintained
+  # here (the FalkorDB Rust client lives in vendor/ via a Cargo [patch]; *.rdb/*.jsonl are fixtures).
+  path_filters:
+    - "!vendor/**"
+    - "!**/*.rdb"
+    - "!**/*.jsonl"
+    - "!Cargo.lock"
+    - "!ui/package-lock.json"
+  pre_merge_checks:
+    # Disable the docstring-coverage check: this repo has no docstring-coverage convention, so the
+    # check only produces false positives. Docs are enforced by review, not this pre-merge gate.
+    docstrings:
+      mode: "off"

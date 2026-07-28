@@ -33,6 +33,16 @@ impl<Payload: Send + Sync> Msg<Payload> {
             offset_ms
         }
     }
+
+    /// The instant this message was scheduled to start executing.
+    ///
+    /// Latency must be measured from this anchor rather than from dequeue time,
+    /// otherwise a backed-up schedule silently drops its queueing delay from the
+    /// recorded latency (coordinated omission).
+    #[inline]
+    pub fn intended_start(&self) -> Instant {
+        self.start_time + Duration::from_millis(self.offset)
+    }
 }
 /// schedule at a rate of msg_per_sec messages per second to sender for number_of_messages
 /// returns a handle to the spawned task
@@ -68,4 +78,37 @@ pub fn spawn_scheduler<Payload: Send + Sync + 'static>(
         }
         info!("All messages sent");
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn intended_start_anchors_at_scheduled_time() {
+        let start_time = Instant::now();
+        let msg = Msg {
+            start_time,
+            offset: 250,
+            payload: (),
+        };
+        // The anchor is the predetermined scheduled instant (start_time + offset ms),
+        // independent of when the message is actually dequeued — this is what makes
+        // latency measured from it coordinated-omission-correct.
+        assert_eq!(
+            msg.intended_start(),
+            start_time + Duration::from_millis(250)
+        );
+    }
+
+    #[test]
+    fn intended_start_with_zero_offset_is_start_time() {
+        let start_time = Instant::now();
+        let msg = Msg {
+            start_time,
+            offset: 0,
+            payload: (),
+        };
+        assert_eq!(msg.intended_start(), start_time);
+    }
 }

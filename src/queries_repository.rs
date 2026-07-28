@@ -2,6 +2,7 @@ use crate::query::{Bolt, Query, QueryBuilder};
 use clap::ValueEnum;
 use rand::prelude::IndexedRandom;
 use rand::random;
+use rand::{Rng, RngExt};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -78,7 +79,7 @@ struct Empty;
 
 pub struct QueryGenerator {
     query_type: QueryType,
-    generator: Box<dyn Fn() -> Query + Send + Sync>,
+    generator: QueryFn,
 }
 
 impl QueryGenerator {
@@ -87,21 +88,41 @@ impl QueryGenerator {
         generator: F,
     ) -> Self
     where
-        F: Fn() -> Query + Send + Sync + 'static,
+        F: Fn(&mut dyn Rng) -> Query + Send + Sync + 'static,
     {
         QueryGenerator {
             query_type,
-            generator: Box::new(generator),
+            // Plain generators have no path draw to preempt; the forced path is ignored.
+            generator: Box::new(move |rng, _path| generator(rng)),
         }
     }
 
+    /// Render this query from the thread-local RNG (seeded once per thread from OS entropy) — the
+    /// compatibility path that preserves today's A/B behavior: each call advances that shared
+    /// stream, so successive renders vary without any caller-supplied seed.
     pub fn generate(&self) -> Query {
-        (self.generator)()
+        let mut rng = rand::rng();
+        (self.generator)(&mut rng, None)
+    }
+
+    /// Render this query from a caller-supplied RNG, so a fixed seed yields a byte-identical
+    /// Cypher+params corpus (design §4.1 — the seedable named-generation entry).
+    pub fn generate_with_rng(&self, rng: &mut dyn Rng) -> Query {
+        (self.generator)(rng, None)
+    }
+
+    /// Render this query with an explicit `(source, target)` path preempting the generator's own
+    /// path draw ([`RandomUtil::random_path`]); any other draws still come from `rng`. This is the
+    /// deterministic, total entry the synthetic distinct-corpus fallback enumerates the pair space
+    /// through (`src/synthetic/shapes.rs`); generators that never draw a path render as usual.
+    pub fn generate_with_path(&self, rng: &mut dyn Rng, path: (i32, i32)) -> Query {
+        (self.generator)(rng, Some(path))
     }
 }
 
-// Define a type alias for the function type
-type QueryFn = Box<dyn Fn() -> Query + Send + Sync>;
+// Define a type alias for the function type: a query generator draws from the supplied RNG, with
+// an optional forced path preempting its `random_path` draw (see `RandomUtil::random_path`).
+type QueryFn = Box<dyn Fn(&mut dyn Rng, Option<(i32, i32)>) -> Query + Send + Sync>;
 
 // Define a type alias for the tuple
 type QueryEntry = (String, QueryType, QueryFn);
@@ -145,7 +166,7 @@ impl QueriesRepositoryBuilder<Flavour> {
         generator: F,
     ) -> Self
     where
-        F: Fn(&RandomUtil, Flavour) -> Query + Send + Sync + 'static,
+        F: Fn(&mut RandomUtil<'_>, Flavour) -> Query + Send + Sync + 'static,
     {
         let vertices = self.vertices;
         let edges = self.edges;
@@ -153,12 +174,14 @@ impl QueriesRepositoryBuilder<Flavour> {
         self.queries.push((
             name.into(),
             query_type,
-            Box::new(move || {
-                let random = RandomUtil {
+            Box::new(move |rng: &mut dyn Rng, forced_path: Option<(i32, i32)>| {
+                let mut random = RandomUtil {
+                    rng,
                     vertices,
                     _edges: edges,
+                    forced_path,
                 };
-                generator(&random, flavour)
+                generator(&mut random, flavour)
             }),
         ));
         self
@@ -208,15 +231,13 @@ impl QueriesRepository {
         }
     }
 
-    fn add_with_id<F>(
+    fn add_with_id(
         &mut self,
         id: u16,
         name: impl Into<String>,
         query_type: QueryType,
-        generator: F,
-    ) where
-        F: Fn() -> Query + Send + Sync + 'static,
-    {
+        generator: QueryFn,
+    ) {
         let name = name.into();
         self.name_to_id.insert(name.clone(), id);
         self.catalog.push(QueryCatalogEntry {
@@ -225,6 +246,10 @@ impl QueriesRepository {
             q_type: query_type,
         });
 
+        let generator = QueryGenerator {
+            query_type,
+            generator,
+        };
         match query_type {
             QueryType::Read => {
                 self.read_query_names.push(name.clone());
@@ -233,19 +258,95 @@ impl QueriesRepository {
                 } else {
                     self.non_algorithm_read_query_names.push(name.clone());
                 }
-                self.read_queries
-                    .insert(name, QueryGenerator::new(query_type, generator));
+                self.read_queries.insert(name, generator);
             }
             QueryType::Write => {
                 self.write_query_names.push(name.clone());
-                self.write_queries
-                    .insert(name, QueryGenerator::new(query_type, generator));
+                self.write_queries.insert(name, generator);
             }
         }
     }
 
     pub fn catalog(&self) -> Vec<QueryCatalogEntry> {
         self.catalog.clone()
+    }
+
+    /// The non-algorithm read shape names, in definition order — the baseline read shapes the
+    /// synthetic check records (design §3.4). Excludes algorithm reads (opt-in, capability-gated)
+    /// and writes.
+    pub fn non_algorithm_read_names(&self) -> &[String] {
+        &self.non_algorithm_read_query_names
+    }
+
+    /// The algorithm read shape names, in definition order — the opt-in whole-graph algorithm
+    /// shapes the synthetic check records via [`Self::render_read_with_rng`] (Phase 6 §3.3).
+    /// Empty unless the repository was built with an [`AlgorithmQuerySelection`] enabling them.
+    pub fn algorithm_read_names(&self) -> &[String] {
+        &self.algorithm_read_query_names
+    }
+
+    /// The write shape names, in definition order — the mutation shapes the synthetic check
+    /// records via [`Self::render_write_with_rng`] (Phase 7 §1, selected by `--repo-writes`).
+    pub fn write_names(&self) -> &[String] {
+        &self.write_query_names
+    }
+
+    /// Render the read shape `name` from a caller-supplied RNG, so a fixed seed yields a
+    /// byte-identical Cypher+params corpus (design §4.1 — the seedable entry the record-once /
+    /// replay-verbatim synthetic path renders each shape's corpus with). Returns `None` if `name`
+    /// is not a known read shape.
+    pub fn render_read_with_rng(
+        &self,
+        name: &str,
+        rng: &mut dyn Rng,
+    ) -> Option<PreparedQuery> {
+        let generator = self.read_queries.get(name)?;
+        let q_id = *self.name_to_id.get(name)?;
+        Some(PreparedQuery::new(
+            q_id,
+            name.to_string(),
+            generator.query_type,
+            generator.generate_with_rng(rng),
+        ))
+    }
+
+    /// Render the read shape `name` with an explicit `(source, target)` path preempting its own
+    /// path draw — the deterministic, total entry the synthetic distinct-corpus fallback walks the
+    /// pair space through (`src/synthetic/shapes.rs`). Any non-path draws still come from `rng`.
+    /// Returns `None` if `name` is not a known read shape.
+    pub fn render_read_with_path(
+        &self,
+        name: &str,
+        rng: &mut dyn Rng,
+        path: (i32, i32),
+    ) -> Option<PreparedQuery> {
+        let generator = self.read_queries.get(name)?;
+        let q_id = *self.name_to_id.get(name)?;
+        Some(PreparedQuery::new(
+            q_id,
+            name.to_string(),
+            generator.query_type,
+            generator.generate_with_path(rng, path),
+        ))
+    }
+
+    /// Render the write shape `name` from a caller-supplied RNG — [`Self::render_read_with_rng`]
+    /// for the write pool (Phase 7 §3.1: the seedable entry the record-once / replay-verbatim
+    /// synthetic path renders each write shape's corpus with). Returns `None` if `name` is not a
+    /// known write shape.
+    pub fn render_write_with_rng(
+        &self,
+        name: &str,
+        rng: &mut dyn Rng,
+    ) -> Option<PreparedQuery> {
+        let generator = self.write_queries.get(name)?;
+        let q_id = *self.name_to_id.get(name)?;
+        Some(PreparedQuery::new(
+            q_id,
+            name.to_string(),
+            generator.query_type,
+            generator.generate_with_rng(rng),
+        ))
     }
 
     fn random_query_from_pool(
@@ -289,17 +390,25 @@ impl QueriesRepository {
     }
 }
 
-struct RandomUtil {
+struct RandomUtil<'a> {
+    rng: &'a mut dyn Rng,
     vertices: i32,
     _edges: i32,
+    /// When set, the next [`Self::random_path`] returns this pair instead of drawing — the
+    /// deterministic entry the synthetic distinct-corpus fallback renders explicit pairs through
+    /// ([`QueryGenerator::generate_with_path`]).
+    forced_path: Option<(i32, i32)>,
 }
 
-impl RandomUtil {
-    fn random_vertex(&self) -> i32 {
-        rand::random_range(1..=self.vertices)
+impl RandomUtil<'_> {
+    fn random_vertex(&mut self) -> i32 {
+        self.rng.random_range(1..=self.vertices)
     }
     #[allow(dead_code)]
-    fn random_path(&self) -> (i32, i32) {
+    fn random_path(&mut self) -> (i32, i32) {
+        if let Some(path) = self.forced_path.take() {
+            return path;
+        }
         let start = self.random_vertex();
         let mut end = self.random_vertex();
 
@@ -317,6 +426,55 @@ pub struct UsersQueriesRepository {
 impl UsersQueriesRepository {
     pub fn catalog(&self) -> Vec<QueryCatalogEntry> {
         self.queries_repository.catalog()
+    }
+
+    /// The baseline read shape names (non-algorithm reads), in definition order — the shapes the
+    /// synthetic check records via [`Self::render_read_with_rng`] (design §3.4).
+    pub fn non_algorithm_read_names(&self) -> &[String] {
+        self.queries_repository.non_algorithm_read_names()
+    }
+
+    /// The algorithm read shape names, in definition order (Phase 6 §3.3). Empty unless the
+    /// repository was built with an [`AlgorithmQuerySelection`] enabling them.
+    pub fn algorithm_read_names(&self) -> &[String] {
+        self.queries_repository.algorithm_read_names()
+    }
+
+    /// The write shape names, in definition order (Phase 7 §1) — the 10 mutation shapes the
+    /// synthetic check records via [`Self::render_write_with_rng`].
+    pub fn write_names(&self) -> &[String] {
+        self.queries_repository.write_names()
+    }
+
+    /// Render the read shape `name` from a caller-supplied RNG (record-once determinism, §4.1).
+    /// Returns `None` if `name` is not a known read shape.
+    pub fn render_read_with_rng(
+        &self,
+        name: &str,
+        rng: &mut dyn Rng,
+    ) -> Option<PreparedQuery> {
+        self.queries_repository.render_read_with_rng(name, rng)
+    }
+
+    /// See [`QueriesRepository::render_read_with_path`] — the deterministic explicit-pair render
+    /// entry for the synthetic distinct-corpus fallback.
+    pub fn render_read_with_path(
+        &self,
+        name: &str,
+        rng: &mut dyn Rng,
+        path: (i32, i32),
+    ) -> Option<PreparedQuery> {
+        self.queries_repository.render_read_with_path(name, rng, path)
+    }
+
+    /// Render the write shape `name` from a caller-supplied RNG (Phase 7 §3.1 — record-once
+    /// determinism for the write corpus). Returns `None` if `name` is not a known write shape.
+    pub fn render_write_with_rng(
+        &self,
+        name: &str,
+        rng: &mut dyn Rng,
+    ) -> Option<PreparedQuery> {
+        self.queries_repository.render_write_with_rng(name, rng)
     }
 
     pub fn random_queries(
@@ -1172,7 +1330,7 @@ mod tests {
 
     #[test]
     fn test_query_generator() {
-        let generator = QueryGenerator::new(QueryType::Read, || {
+        let generator = QueryGenerator::new(QueryType::Read, |_rng| {
             QueryBuilder::new()
                 .text("MATCH (p:Person) RETURN p")
                 .build()
@@ -1180,6 +1338,132 @@ mod tests {
 
         let query = generator.generate();
         assert_eq!(query.text, "MATCH (p:Person) RETURN p");
+    }
+
+    /// A test RNG that delegates to `StdRng` while counting the primitive draws it serves, so a
+    /// test can assert *deterministically* (no probability) that `generate_with_rng` consumes the
+    /// RNG it is handed. Implementing `TryRng` gives us `Rng` for free via rand's blanket impl.
+    struct CountingRng {
+        inner: rand::rngs::StdRng,
+        draws: usize,
+    }
+
+    impl rand::TryRng for CountingRng {
+        type Error = std::convert::Infallible;
+        fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+            self.draws += 1;
+            Ok(self.inner.next_u32())
+        }
+        fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+            self.draws += 1;
+            Ok(self.inner.next_u64())
+        }
+        fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
+            self.draws += 1;
+            self.inner.fill_bytes(dst);
+            Ok(())
+        }
+    }
+
+    /// A shape that draws a random path (≥2 vertices) from a large space — enough randomness that a
+    /// seed fully determines the rendered Cypher+params.
+    fn seedable_probe_repo() -> QueriesRepository {
+        QueriesRepositoryBuilder::new(1_000_000, 1_000_000)
+            .flavour(Flavour::FalkorDB)
+            .add_query("seedable_probe", QueryType::Read, |random, _flavour| {
+                let (s, e) = random.random_path();
+                QueryBuilder::new()
+                    .text("MATCH (a:User {id: $s}), (b:User {id: $e}) RETURN a, b")
+                    .param("s", s)
+                    .param("e", e)
+                    .build()
+            })
+            .build()
+    }
+
+    #[test]
+    fn generate_with_rng_renders_identically_for_a_fixed_seed() {
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
+
+        let repo = seedable_probe_repo();
+        let generator = repo
+            .read_queries
+            .get("seedable_probe")
+            .expect("probe shape present");
+
+        let render = |seed: u64| {
+            let mut rng = StdRng::seed_from_u64(seed);
+            generator.generate_with_rng(&mut rng).to_cypher()
+        };
+
+        // A fixed seed renders byte-identical Cypher+params on every call: generation is a
+        // deterministic function of the supplied RNG — the reproducibility the A/B non-divergence
+        // gate relies on.
+        assert_eq!(render(0x00C0_FFEE), render(0x00C0_FFEE));
+    }
+
+    #[test]
+    fn generate_with_rng_consumes_the_supplied_rng() {
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
+
+        // The instrument itself: every primitive draw is counted (covers all three `TryRng`
+        // delegations and proves the counter is wired correctly).
+        let mut probe = CountingRng {
+            inner: StdRng::seed_from_u64(2),
+            draws: 0,
+        };
+        let _ = probe.next_u32();
+        let _ = probe.next_u64();
+        let mut buf = [0u8; 8];
+        probe.fill_bytes(&mut buf);
+        assert_eq!(probe.draws, 3, "each primitive draw must be counted");
+
+        let repo = seedable_probe_repo();
+        let generator = repo
+            .read_queries
+            .get("seedable_probe")
+            .expect("probe shape present");
+
+        // Deterministic proof (no probability) that the seam threads the *caller's* RNG rather than
+        // an internal thread RNG: generation must draw from the supplied RNG at least once.
+        let mut counting = CountingRng {
+            inner: StdRng::seed_from_u64(1),
+            draws: 0,
+        };
+        let _ = generator.generate_with_rng(&mut counting);
+        assert!(
+            counting.draws > 0,
+            "generate_with_rng must consume the caller-supplied RNG"
+        );
+    }
+
+    #[test]
+    fn generate_compatibility_path_uses_entropy_within_range() {
+        use crate::query::QueryParam;
+
+        // The `generate()` compatibility entry seeds its own thread RNG; it must still render a
+        // valid query whose drawn vertex stays within `[1, vertices]`.
+        let repo = QueriesRepositoryBuilder::new(50, 50)
+            .flavour(Flavour::FalkorDB)
+            .add_query("one_vertex", QueryType::Read, |random, _flavour| {
+                QueryBuilder::new()
+                    .text("RETURN $v")
+                    .param("v", random.random_vertex())
+                    .build()
+            })
+            .build();
+        let generator = repo.read_queries.get("one_vertex").expect("shape present");
+
+        for _ in 0..64 {
+            let query = generator.generate();
+            let v = query.params.get("v").expect("v param present");
+            assert!(
+                matches!(v, QueryParam::Integer(n) if (1..=50).contains(n)),
+                "expected an in-range integer 'v' param, got {v:?}"
+            );
+        }
     }
 
     #[test]
@@ -1216,5 +1500,160 @@ mod tests {
             repository.queries_repository.algorithm_read_query_count(),
             1
         );
+    }
+
+    #[test]
+    fn non_algorithm_read_names_are_the_baseline_reads() {
+        let repo = UsersQueriesRepository::new(
+            100,
+            1000,
+            Flavour::FalkorDB,
+            AlgorithmQuerySelection::default(),
+            QueryCoverageProfile::Baseline,
+        );
+        let names: Vec<&str> = repo.non_algorithm_read_names().iter().map(String::as_str).collect();
+
+        // Representative baseline reads are present…
+        for expected in ["single_vertex_read", "id_range_scan", "entity_path_introspection"] {
+            assert!(names.contains(&expected), "expected baseline read '{expected}'");
+        }
+        // …algorithms, writes, and out-of-profile shapes are excluded.
+        for excluded in [
+            "algo_pagerank_summary",         // algorithm read (opt-in)
+            "single_vertex_write",           // write
+            "temporal_spatial_roundtrip",    // ExtendedCore (not in Baseline)
+            "vector_query_nodes_smoke",      // FixtureDependent (not in Baseline)
+        ] {
+            assert!(!names.contains(&excluded), "'{excluded}' must not be a baseline read");
+        }
+        // Every name resolves to a Read shape.
+        for name in &names {
+            assert!(
+                repo.render_read_with_rng(name, &mut rand::rng()).is_some(),
+                "baseline read '{name}' must be renderable"
+            );
+        }
+    }
+
+    #[test]
+    fn render_read_with_rng_is_byte_identical_for_a_fixed_seed() {
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
+
+        let repo = UsersQueriesRepository::new(
+            1_000_000,
+            1_000_000,
+            Flavour::FalkorDB,
+            AlgorithmQuerySelection::default(),
+            QueryCoverageProfile::Baseline,
+        );
+
+        // Render a whole corpus (many draws) for a randomised shape from a fixed seed, twice: the
+        // rendered Cypher+params stream must be byte-identical — the record-once / replay-verbatim
+        // determinism the A/B non-divergence gate depends on.
+        let corpus = |seed: u64| -> Vec<String> {
+            let mut rng = StdRng::seed_from_u64(seed);
+            (0..64)
+                .map(|_| {
+                    repo.render_read_with_rng("shortest_path", &mut rng)
+                        .expect("shape present")
+                        .cypher
+                })
+                .collect()
+        };
+        assert_eq!(corpus(0xA11CE), corpus(0xA11CE));
+        // A different seed yields a different stream (the shape is genuinely seed-sensitive).
+        assert_ne!(corpus(0xA11CE), corpus(0xB0B));
+    }
+
+    #[test]
+    fn render_read_with_rng_rejects_unknown_and_non_read_shapes() {
+        let repo = UsersQueriesRepository::new(
+            100,
+            1000,
+            Flavour::FalkorDB,
+            AlgorithmQuerySelection::default(),
+            QueryCoverageProfile::Baseline,
+        );
+        assert!(repo.render_read_with_rng("no_such_shape", &mut rand::rng()).is_none());
+        // A write shape is not a read and must not render through the read seam.
+        assert!(repo.render_read_with_rng("single_vertex_write", &mut rand::rng()).is_none());
+    }
+
+    #[test]
+    fn write_names_are_the_ten_write_shapes_in_definition_order() {
+        let repo = UsersQueriesRepository::new(
+            100,
+            1000,
+            Flavour::FalkorDB,
+            AlgorithmQuerySelection::default(),
+            QueryCoverageProfile::Baseline,
+        );
+        // The write pool is profile-independent (registered unconditionally), so the Baseline
+        // profile sees all 10 writes — in definition order (Phase 7 §1).
+        let names: Vec<&str> = repo.write_names().iter().map(String::as_str).collect();
+        assert_eq!(
+            names,
+            vec![
+                "single_vertex_write",
+                "single_vertex_update",
+                "single_edge_update",
+                "single_edge_write",
+                "merge_user_insert_path",
+                "merge_user_upsert_existing",
+                "merge_friend_edge_upsert",
+                "detach_delete_user",
+                "remove_user_property_and_label",
+                "foreach_loop_mutation",
+            ]
+        );
+        // Every name resolves to a Write shape through the write render seam.
+        for name in &names {
+            let prepared = repo
+                .render_write_with_rng(name, &mut rand::rng())
+                .unwrap_or_else(|| panic!("write shape '{name}' must be renderable"));
+            assert_eq!(prepared.q_type, QueryType::Write, "'{name}' must render as a write");
+        }
+    }
+
+    #[test]
+    fn render_write_with_rng_is_byte_identical_for_a_fixed_seed() {
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
+
+        let repo = UsersQueriesRepository::new(
+            1000,
+            5000,
+            Flavour::FalkorDB,
+            AlgorithmQuerySelection::default(),
+            QueryCoverageProfile::Baseline,
+        );
+        // Same record-once / replay-verbatim property as the read seam, for a randomised write.
+        let corpus = |seed: u64| -> Vec<String> {
+            let mut rng = StdRng::seed_from_u64(seed);
+            (0..64)
+                .map(|_| {
+                    repo.render_write_with_rng("merge_friend_edge_upsert", &mut rng)
+                        .expect("shape present")
+                        .cypher
+                })
+                .collect()
+        };
+        assert_eq!(corpus(0xA11CE), corpus(0xA11CE));
+        assert_ne!(corpus(0xA11CE), corpus(0xB0B));
+    }
+
+    #[test]
+    fn render_write_with_rng_rejects_unknown_and_non_write_shapes() {
+        let repo = UsersQueriesRepository::new(
+            100,
+            1000,
+            Flavour::FalkorDB,
+            AlgorithmQuerySelection::default(),
+            QueryCoverageProfile::Baseline,
+        );
+        assert!(repo.render_write_with_rng("no_such_shape", &mut rand::rng()).is_none());
+        // A read shape is not a write and must not render through the write seam.
+        assert!(repo.render_write_with_rng("single_vertex_read", &mut rand::rng()).is_none());
     }
 }

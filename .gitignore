@@ -4,6 +4,8 @@
 .idea
 downloads
 cache
+# code coverage output (`just coverage` / cargo-llvm-cov)
+codecov.json
 backups
 *.so
 redis-data
@@ -29,4 +31,10 @@ prometheus.yml
 # benchmark output
 Results-*/
 csv_output/
+
+# synthetic per-operation benchmark: per-user config + saved version baselines (Part 6)
+synthetic-bench.toml
+/baselines/
+# recorded workload bundles (record/replay) — regenerable, not committed
+/recordings/
 

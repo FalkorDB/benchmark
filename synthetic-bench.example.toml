@@ -1,0 +1,48 @@
+# Example configuration for the synthetic per-operation benchmark.
+#
+# Copy this to `synthetic-bench.toml` (auto-detected in the working directory) or pass it with
+# `--config <path>`. Every key is optional; any CLI flag overrides the value here, which in turn
+# overrides the built-in defaults. Unknown keys and misspelled operation names are rejected.
+#
+# NOTE: generating the dataset drops and rewrites the target graph, so it is only performed when you
+# pass the explicit `--generate` flag on the command line — this file only supplies the dimensions.
+
+# Seed for the dataset AND the per-operation corpora: the same seed reproduces the exact same
+# workload (graph + parameters) on any machine.
+seed = 42
+
+# Dataset dimensions (used with `--generate`). `edges` must be >= `nodes` and counts relationships.
+nodes = 100000
+edges = 1000000
+
+# Operations to measure, using the same names as `--op` (see `benchmark synthetic list-ops`).
+# Read ops and write ops (create_node, merge_miss, create_edge, set_property, delete_node,
+# merge_hit) can be mixed here.
+operations = ["match_by_index", "expand_hops_5", "aggregate_count"]
+
+# Measurement knobs (all optional; shown with their defaults).
+samples = 1000
+warmup = 200
+cache = "both"              # cached | uncached | both
+
+# Concurrency sweep: the closed-loop worker counts to measure each op at, tracing the
+# latency-vs-throughput curve. Each level opens that many dedicated connections.
+concurrency = [1, 2, 4, 8, 16, 32]
+
+# READ-op pipelining depth K (default 1 = the plain closed loop). K > 1 keeps K commands
+# concurrently in flight on each of the C connections (one multiplexed socket, K lanes), so the
+# server self-paces and client scheduling jitter stops perturbing server_ms. Server concurrency
+# stays C (FalkorDB executes a connection's commands serially); total_ms inflates (informational).
+# Write ops always run at depth 1. Pick `samples` divisible by K for identical totals.
+# pipeline_depth = 1
+
+# Write-op reset cadence: every `reset_every` operations each worker's scratch is reset (untimed)
+# so write drift is bounded to one sawtooth window. Ignored by read ops.
+reset_every = 50000
+
+# Connection / output (all optional).
+# endpoint = "falkor://127.0.0.1:6379"
+# graph = "falkor"
+# server_timeout_ms = 5000
+# client_deadline_ms = 6000
+# out = "synthetic-report.json"

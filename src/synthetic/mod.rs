@@ -1,0 +1,3861 @@
+//! Synthetic per-operation benchmark — a selectable catalog of read operations over a controlled
+//! dataset.
+//!
+//! Measures one or more Cypher read operations in isolation against a FalkorDB endpoint. The graph
+//! is either sampled from the live endpoint or **generated reproducibly** from a seed (see
+//! [`dataset`]). For each selected operation it pre-generates a seeded corpus of parameterized
+//! queries (see [`catalog`]), then, under each plan-cache condition, captures on every invocation
+//! the paired *server time* (FalkorDB's reported internal execution time) and *total time*
+//! (end-to-end client round-trip), summarizes them with severe-outlier removal, and derives the
+//! expression *compilation cost* (uncached − cached). One JSON block is written per operation; when
+//! the dataset was generated, a `corpus_hash` fingerprints the whole workload for comparability.
+//!
+//! Note that per-operation latency distributions can be right-skewed (e.g. high-degree seed nodes
+//! for expansions), so the summary trims only *severe* outliers (beyond 3×IQR) and both cache
+//! modes cycle the same corpus in the same order, keeping the cached-vs-uncached medians comparable
+//! on a matched workload.
+
+pub mod analysis;
+pub mod catalog;
+pub mod config;
+pub mod baseline;
+pub mod dataset;
+pub mod diff;
+pub mod engine;
+pub mod host;
+pub mod op_runner;
+pub mod oracle;
+pub mod provenance;
+pub mod recording;
+pub mod replay;
+pub mod report;
+pub mod shapes;
+pub mod stats;
+pub mod thresholds;
+pub mod writes;
+
+use crate::error::BenchmarkError::OtherError;
+use crate::error::BenchmarkResult;
+use crate::falkor::falkor_endpoint_to_redis_url;
+use crate::queries_repository::QueryType;
+use crate::query::Query;
+use crate::synthetic::catalog::{
+    spec, DatasetHandle, DatasetRequirement, OpBudget, OperationSpec, RecordedBudget, CORPUS_SIZE,
+};
+use crate::synthetic::dataset::DatasetSpec;
+use crate::synthetic::engine::{run_closed_loop, OpInvoker};
+use crate::synthetic::op_runner::{run_and_drain, OpSample};
+use crate::synthetic::report::{
+    DatasetInfo, LevelMetrics, LevelReport, Meta, OperationReport, OpPolicy, Report,
+};
+use crate::synthetic::thresholds::BudgetProfile;
+use crate::synthetic::writes::{verify_mutation, WritePlan, WriteScratch, CANONICAL_SCRATCH_LABEL};
+use clap::ValueEnum;
+use falkordb::{AsyncGraph, ConnectionStrategy, FalkorClientBuilder};
+use futures::StreamExt;
+use rand::rngs::StdRng;
+use rand::SeedableRng;
+use serde::de::{self, Deserializer};
+use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
+use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tracing::{info, warn};
+
+/// The default concurrency sweep (closed-loop worker counts `C`) when none is configured: the
+/// canonical latency-vs-throughput curve from `1` to `32` workers.
+pub const DEFAULT_CONCURRENCY: &[usize] = &[1, 2, 4, 8, 16, 32];
+
+/// The default graph key the probe targets when `--graph` isn't given.
+pub const DEFAULT_GRAPH: &str = "falkor";
+
+/// How many `:User` ids to sample from the live graph to seed operation corpora (Part 2 path).
+const DATASET_SAMPLE_SIZE: usize = 512;
+
+/// `UNWIND` batch size used when the generator bulk-loads a synthetic dataset.
+const DATASET_LOAD_BATCH: usize = 1000;
+
+/// The set of operations the probe can measure. `OpName` is the single source of truth: it's a
+/// clap `ValueEnum` (so `--op`, `--help` and shell completion list exactly these), and every
+/// variant maps to one [`catalog::OperationSpec`] via [`catalog::spec`] (an exhaustive match, so a
+/// new variant won't compile until it has a corpus). Read primitives target the benchmark's
+/// `:User {id, age}` / `(:User)-[:Friend]->(:User)` schema.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, ValueEnum)]
+#[value(rename_all = "snake_case")]
+pub enum OpName {
+    /// `RETURN $i` — a pure round-trip / server parse+exec baseline that needs no dataset.
+    ReturnConst,
+    /// Point lookup on the `:User(id)` index.
+    MatchByIndex,
+    /// Full `:User` label scan with a non-indexable predicate.
+    MatchByLabelScan,
+    /// 1-hop `:Friend` expansion from a seed node.
+    #[value(name = "expand_1_hop")]
+    Expand1Hop,
+    /// Fixed 5-hop `:Friend` expansion from a seed node.
+    #[value(name = "expand_hops_5")]
+    ExpandHops5,
+    /// Count a seed node's 1-hop `:Friend` neighbours.
+    AggregateCount,
+    /// Group a seed node's neighbours by age with counts.
+    AggregateGroup,
+    /// Bounded shortest `:Friend` path between two seed nodes.
+    ShortestPath,
+    /// Project scalar properties of an indexed node.
+    PropertyProjection,
+    /// (write) `CREATE` a fresh scratch node each invocation.
+    CreateNode,
+    /// (write) `MERGE` a fresh scratch node each invocation — always misses, so always creates.
+    MergeMiss,
+    /// (write) `CREATE` a fresh edge between two of this worker's scratch nodes.
+    CreateEdge,
+    /// (write) `SET` a property on a pre-created scratch node each invocation.
+    SetProperty,
+    /// (write) `DELETE` a pre-created scratch node each invocation.
+    DeleteNode,
+    /// (write) `MERGE` an existing scratch node each invocation — always hits, so never creates.
+    MergeHit,
+}
+
+impl OpName {
+    /// Every operation, in declaration order (the catalog's canonical order).
+    pub fn all() -> &'static [OpName] {
+        OpName::value_variants()
+    }
+
+    /// Every read operation. Used by `--all-reads` (write ops are opt-in via explicit `--op`).
+    pub fn all_reads() -> Vec<OpName> {
+        OpName::all()
+            .iter()
+            .copied()
+            .filter(|op| spec(*op).kind == QueryType::Read)
+            .collect()
+    }
+
+    /// This operation's coverage [`Tier`] (from its [`spec`](catalog::spec)).
+    pub fn tier(self) -> Tier {
+        spec(self).tier
+    }
+
+    /// Every **read** op in `tier`, in catalog order. `Core` ⊆ `Full`, so `Tier::Full` yields the
+    /// same set as [`all_reads`](Self::all_reads). Write ops are opt-in (reads-only scope) and are
+    /// never selected by a tier.
+    pub fn reads_in_tier(tier: Tier) -> Vec<OpName> {
+        OpName::all_reads()
+            .into_iter()
+            .filter(|op| tier.includes(op.tier()))
+            .collect()
+    }
+
+    /// The stable string id used in reports and on the CLI.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OpName::ReturnConst => "return_const",
+            OpName::MatchByIndex => "match_by_index",
+            OpName::MatchByLabelScan => "match_by_label_scan",
+            OpName::Expand1Hop => "expand_1_hop",
+            OpName::ExpandHops5 => "expand_hops_5",
+            OpName::AggregateCount => "aggregate_count",
+            OpName::AggregateGroup => "aggregate_group",
+            OpName::ShortestPath => "shortest_path",
+            OpName::PropertyProjection => "property_projection",
+            OpName::CreateNode => "create_node",
+            OpName::MergeMiss => "merge_miss",
+            OpName::CreateEdge => "create_edge",
+            OpName::SetProperty => "set_property",
+            OpName::DeleteNode => "delete_node",
+            OpName::MergeHit => "merge_hit",
+        }
+    }
+
+    /// Whether this operation reads or writes (selects `RO_QUERY` vs `QUERY`).
+    pub fn kind(self) -> QueryType {
+        spec(self).kind
+    }
+
+    /// Parse an [`OpName`] from its stable [`as_str`](Self::as_str) tag (e.g. reading a recorded
+    /// bundle's manifest/command files). `None` for an unknown tag.
+    pub fn from_tag(tag: &str) -> Option<OpName> {
+        OpName::all().iter().copied().find(|op| op.as_str() == tag)
+    }
+
+    /// A one-line description for `list-ops` and the report.
+    pub fn description(self) -> &'static str {
+        spec(self).description
+    }
+
+    /// A stable per-operation salt mixed into the RNG seed so two ops with the same corpus shape
+    /// don't draw identical parameter sequences from one `--seed`. Fixed constants (not the
+    /// declaration index) so reordering the enum can't shift an op's corpus.
+    pub fn salt(self) -> u64 {
+        match self {
+            OpName::ReturnConst => 0x5259_5f43_4f4e_5354,
+            OpName::MatchByIndex => 0x4d54_4348_5f49_4458,
+            OpName::MatchByLabelScan => 0x4c41_4245_4c5f_5343,
+            OpName::Expand1Hop => 0x4558_5031_484f_5000,
+            OpName::ExpandHops5 => 0x4558_5035_484f_5053,
+            OpName::AggregateCount => 0x4147_475f_434e_5400,
+            OpName::AggregateGroup => 0x4147_475f_4752_5000,
+            OpName::ShortestPath => 0x5348_5254_5f50_5448,
+            OpName::PropertyProjection => 0x5052_4f50_5f50_524a,
+            OpName::CreateNode => 0x4352_4541_5445_4e44,
+            OpName::MergeMiss => 0x4d45_5247_455f_4d53,
+            OpName::CreateEdge => 0x4352_545f_4544_4745,
+            OpName::SetProperty => 0x5345_545f_5052_4f50,
+            OpName::DeleteNode => 0x4445_4c5f_4e4f_4445,
+            OpName::MergeHit => 0x4d45_5247_4548_4954,
+        }
+    }
+
+    /// Parse an op from its canonical [`Self::as_str`] name (the CLI/config spelling).
+    pub fn from_cli_str(s: &str) -> Option<OpName> {
+        OpName::all().iter().copied().find(|op| op.as_str() == s)
+    }
+}
+
+/// A stable, name-derived RNG salt for a **string-keyed** synthetic op (design §3.1) — the dynamic
+/// counterpart to [`OpName::salt`]'s hand-assigned constants.
+///
+/// It is a 64-bit FNV-1a hash of the name's bytes: a fixed algorithm with fixed constants, so it is
+/// **process-independent and stable across Rust/`rand` versions** (unlike [`std::hash::DefaultHasher`],
+/// whose output is unspecified). That lets a dynamic op — e.g. a query shape pulled from
+/// `queries_repository` by name, which has no `OpName` variant — derive a reproducible salt from its
+/// name alone, so `seed ^ salt` yields the same corpus every run without a curated constant.
+pub fn salt_from_name(name: &str) -> u64 {
+    // FNV-1a (64-bit): offset basis then, per byte, xor-in and multiply by the FNV prime.
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in name.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+/// A synthetic op's identity, keyed by a **stable string name**.
+///
+/// The representation is **opaque**: an `OpKey` is built only via [`OpKey::from`] (a built-in
+/// [`OpName`]) or [`OpKey::dynamic`] (a string-keyed op), which guarantees a built-in op's name can
+/// never be carried by a dynamic key with a conflicting salt or kind (see [`OpKey::dynamic`]).
+///
+/// Built-in ops keep [`OpName`]'s fixed [`OpName::salt`], so recorded baselines stay valid. A
+/// **dynamic** op — e.g. a query shape pulled from `queries_repository` by name (design §3.1),
+/// which has no `OpName` variant — is identified purely by its stable query name, with a
+/// **name-derived salt** ([`salt_from_name`]) so it needs no hand-assigned constant. Both expose the
+/// same [`name`](Self::name)/[`salt`](Self::salt)/[`kind`](Self::kind), so record/replay/threshold
+/// lookups can key on the string name uniformly (existing `OpName` ops keep working unchanged).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpKey(OpKeyRepr);
+
+/// Private representation of an [`OpKey`]. Kept private so a dynamic key with a built-in name (which
+/// would carry the wrong salt/kind) is impossible to construct — [`OpKey::dynamic`] canonicalizes
+/// built-in names to [`OpKeyRepr::Named`], and there is no other way in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum OpKeyRepr {
+    /// One of the built-in [`OpName`] operations.
+    Named(OpName),
+    /// A dynamic op identified only by its stable string name.
+    Dynamic { name: String, kind: QueryType },
+}
+
+impl OpKey {
+    /// Build a dynamic (string-keyed) op identity from its stable name and kind.
+    ///
+    /// If `name` matches a built-in [`OpName`] tag it **canonicalizes to that `OpName`** (keeping
+    /// the built-in's salt and kind, and ignoring the passed `kind`), so a dynamic key can never
+    /// shadow a built-in op with a conflicting salt/kind — the two would otherwise collide on the
+    /// string name used by reports, thresholds and recordings.
+    pub fn dynamic(name: impl Into<String>, kind: QueryType) -> Self {
+        let name = name.into();
+        match OpName::from_tag(&name) {
+            Some(op) => OpKey(OpKeyRepr::Named(op)),
+            None => OpKey(OpKeyRepr::Dynamic { name, kind }),
+        }
+    }
+
+    /// This op's stable string name — its report / threshold / CLI key.
+    pub fn name(&self) -> &str {
+        match &self.0 {
+            OpKeyRepr::Named(op) => op.as_str(),
+            OpKeyRepr::Dynamic { name, .. } => name,
+        }
+    }
+
+    /// The stable RNG salt mixed into the seed. Built-in ops keep [`OpName::salt`]; dynamic ops
+    /// derive it from their name ([`salt_from_name`]), so an op is reproducible from its name alone.
+    pub fn salt(&self) -> u64 {
+        match &self.0 {
+            OpKeyRepr::Named(op) => op.salt(),
+            OpKeyRepr::Dynamic { name, .. } => salt_from_name(name),
+        }
+    }
+
+    /// Whether this op reads or writes (selects `RO_QUERY` vs `QUERY`).
+    pub fn kind(&self) -> QueryType {
+        match &self.0 {
+            OpKeyRepr::Named(op) => op.kind(),
+            OpKeyRepr::Dynamic { kind, .. } => *kind,
+        }
+    }
+
+    /// Whether this key resolves to a built-in [`OpName`] op (vs a dynamic string-keyed op).
+    pub fn is_named(&self) -> bool {
+        matches!(self.0, OpKeyRepr::Named(_))
+    }
+}
+
+impl From<OpName> for OpKey {
+    fn from(op: OpName) -> Self {
+        OpKey(OpKeyRepr::Named(op))
+    }
+}
+
+/// Deserialize an `OpName` from its canonical [`OpName::as_str`] name, so a `synthetic-bench.toml`
+/// `operations = ["expand_1_hop", ...]` list uses the exact same spelling as the CLI (a plain
+/// `rename_all = "snake_case"` derive would produce `expand1_hop`).
+impl<'de> Deserialize<'de> for OpName {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        OpName::from_cli_str(&s).ok_or_else(|| {
+            let names: Vec<&str> = OpName::all().iter().map(|op| op.as_str()).collect();
+            de::Error::custom(format!(
+                "unknown operation '{}' (expected one of: {})",
+                s,
+                names.join(", ")
+            ))
+        })
+    }
+}
+
+/// Coverage tier controlling how often an operation is gated (design §3.5 / §7.1c).
+///
+/// [`Tier::Core`] is a small, cheap, representative **read** subset that gates **every PR** for a
+/// fast signal; [`Tier::Full`] is the complete read set, run **nightly and on-demand**. `Core` is a
+/// subset of `Full`: selecting `full` measures every read op, selecting `core` measures only the
+/// core subset. Write ops are opt-in (reads-only scope) and always carry [`Tier::Full`], so
+/// `--tier` never selects a write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[value(rename_all = "snake_case")]
+pub enum Tier {
+    /// Small representative read subset gated on every PR.
+    Core,
+    /// The full read set, run nightly / on-demand (a superset of [`Tier::Core`]).
+    Full,
+}
+
+impl Tier {
+    /// The stable lowercase tag used on the CLI and in `list-ops` (`core`/`full`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Tier::Core => "core",
+            Tier::Full => "full",
+        }
+    }
+
+    /// Whether an op whose tier is `op_tier` is selected when measuring *this* tier. `Full` selects
+    /// everything (`Core` ⊆ `Full`); `Core` selects only core ops.
+    pub fn includes(self, op_tier: Tier) -> bool {
+        matches!((self, op_tier), (Tier::Full, _) | (Tier::Core, Tier::Core))
+    }
+}
+
+/// Which plan-cache condition to measure an operation under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
+#[value(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
+pub enum CacheSelection {
+    /// Warm plan cache: identical query **body** every run (only the stripped `CYPHER <params>`
+    /// prefix varies), so the plan is reused → execution only.
+    Cached,
+    /// Forced plan-cache miss every run (a unique comment makes each query body distinct) →
+    /// execution + compilation.
+    Uncached,
+    /// Measure both and report the derived compilation cost (default).
+    Both,
+}
+
+impl CacheSelection {
+    fn modes(self) -> &'static [CacheMode] {
+        match self {
+            CacheSelection::Cached => &[CacheMode::Cached],
+            CacheSelection::Uncached => &[CacheMode::Uncached],
+            CacheSelection::Both => &[CacheMode::Cached, CacheMode::Uncached],
+        }
+    }
+}
+
+/// A single plan-cache condition (one element of a [`CacheSelection`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheMode {
+    Cached,
+    Uncached,
+}
+
+/// Render one corpus query to a Cypher string for the given cache mode.
+///
+/// FalkorDB keys its plan cache on the query **body** (the text after the `CYPHER <params>` prefix
+/// that [`Query::to_cypher`] emits). [`CacheMode::Cached`] uses the body verbatim, so a corpus of
+/// varying parameter values still reuses one cached plan → *execution only*. [`CacheMode::Uncached`]
+/// appends a unique trailing comment `/* co<run_token>-<uid> */`, making every invocation a distinct
+/// cache key that FalkorDB must recompile → *execution + compilation*. The per-run `run_token` keeps
+/// a previous run's uncached comments from being served from cache; `uid` is a **run-global** unique
+/// invocation id (disjoint per worker and per concurrency level), so no two invocations anywhere in
+/// the sweep ever collide.
+fn render_cypher(
+    base: &str,
+    mode: CacheMode,
+    run_token: u64,
+    uid: u64,
+) -> Cow<'_, str> {
+    match mode {
+        // Cached mode sends the base verbatim — borrow it (no per-invocation allocation on the
+        // timed path); only uncached allocates to append its unique cache-buster comment.
+        CacheMode::Cached => Cow::Borrowed(base),
+        CacheMode::Uncached => Cow::Owned(format!("{} /* co{:x}-{} */", base, run_token, uid)),
+    }
+}
+
+/// The deterministic representative Cypher text a generated run records as the op's
+/// [`OperationReport::example_query`] — the **cached-mode base text** of its first invocation.
+/// Reads use their first pre-rendered corpus query verbatim. A catalog write renders invocation 0
+/// against a **canonical scratch** (run-token 0, worker 0), then swaps its label for the
+/// run-independent [`CANONICAL_SCRATCH_LABEL`]: a real worker's label folds in the run's random
+/// nonce, so rendering with the live scratch would make otherwise-identical reports differ
+/// byte-for-byte run to run — only that label differs from the measured text.
+fn example_query(
+    op_spec: &OperationSpec,
+    rendered: &[String],
+    reset_every: usize,
+) -> BenchmarkResult<Option<String>> {
+    match &op_spec.write {
+        Some(plan) => {
+            let scratch = WriteScratch::new(0, 0, reset_every)?;
+            let text = (plan.render)(&scratch, 0)?.to_cypher();
+            Ok(Some(text.replace(&scratch.label(), CANONICAL_SCRATCH_LABEL)))
+        }
+        None => Ok(rendered.first().cloned()),
+    }
+}
+
+/// Configuration for a synthetic probe run over one or more operations.
+#[derive(Debug, Clone)]
+pub struct Config {
+    pub endpoint: String,
+    /// Graph key to measure against (default [`DEFAULT_GRAPH`]).
+    pub graph: String,
+    /// Operations to measure, in order. Deduplicated (first occurrence wins) before running.
+    pub ops: Vec<OpName>,
+    pub samples: usize,
+    pub warmup: usize,
+    /// Concurrency levels to sweep (closed-loop worker counts `C`); each op is measured once per
+    /// level, tracing its latency-vs-throughput curve. Non-empty, each ≥ 1, deduped + sorted.
+    pub concurrency: Vec<usize>,
+    /// Reset cadence for write operations: every `reset_every` ops, each worker's scratch is reset
+    /// (untimed) to bound drift to one sawtooth window. Ignored by read ops.
+    pub reset_every: usize,
+    /// Seed for the per-operation parameter corpora (same seed ⇒ identical corpora).
+    pub seed: u64,
+    pub server_timeout_ms: i64,
+    pub client_deadline_ms: u64,
+    pub cache: CacheSelection,
+    /// READ-op pipelining depth `K` (default 1 = the plain closed loop). At `K > 1` each of a
+    /// level's `C` connections becomes one **multiplexed** socket carrying `K` closed-loop lanes,
+    /// keeping `K` commands in flight per connection so the server always has the next command
+    /// queued (self-pacing — client scheduling jitter can't perturb the arrival pattern). FalkorDB
+    /// executes a connection's commands serially, so server-side concurrency stays `C`; only
+    /// client-observed `total_ms` inflates (a command waits behind its lane-mates). Write ops
+    /// always measure at depth 1 (their per-sample verification and untimed resets are
+    /// closed-loop by design).
+    pub pipeline_depth: usize,
+    pub out: String,
+    pub server_image: Option<String>,
+    /// Optional display name for this run (e.g. `pr`/`main`), recorded into the report.
+    pub label: Option<String>,
+    /// When `Some`, generate a reproducible synthetic dataset (Part 3) into `graph`, **replacing**
+    /// its contents, before measuring. Gated behind explicit CLI consent (`--generate`).
+    pub dataset: Option<DatasetSpec>,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            endpoint: "falkor://127.0.0.1:6379".to_string(),
+            graph: DEFAULT_GRAPH.to_string(),
+            ops: vec![OpName::ReturnConst],
+            samples: 1000,
+            warmup: 200,
+            concurrency: DEFAULT_CONCURRENCY.to_vec(),
+            reset_every: crate::synthetic::catalog::DEFAULT_RESET_EVERY,
+            seed: 0,
+            server_timeout_ms: 5_000,
+            client_deadline_ms: 6_000,
+            cache: CacheSelection::Both,
+            pipeline_depth: 1,
+            out: "synthetic-report.json".to_string(),
+            server_image: None,
+            label: None,
+            dataset: None,
+        }
+    }
+}
+
+impl Config {
+    /// A per-operation view of this config with `budget`'s overrides applied (design §3.5). Each
+    /// `None` field in the [`OpBudget`] inherits the corresponding global knob, so
+    /// [`OpBudget::INHERIT`] yields a config equal to `self` — preserving today's behaviour and the
+    /// record-once / replay-verbatim A/B comparability for every current op. Used per op by [`run`]
+    /// to derive that op's effective knobs before measuring it.
+    pub fn with_budget(&self, budget: &OpBudget) -> Config {
+        self.with_recorded_budget(&RecordedBudget::from(*budget))
+    }
+
+    /// [`Self::with_budget`] for the owned manifest form ([`RecordedBudget`], design §3.4): the
+    /// single overlay implementation, shared by the catalog path (via [`Self::with_budget`]) and
+    /// the recorded-bundle replay path, so the two can't drift.
+    pub fn with_recorded_budget(&self, budget: &RecordedBudget) -> Config {
+        let mut cfg = self.clone();
+        if let Some(samples) = budget.samples {
+            cfg.samples = samples;
+        }
+        if let Some(warmup) = budget.warmup {
+            cfg.warmup = warmup;
+        }
+        if let Some(concurrency) = &budget.concurrency {
+            cfg.concurrency = concurrency.clone();
+        }
+        if let Some(cache) = budget.cache {
+            cfg.cache = cache;
+        }
+        if let Some(server_timeout_ms) = budget.server_timeout_ms {
+            cfg.server_timeout_ms = server_timeout_ms;
+        }
+        if let Some(client_deadline_ms) = budget.client_deadline_ms {
+            cfg.client_deadline_ms = client_deadline_ms;
+        }
+        cfg
+    }
+
+    /// The fully resolved per-op measurement policy this config describes, with `sweep` as the
+    /// op's normalized concurrency levels — persisted on [`OperationReport::policy`] for ops whose
+    /// budget overrode any global knob, so the diff/regression/baseline guards can compare it.
+    pub(crate) fn resolved_policy(
+        &self,
+        sweep: &[usize],
+    ) -> OpPolicy {
+        OpPolicy {
+            samples: self.samples,
+            warmup: self.warmup,
+            concurrency: sweep.to_vec(),
+            cache: self.cache,
+            server_timeout_ms: self.server_timeout_ms,
+            client_deadline_ms: self.client_deadline_ms,
+        }
+    }
+}
+
+/// Print the available operations (for `synthetic list-ops`).
+pub fn list_ops() -> String {
+    let mut out = String::from("Available operations:\n");
+    for op in OpName::all() {
+        let op_spec = spec(*op);
+        out.push_str(&format!(
+            "  {:<20} [{:<4}] {}\n",
+            op.as_str(),
+            op_spec.tier.as_str(),
+            op_spec.description
+        ));
+    }
+    out
+}
+
+/// Strip any password from an endpoint before it is recorded in the report or printed, so
+/// credentials passed in a `falkor://user:pass@host` URL never leak into `synthetic-report.json`.
+/// If the endpoint can't be parsed as a URL it's replaced with a placeholder (rather than echoed
+/// verbatim, which could still contain credentials).
+pub(crate) fn redact_endpoint(endpoint: &str) -> String {
+    match url::Url::parse(endpoint) {
+        Ok(mut url) => {
+            if url.password().is_some() {
+                let _ = url.set_password(None);
+            }
+            url.to_string()
+        }
+        Err(_) => "<unparseable-endpoint>".to_string(),
+    }
+}
+
+/// Parse `endpoint` into a [`falkordb::FalkorConnectionInfo`] without ever echoing credentials:
+/// the error carries only the [redacted](redact_endpoint) endpoint. The underlying parse detail is
+/// deliberately dropped — the vendored client wraps the URL parser's own text
+/// (`FalkorDBError::InvalidConnectionInfo(String)`), which can quote the raw connection string.
+fn parse_endpoint(endpoint: &str) -> BenchmarkResult<falkordb::FalkorConnectionInfo> {
+    endpoint.try_into().map_err(|_| {
+        OtherError(format!(
+            "invalid endpoint '{}': connection string failed to parse",
+            redact_endpoint(endpoint)
+        ))
+    })
+}
+
+/// Open a single-connection [`falkordb::AsyncGraph`] handle for `endpoint` on graph `graph_name`.
+///
+/// Uses a one-socket pool so latency is honest single-flight (the client otherwise defaults to 8
+/// multiplexed sockets). A malformed `endpoint` is reported as an error with credentials redacted.
+pub async fn open_graph(
+    endpoint: &str,
+    graph_name: &str,
+) -> BenchmarkResult<falkordb::AsyncGraph> {
+    let client = FalkorClientBuilder::new_async()
+        .with_connection_info(parse_endpoint(endpoint)?)
+        .with_connection_strategy(ConnectionStrategy::Pooled {
+            size: nonzero::nonzero!(1u8),
+        })
+        .build()
+        .await?;
+    Ok(client.select_graph(graph_name))
+}
+
+/// Open a **pipelining** [`falkordb::AsyncGraph`] handle: ONE multiplexed socket whose cheap
+/// clones share it, so `K` closed-loop lanes cloned from this handle keep `K` commands
+/// concurrently in flight on a single connection (the transport pipelines them; responses return
+/// in order). Backs `--pipeline-depth K > 1`; the default measurement path stays [`open_graph`]'s
+/// honest single-flight `Pooled { size: 1 }`.
+async fn open_graph_pipelined(
+    endpoint: &str,
+    graph_name: &str,
+) -> BenchmarkResult<falkordb::AsyncGraph> {
+    let client = FalkorClientBuilder::new_async()
+        .with_connection_info(parse_endpoint(endpoint)?)
+        .with_connection_strategy(ConnectionStrategy::Multiplexed {
+            connections: nonzero::nonzero!(1u8),
+        })
+        .build()
+        .await?;
+    Ok(client.select_graph(graph_name))
+}
+
+/// The effective pipelining depth for one measured op: reads honor the configured
+/// `--pipeline-depth` (min 1); writes always run the plain closed loop (depth 1) — their
+/// per-sample mutation verification and untimed window-boundary resets don't tolerate a second
+/// in-flight command on the connection. Recorded writes measure with `write: None` but
+/// `kind: Write`, so the gate is on the query kind, not the write plan.
+fn effective_pipeline_depth(
+    kind: QueryType,
+    configured: usize,
+) -> usize {
+    match kind {
+        QueryType::Read => configured.max(1),
+        QueryType::Write => 1,
+    }
+}
+
+/// Measured invocations per closed-loop lane at pipelining depth `depth`: each of a connection's
+/// `depth` lanes runs `ceil(samples / depth)` invocations, so a level completes **at least**
+/// `C × samples` invocations (exactly `C × samples` when `samples` divides evenly — pick such a
+/// `--samples` to keep totals identical across depths).
+fn lane_samples(
+    samples: usize,
+    depth: usize,
+) -> usize {
+    samples.div_ceil(depth.max(1))
+}
+
+/// The decorrelating corpus offset for one closed-loop lane: lanes globally index `w × depth + l`
+/// (worker slot `w`, lane `l`), so every lane starts its corpus cycle at a distinct offset —
+/// exactly today's `w % corpus.len()` when `depth == 1`.
+fn lane_corpus_offset(
+    worker: usize,
+    depth: usize,
+    lane: usize,
+    corpus_len: usize,
+) -> usize {
+    (worker * depth + lane) % corpus_len.max(1)
+}
+
+/// The report's human-readable connection description: the honest single-flight default, or the
+/// multiplexed lane fan-out under `--pipeline-depth K > 1` (informational — never guarded by the
+/// diff/regression comparability checks, so a depth-1 and a depth-K run of the same workload stay
+/// comparable on server_ms).
+pub(crate) fn connection_description(pipeline_depth: usize) -> String {
+    if pipeline_depth > 1 {
+        format!(
+            "multiplexed(1) per worker × {} pipelined read lanes",
+            pipeline_depth
+        )
+    } else {
+        "pool(size=1) per worker".to_string()
+    }
+}
+
+/// Run the probe: connect (single connection), collect server provenance, sample the graph to seed
+/// corpora, then measure each selected operation under each cache mode and build the [`Report`].
+/// Writing the report to disk is the caller's responsibility (see [`run_and_report`]).
+pub async fn run(config: &Config) -> BenchmarkResult<Report> {
+    if config.samples == 0 {
+        return Err(OtherError("samples must be greater than 0".to_string()));
+    }
+    let concurrency = normalize_concurrency(&config.concurrency)?;
+    let ops = dedup_ops(&config.ops);
+    if ops.is_empty() {
+        return Err(OtherError(
+            "no operations selected — pass --op <name> (repeatable/comma-separated) or --all-reads"
+                .to_string(),
+        ));
+    }
+    // Write ops need a positive reset cadence AND a per-worker key band that fits `i32` (FalkorDB
+    // params) at the widest concurrency level. Validate both up-front — before opening any
+    // connection or collecting provenance — so an invalid write config fails fast instead of after
+    // connection/provenance setup.
+    if ops.iter().any(|op| spec(*op).write.is_some()) {
+        if config.reset_every == 0 {
+            return Err(OtherError(
+                "reset_every must be >= 1 for write operations".to_string(),
+            ));
+        }
+        // The band bound grows with the worker id, so the largest level bounds every smaller one;
+        // reuse `WriteScratch::new`'s checked i32 arithmetic (its run_token doesn't affect the
+        // bound). `normalize_concurrency` guarantees a non-empty, ≥1 sweep, so `max_worker ≥ 0`.
+        let max_worker = concurrency.last().copied().unwrap_or(1).saturating_sub(1);
+        WriteScratch::new(0, max_worker, config.reset_every)?;
+    }
+
+    let started_at_epoch_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    // A single dedicated connection: honest single-flight latency.
+    let mut graph = open_graph(&config.endpoint, &config.graph).await?;
+
+    // Server provenance (best-effort: log and continue on failure).
+    let redis_url = falkor_endpoint_to_redis_url(Some(&config.endpoint));
+    let server = match provenance::collect(&redis_url, config.server_image.clone()).await {
+        Ok(info) => info,
+        Err(e) => {
+            warn!("could not collect server provenance: {}", e);
+            crate::synthetic::report::ServerInfo {
+                server_image: config.server_image.clone(),
+                ..Default::default()
+            }
+        }
+    };
+    if server.is_placeholder() {
+        warn!(
+            "FalkorDB module version is the {} dev placeholder — use a tagged image for version comparisons",
+            crate::synthetic::report::ServerInfo::PLACEHOLDER_VER
+        );
+    }
+
+    let client_deadline = Duration::from_millis(config.client_deadline_ms);
+
+    // Dataset: either generate a reproducible one (Part 3) or sample the live graph (Part 2).
+    let dataset = if let Some(spec) = &config.dataset {
+        // Generation replaces the target graph, so it's gated behind explicit CLI consent upstream.
+        // Bulk-load batches do real server-side work, so give them a generous deadline *and* a
+        // matching server-side per-query timeout (the default measurement timeout — often 5s — is
+        // too small for a large UNWIND batch and would trip before the client deadline).
+        let load_deadline = Duration::from_millis(config.client_deadline_ms.max(60_000));
+        let load_server_timeout_ms = config
+            .server_timeout_ms
+            .max(i64::try_from(load_deadline.as_millis()).unwrap_or(i64::MAX));
+        info!(
+            "generating synthetic dataset (seed {}, nodes {}, edges {}) into graph '{}'",
+            spec.seed, spec.nodes, spec.edges, config.graph
+        );
+        dataset::generate_and_load(
+            &mut graph,
+            spec,
+            DATASET_LOAD_BATCH,
+            load_deadline,
+            load_server_timeout_ms,
+        )
+        .await?
+    } else {
+        ensure_graph_exists(&mut graph, config, client_deadline).await?;
+        // Only sample the graph if some selected op needs seed ids (return_const / label scan
+        // don't), so a return_const-only run doesn't fail on a graph that has no :User data.
+        let needs_dataset = ops
+            .iter()
+            .any(|op| spec(*op).requirement != DatasetRequirement::None);
+        if needs_dataset {
+            probe_dataset(&mut graph, config, client_deadline).await?
+        } else {
+            DatasetHandle::default()
+        }
+    };
+
+    // A fresh OS-random run_token per run keeps uncached-mode comments globally unique, so a small
+    // run's uncached queries can never be served from a previous run's plan cache.
+    let run_token = rand::random_range(0..=u64::MAX);
+
+    // The setup connection's work (provenance, dataset generation/probe) is done; drop it so it
+    // doesn't sit idle as a `C + 1`-th connection while the workers open their own pools.
+    drop(graph);
+
+    // Run-global allocator of disjoint invocation-id ranges: every worker claims a block so its
+    // uncached query text can never collide with another worker's or another level's.
+    let uid_alloc = AtomicU64::new(0);
+
+    let mut operations = BTreeMap::new();
+    // Write ops always measure at depth 1, so a run with no reads reports the plain pooled
+    // connection whatever depth was configured (computed before `ops` is consumed below).
+    let effective_meta_depth = if ops.iter().any(|op| op.kind() == QueryType::Read) {
+        config.pipeline_depth
+    } else {
+        1
+    };
+    // Capture each op's corpus fingerprint (in execution order) so the corpus_hash reflects the
+    // exact rendered workload — parameter values included — not just the op names.
+    let mut op_fingerprints: Vec<(OpName, String)> = Vec::with_capacity(ops.len());
+    for op in ops {
+        let op_spec = spec(op);
+        // Per-op runtime budget (design §3.5): overlay this op's `OpBudget` on the global config.
+        // Every current op is `INHERIT`, so `op_config`/`op_concurrency`/`op_client_deadline` equal
+        // the global values and behaviour — and the record-once/replay-verbatim A/B comparability —
+        // is unchanged. The corpus is still seeded from the global `config.seed` (never budgeted),
+        // so the recorded query strings stay identical regardless of any budget.
+        let op_config = config.with_budget(&op_spec.budget);
+        validate_op_config(op.as_str(), &op_config)?;
+        let op_concurrency = normalize_concurrency(&op_config.concurrency)?;
+        let op_client_deadline = Duration::from_millis(op_config.client_deadline_ms);
+        // Seed each op's corpus deterministically (same --seed ⇒ byte-identical corpus).
+        let mut rng = StdRng::seed_from_u64(config.seed ^ op.salt());
+        let corpus = Arc::new(op_spec.build_corpus(&mut rng, &dataset, 0, 1)?);
+        // Fingerprint reads by their rendered corpus; writes by their stable plan tag + reset
+        // cadence (their queries are rendered per-invocation from scratch, not from the corpus).
+        let fingerprint = match &op_spec.write {
+            Some(plan) => format!("write:{}:reset_every={}", plan.plan_tag, config.reset_every),
+            None => dataset::corpus_fingerprint(&corpus),
+        };
+        op_fingerprints.push((op, fingerprint));
+        // Pre-render reads to their cached-mode base strings so the engine measures strings (writes
+        // render per-invocation, so this is unused for them). This is the same string a recorded
+        // bundle stores, so a generated run and a `--recording` run measure identically.
+        let rendered: Arc<Vec<String>> = Arc::new(corpus.iter().map(|q| q.to_cypher()).collect());
+        // Extracted before the measurement (which consumes the corpus): the op's deterministic
+        // representative query for the report.
+        let example = example_query(&op_spec, &rendered, config.reset_every)?;
+        let mut op_report = measure_op(
+            &op_config,
+            &op_concurrency,
+            MeasureTarget::from_spec(&op_spec),
+            rendered,
+            run_token,
+            &uid_alloc,
+            op_client_deadline,
+        )
+        .await?;
+        // Persist the op's effective measurement policy when its catalog budget overrode any
+        // global knob (all-INHERIT today), so a cross-run comparison can guard it per-op.
+        op_report.policy =
+            (op_spec.budget != OpBudget::INHERIT).then(|| op_config.resolved_policy(&op_concurrency));
+        op_report.example_query = example;
+        operations.insert(op.as_str().to_string(), op_report);
+    }
+
+    // Record dataset provenance + the workload's corpus_hash only when we generated the data (we
+    // can't fingerprint an externally-supplied graph, so comparing hashes would be misleading).
+    let dataset_info = config.dataset.as_ref().map(|spec| DatasetInfo {
+        seed: spec.seed,
+        nodes: spec.nodes,
+        edges: spec.edges,
+        workload_hash: dataset::corpus_hash(
+            spec,
+            config.seed,
+            CORPUS_SIZE,
+            &op_fingerprints,
+            &dataset,
+        ),
+    });
+
+    Ok(Report {
+        schema_version: crate::synthetic::report::SCHEMA_VERSION,
+        meta: Meta {
+            tool_version: env!("CARGO_PKG_VERSION").to_string(),
+            endpoint: redact_endpoint(&config.endpoint),
+            graph: config.graph.clone(),
+            samples: config.samples,
+            warmup: config.warmup,
+            concurrency: concurrency.clone(),
+            seed: config.seed,
+            corpus_size: CORPUS_SIZE,
+            server_timeout_ms: config.server_timeout_ms,
+            client_deadline_ms: config.client_deadline_ms,
+            connection: connection_description(effective_meta_depth),
+            started_at_epoch_secs,
+            server,
+            host: host::collect(),
+            dataset: dataset_info,
+            label: config.label.clone(),
+            oracle_verified: None,
+        },
+        operations,
+    })
+}
+
+/// Validate and canonicalize the configured concurrency sweep: non-empty, every level ≥ 1,
+/// deduplicated and sorted ascending (so the curve reads low → high and each `C` runs once).
+pub(crate) fn normalize_concurrency(concurrency: &[usize]) -> BenchmarkResult<Vec<usize>> {
+    if concurrency.is_empty() {
+        return Err(OtherError(
+            "concurrency must list at least one level (e.g. --concurrency 1,4,16)".to_string(),
+        ));
+    }
+    if concurrency.contains(&0) {
+        return Err(OtherError(
+            "concurrency levels must be >= 1 (0 workers can't measure anything)".to_string(),
+        ));
+    }
+    let mut levels: Vec<usize> = concurrency.to_vec();
+    levels.sort_unstable();
+    levels.dedup();
+    Ok(levels)
+}
+
+/// Validate a per-op resolved [`Config`]: the global `run()` guard only checks the global knobs, so
+/// a per-op budget — a catalog [`OpBudget`] or a recorded bundle's [`RecordedBudget`] — that zeroed
+/// `samples` or set an invalid concurrency sweep would slip past it and fail later with a less
+/// actionable error. Reject it up front, naming the op. Concurrency reuses
+/// [`normalize_concurrency`]'s rules (kept the single source of truth) with the op prefixed.
+pub(crate) fn validate_op_config(op: &str, cfg: &Config) -> BenchmarkResult<()> {
+    if cfg.samples == 0 {
+        return Err(OtherError(format!(
+            "operation '{op}' resolved to a per-op budget with samples = 0; samples must be greater than 0"
+        )));
+    }
+    if cfg.server_timeout_ms <= 0 {
+        return Err(OtherError(format!(
+            "operation '{op}' resolved to a per-op budget with server_timeout_ms = {}; the timeout must be positive",
+            cfg.server_timeout_ms
+        )));
+    }
+    if cfg.client_deadline_ms == 0 {
+        return Err(OtherError(format!(
+            "operation '{op}' resolved to a per-op budget with client_deadline_ms = 0; the deadline must be positive"
+        )));
+    }
+    if let Err(e) = normalize_concurrency(&cfg.concurrency) {
+        // Unwrap the inner message so the op-prefixed error isn't double-wrapped with "Other error:".
+        let detail = match e {
+            OtherError(m) => m,
+            other => other.to_string(),
+        };
+        return Err(OtherError(format!("operation '{op}': {detail}")));
+    }
+    Ok(())
+}
+
+/// Deduplicate the selected ops, preserving first-occurrence order (so a repeated `--op` or an
+/// overlap between `--op` and `--all-reads` doesn't silently overwrite a report entry).
+fn dedup_ops(ops: &[OpName]) -> Vec<OpName> {
+    let mut seen = std::collections::HashSet::new();
+    ops.iter().copied().filter(|op| seen.insert(*op)).collect()
+}
+
+/// Ensure the target graph key exists: a read (`RO_QUERY`) against a never-written graph fails with
+/// "Invalid graph operation on empty key". Probe with a read first; only when the error is exactly
+/// that empty-key condition, re-run the same trivial `RETURN 1` over the writable `GRAPH.QUERY`
+/// command (not `RO_QUERY`) — which instantiates the empty graph key even though the query itself
+/// mutates nothing. So a read-only replica whose graph already exists still works via the read
+/// path, and any other error (auth/network) is surfaced rather than masked. Both are bounded by the
+/// client deadline.
+async fn ensure_graph_exists(
+    graph: &mut falkordb::AsyncGraph,
+    config: &Config,
+    client_deadline: Duration,
+) -> BenchmarkResult<()> {
+    let name = &config.graph;
+    let probe = tokio::time::timeout(
+        client_deadline,
+        graph
+            .ro_query("RETURN 1")
+            .with_timeout(config.server_timeout_ms)
+            .execute(),
+    )
+    .await
+    .map_err(|e| OtherError(format!("graph '{}' readiness probe timed out: {}", name, e)))?;
+    match probe {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            let msg = format!("{:?}", e);
+            if is_empty_graph_key(&msg) {
+                tokio::time::timeout(
+                    client_deadline,
+                    graph
+                        .query("RETURN 1")
+                        .with_timeout(config.server_timeout_ms)
+                        .execute(),
+                )
+                .await
+                .map_err(|e| {
+                    OtherError(format!("graph '{}' instantiation timed out: {}", name, e))
+                })?
+                .map_err(|e| {
+                    OtherError(format!("failed to instantiate graph '{}': {:?}", name, e))
+                })?;
+                Ok(())
+            } else {
+                Err(OtherError(format!(
+                    "graph '{}' readiness probe failed: {}",
+                    name, msg
+                )))
+            }
+        }
+    }
+}
+
+/// Sample up to [`DATASET_SAMPLE_SIZE`] existing `:User` ids (ascending, for a stable reproducible
+/// sample) to seed operation corpora. A graph with no `:User` nodes yields an empty handle; ops
+/// that need seed ids then fail with a clear message (ops that don't, like `return_const` or the
+/// label scan, still run).
+async fn probe_dataset(
+    graph: &mut falkordb::AsyncGraph,
+    config: &Config,
+    client_deadline: Duration,
+) -> BenchmarkResult<DatasetHandle> {
+    let cypher = format!(
+        "MATCH (n:User) WHERE n.id >= {} AND n.id <= {} RETURN n.id AS id ORDER BY id LIMIT {}",
+        i32::MIN,
+        i32::MAX,
+        DATASET_SAMPLE_SIZE
+    );
+    let collect = async {
+        let mut result = graph
+            .ro_query(&cypher)
+            .with_timeout(config.server_timeout_ms)
+            .execute()
+            .await
+            .map_err(|e| OtherError(format!("dataset probe failed: {:?}", e)))?;
+        let mut node_ids = Vec::new();
+        while let Some(row) = result.data.next().await {
+            let row = row.map_err(|e| OtherError(format!("dataset probe row error: {:?}", e)))?;
+            // ids are read as i64 then narrowed; out-of-`i32`-range ids are skipped (QueryParam is
+            // i32) rather than clamped, so we never target a wrong/nonexistent node.
+            let id: i64 = row
+                .try_get_at(0)
+                .map_err(|e| OtherError(format!("dataset probe decode error: {:?}", e)))?;
+            if let Ok(id) = i32::try_from(id) {
+                node_ids.push(id);
+            }
+        }
+        Ok::<Vec<i32>, crate::error::BenchmarkError>(node_ids)
+    };
+    let node_ids = tokio::time::timeout(client_deadline, collect)
+        .await
+        .map_err(|e| OtherError(format!("dataset probe timed out: {}", e)))??;
+    Ok(DatasetHandle {
+        node_ids,
+        ..Default::default()
+    })
+}
+
+/// Whether a query error string is FalkorDB's "graph key does not exist yet" condition.
+pub(crate) fn is_empty_graph_key(msg: &str) -> bool {
+    let m = msg.to_ascii_lowercase();
+    m.contains("empty key") || m.contains("invalid graph operation")
+}
+
+/// Where a [`GraphWorker`] gets each invocation's query: a read cycles a shared corpus; a write
+/// renders a fresh query from its own [`WriteScratch`] and runs the untimed reset/verification.
+enum WorkerSource {
+    /// A read op: cycle the shared **pre-rendered** corpus (cached-mode base strings) from a
+    /// decorrelating offset. Uncached mode decorates each base with a unique comment.
+    Read {
+        corpus: Arc<Vec<String>>,
+        corpus_offset: usize,
+    },
+    /// A write op (Part 5): the plan's per-invocation render + the worker's isolated scratch.
+    Write {
+        plan: WritePlan,
+        scratch: WriteScratch,
+    },
+}
+
+/// A closed-loop worker for one operation, cache mode and connection: owns a single-socket
+/// `AsyncGraph` and drives one query at a time via [`run_and_drain`]. Reads cycle a shared corpus
+/// from a decorrelating `corpus_offset`; writes render from a per-worker [`WriteScratch`], run an
+/// untimed reset at each window boundary, and verify each sample's mutation. It claims a disjoint
+/// `uid_base` so its uncached query text is globally unique across the whole sweep.
+struct GraphWorker {
+    graph: AsyncGraph,
+    kind: QueryType,
+    mode: CacheMode,
+    run_token: u64,
+    uid_base: u64,
+    server_timeout_ms: i64,
+    client_deadline: Duration,
+    /// Generous server-timeout/deadline for the untimed write hooks (a reset can delete a whole
+    /// window of nodes, which mustn't trip the tight measurement deadline).
+    hook_server_timeout_ms: i64,
+    hook_deadline: Duration,
+    source: WorkerSource,
+}
+
+impl OpInvoker for GraphWorker {
+    async fn invoke(
+        &mut self,
+        seq: u64,
+    ) -> BenchmarkResult<OpSample> {
+        let uid = self.uid_base + seq;
+        let mode = self.mode;
+        let run_token = self.run_token;
+        let kind = self.kind;
+        let server_timeout_ms = self.server_timeout_ms;
+        let client_deadline = self.client_deadline;
+        // `&self.source` and `&mut self.graph` borrow disjoint fields, so both are live together.
+        match &self.source {
+            WorkerSource::Read {
+                corpus,
+                corpus_offset,
+            } => {
+                let idx = (corpus_offset + seq as usize) % corpus.len();
+                let cypher = render_cypher(&corpus[idx], mode, run_token, uid);
+                run_and_drain(&mut self.graph, kind, &cypher, server_timeout_ms, client_deadline)
+                    .await
+            }
+            WorkerSource::Write { plan, scratch } => {
+                let plan = *plan;
+                let scratch = scratch.clone();
+                // Undo the previous window's drift *before* reusing its key band — untimed, so it
+                // never lands in a sample. `seq` is the global (warm-up + measured) counter, so the
+                // cadence bounds warm-up accumulation too.
+                if scratch.schedule().should_reset(seq) {
+                    for q in (plan.reset)(&scratch)? {
+                        let c = q.to_cypher();
+                        run_and_drain(
+                            &mut self.graph,
+                            kind,
+                            &c,
+                            self.hook_server_timeout_ms,
+                            self.hook_deadline,
+                        )
+                        .await?;
+                    }
+                }
+                let base = (plan.render)(&scratch, seq)?;
+                // Bind the owned rendered string so cached mode can borrow it (no second copy).
+                let rendered = base.to_cypher();
+                let cypher = render_cypher(&rendered, mode, run_token, uid);
+                let sample = run_and_drain(
+                    &mut self.graph,
+                    kind,
+                    &cypher,
+                    server_timeout_ms,
+                    client_deadline,
+                )
+                .await?;
+                // The op must actually effect its intended mutation — a silent no-op is an error.
+                verify_mutation(plan.expected, &sample.mutations)?;
+                Ok(sample)
+            }
+        }
+    }
+}
+
+/// The minimal per-operation facts the measurement engine needs, decoupled from the catalog's
+/// [`OperationSpec`] so a recorded **string-keyed** op — which has no `OperationSpec` (see
+/// [`OpKey`]) — can be measured the same way: its read/write [`QueryType`] (selects `RO_QUERY` vs
+/// `QUERY`) and, for writes, the [`WritePlan`] whose setup/reset/cleanup hooks frame the measured
+/// window. Reads carry `write: None`.
+#[derive(Clone, Copy)]
+pub(crate) struct MeasureTarget {
+    pub kind: QueryType,
+    pub write: Option<WritePlan>,
+}
+
+impl MeasureTarget {
+    /// The measurement target for a built-in catalog operation.
+    pub(crate) fn from_spec(op_spec: &OperationSpec) -> Self {
+        Self {
+            kind: op_spec.kind,
+            write: op_spec.write,
+        }
+    }
+
+    /// A read-only measurement target (no write hooks) — used by the reads-only replay path.
+    pub(crate) fn read() -> Self {
+        Self {
+            kind: QueryType::Read,
+            write: None,
+        }
+    }
+}
+
+/// Measure one operation across the concurrency sweep, under every requested cache mode, and derive
+/// its per-level compilation cost.
+pub(crate) async fn measure_op(
+    config: &Config,
+    concurrency: &[usize],
+    target: MeasureTarget,
+    corpus: Arc<Vec<String>>,
+    run_token: u64,
+    uid_alloc: &AtomicU64,
+    client_deadline: Duration,
+) -> BenchmarkResult<OperationReport> {
+    let mut levels = Vec::with_capacity(concurrency.len());
+    for &c in concurrency {
+        let mut cached: Option<LevelMetrics> = None;
+        let mut uncached: Option<LevelMetrics> = None;
+        for &mode in config.cache.modes() {
+            let metrics = measure_level(
+                config,
+                c,
+                target,
+                &corpus,
+                mode,
+                run_token,
+                uid_alloc,
+                client_deadline,
+            )
+            .await?;
+            match mode {
+                CacheMode::Cached => cached = Some(metrics),
+                CacheMode::Uncached => uncached = Some(metrics),
+            }
+        }
+
+        // Derived expression-compilation cost: how much slower an uncached (recompiled) run's
+        // server time is than a cached (plan-reused) one, at this concurrency level.
+        let compilation_ms_median = match (&cached, &uncached) {
+            (Some(cm), Some(um)) => Some(um.metrics.server_ms.median - cm.metrics.server_ms.median),
+            _ => None,
+        };
+
+        levels.push(LevelReport {
+            concurrency: c,
+            cached,
+            uncached,
+            compilation_ms_median,
+        });
+    }
+
+    Ok(OperationReport {
+        levels,
+        result_digest: None,
+        policy: None,
+        skipped: None,
+        example_query: None,
+    })
+}
+
+/// Run a list of untimed write statements (setup/reset/cleanup) to completion on `graph`.
+async fn run_write_stmts(
+    graph: &mut AsyncGraph,
+    stmts: Vec<Query>,
+    server_timeout_ms: i64,
+    deadline: Duration,
+) -> BenchmarkResult<()> {
+    for q in stmts {
+        let cypher = q.to_cypher();
+        run_and_drain(graph, QueryType::Write, &cypher, server_timeout_ms, deadline).await?;
+    }
+    Ok(())
+}
+
+/// Open a fresh connection and drop a write run's scratch (its `cleanup` statements). Kept off the
+/// measurement connections so a level that errored still gets cleaned up, and so — unlike the
+/// per-op work — a cleanup failure is a **surfaced** error the caller can propagate on the success
+/// path rather than silent scratch pollution.
+async fn run_scratch_cleanup(
+    endpoint: &str,
+    graph: &str,
+    plan: WritePlan,
+    scratch: &WriteScratch,
+    server_timeout_ms: i64,
+    deadline: Duration,
+) -> BenchmarkResult<()> {
+    let mut g = open_graph(endpoint, graph).await?;
+    let stmts = (plan.cleanup)(scratch)?;
+    run_write_stmts(&mut g, stmts, server_timeout_ms, deadline).await
+}
+
+/// Measure one operation at one concurrency level `C` in one cache mode via the closed-loop engine:
+/// open `C` single-socket connections (one per worker), drive them to completion, and summarize the
+/// pooled samples plus the achieved throughput.
+///
+/// At `pipeline_depth K > 1` (reads only — see [`effective_pipeline_depth`]) each of the `C`
+/// connection slots becomes one **multiplexed** socket fanned into `K` closed-loop lanes: the
+/// engine drives `C × K` lanes, each measuring [`lane_samples`] invocations, so at most `K`
+/// commands are in flight per connection while server-side concurrency stays `C` (FalkorDB
+/// executes a connection's commands serially). The reported level keeps `concurrency = C`.
+///
+/// For write ops each worker gets an isolated [`WriteScratch`] and its untimed setup runs before the
+/// window. The run's scratch is dropped afterward on a fresh connection whether or not the level
+/// errored, so a failed write level never leaks scratch into the next one. A cleanup failure on the
+/// **success** path is surfaced (leftover scratch must never silently pollute the graph); on the
+/// **failure** path cleanup stays best-effort so it can't mask the level's original error.
+#[allow(clippy::too_many_arguments)]
+async fn measure_level(
+    config: &Config,
+    concurrency: usize,
+    target: MeasureTarget,
+    corpus: &Arc<Vec<String>>,
+    mode: CacheMode,
+    run_token: u64,
+    uid_alloc: &AtomicU64,
+    client_deadline: Duration,
+) -> BenchmarkResult<LevelMetrics> {
+    // Prime the plan cache once even when warmup==0, so a cached-mode measurement never pays
+    // first-touch compilation on its first sample. (No help for uncached, whose every query is
+    // unique by design.) An untimed warm-up invocation does exactly that.
+    let effective_warmup = if config.warmup == 0 && mode == CacheMode::Cached {
+        1
+    } else {
+        config.warmup
+    };
+
+    // Reads honor `--pipeline-depth`; writes always run the plain closed loop. At depth 1 every
+    // value below (lane count, per-lane samples, uid blocks, corpus offsets) is byte-identical to
+    // the pre-pipelining behaviour.
+    let depth = effective_pipeline_depth(target.kind, config.pipeline_depth);
+    let samples_per_lane = lane_samples(config.samples, depth);
+
+    // Each lane claims a disjoint id block wide enough for its warm-up + measured invocations, so
+    // no two lanes (here or at any other level) ever render the same uncached query text.
+    let block = (effective_warmup + samples_per_lane) as u64;
+
+    // The untimed write hooks (setup/reset/cleanup) can touch a whole window of nodes, so give them
+    // a generous deadline independent of the tight per-op measurement deadline.
+    let hook_deadline = client_deadline.max(Duration::from_millis(60_000));
+    let hook_server_timeout_ms = config
+        .server_timeout_ms
+        .max(i64::try_from(hook_deadline.as_millis()).unwrap_or(i64::MAX));
+
+    // For a write op, capture the cleanup handle up-front — *before* any worker's setup mutates the
+    // graph — so a mid-loop connection/setup failure still drops whatever scratch earlier workers
+    // created. The run label is shared, so worker 0's scratch cleans the whole run.
+    let write_cleanup: Option<(WritePlan, WriteScratch)> = match &target.write {
+        Some(plan) => Some((*plan, WriteScratch::new(run_token, 0, config.reset_every)?)),
+        None => None,
+    };
+
+    // Build the workers (opening a connection and running each write op's untimed setup). Collected
+    // into a Result so a partway failure routes through the scratch cleanup below instead of leaking
+    // the nodes earlier workers already created.
+    let build_workers = async {
+        let mut workers = Vec::with_capacity(concurrency * depth);
+        for w in 0..concurrency {
+            if depth > 1 {
+                // Pipelined reads: ONE multiplexed socket for this connection slot; its K cloned
+                // lanes pipeline their in-flight commands over it. Each lane claims its own
+                // disjoint uid block and a distinct decorrelating corpus offset.
+                let graph = open_graph_pipelined(&config.endpoint, &config.graph).await?;
+                for lane in 0..depth {
+                    let uid_base = uid_alloc.fetch_add(block, Ordering::Relaxed);
+                    workers.push(GraphWorker {
+                        graph: graph.clone(),
+                        kind: target.kind,
+                        mode,
+                        run_token,
+                        uid_base,
+                        server_timeout_ms: config.server_timeout_ms,
+                        client_deadline,
+                        hook_server_timeout_ms,
+                        hook_deadline,
+                        source: WorkerSource::Read {
+                            corpus: Arc::clone(corpus),
+                            corpus_offset: lane_corpus_offset(w, depth, lane, corpus.len()),
+                        },
+                    });
+                }
+                continue;
+            }
+            let mut graph = open_graph(&config.endpoint, &config.graph).await?;
+            let uid_base = uid_alloc.fetch_add(block, Ordering::Relaxed);
+            let source = match &target.write {
+                Some(plan) => {
+                    let scratch = WriteScratch::new(run_token, w, config.reset_every)?;
+                    // Untimed setup on this worker's own connection before the measurement window.
+                    run_write_stmts(
+                        &mut graph,
+                        (plan.setup)(&scratch)?,
+                        hook_server_timeout_ms,
+                        hook_deadline,
+                    )
+                    .await?;
+                    WorkerSource::Write {
+                        plan: *plan,
+                        scratch,
+                    }
+                }
+                None => WorkerSource::Read {
+                    corpus: Arc::clone(corpus),
+                    corpus_offset: w % corpus.len(),
+                },
+            };
+            workers.push(GraphWorker {
+                graph,
+                kind: target.kind,
+                mode,
+                run_token,
+                uid_base,
+                server_timeout_ms: config.server_timeout_ms,
+                client_deadline,
+                hook_server_timeout_ms,
+                hook_deadline,
+                source,
+            });
+        }
+        Ok::<_, crate::error::BenchmarkError>(workers)
+    }
+    .await;
+
+    // Run the closed loop only if every worker built; otherwise carry the build/setup error forward
+    // so the single cleanup path below runs for both outcomes (a partially set-up populated band
+    // must never leak). The build/setup error is what we ultimately propagate.
+    let run = match build_workers {
+        Ok(workers) => run_closed_loop(workers, effective_warmup, samples_per_lane).await,
+        Err(e) => Err(e),
+    };
+
+    // Drop the run's scratch on a fresh connection, whether or not the level succeeded, so a write
+    // level can't leave scratch behind for the next level/op. On the **success** path a cleanup
+    // failure is surfaced (leftover scratch must never silently pollute the graph); on the
+    // **failure** path cleanup stays best-effort so it can't mask the level's original error.
+    let cleanup = match write_cleanup {
+        Some((plan, scratch)) => {
+            run_scratch_cleanup(
+                &config.endpoint,
+                &config.graph,
+                plan,
+                &scratch,
+                hook_server_timeout_ms,
+                hook_deadline,
+            )
+            .await
+        }
+        None => Ok(()),
+    };
+
+    let run = run?; // a level error wins (cleanup already ran best-effort above)
+    cleanup?; // otherwise surface any cleanup failure so scratch can't leak silently
+    let metrics = summarize_samples(&run.samples)?;
+    Ok(LevelMetrics {
+        throughput_ops_per_sec: run.throughput_ops_per_sec(),
+        metrics,
+    })
+}
+
+/// Summarize a set of paired samples into a [`MetricSet`].
+///
+/// Outlier removal is *paired*: a sample is dropped if it is a severe outlier in **either**
+/// `server_ms` or `total_ms`, and all three summaries (server, total, and the paired residual) are
+/// computed over that single shared retained cohort. This keeps their sample counts identical and
+/// preserves the invariant that, since every raw pair has `total >= server`, the retained
+/// aggregates do too. Cache-health stats are computed over the same retained cohort.
+pub(crate) fn summarize_samples(
+    samples: &[OpSample]
+) -> BenchmarkResult<crate::synthetic::report::MetricSet> {
+    let server: Vec<f64> = samples.iter().map(|s| s.server_ms).collect();
+    let total: Vec<f64> = samples.iter().map(|s| s.total_ms).collect();
+
+    let server_fence = stats::severe_fence(&server);
+    let total_fence = stats::severe_fence(&total);
+    let within = |v: f64, fence: Option<(f64, f64)>| match fence {
+        Some((lo, hi)) => v >= lo && v <= hi,
+        None => true,
+    };
+
+    let kept: Vec<&OpSample> = samples
+        .iter()
+        .filter(|s| within(s.server_ms, server_fence) && within(s.total_ms, total_fence))
+        .collect();
+    let removed = samples.len() - kept.len();
+
+    let kept_server: Vec<f64> = kept.iter().map(|s| s.server_ms).collect();
+    let kept_total: Vec<f64> = kept.iter().map(|s| s.total_ms).collect();
+    let kept_residual: Vec<f64> = kept.iter().map(|s| s.total_ms - s.server_ms).collect();
+
+    let server_ms = stats::summarize_kept(&kept_server, removed)
+        .ok_or_else(|| OtherError("no server_ms samples to summarize".to_string()))?;
+    let total_ms = stats::summarize_kept(&kept_total, removed)
+        .ok_or_else(|| OtherError("no total_ms samples to summarize".to_string()))?;
+    let non_internal_ms = stats::summarize_kept(&kept_residual, removed)
+        .ok_or_else(|| OtherError("no non_internal_ms samples to summarize".to_string()))?;
+
+    // Cache health over the same retained cohort (not the raw samples).
+    let cached_unknown = kept.iter().filter(|s| s.cached.is_none()).count();
+    let known: Vec<bool> = kept.iter().filter_map(|s| s.cached).collect();
+    let cached_false_rate = if known.is_empty() {
+        0.0
+    } else {
+        known.iter().filter(|&&c| !c).count() as f64 / known.len() as f64
+    };
+
+    Ok(crate::synthetic::report::MetricSet {
+        server_ms,
+        total_ms,
+        non_internal_ms,
+        cached_false_rate,
+        cached_unknown,
+    })
+}
+
+/// Run the probe, print the console summary, and write the JSON report to `config.out`.
+pub async fn run_and_report(config: &Config) -> BenchmarkResult<()> {
+    if config.samples == 0 {
+        return Err(OtherError("--samples must be greater than 0".to_string()));
+    }
+    let report = run(config).await?;
+    println!("{}", report.to_console());
+    write_report(&report, &config.out).await
+}
+
+/// Print nothing extra, but write the JSON report to `out` **and** the pasteable Markdown alongside
+/// it (`<out>.md`). Shared by [`run_and_report`] and the `run --recording` path.
+pub(crate) async fn write_report(
+    report: &crate::synthetic::report::Report,
+    out: &str,
+) -> BenchmarkResult<()> {
+    let json = report.to_json()?;
+    tokio::fs::write(out, json).await?;
+    info!("wrote {}", out);
+    println!("report written to {}", out);
+    // A PR-pasteable Markdown report alongside the JSON: `<out>.md` (replacing a `.json` suffix).
+    let md_path = markdown_path(out);
+    tokio::fs::write(&md_path, report.to_markdown()).await?;
+    info!("wrote {}", md_path);
+    println!("markdown written to {}", md_path);
+    Ok(())
+}
+
+/// The Markdown report path for a JSON `out` path: swap a trailing `.json` for `.md`, else append
+/// `.md` (e.g. `synthetic-report.json` → `synthetic-report.md`, `report` → `report.md`).
+fn markdown_path(out: &str) -> String {
+    match out.strip_suffix(".json") {
+        Some(stem) => format!("{stem}.md"),
+        None => format!("{out}.md"),
+    }
+}
+
+/// Execute a parsed `synthetic` subcommand. This keeps `main.rs` a thin shell: it loads the
+/// optional `synthetic-bench.toml`, merges it with the CLI overrides into a [`Config`] and runs the
+/// probe, or prints the operation catalog.
+pub async fn run_command(command: crate::cli::SyntheticCommands) -> BenchmarkResult<()> {
+    match command {
+        crate::cli::SyntheticCommands::Run {
+            config: config_path,
+            endpoint,
+            graph,
+            ops,
+            all_reads,
+            tier,
+            samples,
+            warmup,
+            concurrency,
+            reset_every,
+            seed,
+            cache,
+            server_timeout_ms,
+            client_deadline_ms,
+            out,
+            server_image,
+            label,
+            generate,
+            nodes,
+            edges,
+            recording,
+            no_load,
+            require_oracle,
+            pipeline_depth,
+        } => {
+            // Expand `--op all` / `--op '*'` to the concrete read ops before anything else.
+            let ops = crate::cli::expand_op_selectors(&ops);
+            // A recorded workload takes a different, exclusive path: measure the recorded commands
+            // across the concurrency sweep + cache modes (no generation/probing).
+            if let Some(recording) = recording {
+                if config_path.is_some() || generate || all_reads || tier.is_some() || !ops.is_empty() || nodes.is_some() || edges.is_some() || seed.is_some() {
+                    return Err(OtherError(
+                        "--recording measures a recorded bundle and can't be combined with \
+                         --config/--generate/--op/--all-reads/--tier/--nodes/--edges/--seed (the bundle \
+                         defines the workload; pass --endpoint/--graph/--concurrency/--cache directly)"
+                            .to_string(),
+                    ));
+                }
+                let replay_config = replay::ReplayConfig {
+                    recording_dir: std::path::PathBuf::from(recording),
+                    endpoint: endpoint.unwrap_or_else(|| "falkor://127.0.0.1:6379".to_string()),
+                    graph,
+                    load: !no_load,
+                    samples: samples.unwrap_or(1000),
+                    warmup: warmup.unwrap_or(200),
+                    concurrency: if concurrency.is_empty() {
+                        DEFAULT_CONCURRENCY.to_vec()
+                    } else {
+                        concurrency
+                    },
+                    cache: cache.unwrap_or(CacheSelection::Both),
+                    server_timeout_ms: server_timeout_ms.unwrap_or(5_000),
+                    client_deadline_ms: client_deadline_ms.unwrap_or(6_000),
+                    out: out.unwrap_or_else(|| "synthetic-report.json".to_string()),
+                    server_image,
+                    label,
+                    require_oracle,
+                    pipeline_depth: pipeline_depth.map_or(1, std::num::NonZeroUsize::get),
+                };
+                return replay::run_and_report(&replay_config).await;
+            }
+            // clap enforces `--require-oracle requires --recording`; re-validate for directly
+            // constructed commands (tests, future callers) so the flag can never silently no-op.
+            if require_oracle {
+                return Err(OtherError(
+                    "--require-oracle requires --recording: the outcome oracle lives in a \
+                     recorded write bundle"
+                        .to_string(),
+                ));
+            }
+            let overrides = config::CliOverrides {
+                endpoint,
+                graph,
+                ops,
+                all_reads,
+                tier,
+                samples,
+                warmup,
+                concurrency,
+                reset_every,
+                seed,
+                cache,
+                server_timeout_ms,
+                client_deadline_ms,
+                out,
+                server_image,
+                label,
+                generate,
+                nodes,
+                edges,
+                pipeline_depth: pipeline_depth.map(std::num::NonZeroUsize::get),
+            };
+            let file = config::FileConfig::load(config_path.as_deref())?;
+            let config = config::resolve(overrides, file)?;
+            run_and_report(&config).await
+        }
+        crate::cli::SyntheticCommands::ListOps => {
+            print!("{}", list_ops());
+            Ok(())
+        }
+        crate::cli::SyntheticCommands::Record {
+            config: config_path,
+            graph,
+            ops,
+            all_reads,
+            tier,
+            repo_reads,
+            repo_algorithms,
+            repo_writes,
+            seed,
+            nodes,
+            edges,
+            oracle,
+            out_dir,
+        } => {
+            // clap enforces `--oracle requires --repo-writes`; re-validate here so a directly
+            // constructed command (tests, future callers) can't capture an oracle for a read
+            // bundle either.
+            if oracle.is_some() && !repo_writes {
+                return Err(OtherError(
+                    "--oracle requires --repo-writes: the outcome oracle records mutation \
+                     counters, which only write bundles have"
+                        .to_string(),
+                ));
+            }
+            // Expand `--op all` / `--op '*'` to the concrete read ops.
+            let ops = crate::cli::expand_op_selectors(&ops);
+            // Reuse the run-config resolution (with generate=true) to validate + resolve the
+            // dataset knobs, graph and read-op selection, then record OFFLINE (no server).
+            // `--repo-reads`/`--repo-algorithms`/`--repo-writes` select repo SHAPES implicitly
+            // (not catalog ops), so they force `all_reads` only to satisfy op resolution; the
+            // resolved ops are ignored below.
+            let overrides = config::CliOverrides {
+                endpoint: None,
+                graph,
+                ops,
+                all_reads: all_reads || repo_reads.is_some() || repo_algorithms || repo_writes,
+                tier,
+                samples: None,
+                warmup: None,
+                concurrency: Vec::new(),
+                reset_every: None,
+                seed,
+                cache: None,
+                server_timeout_ms: None,
+                client_deadline_ms: None,
+                out: None,
+                server_image: None,
+                label: None,
+                generate: true,
+                nodes,
+                edges,
+                pipeline_depth: None,
+            };
+            let file = config::FileConfig::load(config_path.as_deref())?;
+            let resolved = config::resolve(overrides, file)?;
+            let spec = resolved.dataset.ok_or_else(|| {
+                OtherError("record requires --nodes/--edges (or a config) to generate a dataset".to_string())
+            })?;
+            let manifest = if repo_writes {
+                // Phase 7: record the 10 opt-in write shapes as a single-kind write bundle
+                // (recording format v2+ — the workload_hash binds each op's kind). Same
+                // render-once discipline as the read shapes. The prepared-state statement (§6.4)
+                // is baked into the recorded graph so `remove_user_property_and_label` removes a
+                // property/label that exists, and the oracle's per-invocation restore re-prepares
+                // it before every captured command. `--repo-writes` conflicts with every read
+                // selector, so a bundle is never mixed.
+                let recorded = crate::synthetic::shapes::record_repo_writes(
+                    spec.nodes as i32,
+                    spec.edges as i32,
+                    resolved.seed,
+                )?;
+                recording::record_rendered_with_prepared(
+                    &spec,
+                    &resolved.graph,
+                    &recorded,
+                    resolved.seed,
+                    DATASET_LOAD_BATCH,
+                    std::path::Path::new(&out_dir),
+                )?
+            } else if repo_reads.is_some() || repo_algorithms {
+                // Phase 3/4/5: record the queries_repository read shapes (Baseline reads +
+                // ExtendedCore `temporal_spatial_roundtrip` + the FixtureDependent fulltext/vector
+                // reads); Phase 6: optionally append the 4 opt-in algorithm shapes
+                // (`--repo-algorithms`, orthogonal to `--repo-reads`). Each shape's corpus is
+                // rendered ONCE here from `resolved.seed ^ salt` (record-once → replay-verbatim),
+                // then `record_rendered[_with_fixture]` writes the identical bundle format the
+                // catalog path produces (so `workload_hash` stays byte-identical across replay
+                // endpoints — the A/B compares two FalkorDB versions). When the selected reads tier
+                // includes any FixtureDependent shape, the fulltext/vector fixture is baked into
+                // the recorded graph (once), so every replay gets the identical fixture (that
+                // fixture DDL is FalkorDB-specific — FalkorDB-vs-FalkorDB, not cross-database).
+                // The algorithm shapes need no fixture: every generated graph is simple
+                // (synthbench/v5) and every `:Friend` edge carries `bench_capacity`.
+                let mut recorded = match repo_reads {
+                    Some(tier) => crate::synthetic::shapes::record_repo_reads(
+                        tier,
+                        spec.nodes as i32,
+                        spec.edges as i32,
+                        resolved.seed,
+                    )?,
+                    None => Vec::new(),
+                };
+                if repo_algorithms {
+                    recorded.extend(crate::synthetic::shapes::record_algorithm_reads(
+                        spec.nodes as i32,
+                        spec.edges as i32,
+                        resolved.seed,
+                    )?);
+                }
+                if repo_reads.is_some_and(crate::synthetic::shapes::repo_reads_need_fixture) {
+                    recording::record_rendered_with_fixture(
+                        &spec,
+                        &resolved.graph,
+                        &recorded,
+                        resolved.seed,
+                        DATASET_LOAD_BATCH,
+                        std::path::Path::new(&out_dir),
+                    )?
+                } else {
+                    recording::record_rendered(
+                        &spec,
+                        &resolved.graph,
+                        &recorded,
+                        resolved.seed,
+                        DATASET_LOAD_BATCH,
+                        std::path::Path::new(&out_dir),
+                    )?
+                }
+            } else {
+                recording::record(
+                    &spec,
+                    &resolved.graph,
+                    &resolved.ops,
+                    resolved.seed,
+                    DATASET_LOAD_BATCH,
+                    std::path::Path::new(&out_dir),
+                )?
+            };
+            println!(
+                "recorded {} op(s) into {} (workload_hash {})",
+                manifest.ops.len(),
+                out_dir,
+                manifest.workload_hash
+            );
+            // §6.3: capture the outcome oracle ONLINE against the given endpoint and fold it into
+            // the just-written bundle (upgrading it to format v3 with a new workload_hash).
+            if let Some(endpoint) = &oracle {
+                // The resolved defaults budget only the single measured write per sample; the
+                // per-sample base restores are bulk loads and get replay's ≥60 s floor inside
+                // `load_recorded_graph`, so no capture-specific budget is needed.
+                let manifest = oracle::capture(
+                    endpoint,
+                    std::path::Path::new(&out_dir),
+                    resolved.server_timeout_ms,
+                    resolved.client_deadline_ms,
+                )
+                .await?;
+                let oracle_ops = manifest.ops.iter().filter(|e| e.oracle.is_some()).count();
+                let outcomes: usize = manifest.ops.iter().filter_map(|e| e.oracle).sum();
+                println!(
+                    "captured outcome oracle: {} outcome(s) across {} op(s) — the complete \
+                     corpus of every eligible shape, determinism proven by a second pass \
+                     (format v{}, workload_hash {})",
+                    outcomes, oracle_ops, manifest.format_version, manifest.workload_hash
+                );
+            }
+            Ok(())
+        }
+        crate::cli::SyntheticCommands::Report {
+            input,
+            diff,
+            regression,
+            thresholds,
+            out,
+            elapsed_secs,
+            summary,
+            cells,
+            budget_profile,
+            divergence_policy,
+            gated_metric,
+        } => {
+            // clap's value_parser restricts these to known names, so the parses cannot fail; map
+            // errors anyway so a future drift fails loudly instead of silently defaulting.
+            let budget_profile = budget_profile
+                .as_deref()
+                .map(str::parse::<BudgetProfile>)
+                .transpose()
+                .map_err(OtherError)?
+                .unwrap_or_default();
+            let divergence_policy = divergence_policy
+                .as_deref()
+                .map(str::parse::<analysis::DivergencePolicy>)
+                .transpose()
+                .map_err(OtherError)?
+                .unwrap_or_default();
+            let gated_metric = gated_metric
+                .as_deref()
+                .map(str::parse::<analysis::GatedMetric>)
+                .transpose()
+                .map_err(OtherError)?
+                .unwrap_or_default();
+            report_command(
+                input,
+                diff,
+                regression,
+                out,
+                RegressionOpts {
+                    thresholds,
+                    elapsed_secs,
+                    summary,
+                    cells,
+                    budget_profile,
+                    divergence_policy,
+                    gated_metric,
+                },
+            )
+            .await
+        }
+    }
+}
+
+/// The regression-mode knobs of `synthetic report` (all ignored outside `--regression`).
+struct RegressionOpts {
+    thresholds: Option<String>,
+    elapsed_secs: Option<f64>,
+    summary: Option<String>,
+    cells: Option<String>,
+    budget_profile: BudgetProfile,
+    divergence_policy: analysis::DivergencePolicy,
+    gated_metric: analysis::GatedMetric,
+}
+
+/// `synthetic report`: re-render a saved report (`input`) to console + Markdown, or **diff** two
+/// reports (`diff = [A, B]`). The diff first runs the [`baseline`] guard (workload_hash + result
+/// digests) and **aborts** on a mismatch, then writes a Markdown diff to `out` (default
+/// `synthetic-diff.md`). Advisory guard notes (version/image change) are printed but don't abort.
+async fn report_command(
+    input: Option<String>,
+    diff: Vec<String>,
+    regression: bool,
+    out: Option<String>,
+    opts: RegressionOpts,
+) -> BenchmarkResult<()> {
+    let load = |path: &str| -> BenchmarkResult<crate::synthetic::report::Report> {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| OtherError(format!("could not read report '{}': {}", path, e)))?;
+        serde_json::from_str(&text)
+            .map_err(|e| OtherError(format!("invalid synthetic report '{}': {}", path, e)))
+    };
+
+    if diff.len() == 2 {
+        let a = load(&diff[0])?;
+        let b = load(&diff[1])?;
+
+        // NON-FATAL regression mode: colored per-cell verdicts, never aborts on divergence.
+        if regression {
+            let budgets = match &opts.thresholds {
+                Some(path) => crate::synthetic::thresholds::Thresholds::from_file_with_profile(
+                    path,
+                    opts.budget_profile,
+                )?,
+                // The built-in defaults define only the strict profile; selecting another without
+                // a TOML that declares it is a config error, not something to silently fall back
+                // from (design §A4).
+                None if opts.budget_profile != BudgetProfile::Strict => {
+                    return Err(OtherError(format!(
+                        "--budget-profile {} requires --thresholds <file> with a [{}] section \
+                         (the built-in defaults define no such profile)",
+                        opts.budget_profile.as_str(),
+                        opts.budget_profile.as_str()
+                    )));
+                }
+                None => crate::synthetic::thresholds::Thresholds::builtin(),
+            };
+            let guard = baseline::regression_guard(&a, &b);
+            // Analyze ONCE; every artifact (Markdown, summary, cells JSON) renders from this one
+            // model, so they can never disagree.
+            let analysis = analysis::analyze(
+                &a,
+                &b,
+                &guard,
+                &budgets,
+                &analysis::AnalysisOptions {
+                    budget_profile: opts.budget_profile,
+                    divergence_policy: opts.divergence_policy,
+                    gated_metric: opts.gated_metric,
+                    elapsed_secs: opts.elapsed_secs,
+                },
+            );
+            let md = diff::regression_markdown(&analysis);
+            let out_path = out.unwrap_or_else(|| "synthetic-regression.md".to_string());
+            tokio::fs::write(&out_path, &md).await?;
+            println!("{}", md);
+            println!("regression report written to {}", out_path);
+            // Optionally also emit the compact machine-usable summary (Decision 5).
+            if let Some(summary_path) = opts.summary {
+                let compact = diff::summarize(&analysis);
+                tokio::fs::write(&summary_path, compact.to_json()?).await?;
+                println!("summary written to {}", summary_path);
+            }
+            // Optionally emit the full analysis model — source material for the interactive page.
+            if let Some(cells_path) = opts.cells {
+                tokio::fs::write(&cells_path, analysis.to_json()?).await?;
+                println!("cells written to {}", cells_path);
+            }
+            return Ok(());
+        }
+
+        let warnings = match baseline::guard(
+            &baseline::BaselineKey::from_report(&a),
+            &baseline::BaselineKey::from_report(&b),
+        ) {
+            baseline::GuardOutcome::Proceed { warnings } => warnings,
+            baseline::GuardOutcome::Abort { reason } => {
+                return Err(OtherError(format!("cannot diff — {}", reason)))
+            }
+        };
+        for w in &warnings {
+            eprintln!("⚠ {}", w);
+        }
+        let md = diff::diff_markdown(&a, &b, &warnings);
+        let out_path = out.unwrap_or_else(|| "synthetic-diff.md".to_string());
+        tokio::fs::write(&out_path, &md).await?;
+        println!("{}", md);
+        println!("diff written to {}", out_path);
+        return Ok(());
+    }
+
+    match input {
+        Some(path) => {
+            let report = load(&path)?;
+            println!("{}", report.to_console());
+            if let Some(out_path) = out {
+                tokio::fs::write(&out_path, report.to_markdown()).await?;
+                println!("markdown written to {}", out_path);
+            }
+            Ok(())
+        }
+        None => Err(OtherError(
+            "report needs a report path to re-render, or `--diff <A.json> <B.json>`".to_string(),
+        )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::query::QueryBuilder;
+
+    #[test]
+    fn effective_pipeline_depth_pipelines_reads_only() {
+        // Reads honor the configured depth (with a ≥1 floor)…
+        assert_eq!(effective_pipeline_depth(QueryType::Read, 1), 1);
+        assert_eq!(effective_pipeline_depth(QueryType::Read, 4), 4);
+        assert_eq!(effective_pipeline_depth(QueryType::Read, 0), 1);
+        // …while writes always run the plain closed loop, whatever was configured (their
+        // per-sample verification + untimed resets don't tolerate pipelining).
+        assert_eq!(effective_pipeline_depth(QueryType::Write, 1), 1);
+        assert_eq!(effective_pipeline_depth(QueryType::Write, 4), 1);
+    }
+
+    #[test]
+    fn lane_samples_splits_evenly_and_rounds_up() {
+        // depth 1 = today's behaviour, verbatim.
+        assert_eq!(lane_samples(1000, 1), 1000);
+        // An even split keeps the level total exactly C × samples.
+        assert_eq!(lane_samples(1000, 4), 250);
+        // An uneven split rounds UP so a level never measures fewer than C × samples.
+        assert_eq!(lane_samples(1001, 4), 251);
+        assert_eq!(lane_samples(1, 8), 1);
+        // A zero depth is floored to 1 (defensive; effective_pipeline_depth already floors).
+        assert_eq!(lane_samples(10, 0), 10);
+    }
+
+    #[test]
+    fn lane_corpus_offset_is_todays_offset_at_depth_1_and_distinct_across_lanes() {
+        let corpus_len = 256;
+        // depth 1 reproduces the historical `w % corpus.len()` exactly.
+        for w in 0..40 {
+            assert_eq!(lane_corpus_offset(w, 1, 0, corpus_len), w % corpus_len);
+        }
+        // Lanes index globally (w × depth + lane): all C × K offsets are distinct while
+        // C × K ≤ corpus_len, so every lane starts its cycle somewhere different.
+        let depth = 4;
+        let concurrency = 8;
+        let mut seen = std::collections::HashSet::new();
+        for w in 0..concurrency {
+            for lane in 0..depth {
+                assert!(
+                    seen.insert(lane_corpus_offset(w, depth, lane, corpus_len)),
+                    "offset collision at worker {w} lane {lane}"
+                );
+            }
+        }
+        // Wraps modulo the corpus length…
+        assert_eq!(lane_corpus_offset(100, 4, 3, corpus_len), (100 * 4 + 3) % corpus_len);
+        // …and an empty corpus can't divide by zero (defensive floor).
+        assert_eq!(lane_corpus_offset(3, 4, 2, 0), 0);
+    }
+
+    #[test]
+    fn connection_description_reflects_pipeline_depth() {
+        // Depth 1 keeps the historical string byte-identical (report metadata compatibility).
+        assert_eq!(connection_description(1), "pool(size=1) per worker");
+        assert_eq!(connection_description(0), "pool(size=1) per worker");
+        assert_eq!(
+            connection_description(4),
+            "multiplexed(1) per worker × 4 pipelined read lanes"
+        );
+    }
+
+    /// Simulate `measure_level`'s uid-block claiming across lanes: every lane claims a disjoint
+    /// block sized for its warm-up + measured invocations, so no two lanes can ever render the
+    /// same uncached uid — the exact invariant uncached mode's plan-cache-miss guarantee needs.
+    #[test]
+    fn lane_uid_blocks_are_disjoint_across_a_pipelined_level() {
+        let warmup = 3usize;
+        let samples = 10usize;
+        let depth = 4usize;
+        let concurrency = 8usize;
+        let per_lane = lane_samples(samples, depth);
+        let block = (warmup + per_lane) as u64;
+        let uid_alloc = AtomicU64::new(0);
+        let mut all_uids = std::collections::HashSet::new();
+        for _lane in 0..concurrency * depth {
+            let uid_base = uid_alloc.fetch_add(block, Ordering::Relaxed);
+            for seq in 0..(warmup + per_lane) as u64 {
+                assert!(
+                    all_uids.insert(uid_base + seq),
+                    "uid collision at base {uid_base} seq {seq}"
+                );
+            }
+        }
+        assert_eq!(all_uids.len(), concurrency * depth * (warmup + per_lane));
+    }
+
+    #[test]
+    fn example_query_uses_the_first_rendered_read() {
+        let op_spec = spec(OpName::MatchByIndex);
+        let rendered = vec!["MATCH (one) RETURN one".to_string(), "MATCH (two)".to_string()];
+        let ex = example_query(&op_spec, &rendered, 512).unwrap();
+        assert_eq!(ex.as_deref(), Some("MATCH (one) RETURN one"), "first corpus query verbatim");
+        // Defensive: an empty corpus (impossible via build_corpus) yields no example, not a panic.
+        assert_eq!(example_query(&op_spec, &[], 512).unwrap(), None);
+    }
+
+    #[test]
+    fn example_query_renders_writes_with_the_canonical_label() {
+        // A catalog write renders invocation 0 against the canonical scratch and swaps the label
+        // for the run-independent placeholder, so identical runs report identical examples.
+        for op in [OpName::CreateNode, OpName::CreateEdge, OpName::DeleteNode] {
+            let op_spec = spec(op);
+            let first = example_query(&op_spec, &[], 512).unwrap().unwrap();
+            let second = example_query(&op_spec, &[], 512).unwrap().unwrap();
+            assert_eq!(first, second, "{op:?}: deterministic across calls");
+            assert!(
+                first.contains(CANONICAL_SCRATCH_LABEL),
+                "{op:?}: canonical placeholder label: {first}"
+            );
+            assert!(
+                !first.contains("BenchScratch_0"),
+                "{op:?}: raw run-token-0 label must be canonicalized: {first}"
+            );
+        }
+    }
+
+    #[test]
+    fn op_name_maps_are_consistent() {
+        assert_eq!(OpName::ReturnConst.as_str(), "return_const");
+        assert_eq!(OpName::ReturnConst.kind(), QueryType::Read);
+        assert!(!OpName::ReturnConst.description().is_empty());
+    }
+
+    #[test]
+    fn salt_from_name_is_stable_distinct_and_pinned() {
+        // Deterministic within and across processes (a fixed FNV-1a, not a randomized hasher).
+        assert_eq!(salt_from_name("expand_1_hop"), salt_from_name("expand_1_hop"));
+        // Pinned outputs: changing the hash would silently shift every dynamic op's corpus and
+        // invalidate recorded baselines, so these must fail loudly if the algorithm ever changes.
+        assert_eq!(salt_from_name(""), 0xcbf2_9ce4_8422_2325); // FNV-1a 64-bit offset basis
+        assert_eq!(salt_from_name("expand_1_hop"), 0x306d_432a_b8ba_7b21);
+        assert_eq!(salt_from_name("query_shape_42"), 0xbaf3_f049_7b8e_fed0);
+        // Distinct names get distinct salts, including near-identical ones.
+        assert_ne!(salt_from_name("a"), salt_from_name("b"));
+        assert_ne!(salt_from_name("expand_1_hop"), salt_from_name("expand_hops_5"));
+    }
+
+    #[test]
+    fn op_key_named_matches_its_opname() {
+        let key = OpKey::from(OpName::MatchByIndex);
+        assert!(key.is_named());
+        assert_eq!(key, OpKey::from(OpName::MatchByIndex));
+        assert_eq!(key.name(), OpName::MatchByIndex.as_str());
+        assert_eq!(key.kind(), OpName::MatchByIndex.kind());
+        // A built-in op keeps its curated salt constant — NOT the name-derived one — so existing
+        // recorded baselines stay valid.
+        assert_eq!(key.salt(), OpName::MatchByIndex.salt());
+        assert_ne!(key.salt(), salt_from_name("match_by_index"));
+    }
+
+    #[test]
+    fn op_key_dynamic_uses_name_derived_salt() {
+        let key = OpKey::dynamic("query_shape_42", QueryType::Read);
+        assert!(!key.is_named());
+        assert_eq!(key.name(), "query_shape_42");
+        assert_eq!(key.kind(), QueryType::Read);
+        assert_eq!(key.salt(), salt_from_name("query_shape_42"));
+        // The kind is carried verbatim (a write shape stays a write).
+        assert_eq!(
+            OpKey::dynamic("w", QueryType::Write).kind(),
+            QueryType::Write
+        );
+        // Two dynamic ops with different names are distinct and draw different salts.
+        assert_ne!(
+            OpKey::dynamic("shape_a", QueryType::Read),
+            OpKey::dynamic("shape_b", QueryType::Read)
+        );
+        assert_ne!(
+            OpKey::dynamic("shape_a", QueryType::Read).salt(),
+            OpKey::dynamic("shape_b", QueryType::Read).salt()
+        );
+    }
+
+    #[test]
+    fn op_key_dynamic_canonicalizes_builtin_names() {
+        // A dynamic key built from a *built-in* op name must collapse to the `Named` identity, so it
+        // can't shadow the built-in with a conflicting salt/kind on the shared string name (the key
+        // reports, thresholds and recordings all use).
+        let canon = OpKey::dynamic("match_by_index", QueryType::Write);
+        assert!(canon.is_named());
+        assert_eq!(canon, OpKey::from(OpName::MatchByIndex));
+        // The built-in's real salt and kind win; the passed `Write` kind is ignored.
+        assert_eq!(canon.salt(), OpName::MatchByIndex.salt());
+        assert_eq!(canon.kind(), OpName::MatchByIndex.kind());
+        assert_ne!(canon.salt(), salt_from_name("match_by_index"));
+    }
+
+    #[test]
+    fn clap_value_names_match_as_str() {
+        // The CLI value (used by --op, --help and shell completion) must equal `as_str()` so the
+        // catalog, reports and CLI never disagree (e.g. `expand_1_hop`, not `expand1_hop`).
+        for op in OpName::all() {
+            let cli = op
+                .to_possible_value()
+                .expect("every op is selectable")
+                .get_name()
+                .to_string();
+            assert_eq!(cli, op.as_str(), "clap name vs as_str mismatch");
+        }
+    }
+
+    #[test]
+    fn every_op_builds_valid_parameterized_cypher() {
+        use crate::synthetic::catalog::{spec, DatasetHandle, CORPUS_SIZE};
+        // A dataset with enough ids for every op (incl. shortest_path's TwoIds).
+        let dataset = DatasetHandle {
+            node_ids: (1..=50).collect(),
+            ..Default::default()
+        };
+        for op in OpName::all() {
+            let s = spec(*op);
+            // Write ops render their measured query per-invocation from a WriteScratch, not from a
+            // corpus (the corpus is a stub), so the read-corpus invariants below don't apply.
+            if s.write.is_some() {
+                continue;
+            }
+            let mut rng = StdRng::seed_from_u64(7 ^ op.salt());
+            let corpus = s
+                .build_corpus(&mut rng, &dataset, 0, 1)
+                .unwrap_or_else(|e| panic!("corpus for {} should build: {}", op.as_str(), e));
+            assert_eq!(corpus.len(), CORPUS_SIZE, "op {}", op.as_str());
+            // Every corpus entry shares one identical body (required for cache correctness), is
+            // parameterized (no inlined literals beyond the body), and the rendered Cypher never
+            // returns a whole node/edge (scalar projections only).
+            let body0 = &corpus[0].text;
+            for q in &corpus {
+                assert_eq!(&q.text, body0, "op {} bodies must match", op.as_str());
+                assert!(q.text.contains("RETURN"), "op {} must RETURN", op.as_str());
+            }
+        }
+    }
+
+    #[test]
+    fn corpus_is_deterministic_in_seed() {
+        use crate::synthetic::catalog::{spec, DatasetHandle};
+        let dataset = DatasetHandle {
+            node_ids: (1..=100).collect(),
+            ..Default::default()
+        };
+        let build = |seed: u64| {
+            let s = spec(OpName::MatchByIndex);
+            let mut rng = StdRng::seed_from_u64(seed);
+            s.build_corpus(&mut rng, &dataset, 0, 1).unwrap()
+        };
+        let params = |c: &[Query]| -> Vec<String> { c.iter().map(|q| q.to_cypher()).collect() };
+        // Same seed ⇒ byte-identical corpus; different seed ⇒ different corpus.
+        assert_eq!(params(&build(42)), params(&build(42)));
+        assert_ne!(params(&build(42)), params(&build(43)));
+    }
+
+    #[test]
+    fn ops_needing_seeds_error_on_empty_dataset() {
+        use crate::synthetic::catalog::{spec, DatasetHandle};
+        let empty = DatasetHandle::default();
+        // return_const and the label scan need no ids; the rest do.
+        assert!(spec(OpName::ReturnConst)
+            .build_corpus(&mut StdRng::seed_from_u64(1), &empty, 0, 1)
+            .is_ok());
+        assert!(spec(OpName::MatchByLabelScan)
+            .build_corpus(&mut StdRng::seed_from_u64(1), &empty, 0, 1)
+            .is_ok());
+        assert!(spec(OpName::MatchByIndex)
+            .build_corpus(&mut StdRng::seed_from_u64(1), &empty, 0, 1)
+            .is_err());
+        // shortest_path needs two ids: one is not enough.
+        let one = DatasetHandle {
+            node_ids: vec![1],
+            ..Default::default()
+        };
+        assert!(spec(OpName::ShortestPath)
+            .build_corpus(&mut StdRng::seed_from_u64(1), &one, 0, 1)
+            .is_err());
+    }
+
+    #[test]
+    fn all_reads_covers_the_catalog_and_dedups() {
+        let reads = OpName::all_reads();
+        // `--all-reads` selects exactly the read-kind ops; write ops are opt-in via `--op`.
+        assert!(
+            reads.iter().all(|op| op.kind() == QueryType::Read),
+            "all_reads must contain only reads"
+        );
+        assert!(
+            !reads.contains(&OpName::CreateNode) && !reads.contains(&OpName::MergeMiss),
+            "write ops must be excluded from --all-reads"
+        );
+        assert_eq!(
+            reads.len(),
+            OpName::all()
+                .iter()
+                .filter(|op| op.kind() == QueryType::Read)
+                .count(),
+            "all_reads covers every read op"
+        );
+        // dedup_ops keeps first occurrence and drops duplicates / overlaps.
+        let deduped = dedup_ops(&[
+            OpName::MatchByIndex,
+            OpName::Expand1Hop,
+            OpName::MatchByIndex,
+        ]);
+        assert_eq!(deduped, vec![OpName::MatchByIndex, OpName::Expand1Hop]);
+    }
+
+    #[test]
+    fn tier_includes_is_core_subset_of_full() {
+        // `Full` selects everything; `Core` selects only core ops (Core ⊆ Full).
+        assert!(Tier::Full.includes(Tier::Core));
+        assert!(Tier::Full.includes(Tier::Full));
+        assert!(Tier::Core.includes(Tier::Core));
+        assert!(!Tier::Core.includes(Tier::Full));
+    }
+
+    #[test]
+    fn tier_as_str_round_trips_the_cli_tags() {
+        assert_eq!(Tier::Core.as_str(), "core");
+        assert_eq!(Tier::Full.as_str(), "full");
+    }
+
+    #[test]
+    fn reads_in_tier_full_equals_all_reads_and_core_is_a_strict_nonempty_subset() {
+        let full = OpName::reads_in_tier(Tier::Full);
+        // `--tier full` is exactly `--all-reads` (Core ⊆ Full, and every read is at most Full).
+        assert_eq!(full, OpName::all_reads());
+
+        let core = OpName::reads_in_tier(Tier::Core);
+        assert!(!core.is_empty(), "core tier must select at least one op");
+        assert!(
+            core.len() < full.len(),
+            "core must be a *strict* subset of full (cheap per-PR signal)"
+        );
+        // Every core-selected op is a read tagged Core; catalog order is preserved.
+        assert!(core.iter().all(|op| op.kind() == QueryType::Read));
+        assert!(core.iter().all(|op| op.tier() == Tier::Core));
+        assert!(
+            core.iter().all(|op| full.contains(op)),
+            "core ⊆ full"
+        );
+    }
+
+    #[test]
+    fn core_tier_pins_the_representative_read_subset() {
+        // Pin the curated core set so an accidental tier flip on any op is caught in review. Core
+        // is one cheap representative per fundamental read category; the heavier/deeper variants
+        // (5-hop expand, group-by, shortest-path) run in Full/nightly only.
+        assert_eq!(
+            OpName::reads_in_tier(Tier::Core),
+            vec![
+                OpName::ReturnConst,
+                OpName::MatchByIndex,
+                OpName::MatchByLabelScan,
+                OpName::Expand1Hop,
+                OpName::AggregateCount,
+                OpName::PropertyProjection,
+            ]
+        );
+    }
+
+    #[test]
+    fn write_ops_are_full_tier_and_never_selected_by_a_tier() {
+        // Writes are opt-in (reads-only scope): they carry `Full` and no `--tier` selection ever
+        // includes them (both tiers filter over reads).
+        let writes: Vec<OpName> = OpName::all()
+            .iter()
+            .copied()
+            .filter(|op| op.kind() == QueryType::Write)
+            .collect();
+        assert!(!writes.is_empty(), "the catalog has write ops");
+        assert!(writes.iter().all(|op| op.tier() == Tier::Full));
+        // Neither tier ever selects a write op (both filter over reads).
+        for tier in [Tier::Core, Tier::Full] {
+            assert!(OpName::reads_in_tier(tier)
+                .iter()
+                .all(|op| op.kind() == QueryType::Read));
+        }
+    }
+
+    #[test]
+    fn render_cypher_cached_stable_uncached_unique() {
+        let q = QueryBuilder::new()
+            .text("MATCH (n:User {id: $id}) RETURN n.id")
+            .param("id", 7)
+            .build();
+        let base = q.to_cypher();
+        // Cached: body verbatim (plan reused), no uniqueness token.
+        let c0 = render_cypher(&base, CacheMode::Cached, 0xABCD, 0);
+        let c1 = render_cypher(&base, CacheMode::Cached, 0xABCD, 1);
+        assert_eq!(c0, c1);
+        assert!(!c0.contains("/* co"));
+        assert!(c0.contains("RETURN n.id"));
+        // Uncached: a unique per-invocation comment ⇒ distinct cache key; the run_token keeps it apart
+        // from other runs.
+        let u0 = render_cypher(&base, CacheMode::Uncached, 0xABCD, 0);
+        let u1 = render_cypher(&base, CacheMode::Uncached, 0xABCD, 1);
+        assert_ne!(u0, u1);
+        assert!(u0.contains("/* coabcd-0 */"));
+        assert!(u1.contains("/* coabcd-1 */"));
+    }
+
+    #[test]
+    fn cache_selection_expands_to_modes() {
+        assert_eq!(CacheSelection::Cached.modes(), &[CacheMode::Cached]);
+        assert_eq!(CacheSelection::Uncached.modes(), &[CacheMode::Uncached]);
+        assert_eq!(
+            CacheSelection::Both.modes(),
+            &[CacheMode::Cached, CacheMode::Uncached]
+        );
+    }
+
+    #[test]
+    fn normalize_concurrency_sorts_dedups_and_validates() {
+        // Deduped + sorted ascending so the curve reads low → high.
+        assert_eq!(
+            normalize_concurrency(&[8, 1, 4, 1, 8]).unwrap(),
+            vec![1, 4, 8]
+        );
+        assert_eq!(
+            normalize_concurrency(DEFAULT_CONCURRENCY).unwrap(),
+            vec![1, 2, 4, 8, 16, 32]
+        );
+        // Empty and zero-containing sweeps are rejected.
+        assert!(normalize_concurrency(&[]).is_err());
+        assert!(normalize_concurrency(&[1, 0, 4]).is_err());
+    }
+
+    #[test]
+    fn with_budget_inherit_preserves_every_knob() {
+        // `OpBudget::INHERIT` (no overrides) must yield a config equal to the original, so the
+        // existing ops measure exactly as before and the A/B comparability is preserved.
+        let base = Config {
+            samples: 123,
+            warmup: 45,
+            concurrency: vec![1, 4, 16],
+            cache: CacheSelection::Cached,
+            server_timeout_ms: 999,
+            client_deadline_ms: 1234,
+            seed: 77,
+            reset_every: 5,
+            ..Config::default()
+        };
+        let got = base.with_budget(&OpBudget::INHERIT);
+        assert_eq!(got.samples, base.samples);
+        assert_eq!(got.warmup, base.warmup);
+        assert_eq!(got.concurrency, base.concurrency);
+        assert_eq!(got.cache, base.cache);
+        assert_eq!(got.server_timeout_ms, base.server_timeout_ms);
+        assert_eq!(got.client_deadline_ms, base.client_deadline_ms);
+        // Un-budgeted knobs are always inherited.
+        assert_eq!(got.seed, base.seed);
+        assert_eq!(got.reset_every, base.reset_every);
+    }
+
+    #[test]
+    fn with_budget_overrides_every_knob_independently() {
+        // Each `Some` field overrides exactly its own knob; everything else is inherited. Setting
+        // all six exercises every override branch.
+        let base = Config::default();
+        let budget = OpBudget {
+            samples: Some(7),
+            warmup: Some(3),
+            concurrency: Some(&[9, 2]),
+            cache: Some(CacheSelection::Uncached),
+            server_timeout_ms: Some(111),
+            client_deadline_ms: Some(222),
+        };
+        let got = base.with_budget(&budget);
+        assert_eq!(got.samples, 7);
+        assert_eq!(got.warmup, 3);
+        // The static override slice is copied verbatim (normalization happens later, per op).
+        assert_eq!(got.concurrency, vec![9, 2]);
+        assert_eq!(got.cache, CacheSelection::Uncached);
+        assert_eq!(got.server_timeout_ms, 111);
+        assert_eq!(got.client_deadline_ms, 222);
+        // Never-budgeted knobs (seed/reset_every) stay put — critical for record/replay determinism.
+        assert_eq!(got.seed, base.seed);
+        assert_eq!(got.reset_every, base.reset_every);
+    }
+
+    #[test]
+    fn with_budget_partial_override_leaves_other_knobs_inherited() {
+        let base = Config {
+            samples: 100,
+            warmup: 20,
+            concurrency: vec![1, 8],
+            cache: CacheSelection::Both,
+            server_timeout_ms: 5_000,
+            client_deadline_ms: 6_000,
+            ..Config::default()
+        };
+        // Override only samples + concurrency.
+        let budget = OpBudget {
+            samples: Some(10),
+            concurrency: Some(&[2, 4]),
+            ..OpBudget::INHERIT
+        };
+        let got = base.with_budget(&budget);
+        assert_eq!(got.samples, 10);
+        assert_eq!(got.concurrency, vec![2, 4]);
+        // The rest inherit the global config.
+        assert_eq!(got.warmup, base.warmup);
+        assert_eq!(got.cache, base.cache);
+        assert_eq!(got.server_timeout_ms, base.server_timeout_ms);
+        assert_eq!(got.client_deadline_ms, base.client_deadline_ms);
+    }
+
+    #[test]
+    fn with_recorded_budget_matches_the_catalog_overlay() {
+        // `with_budget` delegates to `with_recorded_budget` (one overlay implementation), so a
+        // recorded bundle's owned budget must resolve exactly like the catalog's static form —
+        // replay and generated runs can't drift apart.
+        let base = Config {
+            samples: 100,
+            warmup: 20,
+            concurrency: vec![1, 8],
+            ..Config::default()
+        };
+        static SWEEP: [usize; 1] = [2];
+        let catalog_form = OpBudget {
+            samples: Some(1),
+            concurrency: Some(&SWEEP),
+            cache: Some(CacheSelection::Cached),
+            ..OpBudget::INHERIT
+        };
+        let via_catalog = base.with_budget(&catalog_form);
+        let via_recorded = base.with_recorded_budget(&RecordedBudget::from(catalog_form));
+        assert_eq!(via_catalog.samples, via_recorded.samples);
+        assert_eq!(via_catalog.warmup, via_recorded.warmup);
+        assert_eq!(via_catalog.concurrency, via_recorded.concurrency);
+        assert_eq!(via_catalog.cache, via_recorded.cache);
+        assert_eq!(via_catalog.server_timeout_ms, via_recorded.server_timeout_ms);
+        assert_eq!(via_catalog.client_deadline_ms, via_recorded.client_deadline_ms);
+        assert_eq!(via_recorded.samples, 1);
+        assert_eq!(via_recorded.concurrency, vec![2]);
+        assert_eq!(via_recorded.cache, CacheSelection::Cached);
+        // An inherit (default) recorded budget — every pre-field bundle — changes nothing.
+        let inherited = base.with_recorded_budget(&RecordedBudget::default());
+        assert_eq!(inherited.samples, base.samples);
+        assert_eq!(inherited.warmup, base.warmup);
+        assert_eq!(inherited.concurrency, base.concurrency);
+        assert_eq!(inherited.cache, base.cache);
+    }
+
+    #[test]
+    fn validate_op_config_rejects_invalid_per_op_budgets() {
+        // The global `run()` guard only checks the global knobs; a per-op budget that zeroed
+        // samples or produced an invalid concurrency sweep must fail fast, naming the offending op.
+        let base = Config {
+            samples: 100,
+            concurrency: vec![1, 4],
+            ..Config::default()
+        };
+        // samples = 0.
+        let zeroed = base.with_budget(&OpBudget {
+            samples: Some(0),
+            ..OpBudget::INHERIT
+        });
+        let msg = validate_op_config(OpName::ReturnConst.as_str(), &zeroed)
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("samples must be greater than 0"), "{msg}");
+        assert!(msg.contains("return_const"), "{msg}");
+        // Empty concurrency sweep — reuses normalize_concurrency's rule, op-named.
+        let empty = Config {
+            concurrency: vec![],
+            ..base.clone()
+        };
+        let msg = validate_op_config(OpName::MatchByIndex.as_str(), &empty)
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("match_by_index"), "{msg}");
+        assert!(msg.contains("at least one level"), "{msg}");
+        // A concurrency level of 0 — op-named.
+        let zero_level = Config {
+            concurrency: vec![0],
+            ..base.clone()
+        };
+        let msg = validate_op_config(OpName::MatchByIndex.as_str(), &zero_level)
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("match_by_index"), "{msg}");
+        assert!(msg.contains(">= 1"), "{msg}");
+        // A non-positive server timeout — e.g. a manifest typo of -1 — fails fast, op-named.
+        let bad_timeout = base.with_budget(&OpBudget {
+            server_timeout_ms: Some(-1),
+            ..OpBudget::INHERIT
+        });
+        let msg = validate_op_config(OpName::ReturnConst.as_str(), &bad_timeout)
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("server_timeout_ms = -1"), "{msg}");
+        assert!(msg.contains("return_const"), "{msg}");
+        // A zero client deadline — the driver would otherwise time out every call confusingly.
+        let bad_deadline = base.with_budget(&OpBudget {
+            client_deadline_ms: Some(0),
+            ..OpBudget::INHERIT
+        });
+        let msg = validate_op_config(OpName::ReturnConst.as_str(), &bad_deadline)
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("client_deadline_ms = 0"), "{msg}");
+        // A fully valid (inherited) config passes.
+        validate_op_config(OpName::ReturnConst.as_str(), &base).unwrap();
+    }
+
+    #[test]
+    fn inherit_is_the_default_budget_and_every_catalog_op_uses_it() {
+        // The reads-only scope carries no per-op budgets yet: every op inherits the global knobs, so
+        // enabling budgets later is purely additive. This tripwire flags any op that gains one.
+        assert_eq!(OpBudget::default(), OpBudget::INHERIT);
+        for op in OpName::all() {
+            assert_eq!(
+                spec(*op).budget,
+                OpBudget::INHERIT,
+                "op should inherit its budget until a phase deliberately sets one"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_graph_key_detection() {
+        assert!(is_empty_graph_key("Invalid graph operation on empty key"));
+        assert!(is_empty_graph_key(
+            "RedisError(\"Invalid graph operation on empty key\")"
+        ));
+        assert!(!is_empty_graph_key("Password authentication failed"));
+        assert!(!is_empty_graph_key("connection refused"));
+    }
+
+    #[tokio::test]
+    async fn run_rejects_zero_samples() {
+        // Guarded before any network use, so this needs no server.
+        let config = Config {
+            samples: 0,
+            ..Config::default()
+        };
+        assert!(run(&config).await.is_err());
+        assert!(run_and_report(&config).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn run_rejects_malformed_endpoint() {
+        // A connection string that fails to parse errors at `try_into`, before any network use,
+        // so this needs no server.
+        let config = Config {
+            endpoint: "falkor://host:notaport".to_string(),
+            samples: 10,
+            ..Config::default()
+        };
+        assert!(run(&config).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn open_graph_pipelined_rejects_malformed_endpoint() {
+        // Same parse-time guard as `open_graph`, on the multiplexed path — no server needed.
+        // (`AsyncGraph` isn't `Debug`, so unwrap the error arm by hand.)
+        let err = match open_graph_pipelined("falkor://host:notaport", "g").await {
+            Ok(_) => panic!("malformed endpoint must fail"),
+            Err(e) => e,
+        };
+        assert!(err.to_string().contains("invalid endpoint"));
+    }
+
+    #[test]
+    fn parse_endpoint_error_never_echoes_credentials() {
+        // The underlying parser's message can quote the raw connection string, so the mapped
+        // error must carry only the redacted endpoint — never the password.
+        let err = match parse_endpoint("falkor://user:hunter2@host:notaport") {
+            Ok(_) => panic!("malformed endpoint must fail"),
+            Err(e) => e,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("invalid endpoint"));
+        assert!(!msg.contains("hunter2"), "credential leaked: {msg}");
+    }
+
+    #[tokio::test]
+    async fn run_command_list_ops_needs_no_server() {
+        // The catalog path is pure output.
+        assert!(run_command(crate::cli::SyntheticCommands::ListOps)
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn run_command_run_maps_args_and_validates() {
+        // Exercises the CLI→Config mapping without a server: samples==0 is rejected up front.
+        // Use an empty temp config (not `config: None`) so the test never auto-detects an ambient
+        // `synthetic-bench.toml` from the working directory.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let cfg_path = std::env::temp_dir().join(format!(
+            "syn-maps-{}-{}.toml",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::write(&cfg_path, "# empty\n").unwrap();
+        let command = crate::cli::SyntheticCommands::Run {
+            config: Some(cfg_path.to_string_lossy().into_owned()),
+            endpoint: Some("falkor://127.0.0.1:6379".to_string()),
+            graph: Some("falkor".to_string()),
+            ops: vec![crate::cli::OpSelector::One(OpName::ReturnConst)],
+            all_reads: false,
+            tier: None,
+            samples: Some(0),
+            warmup: Some(0),
+            concurrency: vec![],
+            reset_every: None,
+            seed: Some(0),
+            cache: Some(CacheSelection::Both),
+            server_timeout_ms: Some(5_000),
+            client_deadline_ms: Some(6_000),
+            out: Some("unused.json".to_string()),
+            server_image: None,
+            label: None,
+            generate: false,
+            nodes: None,
+            edges: None,
+            recording: None,
+            no_load: false,
+            require_oracle: false,
+            pipeline_depth: None,
+        };
+        assert!(run_command(command).await.is_err());
+        let _ = std::fs::remove_file(&cfg_path);
+    }
+
+    #[tokio::test]
+    async fn run_command_record_offline_records_only_the_selected_tier() {
+        // `synthetic record --tier core` runs OFFLINE (no server): it writes a bundle containing
+        // exactly the core read ops, and a full-only op (shortest_path) is absent. Exercises the
+        // Record handler's `tier` plumbing end-to-end.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let out_dir = std::env::temp_dir().join(format!(
+            "syn-rec-tier-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let command = crate::cli::SyntheticCommands::Record {
+            config: None,
+            graph: Some("gtier".to_string()),
+            ops: vec![],
+            all_reads: false,
+            tier: Some(Tier::Core),
+            repo_reads: None,
+            repo_algorithms: false,
+            repo_writes: false,
+            seed: Some(3),
+            nodes: Some(200),
+            edges: Some(600),
+            oracle: None,
+            out_dir: out_dir.to_string_lossy().into_owned(),
+        };
+        run_command(command).await.expect("offline record succeeds without a server");
+        assert!(out_dir.join("manifest.json").exists());
+        let commands = out_dir.join("commands");
+        // Every core read op is recorded…
+        for op in OpName::reads_in_tier(Tier::Core) {
+            assert!(commands.join(format!("{}.jsonl", op.as_str())).exists());
+        }
+        // …and a full-only op (shortest_path) is not.
+        assert!(!commands.join("shortest_path.jsonl").exists());
+        std::fs::remove_dir_all(&out_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn run_command_record_offline_records_repo_read_shapes() {
+        // `synthetic record --repo-reads core` runs OFFLINE (no server): it writes a bundle
+        // containing exactly the CORE read SHAPES from queries_repository (Phase 3 baseline reads +
+        // the Phase 4 ExtendedCore `temporal_spatial_roundtrip`), and a full-only shape is absent.
+        // Exercises the Record handler's `repo_reads` plumbing end-to-end (shapes::record_repo_reads
+        // → record_rendered).
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let out_dir = std::env::temp_dir().join(format!(
+            "syn-rec-reporeads-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let command = crate::cli::SyntheticCommands::Record {
+            config: None,
+            graph: Some("greporeads".to_string()),
+            ops: vec![],
+            all_reads: false,
+            tier: None,
+            repo_reads: Some(Tier::Core),
+            repo_algorithms: false,
+            repo_writes: false,
+            seed: Some(5),
+            nodes: Some(300),
+            edges: Some(900),
+            oracle: None,
+            out_dir: out_dir.to_string_lossy().into_owned(),
+        };
+        run_command(command)
+            .await
+            .expect("offline repo-reads record succeeds without a server");
+        assert!(out_dir.join("manifest.json").exists());
+        let commands = out_dir.join("commands");
+        // Every core read shape is recorded (incl. the ExtendedCore temporal_spatial_roundtrip)…
+        let core: Vec<_> = crate::synthetic::shapes::repo_read_shapes()
+            .into_iter()
+            .filter(|s| s.tier == Tier::Core)
+            .collect();
+        assert!(!core.is_empty(), "core tier must select at least one shape");
+        assert!(
+            core.iter().any(|s| s.name == "temporal_spatial_roundtrip"),
+            "the ExtendedCore shape is Core-tier and must be recorded"
+        );
+        for shape in &core {
+            assert!(
+                commands.join(format!("{}.jsonl", shape.name)).exists(),
+                "missing core shape {}",
+                shape.name
+            );
+        }
+        // …and a full-only shape (aggregate_expansion_2) is not.
+        assert!(!commands.join("aggregate_expansion_2.jsonl").exists());
+        // Core selects no FixtureDependent shape, so the bundle bakes NO fixture into its graph.
+        let bundle = recording::load(&out_dir).expect("core bundle loads");
+        assert!(
+            !bundle
+                .graph_statements
+                .iter()
+                .any(|(phase, _)| *phase == crate::synthetic::dataset::LoadPhase::Fixture),
+            "core bundle must not contain the fulltext/vector fixture"
+        );
+        assert!(
+            !commands.join("vector_query_nodes_smoke.jsonl").exists(),
+            "the FixtureDependent reads are Full-only"
+        );
+        std::fs::remove_dir_all(&out_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn run_command_record_offline_records_repo_write_shapes_and_replay_guards_hold() {
+        // `synthetic record --repo-writes` runs OFFLINE (no server): it writes a format-v2 write
+        // bundle containing exactly the 10 write shapes (Phase 7 §3.1), each kind=Write, un-gated,
+        // budgeted C=[1]. Then the replay guards are exercised through the REAL `replay::run` path
+        // against that bundle — both fail offline, before any connection (bogus endpoint).
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let out_dir = std::env::temp_dir().join(format!(
+            "syn-rec-repowrites-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let command = crate::cli::SyntheticCommands::Record {
+            config: None,
+            graph: Some("grepowrites".to_string()),
+            ops: vec![],
+            all_reads: false,
+            tier: None,
+            repo_reads: None,
+            repo_algorithms: false,
+            repo_writes: true,
+            seed: Some(7),
+            nodes: Some(300),
+            edges: Some(900),
+            oracle: None,
+            out_dir: out_dir.to_string_lossy().into_owned(),
+        };
+        run_command(command)
+            .await
+            .expect("offline repo-writes record succeeds without a server");
+        let manifest_path = out_dir.join("manifest.json");
+        let bundle = recording::load(&out_dir).expect("write bundle loads");
+        assert_eq!(bundle.manifest.format_version, 2, "write bundles are format v2");
+        let expected: Vec<&str> =
+            crate::synthetic::shapes::write_shapes().iter().map(|s| s.name).collect();
+        let recorded: Vec<&str> = bundle.manifest.ops.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(recorded, expected, "exactly the 10 write shapes, in definition order");
+        // §6.4: the CLI arm records via `record_rendered_with_prepared`, so the graph ends with
+        // exactly the prepared-state statement (hash-bound; re-established by every restore).
+        let prepared: Vec<(dataset::LoadPhase, String)> =
+            crate::synthetic::dataset::prepared_statements().collect();
+        let tail = &bundle.graph_statements[bundle.graph_statements.len() - prepared.len()..];
+        assert_eq!(tail, prepared.as_slice(), "write bundles bake the §6.4 prepared state last");
+        for entry in &bundle.manifest.ops {
+            assert_eq!(entry.kind, QueryType::Write, "{}", entry.name);
+            assert!(!entry.result_gated, "{} is latency-tier (§4.1)", entry.name);
+            assert_eq!(
+                entry.budget.concurrency.as_deref(),
+                Some(&[1][..]),
+                "{} must pin C=[1]",
+                entry.name
+            );
+        }
+        // Guard 1 through the real path: --no-load is forbidden for a write bundle…
+        let mut replay_cfg = crate::synthetic::replay::ReplayConfig {
+            recording_dir: out_dir.clone(),
+            endpoint: "falkor://127.0.0.1:1".to_string(),
+            graph: None,
+            load: false,
+            samples: 2,
+            warmup: 0,
+            concurrency: vec![1],
+            cache: CacheSelection::Cached,
+            server_timeout_ms: 5_000,
+            client_deadline_ms: 6_000,
+            out: out_dir.join("unused.json").to_string_lossy().into_owned(),
+            server_image: None,
+            label: None,
+            require_oracle: false,
+            pipeline_depth: 1,
+        };
+        let err = crate::synthetic::replay::run(&replay_cfg).await.unwrap_err();
+        assert!(
+            format!("{err}").contains("--no-load is not supported for a write bundle"),
+            "got: {err}"
+        );
+        // …guard 2: a tampered budget sweep (budgets are OUTSIDE workload_hash, so the load hash
+        // gate passes) is refused by the C=1 check, still offline.
+        let mut manifest: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
+        manifest["ops"][0]["budget"]["concurrency"] = serde_json::json!([8]);
+        std::fs::write(&manifest_path, serde_json::to_string_pretty(&manifest).unwrap()).unwrap();
+        replay_cfg.load = true;
+        let err = crate::synthetic::replay::run(&replay_cfg).await.unwrap_err();
+        assert!(format!("{err}").contains("write replay is C=1 only"), "got: {err}");
+        std::fs::remove_dir_all(&out_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn run_command_record_offline_repo_reads_full_bakes_the_fixture() {
+        // `synthetic record --repo-reads full` runs OFFLINE: it records the FixtureDependent
+        // fulltext/vector reads (Phase 5) as non-gated (result-N/A) ops AND bakes the fulltext/vector
+        // fixture into the recorded graph exactly once (record-once → replay-verbatim). Exercises the
+        // Record handler's `repo_reads_need_fixture` → `record_rendered_with_fixture` plumbing.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let out_dir = std::env::temp_dir().join(format!(
+            "syn-rec-reporeads-full-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let command = crate::cli::SyntheticCommands::Record {
+            config: None,
+            graph: Some("greporeadsfull".to_string()),
+            ops: vec![],
+            all_reads: false,
+            tier: None,
+            repo_reads: Some(Tier::Full),
+            repo_algorithms: false,
+            repo_writes: false,
+            seed: Some(5),
+            nodes: Some(300),
+            edges: Some(900),
+            oracle: None,
+            out_dir: out_dir.to_string_lossy().into_owned(),
+        };
+        run_command(command)
+            .await
+            .expect("offline full repo-reads record succeeds without a server");
+        let commands = out_dir.join("commands");
+        // The three FixtureDependent reads are recorded…
+        for name in [
+            "vector_query_nodes_smoke",
+            "fulltext_query_nodes_smoke",
+            "fulltext_query_relationships_smoke",
+        ] {
+            assert!(commands.join(format!("{name}.jsonl")).exists(), "missing fixture read {name}");
+        }
+        // …the fixture (5 statements) is baked into the graph, in the Fixture phase, after the base
+        // load statements…
+        let bundle = recording::load(&out_dir).expect("full bundle loads + passes the integrity gate");
+        let fixture_stmts: Vec<&str> = bundle
+            .graph_statements
+            .iter()
+            .filter(|(phase, _)| *phase == crate::synthetic::dataset::LoadPhase::Fixture)
+            .map(|(_, s)| s.as_str())
+            .collect();
+        assert_eq!(fixture_stmts.len(), 5, "the fixture is 3 index DDL + 2 seed SETs");
+        assert!(fixture_stmts.iter().any(|s| s.contains("VECTOR INDEX")));
+        assert!(fixture_stmts.iter().any(|s| s.contains("FULLTEXT INDEX")));
+        assert!(fixture_stmts.iter().any(|s| s.contains("fixture_alice")));
+        // …and the fixture reads are recorded as non-gated (result-N/A) ops.
+        for name in [
+            "vector_query_nodes_smoke",
+            "fulltext_query_nodes_smoke",
+            "fulltext_query_relationships_smoke",
+        ] {
+            let entry = bundle.manifest.ops.iter().find(|o| o.name == name).unwrap();
+            assert!(!entry.result_gated, "{name} must be result-N/A (top-k)");
+        }
+        std::fs::remove_dir_all(&out_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn repo_reads_full_workload_hash_golden_is_pinned() {
+        // GOLDEN: `synthetic record --graph verify --repo-reads full --seed 7 --nodes 1000
+        // --edges 5000` must keep producing this exact workload_hash. The hash is a length-framed
+        // SHA-256 over the recording header, every graph load statement (fixture included) and
+        // every rendered command — so this single value pins the complete `--repo-reads full`
+        // command stream byte-for-byte, proving the "recorded bundles are byte-identical across
+        // code changes" claim (design §3.4) rather than spot-checking defaults. If this test
+        // fails, a code change altered the recorded workload: bump the recording
+        // `GENERATOR_VERSION`, regenerate any saved bundles, and update this golden deliberately.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let out_dir = std::env::temp_dir().join(format!(
+            "syn-rec-golden-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let command = crate::cli::SyntheticCommands::Record {
+            config: None,
+            graph: Some("verify".to_string()),
+            ops: vec![],
+            all_reads: false,
+            tier: None,
+            repo_reads: Some(Tier::Full),
+            repo_algorithms: false,
+            repo_writes: false,
+            seed: Some(7),
+            nodes: Some(1000),
+            edges: Some(5000),
+            oracle: None,
+            out_dir: out_dir.to_string_lossy().into_owned(),
+        };
+        run_command(command).await.expect("offline full repo-reads record succeeds");
+        let bundle = recording::load(&out_dir).expect("golden bundle loads");
+        assert_eq!(
+            bundle.manifest.workload_hash,
+            "sha256:894858b3aefc8b06d03edab41747e255c6eeb145b7cb87b683fb8c10f707721d",
+            "the --repo-reads full command stream changed byte-wise"
+        );
+        std::fs::remove_dir_all(&out_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn run_command_record_offline_records_algorithm_shapes() {
+        // `synthetic record --repo-algorithms` runs OFFLINE (Phase 6 §7.3): it writes a bundle
+        // containing exactly the 4 opt-in algorithm shapes — max_flow/msf result-gated,
+        // pagerank/harmonic result-N/A (design §6), each with its recorded
+        // per-op budget — and, without --repo-reads, no read shape and no fulltext/vector fixture
+        // (the algorithm shapes run on the plain simple graph). Exercises the Record handler's
+        // `repo_algorithms` plumbing end-to-end (shapes::record_algorithm_reads → record_rendered).
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let out_dir = std::env::temp_dir().join(format!(
+            "syn-rec-repoalgos-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let command = crate::cli::SyntheticCommands::Record {
+            config: None,
+            graph: Some("galgos".to_string()),
+            ops: vec![],
+            all_reads: false,
+            tier: None,
+            repo_reads: None,
+            repo_algorithms: true,
+            repo_writes: false,
+            seed: Some(5),
+            nodes: Some(300),
+            edges: Some(900),
+            oracle: None,
+            out_dir: out_dir.to_string_lossy().into_owned(),
+        };
+        run_command(command)
+            .await
+            .expect("offline algorithm record succeeds without a server");
+        let bundle = recording::load(&out_dir).expect("algorithm bundle loads");
+        let names: Vec<&str> = bundle.manifest.ops.iter().map(|o| o.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "algo_pagerank_summary",
+                "algo_max_flow_single_pair",
+                "algo_msf_summary",
+                "algo_harmonic_summary"
+            ],
+            "exactly the 4 algorithm shapes, in definition order"
+        );
+        for entry in &bundle.manifest.ops {
+            let expect_gated =
+                matches!(entry.name.as_str(), "algo_max_flow_single_pair" | "algo_msf_summary");
+            assert_eq!(
+                entry.result_gated, expect_gated,
+                "{} gating must follow the §6 determinism table",
+                entry.name
+            );
+            assert!(
+                !entry.budget.is_inherit(),
+                "{} must carry its recorded per-op budget",
+                entry.name
+            );
+        }
+        // No fixture: the algorithm shapes address the plain generated (simple) graph.
+        assert!(
+            !bundle
+                .graph_statements
+                .iter()
+                .any(|(phase, _)| *phase == crate::synthetic::dataset::LoadPhase::Fixture),
+            "an algorithms-only bundle must not bake the fulltext/vector fixture"
+        );
+        std::fs::remove_dir_all(&out_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn run_command_record_combines_repo_reads_with_algorithms() {
+        // --repo-algorithms is ORTHOGONAL to --repo-reads (design §3.2): combined, the bundle is
+        // the 50 full-tier reads followed by the 4 algorithm shapes (54 ops), with the fixture
+        // still baked for the FixtureDependent reads.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let out_dir = std::env::temp_dir().join(format!(
+            "syn-rec-reads-plus-algos-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let command = crate::cli::SyntheticCommands::Record {
+            config: None,
+            graph: Some("gcombined".to_string()),
+            ops: vec![],
+            all_reads: false,
+            tier: None,
+            repo_reads: Some(Tier::Full),
+            repo_algorithms: true,
+            repo_writes: false,
+            seed: Some(5),
+            nodes: Some(300),
+            edges: Some(900),
+            oracle: None,
+            out_dir: out_dir.to_string_lossy().into_owned(),
+        };
+        run_command(command).await.expect("offline combined record succeeds");
+        let bundle = recording::load(&out_dir).expect("combined bundle loads");
+        assert_eq!(bundle.manifest.ops.len(), 54, "50 reads + 4 algorithm shapes");
+        let names: Vec<&str> = bundle.manifest.ops.iter().map(|o| o.name.as_str()).collect();
+        assert_eq!(names[0], "single_vertex_read", "reads come first, in record order");
+        assert_eq!(
+            &names[50..],
+            [
+                "algo_pagerank_summary",
+                "algo_max_flow_single_pair",
+                "algo_msf_summary",
+                "algo_harmonic_summary"
+            ],
+            "algorithm shapes are appended after the reads"
+        );
+        assert!(
+            bundle
+                .graph_statements
+                .iter()
+                .any(|(phase, _)| *phase == crate::synthetic::dataset::LoadPhase::Fixture),
+            "the FixtureDependent reads still bake the fixture"
+        );
+        std::fs::remove_dir_all(&out_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn run_command_record_rejects_an_oracle_without_repo_writes() {
+        // The clap layer enforces `--oracle requires --repo-writes`; this runtime guard keeps
+        // directly-constructed commands honest too — failing offline, before any file or
+        // network use.
+        let base = crate::cli::SyntheticCommands::Record {
+            config: None,
+            graph: None,
+            ops: vec![],
+            all_reads: true,
+            tier: None,
+            repo_reads: None,
+            repo_algorithms: false,
+            repo_writes: false,
+            seed: Some(1),
+            nodes: Some(10),
+            edges: Some(20),
+            oracle: Some("falkor://127.0.0.1:1".to_string()),
+            out_dir: "unused".to_string(),
+        };
+        let err = run_command(base).await.unwrap_err();
+        assert!(
+            format!("{err}").contains("--oracle requires --repo-writes"),
+            "got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_command_run_requires_an_op() {
+        // Neither --op nor --all-reads nor any config `operations` ⇒ a clear error before any
+        // network use. Point --config at a real but empty config file so the file *loads* fine and
+        // the failure comes from the no-operations validation (not a missing-file read error). The
+        // filename mixes pid + a process-unique counter so parallel tests can't collide.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir();
+        let cfg_path = dir.join(format!(
+            "syn-noops-{}-{}.toml",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::write(&cfg_path, "# empty config, no operations\n").unwrap();
+        let command = crate::cli::SyntheticCommands::Run {
+            config: Some(cfg_path.to_string_lossy().into_owned()),
+            endpoint: Some("falkor://127.0.0.1:6379".to_string()),
+            graph: Some("falkor".to_string()),
+            ops: vec![],
+            all_reads: false,
+            tier: None,
+            samples: Some(100),
+            warmup: Some(0),
+            concurrency: vec![],
+            reset_every: None,
+            seed: Some(0),
+            cache: Some(CacheSelection::Both),
+            server_timeout_ms: Some(5_000),
+            client_deadline_ms: Some(6_000),
+            out: Some("unused.json".to_string()),
+            server_image: None,
+            label: None,
+            generate: false,
+            nodes: None,
+            edges: None,
+            recording: None,
+            no_load: false,
+            require_oracle: false,
+            pipeline_depth: None,
+        };
+        let err = run_command(command).await.expect_err("no ops ⇒ error");
+        assert!(
+            format!("{err:?}").contains("no operations selected"),
+            "expected a no-operations error, got: {err:?}"
+        );
+        let _ = std::fs::remove_file(&cfg_path);
+    }
+
+    #[tokio::test]
+    async fn run_recording_rejects_conflicting_flags() {
+        // --recording is exclusive with generate/probe knobs; the conflict is caught before any I/O.
+        let command = crate::cli::SyntheticCommands::Run {
+            config: None,
+            endpoint: None,
+            graph: None,
+            ops: vec![],
+            all_reads: false,
+            tier: None,
+            samples: None,
+            warmup: None,
+            concurrency: vec![],
+            reset_every: None,
+            seed: None,
+            cache: None,
+            server_timeout_ms: None,
+            client_deadline_ms: None,
+            out: None,
+            server_image: None,
+            label: None,
+            generate: true,
+            nodes: None,
+            edges: None,
+            recording: Some("/nonexistent/rec".to_string()),
+            no_load: false,
+            require_oracle: false,
+            pipeline_depth: None,
+        };
+        let err = run_command(command).await.expect_err("recording + generate ⇒ error");
+        assert!(format!("{err}").contains("--recording"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn run_command_rejects_require_oracle_without_recording() {
+        // clap enforces `requires = "recording"`; the handler re-validates for directly
+        // constructed commands so the flag can never silently no-op on a plain run.
+        let command = crate::cli::SyntheticCommands::Run {
+            config: None,
+            endpoint: None,
+            graph: None,
+            ops: vec![],
+            all_reads: false,
+            tier: None,
+            samples: None,
+            warmup: None,
+            concurrency: vec![],
+            reset_every: None,
+            seed: None,
+            cache: None,
+            server_timeout_ms: None,
+            client_deadline_ms: None,
+            out: None,
+            server_image: None,
+            label: None,
+            generate: false,
+            nodes: None,
+            edges: None,
+            recording: None,
+            no_load: false,
+            require_oracle: true,
+            pipeline_depth: None,
+        };
+        let err = run_command(command).await.expect_err("--require-oracle without --recording");
+        assert!(
+            format!("{err}").contains("--require-oracle requires --recording"),
+            "got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn report_requires_input_or_diff() {
+        let err = run_command(crate::cli::SyntheticCommands::Report {
+            input: None,
+            regression: false,
+            thresholds: None,
+            diff: vec![],
+            out: None,
+            elapsed_secs: None,
+            summary: None,
+            cells: None,
+            budget_profile: None,
+            divergence_policy: None,
+            gated_metric: None,
+        })
+        .await
+        .expect_err("report with no args ⇒ error");
+        assert!(format!("{err}").contains("report needs"), "got: {err}");
+    }
+
+    #[test]
+    fn list_ops_mentions_each_op() {
+        let listing = list_ops();
+        for op in OpName::value_variants() {
+            assert!(listing.contains(op.as_str()));
+        }
+        // Every row carries its coverage tier tag so `list-ops` shows what `--tier core` selects.
+        assert!(listing.contains("[core]"), "{listing}");
+        assert!(listing.contains("[full]"), "{listing}");
+    }
+
+    #[tokio::test]
+    async fn baseline_guard_command_gates_on_corpus_hash() {
+        // Hermetic: writes minimal report JSONs and drives the `baseline-guard` subcommand (which
+        // only reads files + applies the guard — no server).
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir();
+        let write_report = |hash: &str, ver: u64| -> String {
+            let p = dir.join(format!(
+                "bg-{}-{}.json",
+                std::process::id(),
+                SEQ.fetch_add(1, Ordering::Relaxed)
+            ));
+            let json = format!(
+                r#"{{"meta":{{"tool_version":"0.1.0","endpoint":"x","samples":1,"warmup":0,"server_timeout_ms":5000,"client_deadline_ms":6000,"connection":"c","started_at_epoch_secs":0,"server":{{"module_graph_ver":{ver}}},"dataset":{{"seed":1,"nodes":10,"edges":20,"corpus_hash":"{hash}"}}}},"operations":{{}}}}"#
+            );
+            std::fs::write(&p, json).unwrap();
+            p.to_string_lossy().into_owned()
+        };
+        let base = write_report("sha256:same", 42001);
+        // Same workload + same version ⇒ guard proceeds (report --diff succeeds + writes a diff).
+        let ok = write_report("sha256:same", 42001);
+        let diff_out = dir
+            .join(format!("bg-diff-{}.md", std::process::id()))
+            .to_string_lossy()
+            .into_owned();
+        assert!(run_command(crate::cli::SyntheticCommands::Report {
+            input: None,
+            regression: false,
+            thresholds: None,
+            diff: vec![base.clone(), ok.clone()],
+            out: Some(diff_out.clone()),
+            elapsed_secs: None,
+            summary: None,
+            cells: None,
+            budget_profile: None,
+            divergence_policy: None,
+            gated_metric: None,
+        })
+        .await
+        .is_ok());
+        // Different workload ⇒ guard aborts the diff.
+        let bad = write_report("sha256:different", 42002);
+        let err = run_command(crate::cli::SyntheticCommands::Report {
+            input: None,
+            regression: false,
+            thresholds: None,
+            diff: vec![base.clone(), bad.clone()],
+            out: Some(diff_out.clone()),
+            elapsed_secs: None,
+            summary: None,
+            cells: None,
+            budget_profile: None,
+            divergence_policy: None,
+            gated_metric: None,
+        })
+        .await
+        .expect_err("workload_hash mismatch must abort");
+        assert!(format!("{err}").contains("workload_hash mismatch"));
+        for p in [base, ok, bad] {
+            let _ = std::fs::remove_file(p);
+        }
+        let _ = std::fs::remove_file(&diff_out);
+    }
+
+    #[tokio::test]
+    async fn report_regression_command_is_non_fatal_on_divergence() {
+        // Hermetic: two reports with the SAME workload_hash but a differing result digest for one
+        // op. `report --diff --regression` must NOT error (unlike strict --diff) — it renders the
+        // op as "results differ" and returns Ok.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir();
+        let write = |label: &str, digest: &str| -> String {
+            let p = dir.join(format!(
+                "reg-{}-{}.json",
+                std::process::id(),
+                SEQ.fetch_add(1, Ordering::Relaxed)
+            ));
+            let json = format!(
+                r#"{{"meta":{{"tool_version":"0.1.0","endpoint":"x","samples":1,"warmup":0,"concurrency":[1],"server_timeout_ms":5000,"client_deadline_ms":6000,"connection":"c","started_at_epoch_secs":0,"server":{{"module_graph_ver":42001}},"dataset":{{"seed":1,"nodes":10,"edges":20,"corpus_hash":"sha256:same"}},"label":"{label}"}},"operations":{{"match_by_index":{{"levels":[],"result_digest":"{digest}"}}}}}}"#
+            );
+            std::fs::write(&p, json).unwrap();
+            p.to_string_lossy().into_owned()
+        };
+        let a = write("main", "sha256:aa");
+        let b = write("pr", "sha256:bb"); // diverged result
+        let out = dir
+            .join(format!("reg-out-{}.md", std::process::id()))
+            .to_string_lossy()
+            .into_owned();
+        let sum = dir
+            .join(format!("reg-sum-{}.json", std::process::id()))
+            .to_string_lossy()
+            .into_owned();
+        assert!(run_command(crate::cli::SyntheticCommands::Report {
+            input: None,
+            regression: true,
+            thresholds: None,
+            diff: vec![a.clone(), b.clone()],
+            out: Some(out.clone()),
+            elapsed_secs: None,
+            summary: Some(sum.clone()),
+            cells: None,
+            budget_profile: None,
+            divergence_policy: None,
+            gated_metric: None,
+        })
+        .await
+        .is_ok());
+        let md = std::fs::read_to_string(&out).unwrap();
+        assert!(md.contains("results differ"), "{md}");
+        assert!(md.contains("main") && md.contains("pr"), "labels in header: {md}");
+        // The compact summary must be written, parse back, and agree with the full report: a
+        // correctness divergence ⇒ Regressed verdict with the diverged op surfaced.
+        let compact: diff::SyntheticSummary =
+            serde_json::from_str(&std::fs::read_to_string(&sum).unwrap()).unwrap();
+        assert_eq!(compact.overall_verdict, analysis::OverallVerdict::Regressed);
+        assert_eq!(compact.diverged_ops, vec!["match_by_index".to_string()]);
+        for p in [a, b, out, sum] {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+
+    #[tokio::test]
+    async fn report_regression_writes_cells_json_and_honors_advisory_policy() {
+        // Hermetic: same divergent pair as above, but with `--cells` + `--divergence-policy
+        // advisory`: the command writes the full analysis model and the verdict caps at Advisory.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir();
+        let write = |label: &str, digest: &str| -> String {
+            let p = dir.join(format!(
+                "cells-{}-{}.json",
+                std::process::id(),
+                SEQ.fetch_add(1, Ordering::Relaxed)
+            ));
+            let json = format!(
+                r#"{{"meta":{{"tool_version":"0.1.0","endpoint":"x","samples":1,"warmup":0,"concurrency":[1],"server_timeout_ms":5000,"client_deadline_ms":6000,"connection":"c","started_at_epoch_secs":0,"server":{{"module_graph_ver":42001}},"dataset":{{"seed":1,"nodes":10,"edges":20,"corpus_hash":"sha256:same"}},"label":"{label}"}},"operations":{{"match_by_index":{{"levels":[],"result_digest":"{digest}"}}}}}}"#
+            );
+            std::fs::write(&p, json).unwrap();
+            p.to_string_lossy().into_owned()
+        };
+        let a = write("main", "sha256:aa");
+        let b = write("pr", "sha256:bb"); // diverged result
+        let out = dir
+            .join(format!("cells-out-{}.md", std::process::id()))
+            .to_string_lossy()
+            .into_owned();
+        let cells = dir
+            .join(format!("cells-model-{}.json", std::process::id()))
+            .to_string_lossy()
+            .into_owned();
+        assert!(run_command(crate::cli::SyntheticCommands::Report {
+            input: None,
+            regression: true,
+            thresholds: None,
+            diff: vec![a.clone(), b.clone()],
+            out: Some(out.clone()),
+            elapsed_secs: Some(1.5),
+            summary: None,
+            cells: Some(cells.clone()),
+            budget_profile: None,
+            divergence_policy: Some("advisory".to_string()),
+            gated_metric: None,
+        })
+        .await
+        .is_ok());
+        let model: analysis::RegressionAnalysis =
+            serde_json::from_str(&std::fs::read_to_string(&cells).unwrap()).unwrap();
+        assert_eq!(model.verdict, analysis::OverallVerdict::Advisory);
+        assert_eq!(model.divergence_policy, analysis::DivergencePolicy::Advisory);
+        assert_eq!(model.elapsed_secs, Some(1.5));
+        assert_eq!(
+            model.ops["match_by_index"].op_outcome,
+            analysis::OpOutcome::DivergedAdvisory
+        );
+        let md = std::fs::read_to_string(&out).unwrap();
+        assert!(md.contains("advisory"), "{md}");
+        for p in [a, b, out, cells] {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+
+    #[tokio::test]
+    async fn report_regression_rejects_cross_engine_profile_without_thresholds_file() {
+        // `--budget-profile cross-engine` without a TOML that defines the profile is a hard,
+        // actionable error — never a silent fallback to the strict budgets (design §A4).
+        let dir = std::env::temp_dir();
+        let p = dir
+            .join(format!("bp-{}.json", std::process::id()))
+            .to_string_lossy()
+            .into_owned();
+        let json = r#"{"meta":{"tool_version":"0.1.0","endpoint":"x","samples":1,"warmup":0,"concurrency":[1],"server_timeout_ms":5000,"client_deadline_ms":6000,"connection":"c","started_at_epoch_secs":0,"server":{},"dataset":{"seed":1,"nodes":10,"edges":20,"corpus_hash":"sha256:same"}},"operations":{}}"#;
+        std::fs::write(&p, json).unwrap();
+        let err = run_command(crate::cli::SyntheticCommands::Report {
+            input: None,
+            regression: true,
+            thresholds: None,
+            diff: vec![p.clone(), p.clone()],
+            out: None,
+            elapsed_secs: None,
+            summary: None,
+            cells: None,
+            budget_profile: Some("cross-engine".to_string()),
+            divergence_policy: None,
+            gated_metric: None,
+        })
+        .await
+        .expect_err("cross-engine without --thresholds must fail");
+        assert!(
+            format!("{err}").contains("requires --thresholds"),
+            "got: {err}"
+        );
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[tokio::test]
+    async fn report_regression_applies_a_cross_engine_thresholds_file() {
+        // With a TOML that defines [cross-engine], `--budget-profile cross-engine` resolves that
+        // profile's budgets — the rendered guard column shows the override, not the strict default.
+        let dir = std::env::temp_dir();
+        let stem = format!("bpx-{}", std::process::id());
+        let rep = dir.join(format!("{stem}.json")).to_string_lossy().into_owned();
+        let json = r#"{"meta":{"tool_version":"0.1.0","endpoint":"x","samples":1,"warmup":0,"concurrency":[1],"server_timeout_ms":5000,"client_deadline_ms":6000,"connection":"c","started_at_epoch_secs":0,"server":{},"dataset":{"seed":1,"nodes":10,"edges":20,"corpus_hash":"sha256:same"}},"operations":{"match_by_index":{"levels":[{"concurrency":1,"cached":{"throughput_ops_per_sec":1000.0,"metrics":{"server_ms":{"n":10,"removed":0,"min":1.0,"mean":1.0,"median":1.0,"p90":1.0,"p95":1.0,"p99":1.0,"max":1.0,"stddev":0.0},"total_ms":{"n":10,"removed":0,"min":1.0,"mean":1.0,"median":1.0,"p90":1.0,"p95":1.0,"p99":1.0,"max":1.0,"stddev":0.0},"non_internal_ms":{"n":10,"removed":0,"min":0.0,"mean":0.0,"median":0.0,"p90":0.0,"p95":0.0,"p99":0.0,"max":0.0,"stddev":0.0},"cached_false_rate":0.0,"cached_unknown":0}}}],"result_digest":"sha256:aa"}}}"#;
+        std::fs::write(&rep, json).unwrap();
+        let toml_path = dir.join(format!("{stem}.toml")).to_string_lossy().into_owned();
+        std::fs::write(
+            &toml_path,
+            "[cross-engine.default]\nbudget_pct = 123.0\nfloor_ms = 2.0\n",
+        )
+        .unwrap();
+        let out = dir.join(format!("{stem}.md")).to_string_lossy().into_owned();
+        assert!(run_command(crate::cli::SyntheticCommands::Report {
+            input: None,
+            regression: true,
+            thresholds: Some(toml_path.clone()),
+            diff: vec![rep.clone(), rep.clone()],
+            out: Some(out.clone()),
+            elapsed_secs: None,
+            summary: None,
+            cells: None,
+            budget_profile: Some("cross-engine".to_string()),
+            divergence_policy: None,
+            gated_metric: None,
+        })
+        .await
+        .is_ok());
+        let md = std::fs::read_to_string(&out).unwrap();
+        assert!(md.contains("123% AND 2 ms"), "cross-engine budget not applied: {md}");
+        for p in [rep, toml_path, out] {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+
+    #[tokio::test]
+    async fn report_regression_gates_on_server_ms_by_default() {
+        // Hermetic end-to-end default flip: the candidate doubles its TOTAL p50 (over budget)
+        // while its SERVER p50 grows 5 % (within budget). The default gate (server-ms) passes;
+        // the explicit `--gated-metric total-ms` opt-in regresses; every artifact (Markdown,
+        // summary JSON, cells JSON) names the selected metric.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir();
+        let stem = format!(
+            "gm-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        );
+        let write = |label: &str, total: f64, server: f64| -> String {
+            let p = dir
+                .join(format!("{stem}-{label}.json"))
+                .to_string_lossy()
+                .into_owned();
+            let summ = |m: f64| {
+                format!(
+                    r#"{{"n":10,"removed":0,"min":{m},"mean":{m},"median":{m},"p90":{m},"p95":{m},"p99":{m},"max":{m},"stddev":0.0}}"#
+                )
+            };
+            let json = format!(
+                r#"{{"meta":{{"tool_version":"0.1.0","endpoint":"x","samples":1,"warmup":0,"concurrency":[1],"server_timeout_ms":5000,"client_deadline_ms":6000,"connection":"c","started_at_epoch_secs":0,"server":{{"module_graph_ver":42001}},"dataset":{{"seed":1,"nodes":10,"edges":20,"corpus_hash":"sha256:same"}},"label":"{label}"}},"operations":{{"match_by_index":{{"levels":[{{"concurrency":1,"cached":{{"throughput_ops_per_sec":1000.0,"metrics":{{"server_ms":{srv},"total_ms":{tot},"non_internal_ms":{ni},"cached_false_rate":0.0,"cached_unknown":0}}}}}}],"result_digest":"sha256:aa"}}}}}}"#,
+                srv = summ(server),
+                tot = summ(total),
+                ni = summ(total - server),
+            );
+            std::fs::write(&p, json).unwrap();
+            p
+        };
+        let a = write("main", 10.0, 2.0);
+        let b = write("pr", 20.0, 2.1);
+        let run = |gated: Option<&str>, suffix: &str| {
+            let out = dir
+                .join(format!("{stem}-{suffix}.md"))
+                .to_string_lossy()
+                .into_owned();
+            let sum = dir
+                .join(format!("{stem}-{suffix}-sum.json"))
+                .to_string_lossy()
+                .into_owned();
+            let cells = dir
+                .join(format!("{stem}-{suffix}-cells.json"))
+                .to_string_lossy()
+                .into_owned();
+            let cmd = crate::cli::SyntheticCommands::Report {
+                input: None,
+                regression: true,
+                thresholds: None,
+                diff: vec![a.clone(), b.clone()],
+                out: Some(out.clone()),
+                elapsed_secs: None,
+                summary: Some(sum.clone()),
+                cells: Some(cells.clone()),
+                budget_profile: None,
+                divergence_policy: None,
+                gated_metric: gated.map(str::to_string),
+            };
+            (cmd, out, sum, cells)
+        };
+
+        let (cmd, out, sum, cells) = run(None, "srv");
+        assert!(run_command(cmd).await.is_ok());
+        let compact: diff::SyntheticSummary =
+            serde_json::from_str(&std::fs::read_to_string(&sum).unwrap()).unwrap();
+        assert_eq!(compact.overall_verdict, analysis::OverallVerdict::Pass);
+        assert_eq!(compact.gated_metric, "server_ms.p50");
+        let model: analysis::RegressionAnalysis =
+            serde_json::from_str(&std::fs::read_to_string(&cells).unwrap()).unwrap();
+        assert!(model.gated_on_server_ms());
+        assert_eq!(
+            model.ops["match_by_index"].cells[0].baseline_p50_ms,
+            Some(2.0)
+        );
+        let md = std::fs::read_to_string(&out).unwrap();
+        assert!(md.contains("**Gated metric: `server_ms.p50`**"), "{md}");
+        for p in [out, sum, cells] {
+            let _ = std::fs::remove_file(p);
+        }
+
+        // The identical pair under the explicit total-ms opt-in: the total-latency regression
+        // is caught, and the artifacts name total_ms.p50.
+        let (cmd, out, sum, cells) = run(Some("total-ms"), "tot");
+        assert!(run_command(cmd).await.is_ok());
+        let compact: diff::SyntheticSummary =
+            serde_json::from_str(&std::fs::read_to_string(&sum).unwrap()).unwrap();
+        assert_eq!(compact.overall_verdict, analysis::OverallVerdict::Regressed);
+        assert_eq!(compact.gated_metric, "total_ms.p50");
+        let md = std::fs::read_to_string(&out).unwrap();
+        assert!(md.contains("**Gated metric: `total_ms.p50`** (opt-in)"), "{md}");
+        for p in [a, b, out, sum, cells] {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+
+    #[tokio::test]
+    async fn report_regression_rejects_an_unknown_gated_metric() {
+        // clap's value_parser guards the real CLI; a directly-constructed command must fail
+        // loudly too (the parse happens before any report is read).
+        let err = run_command(crate::cli::SyntheticCommands::Report {
+            input: None,
+            regression: true,
+            thresholds: None,
+            diff: vec!["a.json".to_string(), "b.json".to_string()],
+            out: None,
+            elapsed_secs: None,
+            summary: None,
+            cells: None,
+            budget_profile: None,
+            divergence_policy: None,
+            gated_metric: Some("bogus".to_string()),
+        })
+        .await
+        .expect_err("unknown gated metric must fail");
+        assert!(
+            format!("{err}").contains("unknown gated metric 'bogus'"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn markdown_path_swaps_json_suffix_or_appends() {
+        assert_eq!(markdown_path("synthetic-report.json"), "synthetic-report.md");
+        assert_eq!(markdown_path("/tmp/out/report.json"), "/tmp/out/report.md");
+        assert_eq!(markdown_path("report"), "report.md");
+        // Only a trailing `.json` is swapped; anything else just gets `.md` appended.
+        assert_eq!(markdown_path("weird.jsonx"), "weird.jsonx.md");
+    }
+
+    #[tokio::test]
+    async fn run_rejects_zero_reset_every_for_write_ops_before_connecting() {
+        // A write op with reset_every == 0 fails the fast pre-connection validation, so no
+        // connection is opened — this stays hermetic (the endpoint is never touched).
+        let cfg = Config {
+            ops: vec![OpName::CreateNode],
+            reset_every: 0,
+            ..Config::default()
+        };
+        let err = run(&cfg).await.expect_err("zero cadence must be rejected");
+        assert!(
+            format!("{err:?}").contains("reset_every must be >= 1"),
+            "expected a reset_every validation error, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_rejects_write_key_band_overflow_before_connecting() {
+        // A write op whose widest concurrency level × reset_every would overflow the i32 key range
+        // is rejected up-front, before any connection is opened (hermetic). Here worker 1's highest
+        // key is 2·(i32::MAX) − 1, well past i32::MAX.
+        let cfg = Config {
+            ops: vec![OpName::CreateNode],
+            reset_every: i32::MAX as usize,
+            concurrency: vec![2],
+            ..Config::default()
+        };
+        let err = run(&cfg)
+            .await
+            .expect_err("an overflowing key band must be rejected");
+        assert!(
+            format!("{err:?}").contains("overflows i32"),
+            "expected an i32 key-band overflow error, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn summarize_samples_computes_paired_residual_and_cache() {
+        let samples = vec![
+            OpSample {
+                server_ms: 0.10,
+                total_ms: 0.40,
+                rows: 1,
+                cached: Some(true),
+                mutations: crate::synthetic::writes::MutationStats::default(),
+            },
+            OpSample {
+                server_ms: 0.12,
+                total_ms: 0.45,
+                rows: 1,
+                cached: Some(false),
+                mutations: crate::synthetic::writes::MutationStats::default(),
+            },
+            OpSample {
+                server_ms: 0.11,
+                total_ms: 0.42,
+                rows: 1,
+                cached: None,
+                mutations: crate::synthetic::writes::MutationStats::default(),
+            },
+            OpSample {
+                server_ms: 0.13,
+                total_ms: 0.44,
+                rows: 1,
+                cached: Some(true),
+                mutations: crate::synthetic::writes::MutationStats::default(),
+            },
+        ];
+        let r = summarize_samples(&samples).unwrap();
+        assert_eq!(r.server_ms.n, 4);
+        assert_eq!(r.cached_unknown, 1);
+        // 1 of 3 known-cache samples was false.
+        assert!((r.cached_false_rate - 1.0 / 3.0).abs() < 1e-9);
+        // non_internal median should be positive (total > server).
+        assert!(r.non_internal_ms.median > 0.0);
+    }
+
+    #[test]
+    fn paired_summaries_share_one_retained_cohort() {
+        // 20 well-behaved pairs (total = server + 0.3) plus one pair whose TOTAL is a severe
+        // outlier. That pair must be dropped from *all three* summaries, so their `n` matches and
+        // total.median stays >= server.median.
+        let mut samples: Vec<OpSample> = (0..20)
+            .map(|i| {
+                let s = 0.10 + i as f64 * 0.001;
+                OpSample {
+                    server_ms: s,
+                    total_ms: s + 0.3,
+                    rows: 1,
+                    cached: Some(true),
+                    mutations: crate::synthetic::writes::MutationStats::default(),
+                }
+            })
+            .collect();
+        samples.push(OpSample {
+            server_ms: 0.11,
+            total_ms: 500.0,
+            rows: 1,
+            cached: Some(true),
+            mutations: crate::synthetic::writes::MutationStats::default(),
+        });
+        let r = summarize_samples(&samples).unwrap();
+        assert_eq!(r.server_ms.n, r.total_ms.n);
+        assert_eq!(r.total_ms.n, r.non_internal_ms.n);
+        assert_eq!(r.total_ms.removed, 1);
+        assert!(r.total_ms.median >= r.server_ms.median);
+    }
+
+    #[test]
+    fn summarize_samples_tiny_all_unknown_cache() {
+        // A tiny sample set: `severe_fence` returns None (nothing removed → the `within` no-fence
+        // path), and with every `cached` unknown the false-rate collapses to 0.0.
+        let samples = vec![
+            OpSample {
+                server_ms: 0.10,
+                total_ms: 0.40,
+                rows: 1,
+                cached: None,
+                mutations: crate::synthetic::writes::MutationStats::default(),
+            },
+            OpSample {
+                server_ms: 0.12,
+                total_ms: 0.45,
+                rows: 1,
+                cached: None,
+                mutations: crate::synthetic::writes::MutationStats::default(),
+            },
+            OpSample {
+                server_ms: 0.11,
+                total_ms: 0.42,
+                rows: 1,
+                cached: None,
+                mutations: crate::synthetic::writes::MutationStats::default(),
+            },
+        ];
+        let r = summarize_samples(&samples).unwrap();
+        assert_eq!(r.server_ms.n, 3);
+        assert_eq!(r.server_ms.removed, 0);
+        assert_eq!(r.cached_unknown, 3);
+        assert_eq!(r.cached_false_rate, 0.0);
+    }
+
+    #[test]
+    fn redact_endpoint_strips_password() {
+        assert_eq!(
+            redact_endpoint("falkor://user:secret@host:6379"),
+            "falkor://user@host:6379"
+        );
+        // No credentials → unchanged (modulo url normalization).
+        assert!(redact_endpoint("falkor://127.0.0.1:6379").contains("127.0.0.1:6379"));
+        assert!(!redact_endpoint("falkor://user:secret@host:6379").contains("secret"));
+        // Unparseable input is replaced with a placeholder, never echoed verbatim.
+        assert_eq!(redact_endpoint("not a url"), "<unparseable-endpoint>");
+    }
+}
