@@ -566,6 +566,19 @@ pub(crate) fn redact_endpoint(endpoint: &str) -> String {
     }
 }
 
+/// Parse `endpoint` into a [`falkordb::FalkorConnectionInfo`] without ever echoing credentials:
+/// the error carries only the [redacted](redact_endpoint) endpoint. The underlying parse detail is
+/// deliberately dropped — the vendored client wraps the URL parser's own text
+/// (`FalkorDBError::InvalidConnectionInfo(String)`), which can quote the raw connection string.
+fn parse_endpoint(endpoint: &str) -> BenchmarkResult<falkordb::FalkorConnectionInfo> {
+    endpoint.try_into().map_err(|_| {
+        OtherError(format!(
+            "invalid endpoint '{}': connection string failed to parse",
+            redact_endpoint(endpoint)
+        ))
+    })
+}
+
 /// Open a single-connection [`falkordb::AsyncGraph`] handle for `endpoint` on graph `graph_name`.
 ///
 /// Uses a one-socket pool so latency is honest single-flight (the client otherwise defaults to 8
@@ -574,16 +587,8 @@ pub async fn open_graph(
     endpoint: &str,
     graph_name: &str,
 ) -> BenchmarkResult<falkordb::AsyncGraph> {
-    let connection_info = endpoint.try_into().map_err(|e| {
-        OtherError(format!(
-            "invalid endpoint '{}': {:?}",
-            redact_endpoint(endpoint),
-            e
-        ))
-    })?;
-
     let client = FalkorClientBuilder::new_async()
-        .with_connection_info(connection_info)
+        .with_connection_info(parse_endpoint(endpoint)?)
         .with_connection_strategy(ConnectionStrategy::Pooled {
             size: nonzero::nonzero!(1u8),
         })
@@ -601,16 +606,8 @@ async fn open_graph_pipelined(
     endpoint: &str,
     graph_name: &str,
 ) -> BenchmarkResult<falkordb::AsyncGraph> {
-    let connection_info = endpoint.try_into().map_err(|e| {
-        OtherError(format!(
-            "invalid endpoint '{}': {:?}",
-            redact_endpoint(endpoint),
-            e
-        ))
-    })?;
-
     let client = FalkorClientBuilder::new_async()
-        .with_connection_info(connection_info)
+        .with_connection_info(parse_endpoint(endpoint)?)
         .with_connection_strategy(ConnectionStrategy::Multiplexed {
             connections: nonzero::nonzero!(1u8),
         })
@@ -2594,6 +2591,19 @@ mod tests {
             Err(e) => e,
         };
         assert!(err.to_string().contains("invalid endpoint"));
+    }
+
+    #[test]
+    fn parse_endpoint_error_never_echoes_credentials() {
+        // The underlying parser's message can quote the raw connection string, so the mapped
+        // error must carry only the redacted endpoint — never the password.
+        let err = match parse_endpoint("falkor://user:hunter2@host:notaport") {
+            Ok(_) => panic!("malformed endpoint must fail"),
+            Err(e) => e,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("invalid endpoint"));
+        assert!(!msg.contains("hunter2"), "credential leaked: {msg}");
     }
 
     #[tokio::test]

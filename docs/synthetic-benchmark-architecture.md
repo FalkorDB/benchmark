@@ -124,7 +124,7 @@ requests in flight is gated **by construction of the workers**, not by any queue
 
 [`run_closed_loop`](../src/synthetic/engine.rs#L96) spawns one tokio task per worker into a
 [`JoinSet`](../src/synthetic/engine.rs#L115). Each worker owns its **own single connection** —
-[`open_graph`](../src/synthetic/mod.rs#L573) builds a dedicated client with
+[`open_graph`](../src/synthetic/mod.rs#L586) builds a dedicated client with
 `ConnectionStrategy::Pooled { size: 1 }` — and runs a **closed loop**: fire one command, await the
 reply (rows drained), only then fire the next. Warm-up invocations are discarded, then all `C`
 workers cross a shared [`Barrier`](../src/synthetic/engine.rs#L114) so the window opens with all
@@ -148,9 +148,9 @@ sequenceDiagram
 
 ### Depth `K > 1` (reads only): `C x K` resident, still only `C` executing
 
-With [`--pipeline-depth K`](../src/synthetic/mod.rs#L451), [`measure_level`
-fan-out](../src/synthetic/mod.rs#L1318-L1341) keeps the `C` connection slots but builds each one as
-a single **multiplexed** socket ([`open_graph_pipelined`](../src/synthetic/mod.rs#L600),
+With [`--pipeline-depth K`](../src/cli.rs#L517), [`measure_level`
+fan-out](../src/synthetic/mod.rs#L1315-L1338) keeps the `C` connection slots but builds each one as
+a single **multiplexed** socket ([`open_graph_pipelined`](../src/synthetic/mod.rs#L605),
 `ConnectionStrategy::Multiplexed { connections: 1 }`) whose handle is cheaply cloned into `K`
 closed-loop **lanes**. All `C x K` lanes are fed through the *unchanged*
 [`run_closed_loop`](../src/synthetic/engine.rs#L96) — each lane is still a closed loop, but the
@@ -190,37 +190,37 @@ What "gated" means per phase, precisely:
 
 | Phase | In-flight gate |
 |---|---|
-| Measured **read** levels | `C` connections x [`effective_pipeline_depth`](../src/synthetic/mod.rs#L627) lanes: `K` in flight per connection, `C` executing server-side. |
+| Measured **read** levels | `C` connections x [`effective_pipeline_depth`](../src/synthetic/mod.rs#L624) lanes: `K` in flight per connection, `C` executing server-side. |
 | Measured **write** levels | Always depth 1 — `C` connections, one in flight each, regardless of `--pipeline-depth`. |
-| Recorded-bundle dataset **load** | Untouched by `--pipeline-depth` (the flag reaches only [`measure_level`](../src/synthetic/mod.rs#L1290)); the load replays the recorded statements sequentially on one connection. |
+| Recorded-bundle dataset **load** | Untouched by `--pipeline-depth` (the flag reaches only [`measure_level`](../src/synthetic/mod.rs#L1287)); the load replays the recorded statements sequentially on one connection. |
 | **record** / **report** phases | Offline — no server, nothing in flight. |
 
 Bookkeeping that keeps depth-K comparable to depth-1 (and depth 1 byte-identical to the
 pre-pipelining behavior):
 
-- **Totals** — each lane measures [`ceil(samples / K)`](../src/synthetic/mod.rs#L641)
+- **Totals** — each lane measures [`ceil(samples / K)`](../src/synthetic/mod.rs#L638)
   invocations, so a level completes ≥ `C x samples` (exactly `C x samples` when `K` divides
   `--samples`; pick such a value).
-- **Uniqueness** — every lane claims a [disjoint uid block](../src/synthetic/mod.rs#L1294-L1296)
+- **Uniqueness** — every lane claims a [disjoint uid block](../src/synthetic/mod.rs#L1290-L1292)
   from the run-global allocator, so uncached query text (which embeds the uid) never collides
   across lanes, levels or ops.
 - **Decorrelation** — lane `l` of slot `w` starts its corpus cycle at offset
-  [`(w x K + l) % corpus.len()`](../src/synthetic/mod.rs#L651) — exactly today's `w %
+  [`(w x K + l) % corpus.len()`](../src/synthetic/mod.rs#L648) — exactly today's `w %
   corpus.len()` at `K = 1`.
 - **Digests** — the per-op `result_digest` comes from the replay's untimed single-flight
   [reference pass](../src/synthetic/replay.rs#L298), not from the measured lanes, so it is
   depth-independent by construction: a depth-1 and a depth-4 run of one bundle produce identical
   digests, and `report --diff` still guards them.
 - **Reporting** — the connection description in `meta`
-  ([`connection_description`](../src/synthetic/mod.rs#L664)) is informational and never guarded,
+  ([`connection_description`](../src/synthetic/mod.rs#L661)) is informational and never guarded,
   so depth-1 and depth-K reports of one workload stay diffable.
 
 ## Write operations
 
-Write ops always run the plain closed loop — [`effective_pipeline_depth`](../src/synthetic/mod.rs#L627)
+Write ops always run the plain closed loop — [`effective_pipeline_depth`](../src/synthetic/mod.rs#L624)
 returns 1 for `QueryType::Write` no matter what `--pipeline-depth` says (recorded writes measure
 with `kind: Write` even though they carry no write plan, so the gate is on the query kind). Two
-reasons, both visible in the [`GraphWorker` write choreography](../src/synthetic/mod.rs#L1075-L1131):
+reasons, both visible in the [`GraphWorker` write choreography](../src/synthetic/mod.rs#L1072-L1130):
 
 1. **Per-sample verification** — every measured write's reply is checked with `verify_mutation`
    (a silent no-op is an error), which pairs each request with *its* reply; a second in-flight
@@ -249,7 +249,7 @@ sequenceDiagram
 
 Each worker gets an **isolated `WriteScratch`** (its own key band sized to fit `i32`), setup runs
 untimed on the worker's own connection before the window, and the run's scratch is dropped
-afterward [on a fresh connection](../src/synthetic/mod.rs#L1231-L1251) whether or not the level
+afterward [on a fresh connection](../src/synthetic/mod.rs#L1231-L1247) whether or not the level
 succeeded — a failed write level never leaks scratch into the next one. On the success path a
 cleanup failure is surfaced; on the failure path cleanup is best-effort so it can't mask the
 original error.
@@ -343,11 +343,11 @@ Reading the tables:
 | Concern | Where |
 |---|---|
 | Closed-loop engine (barrier, JoinSet, fail-fast, window math) | [`src/synthetic/engine.rs`](../src/synthetic/engine.rs) — [`run_closed_loop`](../src/synthetic/engine.rs#L96) |
-| Single-flight connection (depth 1) | [`open_graph`](../src/synthetic/mod.rs#L573) — `Pooled { size: 1 }` |
-| Pipelined connection (depth K) | [`open_graph_pipelined`](../src/synthetic/mod.rs#L600) — `Multiplexed { connections: 1 }`, cloned into lanes |
-| Lane fan-out per level | [`measure_level`](../src/synthetic/mod.rs#L1268) (`if depth > 1` at [L1318](../src/synthetic/mod.rs#L1318)) |
-| Reads-only gating, lane math | [`effective_pipeline_depth`](../src/synthetic/mod.rs#L627), [`lane_samples`](../src/synthetic/mod.rs#L641), [`lane_corpus_offset`](../src/synthetic/mod.rs#L651) |
-| Write choreography (verify, reset, cleanup) | [`GraphWorker::invoke`](../src/synthetic/mod.rs#L1075) write arm |
+| Single-flight connection (depth 1) | [`open_graph`](../src/synthetic/mod.rs#L586) — `Pooled { size: 1 }` |
+| Pipelined connection (depth K) | [`open_graph_pipelined`](../src/synthetic/mod.rs#L605) — `Multiplexed { connections: 1 }`, cloned into lanes |
+| Lane fan-out per level | [`measure_level`](../src/synthetic/mod.rs#L1265) (`if depth > 1` at [L1318](../src/synthetic/mod.rs#L1315)) |
+| Reads-only gating, lane math | [`effective_pipeline_depth`](../src/synthetic/mod.rs#L624), [`lane_samples`](../src/synthetic/mod.rs#L638), [`lane_corpus_offset`](../src/synthetic/mod.rs#L648) |
+| Write choreography (verify, reset, cleanup) | [`GraphWorker::invoke`](../src/synthetic/mod.rs#L1072) write arm |
 | Replay: reference pass, digests, depth plumbing | [`src/synthetic/replay.rs`](../src/synthetic/replay.rs) ([`pipeline_depth`](../src/synthetic/replay.rs#L92-L93)) |
 | Runtime build (`--client-threads`) | [`build_runtime`](../src/main.rs#L203-L216) in `src/main.rs` |
 | CLI flags | [`--client-threads`](../src/cli.rs#L157) (global), [`--pipeline-depth`](../src/cli.rs#L517) (`synthetic run`) |
