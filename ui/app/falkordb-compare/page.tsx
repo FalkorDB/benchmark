@@ -3,6 +3,8 @@ import { Header } from "../components/header";
 import BenchmarkMetricsCrawlerTable from "../components/BenchmarkMetricsCrawlerTable";
 import { loadBenchmarkSummary, loadRunsManifest } from "../lib/benchmark-data.server";
 
+export const dynamic = "force-dynamic";
+
 export default async function FalkorDBCompare() {
   const dataUrl = "/summaries/falkordb_vs_falkordb.json";
   const [initialData, initialManifest] = await Promise.all([

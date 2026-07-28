@@ -43,10 +43,10 @@ function getStops(vendor: VendorKey): GradientStops {
         { offset: 1.0, color: cssVar("--FalkorDB-gradient-end", "#7568F2") },
       ];
     case "falkordb2":
-      // Darker pink -> darker purple (used for second Falkor variant)
+      // Orange -> red gradient to clearly distinguish FalkorDB-2 from FalkorDB-1
       return [
-        { offset: 0.0, color: cssVar("--FalkorDB2-gradient-start", "#d24aa8") },
-        { offset: 1.0, color: cssVar("--FalkorDB2-gradient-end", "#5145d6") },
+        { offset: 0.0, color: cssVar("--FalkorDB2-gradient-start", "#ff9a3d") },
+        { offset: 1.0, color: cssVar("--FalkorDB2-gradient-end", "#e63946") },
       ];
     case "neo4j":
       // Neo4j "Baltic" palette: Dark -> Mid -> Baltic -> Light

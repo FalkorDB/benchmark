@@ -969,7 +969,7 @@ export default function DashBoard({
                   }}
                   className="bg-white border border-gray-200/80 text-gray-800 text-sm rounded-lg px-3 py-2 font-fira shadow-sm focus:outline-none focus:ring-1 focus:ring-primary focus:border-primary cursor-pointer w-full md:w-auto md:min-w-[280px]"
                 >
-                  <option value={baseFileName}>Latest Run (Default)</option>
+                  <option value={baseFileName}>Default Result Set</option>
                   {pastRuns.map((run) => (
                     <option key={run.filename} value={run.filename}>
                       {`${run.filename} — ${formatRunTimestamp(run.timestamp)}`}
