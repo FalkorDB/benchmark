@@ -100,14 +100,13 @@ pub fn diff_markdown(
          along as an informational sub-line. **Latency: lower is better** (a positive Δ = \
          slower / regressed); **throughput: higher is better**. Each side's `n / σ (ms) / CV` \
          describes its own **within-run** dispersion of `server_ms` (not run-to-run noise): \
-         `n` = samples retained after severe-outlier removal (pooled across the C workers), \
-         `σ` = their **sample** standard deviation (n−1 denominator), `CV` = 100·σ/mean; when \
-         only part of the retained cohort carries a server time (older engines), `n (server m)` \
-         names both counts. `—` = not measured in that run (or, in a latency/σ/CV column, no \
-         valid server time on that side — e.g. a report predating server-time capture or an \
-         engine that doesn't report execution time). Each op's `example query` block shows its \
-         first measured command (cached-mode base text; uncached appends a unique cache-buster \
-         comment)._\n",
+         `n` = retained samples that carried a server-reported time (severe outliers removed, \
+         pooled across the C workers), `σ` = their **sample** standard deviation (n−1 \
+         denominator), `CV` = 100·σ/mean. `—` = not measured in that run (or, in a \
+         latency/n/σ/CV column, no valid server time on that side — e.g. a report predating \
+         server-time capture or an engine that doesn't report execution time). Each op's \
+         `example query` block shows its first measured command (cached-mode base text; \
+         uncached appends a unique cache-buster comment)._\n",
     );
     for w in warnings {
         out.push_str(&format!("\n> ⚠ {w}\n"));
@@ -279,38 +278,32 @@ fn percentiles(m: &LevelMetrics) -> String {
     }
 }
 
-/// A diff-table `n / σ (ms) / CV` cell: the retained-sample count with the **within-run**
-/// sample standard deviation and coefficient of variation of `server_ms` — see
-/// [`format_dispersion`]. σ/CV degrade to `—` exactly like the server latency columns when the
-/// side carries no valid server time.
+/// A diff-table `n / σ (ms) / CV` cell: the within-run dispersion of **`server_ms`** — the
+/// gated distribution — where `n` counts the retained samples that actually carried a server
+/// time. All three degrade to `—` together exactly like the server latency columns when the
+/// side carries no valid server time — see [`format_dispersion`].
 fn dispersion_cell(m: &LevelMetrics) -> String {
     let server_valid = server_median(m).is_some();
     let server = &m.metrics.server_ms;
     format_dispersion(
         " / ",
-        m.metrics.total_ms.n,
         server_valid.then_some(server.n),
         if server_valid { server.sample_stddev() } else { None },
         if server_valid { server.cv_pct() } else { None },
     )
 }
 
-/// Format one side's within-run dispersion stats (`n`, sample σ of `server_ms` in ms, CV%),
-/// joined by `sep`. `n` is the retained `total_ms` cohort (the always-captured wall clock);
-/// when the server-time cohort exists but differs — possible only on foreign/older reports —
-/// both counts are named (`n (server m)`). Undefined σ/CV (no valid server time, or n < 2)
-/// render `—`, mirroring the server latency columns.
+/// Format one side's within-run dispersion stats of `server_ms` (`n`, sample σ in ms, CV%),
+/// joined by `sep`. `n` counts the retained samples carrying a server-reported time; it renders
+/// `—` (like every server column) when the side has no valid server time, and σ/CV additionally
+/// render `—` when undefined (n < 2).
 fn format_dispersion(
     sep: &str,
-    n: usize,
-    n_server: Option<usize>,
+    n: Option<usize>,
     stddev_ms: Option<f64>,
     cv_pct: Option<f64>,
 ) -> String {
-    let n_cell = match n_server {
-        Some(ns) if ns != n => format!("{n} (server {ns})"),
-        _ => n.to_string(),
-    };
+    let n_cell = n.map(|v| v.to_string()).unwrap_or_else(|| "—".to_string());
     let sd = stddev_ms.map(|s| format!("{s:.3}")).unwrap_or_else(|| "—".to_string());
     let cv = cv_pct.map(|c| format!("{c:.1}%")).unwrap_or_else(|| "—".to_string());
     format!("{n_cell}{sep}{sd}{sep}{cv}")
@@ -364,12 +357,12 @@ fn latency_cell(
 ) -> String {
     match (p50, ctx) {
         (Some(p50), Some(c)) => {
-            // A zero `n` means the model predates the dispersion stats (deserialized old cells
-            // JSON) — omit the segment rather than claim zero samples.
-            let disp = if c.n > 0 {
+            // Absent server_n means the side carries no server-clock stats (deserialized old
+            // cells JSON, or a side without valid server time) — omit the segment entirely.
+            let disp = if c.server_n.is_some() {
                 format!(
                     " · n/σ/CV {}",
-                    format_dispersion("/", c.n, c.n_server, c.server_stddev_ms, c.server_cv_pct)
+                    format_dispersion("/", c.server_n, c.server_stddev_ms, c.server_cv_pct)
                 )
             } else {
                 String::new()
@@ -619,10 +612,10 @@ pub fn regression_markdown(analysis: &RegressionAnalysis) -> String {
         "the `context:` line (p90/p95/p99 · throughput · within-run n/σ/CV of `server_ms`)"
     };
     // The dispersion stats' one-line definition, shared by both policies' legends.
-    let stats_clause = "n = samples retained after severe-outlier removal (pooled across the C \
-                        workers; `n (server m)` when only `m` carry a server time); σ = their \
-                        **sample** standard deviation (n−1) of `server_ms` **within this run** — \
-                        not run-to-run noise; CV = 100·σ/mean.";
+    let stats_clause = "n = retained samples that carried a server-reported time (severe \
+                        outliers removed, pooled across the C workers); σ = their **sample** \
+                        standard deviation (n−1) of `server_ms` **within this run** — not \
+                        run-to-run noise; CV = 100·σ/mean.";
     out.push_str(&match analysis.divergence_policy {
         DivergencePolicy::Gate => format!(
             "\n🟢 = faster or within budget · 🔴 = slower than budget **or** results differ · \
@@ -1167,8 +1160,8 @@ mod tests {
         set_server_median(&mut a, 0.0);
         let md = diff_markdown(&a, &b, &[]);
         assert!(
-            md.contains("| —<br><sub>total p50 1.000</sub> | 100 / — / — |"),
-            "missing server side degrades to — with demoted total and — σ/CV: {md}"
+            md.contains("| —<br><sub>total p50 1.000</sub> | — / — / — |"),
+            "missing server side degrades to — with demoted total and a dashed n/σ/CV: {md}"
         );
         assert!(
             md.contains("10.1% | — |"),
@@ -1199,7 +1192,7 @@ mod tests {
         // The legend explains the new columns and their within-run scope.
         assert!(md.contains("**within-run** dispersion"), "{md}");
         assert!(md.contains("**sample** standard deviation (n−1 denominator)"), "{md}");
-        assert!(md.contains("`n (server m)`"), "{md}");
+        assert!(md.contains("`n` = retained samples that carried a server-reported time"), "{md}");
     }
 
     #[test]
@@ -1249,45 +1242,39 @@ mod tests {
     }
 
     #[test]
-    fn format_dispersion_names_a_differing_server_cohort() {
-        // In this tool's own reports both cohorts always match (paired capture); a foreign or
-        // older report may carry fewer server-timed samples — both counts are then named.
+    fn format_dispersion_renders_server_counts_and_degrades_together() {
+        // n counts the server-timed samples — the gated distribution's cohort. A side without
+        // valid server time degrades all three stats to `—` like every server column.
         assert_eq!(
-            format_dispersion(" / ", 100, Some(100), Some(0.5), Some(10.0)),
+            format_dispersion(" / ", Some(100), Some(0.5), Some(10.0)),
             "100 / 0.500 / 10.0%"
         );
-        assert_eq!(
-            format_dispersion(" / ", 100, Some(80), Some(0.5), Some(10.0)),
-            "100 (server 80) / 0.500 / 10.0%"
-        );
-        assert_eq!(format_dispersion("/", 100, None, None, None), "100/—/—");
+        assert_eq!(format_dispersion("/", Some(1), None, None), "1/—/—");
+        assert_eq!(format_dispersion("/", None, None, None), "—/—/—");
     }
 
     #[test]
     fn latency_cell_omits_dispersion_for_pre_stats_cells() {
         use crate::synthetic::analysis::CellContextSide;
-        // n = 0 marks a context deserialized from cells JSON written before the dispersion
-        // stats existed — the segment is omitted rather than claiming zero samples.
+        // An absent server_n marks a context deserialized from cells JSON written before the
+        // dispersion stats existed (or a side with no valid server time) — the segment is
+        // omitted rather than rendering a fully dashed triple.
         let old = CellContextSide {
             p90_ms: 1.2,
             p95_ms: 1.3,
             p99_ms: 1.5,
             throughput_ops_per_sec: 1000.0,
             total_p50_ms: Some(1.0),
-            n: 0,
-            n_server: None,
+            server_n: None,
             server_stddev_ms: None,
             server_cv_pct: None,
-            total_stddev_ms: None,
-            total_cv_pct: None,
         };
         let cell = latency_cell(Some(1.0), Some(&old));
         assert!(!cell.contains("n/σ/CV"), "{cell}");
         assert!(cell.contains("· total p50 1.000"), "{cell}");
         // A populated context folds the stats between throughput and the demoted total.
         let new = CellContextSide {
-            n: 100,
-            n_server: Some(100),
+            server_n: Some(100),
             server_stddev_ms: Some(0.1),
             server_cv_pct: Some(10.0),
             ..old
@@ -1310,7 +1297,7 @@ mod tests {
         assert!(md.contains("<details><summary>example query</summary>"), "{md}");
         assert!(md.contains("MATCH (u:User {id: $id}) RETURN u"), "{md}");
         // The legend defines the context-line stats.
-        assert!(md.contains("n = samples retained after severe-outlier removal"), "{md}");
+        assert!(md.contains("n = retained samples that carried a server-reported time"), "{md}");
     }
 
     /// Overwrite every level's `server_ms` summary median (fixtures default both clocks equal).

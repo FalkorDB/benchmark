@@ -342,18 +342,13 @@ pub struct CellContextSide {
     /// (the primary p50 already is that clock) or when the side has no valid total median.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_p50_ms: Option<f64>,
-    /// Number of pooled measured samples this side's cell retains after severe-outlier removal
-    /// (the `total_ms` cohort — the wall clock is captured on every sample), i.e. the samples the
-    /// dispersion stats describe. `0` on a cells JSON written before this field existed.
-    #[serde(default)]
-    pub n: usize,
-    /// Retained sample count backing the **server_ms** dispersion stats. `None` when the side
-    /// carries no valid server time (a report predating server-time capture, or an engine that
-    /// doesn't report execution time) — the same degradation rule as every server column. It can
-    /// differ from [`n`](Self::n) only on such foreign/older reports; this tool's own pipeline
-    /// filters the two clocks as a paired cohort.
+    /// Number of retained measured samples that actually carried a **server-reported execution
+    /// time** — the cohort every dispersion stat (and the gated server p50) describes, counted
+    /// after severe-outlier removal and pooled across the C workers. `None` when the side has no
+    /// valid server time (a report predating server-time capture, or an engine that doesn't
+    /// report execution time) — the same degradation rule as every server column.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub n_server: Option<usize>,
+    pub server_n: Option<usize>,
     /// **Sample** standard deviation (n−1 denominator — see
     /// [`Summary::sample_stddev`](crate::synthetic::stats::Summary::sample_stddev)) of this
     /// side's retained `server_ms` samples, in ms: **within-run** dispersion (how spread this
@@ -366,15 +361,6 @@ pub struct CellContextSide {
     /// [`server_stddev_ms`](Self::server_stddev_ms).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_cv_pct: Option<f64>,
-    /// Sample standard deviation of the retained `total_ms` samples, in ms — carried for
-    /// machine consumers (the interactive page / analyzer scripts); the Markdown tables show
-    /// only the server-clock dispersion. `None` with fewer than 2 samples.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub total_stddev_ms: Option<f64>,
-    /// Coefficient of variation of `total_ms`, percent — machine-consumer counterpart of
-    /// [`server_cv_pct`](Self::server_cv_pct). `None` when undefined.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub total_cv_pct: Option<f64>,
 }
 
 /// Informational context for a cell (both sides optional — a side may not have measured it).
@@ -644,8 +630,8 @@ fn level_metrics<'a>(
 
 /// One side's informational tails/throughput, read from the **selected gated metric's** summary
 /// so a cell's primary p50 and its `context:` line always describe the same clock — plus the
-/// within-run dispersion stats (sample counts, sample σ, CV%) computed from each clock's own
-/// summary, clock-named so they are unambiguous under either gate.
+/// within-run dispersion stats (`server_n`, sample σ, CV%), all computed on **`server_ms`**:
+/// the distribution whose p50 is gated. Field names carry the clock so they stay unambiguous.
 fn context_side(
     metric: GatedMetric,
     m: &LevelMetrics,
@@ -669,12 +655,9 @@ fn context_side(
         p99_ms: s.p99,
         throughput_ops_per_sec: m.throughput_ops_per_sec,
         total_p50_ms,
-        n: m.metrics.total_ms.n,
-        n_server: server_valid.then_some(server.n),
+        server_n: server_valid.then_some(server.n),
         server_stddev_ms: round6(if server_valid { server.sample_stddev() } else { None }),
         server_cv_pct: round6(if server_valid { server.cv_pct() } else { None }),
-        total_stddev_ms: round6(m.metrics.total_ms.sample_stddev()),
-        total_cv_pct: round6(m.metrics.total_ms.cv_pct()),
     }
 }
 
@@ -1836,39 +1819,33 @@ mod tests {
 
     #[test]
     fn cell_context_carries_within_run_dispersion_stats() {
-        // Each side's context carries the within-run sample count and dispersion of both
-        // clocks: n (retained total_ms cohort), n_server, sample σ (n−1) and CV% — all rounded
-        // to 6 decimals so the cells JSON stays compact and byte-stable across serde round-trips.
+        // Each side's context carries the within-run dispersion of `server_ms` — the gated
+        // distribution: server_n (samples that actually carried a server time), sample σ (n−1)
+        // and CV% — all rounded to 6 decimals so the cells JSON stays compact and byte-stable
+        // across serde round-trips.
         let a = rpt("main", 42001, &[("match_by_index", 2.0, Some("d1"))]);
         let b = rpt("pr", 42002, &[("match_by_index", 2.0, Some("d1"))]);
         let an = server_gate(&a, &b);
         let side = an.ops["match_by_index"].cells[0].context.baseline.unwrap();
-        assert_eq!(side.n, 100);
-        assert_eq!(side.n_server, Some(100));
+        assert_eq!(side.server_n, Some(100));
         // summ(2.0): population σ = 0.2 over n = 100 ⇒ sample σ = 0.2·√(100/99) ≈ 0.201008.
         assert_eq!(side.server_stddev_ms, Some(0.201008));
         assert_eq!(side.server_cv_pct, Some(10.050378));
-        // Both fixture clocks share the same summary, so the total_ms stats match.
-        assert_eq!(side.total_stddev_ms, Some(0.201008));
-        assert_eq!(side.total_cv_pct, Some(10.050378));
     }
 
     #[test]
     fn dispersion_stats_degrade_with_invalid_server_median() {
         // No valid server time on a side (median 0/NaN — a report predating server-time
-        // capture): its server-clock stats and n_server are absent, exactly like the server p50
-        // columns; the wall-clock stats survive because total_ms is always captured.
+        // capture): every dispersion stat is absent, exactly like the server p50 columns —
+        // there is deliberately no wall-clock fallback.
         let a = rpt("main", 42001, &[("match_by_index", 2.0, Some("d1"))]);
         let mut b = rpt("pr", 42002, &[("match_by_index", 2.0, Some("d1"))]);
         set_server_median(&mut b, "match_by_index", 0.0);
         let an = server_gate(&a, &b);
         let side = an.ops["match_by_index"].cells[0].context.candidate.unwrap();
-        assert_eq!(side.n, 100, "the wall-clock cohort is still counted");
-        assert_eq!(side.n_server, None);
+        assert_eq!(side.server_n, None);
         assert_eq!(side.server_stddev_ms, None);
         assert_eq!(side.server_cv_pct, None);
-        assert_eq!(side.total_stddev_ms, Some(0.201008));
-        assert_eq!(side.total_cv_pct, Some(10.050378));
     }
 
     #[test]
@@ -1907,18 +1884,14 @@ mod tests {
     #[test]
     fn old_cells_json_without_dispersion_fields_still_deserializes() {
         // Cells JSON written before the dispersion stats existed (schema v2, additive change):
-        // the new fields default — n = 0 (meaning "not recorded", which renderers omit) and the
-        // optional stats stay None.
+        // the optional server-clock stats default to None, which renderers omit.
         let side: CellContextSide = serde_json::from_str(
             r#"{"p90_ms":1.2,"p95_ms":1.3,"p99_ms":1.5,"throughput_ops_per_sec":1000.0}"#,
         )
         .unwrap();
-        assert_eq!(side.n, 0);
-        assert_eq!(side.n_server, None);
+        assert_eq!(side.server_n, None);
         assert_eq!(side.server_stddev_ms, None);
         assert_eq!(side.server_cv_pct, None);
-        assert_eq!(side.total_stddev_ms, None);
-        assert_eq!(side.total_cv_pct, None);
         assert_eq!(side.total_p50_ms, None);
     }
 

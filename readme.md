@@ -619,9 +619,10 @@ just synthetic-compare-versions demo falkor://127.0.0.1:6379 falkor://127.0.0.1:
   rides along as an informational sub-line, and a side without a valid server time — e.g. a report
   predating server-time capture — degrades that
   latency cell to `—` — no silent fallback). Each side also gets a compact **`n / σ (ms) / CV`**
-  column with its **within-run** dispersion of `server_ms`: `n` = samples retained after
-  severe-outlier removal (pooled across the C workers), `σ` = their **sample** standard deviation
-  (n−1 denominator), `CV` = 100·σ/mean — dispersion *within* that run, not run-to-run noise; σ/CV
+  column with its **within-run** dispersion of `server_ms` — the gated distribution: `n` = retained
+  samples that actually carried a server-reported time (severe outliers removed, pooled across the
+  C workers), `σ` = their **sample** standard deviation (n−1 denominator), `CV` = 100·σ/mean —
+  dispersion *within* that run, not run-to-run noise; all three
   degrade to `—` alongside the server latency columns. Every op section opens with a **collapsed
   `example query`** block showing the op's deterministic first measured command (cached-mode base
   text, truncated past 600 chars; recorded repo-read shapes are documented in
@@ -682,10 +683,10 @@ just synthetic-compare-versions demo falkor://127.0.0.1:6379 falkor://127.0.0.1:
     attestation when present, thresholds echo) plus every
     op × cache-mode × concurrency cell with baseline/candidate p50, `delta_pct`/`delta_ms`, the
     resolved budget and the per-cell verdict — source material for an interactive report page.
-    Each cell's per-side `context` also carries the within-run measurement stats — `n` (retained
-    samples; `0` in files written before the field existed), `n_server` (server-timed cohort,
-    omitted when the side has no valid server time), `server_stddev_ms`/`server_cv_pct` and
-    `total_stddev_ms`/`total_cv_pct` (sample σ, n−1; omitted when undefined) — and each op an
+    Each cell's per-side `context` also carries the within-run measurement stats of `server_ms` —
+    the gated distribution: `server_n` (retained samples that actually carried a server-reported
+    time; omitted when the side has no valid server time) and `server_stddev_ms`/`server_cv_pct`
+    (sample σ, n−1, and 100·σ/mean; omitted when undefined, i.e. n < 2) — and each op an
     additive `example_query` (its deterministic first measured command, candidate's when both
     sides carry one; omitted when neither does).
     Skipped ops carry their reason in `skipped_baseline`/`skipped_candidate` (omitted otherwise).
