@@ -342,6 +342,39 @@ pub struct CellContextSide {
     /// (the primary p50 already is that clock) or when the side has no valid total median.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_p50_ms: Option<f64>,
+    /// Number of pooled measured samples this side's cell retains after severe-outlier removal
+    /// (the `total_ms` cohort — the wall clock is captured on every sample), i.e. the samples the
+    /// dispersion stats describe. `0` on a cells JSON written before this field existed.
+    #[serde(default)]
+    pub n: usize,
+    /// Retained sample count backing the **server_ms** dispersion stats. `None` when the side
+    /// carries no valid server time (a report predating server-time capture, or an engine that
+    /// doesn't report execution time) — the same degradation rule as every server column. It can
+    /// differ from [`n`](Self::n) only on such foreign/older reports; this tool's own pipeline
+    /// filters the two clocks as a paired cohort.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub n_server: Option<usize>,
+    /// **Sample** standard deviation (n−1 denominator — see
+    /// [`Summary::sample_stddev`](crate::synthetic::stats::Summary::sample_stddev)) of this
+    /// side's retained `server_ms` samples, in ms: **within-run** dispersion (how spread this
+    /// run's own samples are), not run-to-run noise. `None` when the side has no valid server
+    /// time or fewer than 2 samples.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_stddev_ms: Option<f64>,
+    /// Coefficient of variation of `server_ms`, percent (`100·σ/mean`, sample σ) — within-run
+    /// dispersion relative to the cell's own scale. `None` under the same conditions as
+    /// [`server_stddev_ms`](Self::server_stddev_ms).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_cv_pct: Option<f64>,
+    /// Sample standard deviation of the retained `total_ms` samples, in ms — carried for
+    /// machine consumers (the interactive page / analyzer scripts); the Markdown tables show
+    /// only the server-clock dispersion. `None` with fewer than 2 samples.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_stddev_ms: Option<f64>,
+    /// Coefficient of variation of `total_ms`, percent — machine-consumer counterpart of
+    /// [`server_cv_pct`](Self::server_cv_pct). `None` when undefined.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_cv_pct: Option<f64>,
 }
 
 /// Informational context for a cell (both sides optional — a side may not have measured it).
@@ -395,6 +428,13 @@ pub struct OpAnalysis {
     /// Why the **candidate** run skipped this op, or `None` when it measured it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skipped_candidate: Option<String>,
+    /// The op's deterministic representative Cypher text
+    /// ([`OperationReport::example_query`](crate::synthetic::report::OperationReport::example_query)),
+    /// preferring the **candidate** run's text (the run under test), falling back to the
+    /// baseline's — a comparable pair measured the same workload, so the two are normally
+    /// identical. `None` when neither report carries one (both predate the field).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub example_query: Option<String>,
     pub cells: Vec<CellAnalysis>,
 }
 
@@ -603,7 +643,9 @@ fn level_metrics<'a>(
 }
 
 /// One side's informational tails/throughput, read from the **selected gated metric's** summary
-/// so a cell's primary p50 and its `context:` line always describe the same clock.
+/// so a cell's primary p50 and its `context:` line always describe the same clock — plus the
+/// within-run dispersion stats (sample counts, sample σ, CV%) computed from each clock's own
+/// summary, clock-named so they are unambiguous under either gate.
 fn context_side(
     metric: GatedMetric,
     m: &LevelMetrics,
@@ -614,12 +656,25 @@ fn context_side(
     let total = m.metrics.total_ms.median;
     let total_p50_ms = (metric == GatedMetric::ServerMs && total.is_finite() && total > 0.0)
         .then_some(total);
+    // Server-clock stats degrade exactly like every other server column: absent whenever the
+    // side has no valid server time (same finite-and-positive-median rule as the p50 columns).
+    let server = &m.metrics.server_ms;
+    let server_valid = server.median.is_finite() && server.median > 0.0;
+    // Derived dispersion stats are rounded to 6 decimals: sub-nanosecond precision is noise,
+    // and short decimals keep the cells JSON compact and byte-stable across serde round-trips.
+    let round6 = |v: Option<f64>| v.map(|x| (x * 1e6).round() / 1e6);
     CellContextSide {
         p90_ms: s.p90,
         p95_ms: s.p95,
         p99_ms: s.p99,
         throughput_ops_per_sec: m.throughput_ops_per_sec,
         total_p50_ms,
+        n: m.metrics.total_ms.n,
+        n_server: server_valid.then_some(server.n),
+        server_stddev_ms: round6(if server_valid { server.sample_stddev() } else { None }),
+        server_cv_pct: round6(if server_valid { server.cv_pct() } else { None }),
+        total_stddev_ms: round6(m.metrics.total_ms.sample_stddev()),
+        total_cv_pct: round6(m.metrics.total_ms.cv_pct()),
     }
 }
 
@@ -738,6 +793,11 @@ fn analyze_op(
         op_outcome,
         skipped_baseline,
         skipped_candidate,
+        // Candidate first (the run under test), baseline as the fallback — deterministic, and
+        // normally identical on both sides of a comparable pair (same workload_hash).
+        example_query: [candidate, baseline]
+            .iter()
+            .find_map(|r| r.operations.get(op).and_then(|o| o.example_query.clone())),
         cells,
     }
 }
@@ -965,6 +1025,7 @@ mod tests {
                     result_digest: digest.map(str::to_string),
                     policy: None,
                     skipped: None,
+                    example_query: None,
                 },
             );
         }
@@ -1771,6 +1832,94 @@ mod tests {
         let cell = &server.ops["match_by_index"].cells[0];
         assert_eq!(cell.perf_verdict, Verdict::Ok);
         assert_eq!(cell.context.candidate.unwrap().total_p50_ms, None);
+    }
+
+    #[test]
+    fn cell_context_carries_within_run_dispersion_stats() {
+        // Each side's context carries the within-run sample count and dispersion of both
+        // clocks: n (retained total_ms cohort), n_server, sample σ (n−1) and CV% — all rounded
+        // to 6 decimals so the cells JSON stays compact and byte-stable across serde round-trips.
+        let a = rpt("main", 42001, &[("match_by_index", 2.0, Some("d1"))]);
+        let b = rpt("pr", 42002, &[("match_by_index", 2.0, Some("d1"))]);
+        let an = server_gate(&a, &b);
+        let side = an.ops["match_by_index"].cells[0].context.baseline.unwrap();
+        assert_eq!(side.n, 100);
+        assert_eq!(side.n_server, Some(100));
+        // summ(2.0): population σ = 0.2 over n = 100 ⇒ sample σ = 0.2·√(100/99) ≈ 0.201008.
+        assert_eq!(side.server_stddev_ms, Some(0.201008));
+        assert_eq!(side.server_cv_pct, Some(10.050378));
+        // Both fixture clocks share the same summary, so the total_ms stats match.
+        assert_eq!(side.total_stddev_ms, Some(0.201008));
+        assert_eq!(side.total_cv_pct, Some(10.050378));
+    }
+
+    #[test]
+    fn dispersion_stats_degrade_with_invalid_server_median() {
+        // No valid server time on a side (median 0/NaN — a report predating server-time
+        // capture): its server-clock stats and n_server are absent, exactly like the server p50
+        // columns; the wall-clock stats survive because total_ms is always captured.
+        let a = rpt("main", 42001, &[("match_by_index", 2.0, Some("d1"))]);
+        let mut b = rpt("pr", 42002, &[("match_by_index", 2.0, Some("d1"))]);
+        set_server_median(&mut b, "match_by_index", 0.0);
+        let an = server_gate(&a, &b);
+        let side = an.ops["match_by_index"].cells[0].context.candidate.unwrap();
+        assert_eq!(side.n, 100, "the wall-clock cohort is still counted");
+        assert_eq!(side.n_server, None);
+        assert_eq!(side.server_stddev_ms, None);
+        assert_eq!(side.server_cv_pct, None);
+        assert_eq!(side.total_stddev_ms, Some(0.201008));
+        assert_eq!(side.total_cv_pct, Some(10.050378));
+    }
+
+    #[test]
+    fn example_query_prefers_candidate_and_falls_back_to_baseline() {
+        // The op-level example query is additive context: the candidate's recorded text wins
+        // (it reflects what THIS run measured), an older candidate report without the field
+        // falls back to the baseline's, and the field is omitted when neither side carries one.
+        let mut a = rpt("main", 42001, &[("match_by_index", 1.0, Some("d1"))]);
+        let mut b = rpt("pr", 42002, &[("match_by_index", 1.0, Some("d1"))]);
+        a.operations.get_mut("match_by_index").unwrap().example_query =
+            Some("MATCH (old) RETURN old".to_string());
+        b.operations.get_mut("match_by_index").unwrap().example_query =
+            Some("MATCH (new) RETURN new".to_string());
+        let an = gate(&a, &b);
+        assert_eq!(
+            an.ops["match_by_index"].example_query.as_deref(),
+            Some("MATCH (new) RETURN new"),
+            "candidate wins"
+        );
+        assert!(an.to_json().unwrap().contains("\"example_query\""));
+
+        b.operations.get_mut("match_by_index").unwrap().example_query = None;
+        let an = gate(&a, &b);
+        assert_eq!(
+            an.ops["match_by_index"].example_query.as_deref(),
+            Some("MATCH (old) RETURN old"),
+            "baseline fallback"
+        );
+
+        a.operations.get_mut("match_by_index").unwrap().example_query = None;
+        let an = gate(&a, &b);
+        assert_eq!(an.ops["match_by_index"].example_query, None);
+        assert!(!an.to_json().unwrap().contains("example_query"), "omitted when absent");
+    }
+
+    #[test]
+    fn old_cells_json_without_dispersion_fields_still_deserializes() {
+        // Cells JSON written before the dispersion stats existed (schema v2, additive change):
+        // the new fields default — n = 0 (meaning "not recorded", which renderers omit) and the
+        // optional stats stay None.
+        let side: CellContextSide = serde_json::from_str(
+            r#"{"p90_ms":1.2,"p95_ms":1.3,"p99_ms":1.5,"throughput_ops_per_sec":1000.0}"#,
+        )
+        .unwrap();
+        assert_eq!(side.n, 0);
+        assert_eq!(side.n_server, None);
+        assert_eq!(side.server_stddev_ms, None);
+        assert_eq!(side.server_cv_pct, None);
+        assert_eq!(side.total_stddev_ms, None);
+        assert_eq!(side.total_cv_pct, None);
+        assert_eq!(side.total_p50_ms, None);
     }
 
     #[test]

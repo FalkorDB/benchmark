@@ -947,6 +947,7 @@ mod regression_guard_tests {
                     result_digest: dig.map(|s| s.to_string()),
                     policy: None,
                     skipped: None,
+                    example_query: None,
                 },
             );
         }

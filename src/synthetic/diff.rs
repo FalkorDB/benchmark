@@ -98,9 +98,16 @@ pub fn diff_markdown(
         "\n_Δ is 100·(candidate−baseline)/baseline. Latency percentiles and Δp50 are the \
          **server-reported execution time** (`server_ms`); the client-observed total p50 rides \
          along as an informational sub-line. **Latency: lower is better** (a positive Δ = \
-         slower / regressed); **throughput: higher is better**. `—` = not measured in that run \
-         (or, in a latency column, no valid server time on that side — e.g. a report predating \
-         server-time capture or an engine that doesn't report execution time)._\n",
+         slower / regressed); **throughput: higher is better**. Each side's `n / σ (ms) / CV` \
+         describes its own **within-run** dispersion of `server_ms` (not run-to-run noise): \
+         `n` = samples retained after severe-outlier removal (pooled across the C workers), \
+         `σ` = their **sample** standard deviation (n−1 denominator), `CV` = 100·σ/mean; when \
+         only part of the retained cohort carries a server time (older engines), `n (server m)` \
+         names both counts. `—` = not measured in that run (or, in a latency/σ/CV column, no \
+         valid server time on that side — e.g. a report predating server-time capture or an \
+         engine that doesn't report execution time). Each op's `example query` block shows its \
+         first measured command (cached-mode base text; uncached appends a unique cache-buster \
+         comment)._\n",
     );
     for w in warnings {
         out.push_str(&format!("\n> ⚠ {w}\n"));
@@ -122,6 +129,15 @@ pub fn diff_markdown(
         // (design Phase 6 §3.5), per side; reasons are manifest content, hence HTML-escaped.
         if let Some(note) = diff_skip_note(baseline, candidate, op, &la, &lb) {
             out.push_str(&format!("\n_{}_\n", md_cell(&md_inline(&html_escape(&note)))));
+        }
+        // The op's deterministic representative query, collapsed so the diff stays compact.
+        // Both sides of a comparable pair measured the same workload; candidate (the run under
+        // test) wins when both carry a text.
+        if let Some(example) = [candidate, baseline]
+            .iter()
+            .find_map(|r| r.operations.get(op).and_then(|o| o.example_query.as_deref()))
+        {
+            out.push_str(&example_query_block(example));
         }
         for mode in [Mode::Cached, Mode::Uncached] {
             render_mode(&mut out, baseline, candidate, op, mode);
@@ -195,14 +211,16 @@ fn render_mode(
     let la = md_cell(&col_label(a, "A"));
     let lb = md_cell(&col_label(b, "B"));
     out.push_str(&format!(
-        "| C | {la} server p50/p90/p95/p99 (ms) | {lb} server p50/p90/p95/p99 (ms) | Δp50 | {la} tput (ops/s) | {lb} tput (ops/s) | Δtput |\n\
-         |---:|---|---|---:|---:|---:|---:|\n",
+        "| C | {la} server p50/p90/p95/p99 (ms) | {la} n / σ (ms) / CV | {lb} server p50/p90/p95/p99 (ms) | {lb} n / σ (ms) / CV | Δp50 | {la} tput (ops/s) | {lb} tput (ops/s) | Δtput |\n\
+         |---:|---|---:|---|---:|---:|---:|---:|---:|\n",
     ));
     for c in levels {
         let am = level_metrics(a, op, c, mode);
         let bm = level_metrics(b, op, c, mode);
         let a_pct = am.map(percentiles).unwrap_or_else(|| "—".to_string());
         let b_pct = bm.map(percentiles).unwrap_or_else(|| "—".to_string());
+        let a_disp = am.map(dispersion_cell).unwrap_or_else(|| "—".to_string());
+        let b_disp = bm.map(dispersion_cell).unwrap_or_else(|| "—".to_string());
         let dp50 = match (am.map(server_median), bm.map(server_median)) {
             (Some(Some(x)), Some(Some(y))) => pct(x, y),
             _ => "—".to_string(),
@@ -214,7 +232,7 @@ fn render_mode(
             _ => "—".to_string(),
         };
         out.push_str(&format!(
-            "| {c} | {a_pct} | {b_pct} | {dp50} | {a_tp} | {b_tp} | {dtp} |\n"
+            "| {c} | {a_pct} | {a_disp} | {b_pct} | {b_disp} | {dp50} | {a_tp} | {b_tp} | {dtp} |\n"
         ));
     }
 }
@@ -261,24 +279,108 @@ fn percentiles(m: &LevelMetrics) -> String {
     }
 }
 
+/// A diff-table `n / σ (ms) / CV` cell: the retained-sample count with the **within-run**
+/// sample standard deviation and coefficient of variation of `server_ms` — see
+/// [`format_dispersion`]. σ/CV degrade to `—` exactly like the server latency columns when the
+/// side carries no valid server time.
+fn dispersion_cell(m: &LevelMetrics) -> String {
+    let server_valid = server_median(m).is_some();
+    let server = &m.metrics.server_ms;
+    format_dispersion(
+        " / ",
+        m.metrics.total_ms.n,
+        server_valid.then_some(server.n),
+        if server_valid { server.sample_stddev() } else { None },
+        if server_valid { server.cv_pct() } else { None },
+    )
+}
+
+/// Format one side's within-run dispersion stats (`n`, sample σ of `server_ms` in ms, CV%),
+/// joined by `sep`. `n` is the retained `total_ms` cohort (the always-captured wall clock);
+/// when the server-time cohort exists but differs — possible only on foreign/older reports —
+/// both counts are named (`n (server m)`). Undefined σ/CV (no valid server time, or n < 2)
+/// render `—`, mirroring the server latency columns.
+fn format_dispersion(
+    sep: &str,
+    n: usize,
+    n_server: Option<usize>,
+    stddev_ms: Option<f64>,
+    cv_pct: Option<f64>,
+) -> String {
+    let n_cell = match n_server {
+        Some(ns) if ns != n => format!("{n} (server {ns})"),
+        _ => n.to_string(),
+    };
+    let sd = stddev_ms.map(|s| format!("{s:.3}")).unwrap_or_else(|| "—".to_string());
+    let cv = cv_pct.map(|c| format!("{c:.1}%")).unwrap_or_else(|| "—".to_string());
+    format!("{n_cell}{sep}{sd}{sep}{cv}")
+}
+
+/// Maximum number of characters of an example query rendered into the Markdown reports. The
+/// full corpus is ~64 ops and the regression report doubles as a sticky PR comment capped at
+/// ~65 KB by GitHub, so very long recorded texts are cut with an explicit truncation note.
+const EXAMPLE_QUERY_MAX_CHARS: usize = 600;
+
+/// A collapsed `<details>` block showing an op's deterministic example query as a fenced
+/// `cypher` code block. The fence is made longer than any backtick run inside the text (Cypher
+/// identifiers may be backtick-quoted, and a recorded text could otherwise close the fence), and
+/// texts beyond [`EXAMPLE_QUERY_MAX_CHARS`] are truncated with a note naming both lengths.
+/// Rendering is pure — the same text always produces the same block.
+fn example_query_block(text: &str) -> String {
+    let total = text.chars().count();
+    let (shown, truncated): (String, bool) = if total > EXAMPLE_QUERY_MAX_CHARS {
+        (text.chars().take(EXAMPLE_QUERY_MAX_CHARS).collect(), true)
+    } else {
+        (text.to_string(), false)
+    };
+    // A fenced block is delimited by a backtick run at least as long as any inside it.
+    let longest_run = shown
+        .split(|ch| ch != '`')
+        .map(str::len)
+        .max()
+        .unwrap_or(0);
+    let fence = "`".repeat((longest_run + 1).max(3));
+    let mut out = format!(
+        "\n<details><summary>example query</summary>\n\n{fence}cypher\n{shown}\n{fence}\n",
+    );
+    if truncated {
+        out.push_str(&format!(
+            "\n_truncated — showing the first {EXAMPLE_QUERY_MAX_CHARS} of {total} characters_\n"
+        ));
+    }
+    out.push_str("\n</details>\n");
+    out
+}
+
 /// A regression-table latency cell: the gated **p50** on the primary line, with p90/p95/p99,
-/// throughput and — under the server-ms gate — the demoted client-observed total p50 folded onto
-/// a smaller `context:` line (informational, never gated, appended only when the report carries
-/// it). `—` only when the side's p50 is absent. Values are fixed-precision measurements, so no
-/// operator-supplied text is interpolated (no `md_cell` escaping needed).
+/// throughput, the within-run `n`/σ/CV of `server_ms` and — under the server-ms gate — the
+/// demoted client-observed total p50 folded onto a smaller `context:` line (informational, never
+/// gated, appended only when the report carries it). `—` only when the side's p50 is absent.
+/// Values are fixed-precision measurements, so no operator-supplied text is interpolated (no
+/// `md_cell` escaping needed).
 fn latency_cell(
     p50: Option<f64>,
     ctx: Option<&CellContextSide>,
 ) -> String {
     match (p50, ctx) {
         (Some(p50), Some(c)) => {
+            // A zero `n` means the model predates the dispersion stats (deserialized old cells
+            // JSON) — omit the segment rather than claim zero samples.
+            let disp = if c.n > 0 {
+                format!(
+                    " · n/σ/CV {}",
+                    format_dispersion("/", c.n, c.n_server, c.server_stddev_ms, c.server_cv_pct)
+                )
+            } else {
+                String::new()
+            };
             let total = c
                 .total_p50_ms
                 .map(|t| format!(" · total p50 {t:.3}"))
                 .unwrap_or_default();
             format!(
-                "{:.3}<br><sub>context: p90 {:.3} · p95 {:.3} · p99 {:.3} · {:.0} op/s{}</sub>",
-                p50, c.p90_ms, c.p95_ms, c.p99_ms, c.throughput_ops_per_sec, total
+                "{:.3}<br><sub>context: p90 {:.3} · p95 {:.3} · p99 {:.3} · {:.0} op/s{}{}</sub>",
+                p50, c.p90_ms, c.p95_ms, c.p99_ms, c.throughput_ops_per_sec, disp, total
             )
         }
         (Some(p50), None) => format!("{p50:.3}"),
@@ -456,6 +558,12 @@ pub fn regression_markdown(analysis: &RegressionAnalysis) -> String {
         if op_body.trim().is_empty() {
             continue;
         }
+        // The op's deterministic representative query, nested-collapsed so the sticky PR comment
+        // stays compact. Appended only to ops that render a section anyway — an example alone
+        // never resurrects a section for a cell-less op.
+        if let Some(example) = &oa.example_query {
+            op_body.push_str(&example_query_block(example));
+        }
         let diverged_note = if oa.correctness == Correctness::Diverged {
             match analysis.divergence_policy {
                 DivergencePolicy::Gate => " — ⚠ results differ (perf verdict N/A)",
@@ -505,21 +613,28 @@ pub fn regression_markdown(analysis: &RegressionAnalysis) -> String {
     // The context descriptor matches what the cells actually fold in: under the server gate the
     // client-observed total p50 rides along as demoted context.
     let context_clause = if analysis.gated_on_server_ms() {
-        "the `context:` line (p90/p95/p99 · throughput · client-observed total p50)"
+        "the `context:` line (p90/p95/p99 · throughput · within-run n/σ/CV of `server_ms` · \
+         client-observed total p50)"
     } else {
-        "the `context:` line (p90/p95/p99 · throughput)"
+        "the `context:` line (p90/p95/p99 · throughput · within-run n/σ/CV of `server_ms`)"
     };
+    // The dispersion stats' one-line definition, shared by both policies' legends.
+    let stats_clause = "n = samples retained after severe-outlier removal (pooled across the C \
+                        workers; `n (server m)` when only `m` carry a server time); σ = their \
+                        **sample** standard deviation (n−1) of `server_ms` **within this run** — \
+                        not run-to-run noise; CV = 100·σ/mean.";
     out.push_str(&match analysis.divergence_policy {
         DivergencePolicy::Gate => format!(
             "\n🟢 = faster or within budget · 🔴 = slower than budget **or** results differ · \
              N/A = no perf verdict. {metric_clause} — {context_clause} \
-             and `Δms` are informational, never part of the verdict. Non-blocking.\n"
+             and `Δms` are informational, never part of the verdict. {stats_clause} \
+             Non-blocking.\n"
         ),
         DivergencePolicy::Advisory => format!(
             "\n🟢 = faster or within budget · 🔴 = slower than budget · ⚠ = results differ \
              (advisory — the engines did different work, so perf is N/A) · N/A = no perf verdict. \
              {metric_clause} — {context_clause} and `Δms` are \
-             informational, never part of the verdict. Non-blocking.\n"
+             informational, never part of the verdict. {stats_clause} Non-blocking.\n"
         ),
     });
     if analysis.totals.skipped > 0 {
@@ -974,6 +1089,7 @@ mod tests {
                 result_digest: Some("sha256:aa".to_string()),
                 policy: None,
                 skipped: None,
+                example_query: Some("MATCH (u:User {id: $id}) RETURN u".to_string()),
             },
         );
         Report {
@@ -1051,14 +1167,150 @@ mod tests {
         set_server_median(&mut a, 0.0);
         let md = diff_markdown(&a, &b, &[]);
         assert!(
-            md.contains("| —<br><sub>total p50 1.000</sub> |"),
-            "missing server side degrades to — with demoted total: {md}"
+            md.contains("| —<br><sub>total p50 1.000</sub> | 100 / — / — |"),
+            "missing server side degrades to — with demoted total and — σ/CV: {md}"
         );
         assert!(
-            md.contains("</sub> | — |"),
+            md.contains("10.1% | — |"),
             "Δp50 must be — when either server median is invalid: {md}"
         );
         assert!(md.contains("predating server-time capture"), "legend explains —: {md}");
+    }
+
+    #[test]
+    fn diff_renders_dispersion_columns_and_example_query() {
+        let a = report(42001, 1.000, 1000.0);
+        let b = report(42002, 1.100, 900.0);
+        let md = diff_markdown(&a, &b, &[]);
+        // One combined `n / σ (ms) / CV` column per side, right of its percentile column.
+        assert!(
+            md.contains("| A n / σ (ms) / CV |") && md.contains("| B n / σ (ms) / CV |"),
+            "dispersion headers: {md}"
+        );
+        // summ(median): population σ = median·0.1 over n = 100 ⇒ sample σ = ·√(100/99).
+        assert!(md.contains("| 100 / 0.101 / 10.1% |"), "A cell (median 1.0): {md}");
+        assert!(md.contains("| 100 / 0.111 / 10.1% |"), "B cell (median 1.1): {md}");
+        // The op's example query renders as a collapsed details block with a cypher fence.
+        assert!(md.contains("<details><summary>example query</summary>"), "{md}");
+        assert!(
+            md.contains("```cypher\nMATCH (u:User {id: $id}) RETURN u\n```"),
+            "fenced example text: {md}"
+        );
+        // The legend explains the new columns and their within-run scope.
+        assert!(md.contains("**within-run** dispersion"), "{md}");
+        assert!(md.contains("**sample** standard deviation (n−1 denominator)"), "{md}");
+        assert!(md.contains("`n (server m)`"), "{md}");
+    }
+
+    #[test]
+    fn diff_example_query_prefers_the_candidate_text() {
+        let mut a = report(42001, 1.0, 1000.0);
+        let mut b = report(42002, 1.0, 1000.0);
+        a.operations.get_mut("match_by_index").unwrap().example_query =
+            Some("MATCH (base) RETURN base".to_string());
+        b.operations.get_mut("match_by_index").unwrap().example_query =
+            Some("MATCH (cand) RETURN cand".to_string());
+        let md = diff_markdown(&a, &b, &[]);
+        assert!(md.contains("MATCH (cand) RETURN cand"), "candidate text wins: {md}");
+        assert!(!md.contains("MATCH (base) RETURN base"), "{md}");
+        // An older candidate report without the field falls back to the baseline's text.
+        b.operations.get_mut("match_by_index").unwrap().example_query = None;
+        let md = diff_markdown(&a, &b, &[]);
+        assert!(md.contains("MATCH (base) RETURN base"), "baseline fallback: {md}");
+        // Neither side carries one (both reports predate the field): no details block at all.
+        a.operations.get_mut("match_by_index").unwrap().example_query = None;
+        let md = diff_markdown(&a, &b, &[]);
+        assert!(!md.contains("<details><summary>example query</summary>"), "{md}");
+    }
+
+    #[test]
+    fn example_query_block_is_deterministic_and_outruns_inner_backticks() {
+        let text = "MATCH (n:`weird``label`) WHERE n.x = ``` RETURN n";
+        let block = example_query_block(text);
+        assert_eq!(block, example_query_block(text), "pure and deterministic");
+        // The fence must be longer than the longest inner backtick run (3) — 4 backticks.
+        assert!(block.contains("\n````cypher\n"), "{block}");
+        assert!(block.contains("\n````\n"), "{block}");
+        assert!(!block.contains("truncated"), "{block}");
+        // GitHub only renders Markdown inside HTML <details> after a blank line.
+        assert!(block.contains("</summary>\n\n"), "{block}");
+    }
+
+    #[test]
+    fn example_query_block_truncates_very_long_texts() {
+        let text = "x".repeat(700);
+        let block = example_query_block(&text);
+        assert!(block.contains(&"x".repeat(600)), "{block}");
+        assert!(!block.contains(&"x".repeat(601)), "{block}");
+        assert!(
+            block.contains("_truncated — showing the first 600 of 700 characters_"),
+            "{block}"
+        );
+    }
+
+    #[test]
+    fn format_dispersion_names_a_differing_server_cohort() {
+        // In this tool's own reports both cohorts always match (paired capture); a foreign or
+        // older report may carry fewer server-timed samples — both counts are then named.
+        assert_eq!(
+            format_dispersion(" / ", 100, Some(100), Some(0.5), Some(10.0)),
+            "100 / 0.500 / 10.0%"
+        );
+        assert_eq!(
+            format_dispersion(" / ", 100, Some(80), Some(0.5), Some(10.0)),
+            "100 (server 80) / 0.500 / 10.0%"
+        );
+        assert_eq!(format_dispersion("/", 100, None, None, None), "100/—/—");
+    }
+
+    #[test]
+    fn latency_cell_omits_dispersion_for_pre_stats_cells() {
+        use crate::synthetic::analysis::CellContextSide;
+        // n = 0 marks a context deserialized from cells JSON written before the dispersion
+        // stats existed — the segment is omitted rather than claiming zero samples.
+        let old = CellContextSide {
+            p90_ms: 1.2,
+            p95_ms: 1.3,
+            p99_ms: 1.5,
+            throughput_ops_per_sec: 1000.0,
+            total_p50_ms: Some(1.0),
+            n: 0,
+            n_server: None,
+            server_stddev_ms: None,
+            server_cv_pct: None,
+            total_stddev_ms: None,
+            total_cv_pct: None,
+        };
+        let cell = latency_cell(Some(1.0), Some(&old));
+        assert!(!cell.contains("n/σ/CV"), "{cell}");
+        assert!(cell.contains("· total p50 1.000"), "{cell}");
+        // A populated context folds the stats between throughput and the demoted total.
+        let new = CellContextSide {
+            n: 100,
+            n_server: Some(100),
+            server_stddev_ms: Some(0.1),
+            server_cv_pct: Some(10.0),
+            ..old
+        };
+        let cell = latency_cell(Some(1.0), Some(&new));
+        assert!(
+            cell.contains("op/s · n/σ/CV 100/0.100/10.0% · total p50 1.000"),
+            "{cell}"
+        );
+    }
+
+    #[test]
+    fn regression_report_nests_the_example_query_per_op() {
+        use crate::synthetic::baseline::regression_guard;
+        use crate::synthetic::thresholds::Thresholds;
+        let a = report(42001, 1.0, 1000.0);
+        let b = report(42002, 1.0, 1000.0);
+        let g = regression_guard(&a, &b);
+        let md = regression_md(&a, &b, &g, &Thresholds::builtin(), None);
+        assert!(md.contains("<details><summary>example query</summary>"), "{md}");
+        assert!(md.contains("MATCH (u:User {id: $id}) RETURN u"), "{md}");
+        // The legend defines the context-line stats.
+        assert!(md.contains("n = samples retained after severe-outlier removal"), "{md}");
     }
 
     /// Overwrite every level's `server_ms` summary median (fixtures default both clocks equal).
@@ -1386,9 +1638,11 @@ mod tests {
         // Δp50 carries the signed absolute ms delta so the floor is auditable.
         assert!(md.contains("(+0.100)"), "Δms missing: {md}");
         // p90/p99 + throughput are folded onto the context line (not their own columns), with
-        // the demoted client-observed total p50 riding along under the default server gate.
+        // the within-run n/σ/CV and the demoted client-observed total p50 riding along under
+        // the default server gate.
         assert!(
-            md.contains("<br><sub>context: p90 ") && md.contains("op/s · total p50 1.000</sub>"),
+            md.contains("<br><sub>context: p90 ")
+                && md.contains("op/s · n/σ/CV 100/0.101/10.1% · total p50 1.000</sub>"),
             "{md}"
         );
         // The per-line guard shows the resolved default (10%) + floor.
@@ -1449,7 +1703,7 @@ mod tests {
             "demoted total p50 in context: {md}"
         );
         assert!(
-            md.contains("throughput · client-observed total p50)"),
+            md.contains("throughput · within-run n/σ/CV of `server_ms` · client-observed total p50)"),
             "legend names the demoted total: {md}"
         );
         assert!(
@@ -1633,6 +1887,7 @@ mod tests {
                     result_digest: Some("sha256:aa".to_string()),
                     policy: None,
                     skipped: None,
+                    example_query: None,
                 },
             );
         }
@@ -1718,6 +1973,7 @@ mod tests {
                     result_digest: Some((*digest).to_string()),
                     policy: None,
                     skipped: None,
+                    example_query: None,
                 },
             );
         }
