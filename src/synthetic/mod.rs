@@ -2075,6 +2075,45 @@ mod tests {
         assert_eq!(all_uids.len(), concurrency * depth * (warmup + per_lane));
     }
 
+    /// The dispersion cohort under pipelining: a depth-K level drives `C × K` lanes, each
+    /// measuring `lane_samples(samples, K)`, and the engine pools every lane's samples into one
+    /// vector — so the summarized `server_ms` cohort (`Summary.n`, which `context_side` surfaces
+    /// as the cell's `server_n`) counts every lane-measured sample exactly once: no lane dropped,
+    /// none double-counted, and never fewer than the requested `samples` per worker slot.
+    #[tokio::test]
+    async fn pipelined_lanes_pool_into_one_dispersion_cohort() {
+        struct ConstEcho;
+        impl crate::synthetic::engine::OpInvoker for ConstEcho {
+            async fn invoke(
+                &mut self,
+                _seq: u64,
+            ) -> BenchmarkResult<OpSample> {
+                Ok(OpSample {
+                    server_ms: 1.0,
+                    total_ms: 2.0,
+                    rows: 1,
+                    cached: Some(true),
+                    mutations: crate::synthetic::writes::MutationStats::default(),
+                })
+            }
+        }
+
+        let (concurrency, depth, samples, warmup) = (3usize, 4usize, 10usize, 2usize);
+        let per_lane = lane_samples(samples, depth); // 10.div_ceil(4) = 3 — an uneven split
+        let workers: Vec<ConstEcho> = (0..concurrency * depth).map(|_| ConstEcho).collect();
+        let run = run_closed_loop(workers, warmup, per_lane).await.unwrap();
+
+        let pooled = concurrency * depth * per_lane;
+        assert_eq!(run.samples.len(), pooled, "every lane's samples pooled exactly once");
+        assert!(pooled >= concurrency * samples, "round-up never under-measures a level");
+
+        // Constant latencies ⇒ no severe outliers ⇒ the retained server cohort is the pooled
+        // count, and its median is valid — exactly what analysis reports as server_n.
+        let metrics = summarize_samples(&run.samples).unwrap();
+        assert_eq!(metrics.server_ms.n, pooled);
+        assert_eq!(metrics.server_ms.median, 1.0);
+    }
+
     #[test]
     fn example_query_uses_the_first_rendered_read() {
         let op_spec = spec(OpName::MatchByIndex);
