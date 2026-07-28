@@ -1843,6 +1843,7 @@ async fn run_falkor_graph_queries(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn spawn_falkor_worker(
     mut client: benchmark::falkor::FalkorBenchmarkClient,
     worker_id: usize,
@@ -2316,6 +2317,7 @@ struct PrepareQueriesMetadata {
     #[serde(default)]
     catalog: Vec<QueryCatalogEntry>,
 }
+#[allow(clippy::too_many_arguments)]
 async fn prepare_queries(
     vendor: Vendor,
     dataset: Size,
