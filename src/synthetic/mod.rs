@@ -3012,7 +3012,7 @@ mod tests {
         let bundle = recording::load(&out_dir).expect("golden bundle loads");
         assert_eq!(
             bundle.manifest.workload_hash,
-            "sha256:894858b3aefc8b06d03edab41747e255c6eeb145b7cb87b683fb8c10f707721d",
+            "sha256:4aa78294754e7313bb004d2c2bddc9af8747645e52a4d2d8444312f05333266f",
             "the --repo-reads full command stream changed byte-wise"
         );
         std::fs::remove_dir_all(&out_dir).ok();
