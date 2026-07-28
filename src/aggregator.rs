@@ -20,6 +20,7 @@ struct RunResultsMeta {
     started_at_epoch_secs: u64,
     finished_at_epoch_secs: u64,
     elapsed_ms: u128,
+    engine_version: Option<String>,
 }
 
 type MetricLabels = BTreeMap<String, String>;
@@ -110,15 +111,42 @@ struct UiResult {
     )]
     histogram_for_type: BTreeMap<String, Vec<f64>>,
     #[serde(
+        rename = "histogram_for_type_by_size",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    histogram_for_type_by_size: BTreeMap<String, BTreeMap<String, Vec<f64>>>,
+    #[serde(
         rename = "telemetry_for_type",
         skip_serializing_if = "BTreeMap::is_empty"
     )]
     telemetry_for_type: BTreeMap<String, UiTelemetryBreakdown>,
+    #[serde(
+        rename = "timeout_rate_for_type",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    timeout_rate_for_type: BTreeMap<String, f64>,
+    #[serde(
+        rename = "failure_rate_for_type",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    failure_rate_for_type: BTreeMap<String, f64>,
+    #[serde(
+        rename = "global-timeout-rate-pct",
+        skip_serializing_if = "Option::is_none"
+    )]
+    global_timeout_rate_pct: Option<f64>,
+    #[serde(
+        rename = "global-failure-rate-pct",
+        skip_serializing_if = "Option::is_none"
+    )]
+    global_failure_rate_pct: Option<f64>,
 }
 
 #[derive(Debug, Serialize)]
 struct UiRun {
     vendor: String,
+    #[serde(rename = "engine-version", skip_serializing_if = "Option::is_none")]
+    engine_version: Option<String>,
     #[serde(rename = "read-write-ratio")]
     read_write_ratio: f64,
     clients: u64,
@@ -694,9 +722,19 @@ fn build_ui_run_custom(v: &CustomRunArtifacts) -> BenchmarkResult<UiRun> {
     let spawn_stats = compute_spawn_stats(&operations.by_spawn);
 
     let histogram_for_type = metrics.query_latency_histogram_ms(v.vendor);
+    let histogram_for_type_by_size = metrics.query_latency_histogram_ms_by_size(v.vendor);
     let telemetry_for_type = metrics.telemetry_for_type(v.vendor);
+    let timeout_rate_for_type =
+        metrics.query_rate_for_type("benchmark_query_timeout_rate_pct", v.vendor);
+    let failure_rate_for_type =
+        metrics.query_rate_for_type("benchmark_query_failure_rate_pct", v.vendor);
+    let global_timeout_rate_pct =
+        metrics.global_rate("benchmark_global_timeout_rate_pct", v.vendor);
+    let global_failure_rate_pct =
+        metrics.global_rate("benchmark_global_failure_rate_pct", v.vendor);
     Ok(UiRun {
         vendor: v.ui_vendor.clone(),
+        engine_version: v.meta.engine_version.clone(),
         read_write_ratio: 0.0,
         clients: v.meta.parallel as u64,
         platform: v.ui_platform.clone(),
@@ -723,7 +761,12 @@ fn build_ui_run_custom(v: &CustomRunArtifacts) -> BenchmarkResult<UiRun> {
             operations,
             spawn_stats,
             histogram_for_type,
+            histogram_for_type_by_size,
             telemetry_for_type,
+            timeout_rate_for_type,
+            failure_rate_for_type,
+            global_timeout_rate_pct,
+            global_failure_rate_pct,
         },
     })
 }
@@ -852,7 +895,7 @@ impl MetricsIndex {
             Vendor::Neo4j => "neo4j_query_latency_pct_us",
             Vendor::Memgraph => "memgraph_query_latency_pct_us",
         };
-        let timeout_metric = match vendor {
+        let timeout_metric_legacy = match vendor {
             Vendor::Memgraph => Some("memgraph_query_timeout_rate_pct"),
             _ => None,
         };
@@ -888,12 +931,25 @@ impl MetricsIndex {
 
         // query -> timeout rate percentage
         let mut timeout_rates: BTreeMap<String, f64> = BTreeMap::new();
-        if let Some(timeout_metric_name) = timeout_metric {
+        if let Some(timeout_metric_name) = timeout_metric_legacy {
             if let Some(timeout_samples) = self.samples.get(timeout_metric_name) {
                 for (labels, value) in timeout_samples {
                     let Some(query) = labels.get("query").cloned() else {
                         continue;
                     };
+                    timeout_rates.insert(query, *value);
+                }
+            }
+        }
+        if let Some(samples) = self.samples.get("benchmark_query_timeout_rate_pct") {
+            for (labels, value) in samples {
+                let Some(query) = labels.get("query").cloned() else {
+                    continue;
+                };
+                let Some(vendor_label) = labels.get("vendor") else {
+                    continue;
+                };
+                if vendor_label == &vendor.to_string() {
                     timeout_rates.insert(query, *value);
                 }
             }
@@ -916,6 +972,90 @@ impl MetricsIndex {
             // Only keep queries with at least one non-zero percentile.
             if arr.iter().any(|v| *v > 0.0) {
                 out.insert(query, arr);
+            }
+        }
+
+        out
+    }
+
+    fn query_latency_histogram_ms_by_size(
+        &self,
+        vendor: Vendor,
+    ) -> BTreeMap<String, BTreeMap<String, Vec<f64>>> {
+        let metric = match vendor {
+            Vendor::Falkor => "falkordb_query_latency_pct_us_by_size",
+            Vendor::Neo4j => "neo4j_query_latency_pct_us_by_size",
+            Vendor::Memgraph => "memgraph_query_latency_pct_us_by_size",
+        };
+
+        let samples = self.samples.get(metric).cloned().unwrap_or_default();
+
+        let wanted_pcts: [(&str, f64); 11] = [
+            ("10", 10.0),
+            ("20", 20.0),
+            ("30", 30.0),
+            ("40", 40.0),
+            ("50", 50.0),
+            ("60", 60.0),
+            ("70", 70.0),
+            ("80", 80.0),
+            ("90", 90.0),
+            ("95", 95.0),
+            ("99", 99.0),
+        ];
+
+        let mut by_size_query_pct: BTreeMap<String, BTreeMap<String, BTreeMap<String, f64>>> =
+            BTreeMap::new();
+        for (labels, value) in &samples {
+            let Some(size) = labels.get("size").cloned() else {
+                continue;
+            };
+            let Some(query) = labels.get("query").cloned() else {
+                continue;
+            };
+            let Some(pct) = labels.get("pct").cloned() else {
+                continue;
+            };
+            by_size_query_pct
+                .entry(size)
+                .or_default()
+                .entry(query)
+                .or_default()
+                .insert(pct, *value);
+        }
+
+        let timeout_rates_by_size =
+            self.query_rate_for_type_by_size("benchmark_query_timeout_rate_pct_by_size", vendor);
+
+        let mut out: BTreeMap<String, BTreeMap<String, Vec<f64>>> = BTreeMap::new();
+        for (size, by_query_pct) in &by_size_query_pct {
+            let mut queries: BTreeSet<String> = BTreeSet::new();
+            queries.extend(by_query_pct.keys().cloned());
+            if let Some(by_query_timeout) = timeout_rates_by_size.get(size) {
+                queries.extend(by_query_timeout.keys().cloned());
+            }
+
+            let mut by_query_hist: BTreeMap<String, Vec<f64>> = BTreeMap::new();
+            for query in queries {
+                let mut arr = Vec::with_capacity(wanted_pcts.len() + 1);
+                let by_pct = by_query_pct.get(&query);
+                for (label, _p) in wanted_pcts {
+                    let us = by_pct.and_then(|v| v.get(label)).copied().unwrap_or(0.0);
+                    arr.push(us / 1000.0);
+                }
+                let timeout_pct = timeout_rates_by_size
+                    .get(size)
+                    .and_then(|m| m.get(&query))
+                    .copied()
+                    .unwrap_or(0.0);
+                arr.push(timeout_pct);
+                if arr.iter().any(|v| *v > 0.0) {
+                    by_query_hist.insert(query, arr);
+                }
+            }
+
+            if !by_query_hist.is_empty() {
+                out.insert(size.clone(), by_query_hist);
             }
         }
 
@@ -980,6 +1120,72 @@ impl MetricsIndex {
         }
 
         out
+    }
+
+    fn query_rate_for_type(
+        &self,
+        metric: &str,
+        vendor: Vendor,
+    ) -> BTreeMap<String, f64> {
+        let mut out = BTreeMap::new();
+        if let Some(samples) = self.samples.get(metric) {
+            for (labels, value) in samples {
+                let Some(vendor_label) = labels.get("vendor") else {
+                    continue;
+                };
+                if vendor_label != &vendor.to_string() {
+                    continue;
+                }
+                let Some(query) = labels.get("query").cloned() else {
+                    continue;
+                };
+                out.insert(query, *value);
+            }
+        }
+        out
+    }
+
+    fn query_rate_for_type_by_size(
+        &self,
+        metric: &str,
+        vendor: Vendor,
+    ) -> BTreeMap<String, BTreeMap<String, f64>> {
+        let mut out: BTreeMap<String, BTreeMap<String, f64>> = BTreeMap::new();
+        if let Some(samples) = self.samples.get(metric) {
+            for (labels, value) in samples {
+                let Some(vendor_label) = labels.get("vendor") else {
+                    continue;
+                };
+                if vendor_label != &vendor.to_string() {
+                    continue;
+                }
+                let Some(size) = labels.get("size").cloned() else {
+                    continue;
+                };
+                let Some(query) = labels.get("query").cloned() else {
+                    continue;
+                };
+                out.entry(size).or_default().insert(query, *value);
+            }
+        }
+        out
+    }
+
+    fn global_rate(
+        &self,
+        metric: &str,
+        vendor: Vendor,
+    ) -> Option<f64> {
+        let samples = self.samples.get(metric)?;
+        for (labels, value) in samples {
+            let Some(vendor_label) = labels.get("vendor") else {
+                continue;
+            };
+            if vendor_label == &vendor.to_string() {
+                return Some(*value);
+            }
+        }
+        None
     }
 
     fn histogram(

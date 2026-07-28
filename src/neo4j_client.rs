@@ -175,15 +175,14 @@ impl Neo4jClient {
         let q = r#"
 SHOW PROCEDURES
 YIELD name
-WITH collect(toLower(name)) AS names
 RETURN
-  size([n IN names WHERE n = 'gds.graph.project']) AS graph_project_count,
-  size([n IN names WHERE n = 'gds.graph.exists']) AS graph_exists_count,
-  size([n IN names WHERE n = 'gds.graph.drop']) AS graph_drop_count,
-  size([n IN names WHERE n = 'gds.pagerank.stream']) AS pagerank_count,
-  size([n IN names WHERE n = 'gds.maxflow.stats']) AS max_flow_count,
-  size([n IN names WHERE n = 'gds.spanningtree.stats']) AS spanning_tree_count,
-  size([n IN names WHERE n = 'gds.closeness.harmonic.stream']) AS harmonic_count
+  count(CASE WHEN toLower(name) = 'gds.graph.project' THEN 1 END) AS graph_project_count,
+  count(CASE WHEN toLower(name) = 'gds.graph.exists' THEN 1 END) AS graph_exists_count,
+  count(CASE WHEN toLower(name) = 'gds.graph.drop' THEN 1 END) AS graph_drop_count,
+  count(CASE WHEN toLower(name) = 'gds.pagerank.stream' THEN 1 END) AS pagerank_count,
+  count(CASE WHEN toLower(name) = 'gds.maxflow.stats' THEN 1 END) AS max_flow_count,
+  count(CASE WHEN toLower(name) = 'gds.spanningtree.stats' THEN 1 END) AS spanning_tree_count,
+  count(CASE WHEN toLower(name) = 'gds.closeness.harmonic.stream' THEN 1 END) AS harmonic_count
 "#;
 
         let mut result = self.graph.execute(query(q)).await.map_err(Neo4rsError)?;
@@ -216,11 +215,10 @@ RETURN
         let q = r#"
 SHOW PROCEDURES
 YIELD name
-WITH collect(toLower(name)) AS names
 RETURN
-  size([n IN names WHERE n = 'db.index.vector.querynodes']) AS vector_query_nodes_count,
-  size([n IN names WHERE n = 'db.index.fulltext.querynodes']) AS fulltext_query_nodes_count,
-  size([n IN names WHERE n = 'db.index.fulltext.queryrelationships']) AS fulltext_query_relationships_count
+  count(CASE WHEN toLower(name) = 'db.index.vector.querynodes' THEN 1 END) AS vector_query_nodes_count,
+  count(CASE WHEN toLower(name) = 'db.index.fulltext.querynodes' THEN 1 END) AS fulltext_query_nodes_count,
+  count(CASE WHEN toLower(name) = 'db.index.fulltext.queryrelationships' THEN 1 END) AS fulltext_query_relationships_count
 "#;
 
         let mut result = self.graph.execute(query(q)).await.map_err(Neo4rsError)?;
@@ -240,6 +238,24 @@ RETURN
             has_fulltext_query_nodes: fulltext_query_nodes_count > 0,
             has_fulltext_query_relationships: fulltext_query_relationships_count > 0,
         })
+    }
+
+    pub async fn detect_engine_version(&self) -> BenchmarkResult<Option<String>> {
+        let q = r#"
+CALL dbms.components()
+YIELD name, versions
+RETURN name, versions[0] AS version
+LIMIT 1
+"#;
+        let mut result = self.graph.execute(query(q)).await.map_err(Neo4rsError)?;
+        if let Some(row) = result.next().await.map_err(Neo4rsError)? {
+            let name = row.get::<String>("name").unwrap_or_else(|_| "Neo4j".to_string());
+            let version = row.get::<String>("version").unwrap_or_default();
+            if !version.trim().is_empty() {
+                return Ok(Some(format!("{} {}", name, version)));
+            }
+        }
+        Ok(None)
     }
 
     pub async fn ensure_algorithm_projection(

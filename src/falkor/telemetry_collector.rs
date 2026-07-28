@@ -86,6 +86,15 @@ async fn xread_block(
         .await
 }
 
+fn is_expected_block_timeout(e: &redis::RedisError) -> bool {
+    // With XREAD BLOCK, some Redis client stacks may surface a transport-level
+    // timeout instead of returning an empty stream result when no new entries
+    // arrive within the block window. Treat this as an expected idle poll.
+    e.is_timeout()
+        || (matches!(e.kind(), redis::ErrorKind::Io)
+            && e.to_string().to_ascii_lowercase().contains("timed out"))
+}
+
 /// Start a background task that reads FalkorDB telemetry and exports
 /// per-query-type average wait/exec/report durations to Prometheus.
 ///
@@ -179,6 +188,9 @@ pub fn spawn_falkor_telemetry_collector(
                 }
                 Ok(_) => {
                     // No entries; fall through to flush check.
+                }
+                Err(e) if is_expected_block_timeout(&e) => {
+                    // Expected idle timeout for BLOCK reads; do not log as an error.
                 }
                 Err(e) => {
                     info!("Error reading Falkor telemetry stream: {:?}", e);

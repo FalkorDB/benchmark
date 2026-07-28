@@ -43,7 +43,7 @@ const FooterComponent = () => {
         </a>
       </div>
 
-      <div className="fixed bottom-4 left-4 z-40 md:static md:z-auto flex items-center w-auto md:w-auto bg-transparent md:bg-muted/50 md:p-4">
+      <div className="flex items-center w-auto bg-transparent md:bg-muted/50 md:p-4">
         <button
           onClick={() => setIsOpen(true)}
           aria-label="Speak with us"

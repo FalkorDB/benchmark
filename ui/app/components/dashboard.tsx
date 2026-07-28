@@ -714,8 +714,10 @@ export default function DashBoard({
     const edges = baseRun.relationships ?? 0;
     const engineVersions = validRuns.reduce<Record<string, string>>((acc, run) => {
       const vendor = run.vendor;
-      const version = run["engine-version"];
-      if (vendor && version) acc[vendor] = version;
+      const version = (run as unknown as { "engine-version"?: string })["engine-version"];
+      if (vendor && typeof version === "string" && version.length > 0) {
+        acc[vendor] = version;
+      }
       return acc;
     }, {});
 

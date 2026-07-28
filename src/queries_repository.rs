@@ -703,7 +703,20 @@ impl UsersQueriesRepository {
             .add_query("shortest_path", QueryType::Read, |random, flavour| {
                 let (from, to) = random.random_path();
                 let text = match flavour {
-                    Flavour::FalkorDB => "MATCH (s:User {id: $from}), (t:User {id: $to}) WITH shortestPath((s)-[*]->(t)) AS p RETURN length(p)",
+                    Flavour::FalkorDB => {
+                        "MATCH (s:User {id: $from}) \
+                         WITH s LIMIT 1 \
+                         MATCH (t:User {id: $to}) \
+                         WITH s, t LIMIT 1 \
+                         CALL algo.SPpaths({ \
+                            sourceNode: t, \
+                            targetNode: s, \
+                            relTypes: ['Friend'], \
+                            relDirection: 'outgoing' \
+                         }) \
+                         YIELD path \
+                         RETURN length(path)"
+                    }
                     Flavour::Neo4j => "MATCH (s:User {id: $from}), (t:User {id: $to}) MATCH p = shortestPath((s)-[*]->(t)) RETURN length(p)",
                     Flavour::Memgraph => "MATCH p = (:User {id: $from})-[*BFS]->(:User {id: $to}) RETURN length(p)",
                 };
@@ -716,7 +729,21 @@ impl UsersQueriesRepository {
             .add_query("shortest_path_with_filter", QueryType::Read, |random, flavour| {
                 let (from, to) = random.random_path();
                 let text = match flavour {
-                    Flavour::FalkorDB => "MATCH (s:User {id: $from}), (t:User {id: $to}) WITH shortestPath((s)-[*]->(t)) AS p WHERE length(p) > 0 RETURN length(p)",
+                    Flavour::FalkorDB => {
+                        "MATCH (s:User {id: $from}) \
+                         WITH s LIMIT 1 \
+                         MATCH (t:User {id: $to}) \
+                         WITH s, t LIMIT 1 \
+                         CALL algo.SPpaths({ \
+                            sourceNode: t, \
+                            targetNode: s, \
+                            relTypes: ['Friend'], \
+                            relDirection: 'outgoing' \
+                         }) \
+                         YIELD path \
+                         WHERE length(path) > 0 \
+                         RETURN length(path)"
+                    }
                     Flavour::Neo4j => "MATCH (s:User {id: $from}), (t:User {id: $to}) MATCH p = shortestPath((s)-[*]->(t)) WHERE length(p) > 0 RETURN length(p)",
                     Flavour::Memgraph => "MATCH p = (:User {id: $from})-[*BFS]->(:User {id: $to}) WHERE length(p) > 0 RETURN length(p)",
                 };
@@ -1051,7 +1078,20 @@ impl UsersQueriesRepository {
                         "MATCH p = (:User {id: $from})-[*BFS]->(:User {id: $to}) RETURN length(p)"
                     }
                     Flavour::FalkorDB => {
-                        "MATCH (s:User {id: $from}), (t:User {id: $to}) WITH s, t MATCH p = allShortestPaths((s)-[:Friend*1..4]->(t)) RETURN length(p)"
+                        "MATCH (s:User {id: $from}) \
+                         WITH s LIMIT 1 \
+                         MATCH (t:User {id: $to}) \
+                         WITH s, t LIMIT 1 \
+                         CALL algo.SPpaths({ \
+                            sourceNode: t, \
+                            targetNode: s, \
+                            relTypes: ['Friend'], \
+                            relDirection: 'outgoing', \
+                            pathCount: 0, \
+                            maxLen: 4 \
+                         }) \
+                         YIELD path \
+                         RETURN length(path)"
                     }
                     Flavour::Neo4j => {
                         "MATCH (s:User {id: $from}), (t:User {id: $to}) MATCH p = allShortestPaths((s)-[:Friend*1..4]->(t)) RETURN length(p)"

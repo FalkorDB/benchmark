@@ -18,6 +18,7 @@ pub mod error;
 pub mod falkor;
 pub mod memgraph;
 pub mod memgraph_client;
+pub mod multi_benchmark;
 pub mod neo4j;
 pub mod neo4j_client;
 pub mod process_monitor;
@@ -311,6 +312,12 @@ lazy_static! {
         &["query", "pct"]
     )
     .unwrap();
+    pub static ref FALKOR_QUERY_LATENCY_PCT_US_BY_SIZE: IntGaugeVec = register_int_gauge_vec!(
+        "falkordb_query_latency_pct_us_by_size",
+        "Latency percentile per query in microseconds (computed in-process), partitioned by graph size",
+        &["size", "query", "pct"]
+    )
+    .unwrap();
 
     // Telemetry-based breakdown of FalkorDB query timings per query type (read and write).
     // Values are averages in microseconds, aggregated from the FalkorDB telemetry Redis stream.
@@ -350,6 +357,42 @@ lazy_static! {
         "memgraph_query_timeout_rate_pct",
         "Timeout rate per query in percent (computed in-process)",
         &["query"]
+    )
+    .unwrap();
+    pub static ref BENCHMARK_QUERY_TIMEOUT_RATE_PCT: GaugeVec = register_gauge_vec!(
+        "benchmark_query_timeout_rate_pct",
+        "Timeout rate per query in percent (computed in-process) for all vendors",
+        &["vendor", "query"]
+    )
+    .unwrap();
+    pub static ref BENCHMARK_QUERY_FAILURE_RATE_PCT: GaugeVec = register_gauge_vec!(
+        "benchmark_query_failure_rate_pct",
+        "Failure rate per query in percent (computed in-process) for all vendors",
+        &["vendor", "query"]
+    )
+    .unwrap();
+    pub static ref BENCHMARK_QUERY_TIMEOUT_RATE_PCT_BY_SIZE: GaugeVec = register_gauge_vec!(
+        "benchmark_query_timeout_rate_pct_by_size",
+        "Timeout rate per query in percent (computed in-process) for all vendors, partitioned by graph size",
+        &["vendor", "size", "query"]
+    )
+    .unwrap();
+    pub static ref BENCHMARK_QUERY_FAILURE_RATE_PCT_BY_SIZE: GaugeVec = register_gauge_vec!(
+        "benchmark_query_failure_rate_pct_by_size",
+        "Failure rate per query in percent (computed in-process) for all vendors, partitioned by graph size",
+        &["vendor", "size", "query"]
+    )
+    .unwrap();
+    pub static ref BENCHMARK_GLOBAL_TIMEOUT_RATE_PCT: GaugeVec = register_gauge_vec!(
+        "benchmark_global_timeout_rate_pct",
+        "Global timeout rate in percent (computed in-process) for each vendor",
+        &["vendor"]
+    )
+    .unwrap();
+    pub static ref BENCHMARK_GLOBAL_FAILURE_RATE_PCT: GaugeVec = register_gauge_vec!(
+        "benchmark_global_failure_rate_pct",
+        "Global failure rate in percent (computed in-process) for each vendor",
+        &["vendor"]
     )
     .unwrap();
 }

@@ -46,11 +46,13 @@ export interface Result {
   "spawn-stats"?: SpawnStats;
   // Present in aggregated summaries / newer result formats
   histogram_for_type?: Record<string, number[]>;
+  histogram_for_type_by_size?: Record<string, Record<string, number[]>>;
   telemetry_for_type?: Record<string, TelemetryBreakdown>;
 }
 
 export interface Run {
   vendor: string;
+  "engine-version"?: string;
   "read-write-ratio": number;
   clients: number;
   platform: string;
