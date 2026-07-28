@@ -292,6 +292,33 @@ RETURN
         })
     }
 
+    pub async fn detect_engine_version(&self) -> BenchmarkResult<Option<String>> {
+        // Preferred path in Memgraph.
+        if let Ok(mut result) = self.graph.execute(query("SHOW VERSION")).await {
+            if let Ok(Some(row)) = result.next().await {
+                if let Ok(version) = row.get::<String>("version") {
+                    if !version.trim().is_empty() {
+                        return Ok(Some(format!("Memgraph {}", version)));
+                    }
+                }
+                if let Ok(version) = row.get::<String>("Version") {
+                    if !version.trim().is_empty() {
+                        return Ok(Some(format!("Memgraph {}", version)));
+                    }
+                }
+            }
+        }
+
+        // Fallback: parse available procedure names and infer "unknown version".
+        if let Ok(mut result) = self.graph.execute(query("CALL mg.procedures() YIELD name RETURN count(name) AS count")).await {
+            if result.next().await.is_ok() {
+                return Ok(Some("Memgraph (version unavailable)".to_string()));
+            }
+        }
+
+        Ok(None)
+    }
+
     pub async fn graph_size(&self) -> BenchmarkResult<(u64, u64)> {
         let mut result = self
             .graph

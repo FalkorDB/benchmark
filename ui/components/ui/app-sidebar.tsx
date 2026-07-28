@@ -44,6 +44,7 @@ export function AppSidebar({
     readQueries: number;
     writeQueries: number;
     startedAtEpochSecs?: number;
+    engineVersions?: Record<string, string>;
   } | null;
 }) {
   const filteredSidebarItems = React.useMemo(() => {

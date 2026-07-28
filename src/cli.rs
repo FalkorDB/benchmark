@@ -1,6 +1,6 @@
 use crate::queries_repository::QueryCoverageProfile;
 use crate::scenario::Vendor;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 
 #[derive(Parser, Debug)]
@@ -8,6 +8,13 @@ use clap_complete::Shell;
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[value(rename_all = "kebab-case")]
+pub enum FocusedQuery {
+    ShortestPath,
+    Pagerank,
 }
 
 #[derive(Subcommand, Debug)]
@@ -125,6 +132,14 @@ pub enum Commands {
             help = "query coverage profile to generate (baseline, extended-core, fixture-dependent)"
         )]
         query_profile: QueryCoverageProfile,
+        #[arg(
+            long = "focus-query",
+            value_enum,
+            value_delimiter = ',',
+            required = false,
+            help = "optionally focus generated workload on specific query families (shortest-path,pagerank)"
+        )]
+        focus_queries: Vec<FocusedQuery>,
     },
 
     #[command(
@@ -177,6 +192,84 @@ pub enum Commands {
             help = "base directory to write detailed per-vendor run results (will create <results-dir>/<vendor>/...). Defaults to Results-YYMMDD-HH:MM"
         )]
         results_dir: Option<String>,
+    },
+    #[command(
+        about = "run multi-graph benchmark scenario with rolling graph/query windows (graph offloading)"
+    )]
+    RunMulti {
+        #[arg(short, long, value_enum, default_value_t = Vendor::Falkor)]
+        vendor: Vendor,
+        #[arg(
+            short,
+            long,
+            required = true,
+            help = "path to multi scenario config file (json or yaml)"
+        )]
+        scenario: String,
+        #[arg(
+            short,
+            long,
+            required = true,
+            default_missing_value = "queries.json",
+            help = "name of json file to load the queries from"
+        )]
+        name: String,
+        #[arg(
+            short,
+            long,
+            required = false,
+            default_value_t = 1,
+            default_missing_value = "1",
+            help = "parallelism level"
+        )]
+        parallel: usize,
+        #[arg(
+            short,
+            long,
+            required = true,
+            help = "the rate of messages that sent to the server (messages per second)"
+        )]
+        mps: usize,
+        #[arg(
+            short,
+            long,
+            required = false,
+            help = "simulate the benchmark without sending the messages to the server, the value the process time in milliseconds"
+        )]
+        simulate: Option<usize>,
+        #[arg(
+            short,
+            long,
+            required = true,
+            help = "endpoint for external database connection (e.g., falkor://127.0.0.1:6379)"
+        )]
+        endpoint: String,
+        #[arg(
+            long,
+            required = false,
+            help = "base directory to write detailed per-vendor run results (will create <results-dir>/<vendor>/...). Defaults to Results-YYMMDD-HH:MM"
+        )]
+        results_dir: Option<String>,
+        #[arg(
+            long,
+            required = false,
+            help = "target profile label (for example: falkordb1, falkordb2-offload)"
+        )]
+        target_label: Option<String>,
+        #[arg(
+            long,
+            required = false,
+            help = "declared memory limit metadata for this target (for example: 32GiB)"
+        )]
+        memory_limit: Option<String>,
+        #[arg(
+            long,
+            required = false,
+            default_value_t = false,
+            default_missing_value = "true",
+            help = "skip loading graphs and use preloaded graphs from the target endpoint"
+        )]
+        skip_load_existing: bool,
     },
     #[command(about = "aggregate per-vendor run results into UI summary JSON files")]
     Aggregate {

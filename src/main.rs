@@ -1,12 +1,14 @@
 use benchmark::cli::Cli;
 use benchmark::cli::Commands;
 use benchmark::cli::Commands::GenerateAutoComplete;
+use benchmark::cli::FocusedQuery;
 use benchmark::error::BenchmarkError::OtherError;
 use benchmark::error::BenchmarkResult;
 use benchmark::falkor::{Falkor, FalkorAlgorithmCapabilities, Stopped};
 use benchmark::memgraph_client::{
     MemgraphAlgorithmCapabilities, MemgraphClient, MemgraphFixtureCapabilities,
 };
+use benchmark::multi_benchmark::{load_scenario_config, rolling_windows, GraphDeploymentPlan};
 use benchmark::neo4j_client::{Neo4jAlgorithmCapabilities, Neo4jClient, Neo4jFixtureCapabilities};
 use benchmark::queries_repository::{
     AlgorithmQuerySelection, Flavour, PreparedQuery, QueryCatalogEntry, QueryCoverageProfile,
@@ -19,22 +21,25 @@ use benchmark::utils::{
     create_directory_if_not_exists, delete_file, file_exists, format_number, write_to_file,
 };
 use benchmark::{
-    scheduler, FALKOR_ERROR_REQUESTS_DURATION_HISTOGRAM, FALKOR_LATENCY_P50_US,
-    FALKOR_LATENCY_P95_US, FALKOR_LATENCY_P99_US, FALKOR_QUERY_LATENCY_PCT_US,
-    FALKOR_SUCCESS_REQUESTS_DURATION_HISTOGRAM, MEMGRAPH_ERROR_REQUESTS_DURATION_HISTOGRAM,
-    MEMGRAPH_LATENCY_P50_US, MEMGRAPH_LATENCY_P95_US, MEMGRAPH_LATENCY_P99_US,
-    MEMGRAPH_QUERY_LATENCY_PCT_US, MEMGRAPH_QUERY_TIMEOUT_RATE_PCT,
-    MEMGRAPH_STORAGE_BASE_DATASET_BYTES,
-    MEMGRAPH_SUCCESS_REQUESTS_DURATION_HISTOGRAM, NEO4J_ERROR_REQUESTS_DURATION_HISTOGRAM,
-    NEO4J_LATENCY_P50_US, NEO4J_LATENCY_P95_US, NEO4J_LATENCY_P99_US, NEO4J_QUERY_LATENCY_PCT_US,
-    NEO4J_STORE_SIZE_BYTES, NEO4J_SUCCESS_REQUESTS_DURATION_HISTOGRAM,
+    scheduler, BENCHMARK_GLOBAL_FAILURE_RATE_PCT, BENCHMARK_GLOBAL_TIMEOUT_RATE_PCT,
+    BENCHMARK_QUERY_FAILURE_RATE_PCT, BENCHMARK_QUERY_FAILURE_RATE_PCT_BY_SIZE,
+    BENCHMARK_QUERY_TIMEOUT_RATE_PCT, BENCHMARK_QUERY_TIMEOUT_RATE_PCT_BY_SIZE,
+    FALKOR_ERROR_REQUESTS_DURATION_HISTOGRAM, FALKOR_LATENCY_P50_US, FALKOR_LATENCY_P95_US,
+    FALKOR_LATENCY_P99_US, FALKOR_QUERY_LATENCY_PCT_US, FALKOR_QUERY_LATENCY_PCT_US_BY_SIZE,
+    FALKOR_SUCCESS_REQUESTS_DURATION_HISTOGRAM,
+    MEMGRAPH_ERROR_REQUESTS_DURATION_HISTOGRAM, MEMGRAPH_LATENCY_P50_US, MEMGRAPH_LATENCY_P95_US,
+    MEMGRAPH_LATENCY_P99_US, MEMGRAPH_QUERY_LATENCY_PCT_US, MEMGRAPH_QUERY_TIMEOUT_RATE_PCT,
+    MEMGRAPH_STORAGE_BASE_DATASET_BYTES, MEMGRAPH_SUCCESS_REQUESTS_DURATION_HISTOGRAM,
+    NEO4J_ERROR_REQUESTS_DURATION_HISTOGRAM, NEO4J_LATENCY_P50_US, NEO4J_LATENCY_P95_US,
+    NEO4J_LATENCY_P99_US, NEO4J_QUERY_LATENCY_PCT_US, NEO4J_STORE_SIZE_BYTES,
+    NEO4J_SUCCESS_REQUESTS_DURATION_HISTOGRAM,
 };
 use clap::{Command, CommandFactory, Parser};
 use clap_complete::{generate, Generator};
 use futures::StreamExt;
 use histogram::{Histogram, SampleQuantiles};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -65,6 +70,40 @@ fn default_results_dir() -> String {
         .unwrap_or_else(|_| "000000-00:00".to_string());
 
     format!("Results-{}", ts)
+}
+
+fn focused_query_names(focus_queries: &[FocusedQuery]) -> HashSet<&'static str> {
+    let mut names = HashSet::new();
+    for focus in focus_queries {
+        match focus {
+            FocusedQuery::ShortestPath => {
+                names.insert(SHORTEST_PATH_QUERY_NAME);
+                names.insert(SHORTEST_PATH_WITH_FILTER_QUERY_NAME);
+                names.insert(ALL_SHORTEST_PATHS_LEN_QUERY_NAME);
+            }
+            FocusedQuery::Pagerank => {
+                names.insert(ALGO_PAGERANK_QUERY_NAME);
+            }
+        }
+    }
+    names
+}
+
+async fn detect_falkor_engine_version(endpoint: &Option<String>) -> BenchmarkResult<Option<String>> {
+    let redis_url = benchmark::falkor::falkor_endpoint_to_redis_url(endpoint.as_ref());
+    let client = redis::Client::open(redis_url)?;
+    let mut con = client.get_multiplexed_async_connection().await?;
+    let info: String = redis::cmd("INFO")
+        .arg("server")
+        .query_async(&mut con)
+        .await?;
+
+    let redis_version = info
+        .lines()
+        .find_map(|line| line.strip_prefix("redis_version:"))
+        .map(|v| v.trim().to_string());
+
+    Ok(redis_version.map(|v| format!("FalkorDB (Redis {})", v)))
 }
 
 fn redact_endpoint(endpoint: &str) -> String {
@@ -289,6 +328,38 @@ async fn main() -> BenchmarkResult<()> {
                 }
             }
         }
+        Commands::RunMulti {
+            vendor,
+            scenario,
+            name,
+            parallel,
+            mps,
+            simulate,
+            endpoint,
+            results_dir,
+            target_label,
+            memory_limit,
+            skip_load_existing,
+        } => {
+            // Expose metrics while running benchmarks.
+            let _prometheus_endpoint =
+                benchmark::prometheus_endpoint::PrometheusEndpoint::default();
+            let results_dir = Some(results_dir.unwrap_or_else(default_results_dir));
+            run_multi(
+                vendor,
+                scenario,
+                name,
+                parallel,
+                mps,
+                simulate,
+                endpoint,
+                results_dir,
+                target_label,
+                memory_limit,
+                skip_load_existing,
+            )
+            .await?;
+        }
 
         Commands::GenerateQueries {
             vendor,
@@ -301,6 +372,7 @@ async fn main() -> BenchmarkResult<()> {
             enable_algo_msf,
             enable_algo_harmonic,
             query_profile,
+            focus_queries,
         } => {
             validate_query_coverage_profile_support(vendor, query_profile)?;
             let algorithm_selection = AlgorithmQuerySelection {
@@ -317,6 +389,7 @@ async fn main() -> BenchmarkResult<()> {
                 write_ratio,
                 algorithm_selection,
                 query_profile,
+                focus_queries,
             )
             .await?;
         }
@@ -346,6 +419,80 @@ async fn main() -> BenchmarkResult<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn write_multi_run_results(
+    results_dir: Option<String>,
+    vendor: Vendor,
+    dataset: Size,
+    queries_file: &str,
+    parallel: usize,
+    mps: usize,
+    simulate: Option<usize>,
+    endpoint: &Option<String>,
+    queries_count: usize,
+    started_at: SystemTime,
+    finished_at: SystemTime,
+    elapsed: Duration,
+    engine_version: Option<String>,
+    target_label: Option<String>,
+    memory_limit: Option<String>,
+    total_graphs: usize,
+    graph_window_pct: f64,
+    query_window_pct: f64,
+    total_failures: u64,
+    total_timeouts: u64,
+) -> BenchmarkResult<()> {
+    let Some(base_dir) = results_dir else {
+        return Ok(());
+    };
+
+    let vendor_dir = PathBuf::from(base_dir).join(vendor.to_string());
+    let vendor_dir_str = vendor_dir.to_string_lossy().to_string();
+    create_directory_if_not_exists(&vendor_dir_str).await?;
+
+    let meta = RunResultsMeta {
+        vendor: vendor.to_string(),
+        dataset: dataset.to_string(),
+        queries_file: queries_file.to_string(),
+        queries_count,
+        parallel,
+        mps,
+        simulate_ms: simulate,
+        endpoint: endpoint.as_ref().map(|e| redact_endpoint(e)),
+        started_at_epoch_secs: system_time_epoch_secs(started_at),
+        finished_at_epoch_secs: system_time_epoch_secs(finished_at),
+        elapsed_ms: elapsed.as_millis(),
+        engine_version,
+        target_label,
+        memory_limit,
+        total_graphs: Some(total_graphs),
+        graph_window_pct: Some(graph_window_pct),
+        query_window_pct: Some(query_window_pct),
+        total_failures: Some(total_failures),
+        total_timeouts: Some(total_timeouts),
+    };
+
+    let meta_json = serde_json::to_string_pretty(&meta)?;
+    let meta_path = vendor_dir.join("meta.json").to_string_lossy().to_string();
+    write_to_file(&meta_path, &meta_json).await?;
+
+    let encoder = TextEncoder::new();
+    let metric_families = prometheus::gather();
+    let mut buffer = Vec::new();
+    encoder
+        .encode(&metric_families, &mut buffer)
+        .map_err(|e| OtherError(format!("Failed to encode prometheus metrics: {}", e)))?;
+    let metrics_text = String::from_utf8_lossy(&buffer).to_string();
+
+    let metrics_path = vendor_dir
+        .join("metrics.prom")
+        .to_string_lossy()
+        .to_string();
+    write_to_file(&metrics_path, &metrics_text).await?;
+    info!("Wrote multi-run results to {}", vendor_dir_str);
+    Ok(())
+}
+
 fn percentile_us(
     hist: &histogram::Histogram,
     p: f64,
@@ -366,6 +513,9 @@ const ALGO_PAGERANK_QUERY_NAME: &str = "algo_pagerank_summary";
 const ALGO_MAX_FLOW_QUERY_NAME: &str = "algo_max_flow_single_pair";
 const ALGO_MSF_QUERY_NAME: &str = "algo_msf_summary";
 const ALGO_HARMONIC_QUERY_NAME: &str = "algo_harmonic_summary";
+const SHORTEST_PATH_QUERY_NAME: &str = "shortest_path";
+const SHORTEST_PATH_WITH_FILTER_QUERY_NAME: &str = "shortest_path_with_filter";
+const ALL_SHORTEST_PATHS_LEN_QUERY_NAME: &str = "all_shortest_paths_len";
 const VECTOR_QUERY_NODES_SMOKE_QUERY_NAME: &str = "vector_query_nodes_smoke";
 const FULLTEXT_QUERY_NODES_SMOKE_QUERY_NAME: &str = "fulltext_query_nodes_smoke";
 const FULLTEXT_QUERY_RELATIONSHIPS_SMOKE_QUERY_NAME: &str = "fulltext_query_relationships_smoke";
@@ -632,6 +782,8 @@ struct PerQueryLatency {
     catalog: Vec<QueryCatalogEntry>,
     hists: Vec<std::sync::Mutex<histogram::Histogram>>,
     totals: Vec<std::sync::atomic::AtomicU64>,
+    successes: Vec<std::sync::atomic::AtomicU64>,
+    failures: Vec<std::sync::atomic::AtomicU64>,
     timeouts: Vec<std::sync::atomic::AtomicU64>,
 }
 
@@ -639,16 +791,22 @@ impl PerQueryLatency {
     fn new(catalog: Vec<QueryCatalogEntry>) -> BenchmarkResult<Self> {
         let mut hists = Vec::with_capacity(catalog.len());
         let mut totals = Vec::with_capacity(catalog.len());
+        let mut successes = Vec::with_capacity(catalog.len());
+        let mut failures = Vec::with_capacity(catalog.len());
         let mut timeouts = Vec::with_capacity(catalog.len());
         for _ in 0..catalog.len() {
             hists.push(std::sync::Mutex::new(histogram::Histogram::new(7, 64)?));
             totals.push(std::sync::atomic::AtomicU64::new(0));
+            successes.push(std::sync::atomic::AtomicU64::new(0));
+            failures.push(std::sync::atomic::AtomicU64::new(0));
             timeouts.push(std::sync::atomic::AtomicU64::new(0));
         }
         Ok(Self {
             catalog,
             hists,
             totals,
+            successes,
+            failures,
             timeouts,
         })
     }
@@ -661,6 +819,9 @@ impl PerQueryLatency {
         let idx = q_id as usize;
         if let Some(total) = self.totals.get(idx) {
             total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        if let Some(success) = self.successes.get(idx) {
+            success.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         let Some(m) = self.hists.get(idx) else {
             return;
@@ -678,6 +839,9 @@ impl PerQueryLatency {
         if let Some(total) = self.totals.get(idx) {
             total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
+        if let Some(failure) = self.failures.get(idx) {
+            failure.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 
     fn record_timeout(
@@ -693,6 +857,33 @@ impl PerQueryLatency {
         }
     }
 
+    fn totals_summary(&self) -> (u64, u64, u64) {
+        let failures = self
+            .failures
+            .iter()
+            .map(|v| v.load(std::sync::atomic::Ordering::Relaxed))
+            .sum::<u64>();
+        let timeouts = self
+            .timeouts
+            .iter()
+            .map(|v| v.load(std::sync::atomic::Ordering::Relaxed))
+            .sum::<u64>();
+        let total = self
+            .totals
+            .iter()
+            .map(|v| v.load(std::sync::atomic::Ordering::Relaxed))
+            .sum::<u64>();
+        (total, failures, timeouts)
+    }
+
+    fn vendor_label(vendor: Vendor) -> &'static str {
+        match vendor {
+            Vendor::Falkor => "falkor",
+            Vendor::Neo4j => "neo4j",
+            Vendor::Memgraph => "memgraph",
+        }
+    }
+
     fn export_to_prometheus(
         &self,
         vendor: Vendor,
@@ -703,29 +894,53 @@ impl PerQueryLatency {
             Vendor::Neo4j => NEO4J_QUERY_LATENCY_PCT_US.reset(),
             Vendor::Memgraph => MEMGRAPH_QUERY_LATENCY_PCT_US.reset(),
         }
+        BENCHMARK_QUERY_TIMEOUT_RATE_PCT.reset();
+        BENCHMARK_QUERY_FAILURE_RATE_PCT.reset();
+        BENCHMARK_GLOBAL_TIMEOUT_RATE_PCT.reset();
+        BENCHMARK_GLOBAL_FAILURE_RATE_PCT.reset();
         if matches!(vendor, Vendor::Memgraph) {
             MEMGRAPH_QUERY_TIMEOUT_RATE_PCT.reset();
         }
+        let mut global_total = 0u64;
+        let mut global_timeout = 0u64;
+        let mut global_failure = 0u64;
+        let vendor_label = Self::vendor_label(vendor);
 
         for entry in &self.catalog {
             let idx = entry.id as usize;
+            let total = self
+                .totals
+                .get(idx)
+                .map(|v| v.load(std::sync::atomic::Ordering::Relaxed))
+                .unwrap_or(0);
+            let timeout = self
+                .timeouts
+                .get(idx)
+                .map(|v| v.load(std::sync::atomic::Ordering::Relaxed))
+                .unwrap_or(0);
+            let failure = self
+                .failures
+                .get(idx)
+                .map(|v| v.load(std::sync::atomic::Ordering::Relaxed))
+                .unwrap_or(0);
 
-            if matches!(vendor, Vendor::Memgraph) {
-                let total = self
-                    .totals
-                    .get(idx)
-                    .map(|v| v.load(std::sync::atomic::Ordering::Relaxed))
-                    .unwrap_or(0);
-                let timeout = self
-                    .timeouts
-                    .get(idx)
-                    .map(|v| v.load(std::sync::atomic::Ordering::Relaxed))
-                    .unwrap_or(0);
-                if total > 0 {
-                    let rate_pct = (timeout as f64 / total as f64) * 100.0;
+            global_total += total;
+            global_timeout += timeout;
+            global_failure += failure;
+
+            if total > 0 {
+                let timeout_rate_pct = (timeout as f64 / total as f64) * 100.0;
+                let failure_rate_pct = (failure as f64 / total as f64) * 100.0;
+                BENCHMARK_QUERY_TIMEOUT_RATE_PCT
+                    .with_label_values(&[vendor_label, entry.name.as_str()])
+                    .set(timeout_rate_pct);
+                BENCHMARK_QUERY_FAILURE_RATE_PCT
+                    .with_label_values(&[vendor_label, entry.name.as_str()])
+                    .set(failure_rate_pct);
+                if matches!(vendor, Vendor::Memgraph) {
                     MEMGRAPH_QUERY_TIMEOUT_RATE_PCT
                         .with_label_values(&[entry.name.as_str()])
-                        .set(rate_pct);
+                        .set(timeout_rate_pct);
                 }
             }
             let Some(m) = self.hists.get(idx) else {
@@ -764,6 +979,79 @@ impl PerQueryLatency {
                             .with_label_values(&[entry.name.as_str(), pct_label.as_str()])
                             .set(v);
                     }
+                }
+            }
+        }
+
+        if global_total > 0 {
+            BENCHMARK_GLOBAL_TIMEOUT_RATE_PCT
+                .with_label_values(&[vendor_label])
+                .set((global_timeout as f64 / global_total as f64) * 100.0);
+            BENCHMARK_GLOBAL_FAILURE_RATE_PCT
+                .with_label_values(&[vendor_label])
+                .set((global_failure as f64 / global_total as f64) * 100.0);
+        }
+    }
+
+    fn export_to_prometheus_for_size(
+        &self,
+        vendor: Vendor,
+        size_label: &str,
+    ) {
+        let vendor_label = Self::vendor_label(vendor);
+
+        for entry in &self.catalog {
+            let idx = entry.id as usize;
+            let total = self
+                .totals
+                .get(idx)
+                .map(|v| v.load(std::sync::atomic::Ordering::Relaxed))
+                .unwrap_or(0);
+            let timeout = self
+                .timeouts
+                .get(idx)
+                .map(|v| v.load(std::sync::atomic::Ordering::Relaxed))
+                .unwrap_or(0);
+            let failure = self
+                .failures
+                .get(idx)
+                .map(|v| v.load(std::sync::atomic::Ordering::Relaxed))
+                .unwrap_or(0);
+
+            if total > 0 {
+                let timeout_rate_pct = (timeout as f64 / total as f64) * 100.0;
+                let failure_rate_pct = (failure as f64 / total as f64) * 100.0;
+                BENCHMARK_QUERY_TIMEOUT_RATE_PCT_BY_SIZE
+                    .with_label_values(&[vendor_label, size_label, entry.name.as_str()])
+                    .set(timeout_rate_pct);
+                BENCHMARK_QUERY_FAILURE_RATE_PCT_BY_SIZE
+                    .with_label_values(&[vendor_label, size_label, entry.name.as_str()])
+                    .set(failure_rate_pct);
+            }
+
+            let Some(m) = self.hists.get(idx) else {
+                continue;
+            };
+            let Ok(h) = m.lock() else {
+                continue;
+            };
+
+            if percentile_us(&h, 50.0) == 0 {
+                continue;
+            }
+
+            for pct in QUERY_HIST_PCTS {
+                let v = percentile_us(&h, pct) as i64;
+                let pct_label = if (pct - pct.round()).abs() < f64::EPSILON {
+                    format!("{}", pct as i64)
+                } else {
+                    format!("{}", pct)
+                };
+
+                if matches!(vendor, Vendor::Falkor) {
+                    FALKOR_QUERY_LATENCY_PCT_US_BY_SIZE
+                        .with_label_values(&[size_label, entry.name.as_str(), pct_label.as_str()])
+                        .set(v);
                 }
             }
         }
@@ -810,6 +1098,7 @@ async fn run_neo4j(
         neo4j.client().await?
     };
     info!("client connected to neo4j");
+    let engine_version = client.detect_engine_version().await.ok().flatten();
 
     // Best-effort store sizing via Cypher/JMX (works for external endpoints if allowed).
     // If it fails (restricted procedure), we'll keep the filesystem fallback value for local runs.
@@ -983,6 +1272,7 @@ async fn run_neo4j(
         started_at,
         finished_at,
         elapsed,
+        engine_version,
     )
     .await?;
     // Only stop neo4j if we're managing a local instance
@@ -1043,7 +1333,11 @@ async fn spawn_neo4j_worker(
                         }
                         Err(e) => {
                             NEO4J_ERROR_REQUESTS_DURATION_HISTOGRAM.observe(duration.as_secs_f64());
-                            per_query.record_failure(prepared_query.payload.q_id);
+                            if is_timeout_error(&e) {
+                                per_query.record_timeout(prepared_query.payload.q_id);
+                            } else {
+                                per_query.record_failure(prepared_query.payload.q_id);
+                            }
                             let seconds_wait = 3u64;
                             info!(
                                 "worker {} failed to process query, not sleeping for {} seconds {:?}",
@@ -1139,6 +1433,7 @@ async fn run_falkor(
     }
     // start falkor
     let falkor = falkor.start().await?;
+    let engine_version = detect_falkor_engine_version(&endpoint).await.ok().flatten();
 
     // get the graph size
     let (node_count, relation_count) = falkor.graph_size().await?;
@@ -1219,6 +1514,7 @@ async fn run_falkor(
             simulate,
             latency_hist.clone(),
             per_query.clone(),
+            None,
             worker_progress_every,
         )
         .await?;
@@ -1265,11 +1561,257 @@ async fn run_falkor(
         started_at,
         finished_at,
         elapsed,
+        engine_version,
     )
     .await?;
 
     // stop falkor
     let _stopped = falkor.stop().await?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_multi(
+    vendor: Vendor,
+    scenario_path: String,
+    file_name: String,
+    parallel: usize,
+    mps: usize,
+    simulate: Option<usize>,
+    endpoint: String,
+    results_dir: Option<String>,
+    target_label: Option<String>,
+    memory_limit: Option<String>,
+    skip_load_existing: bool,
+) -> BenchmarkResult<()> {
+    if vendor != Vendor::Falkor {
+        return Err(OtherError(
+            "run-multi currently supports only vendor=falkor".to_string(),
+        ));
+    }
+    if parallel == 0 {
+        return Err(OtherError(
+            "Parallelism level must be greater than zero.".to_string(),
+        ));
+    }
+
+    let scenario = load_scenario_config(&scenario_path)?;
+    let deployment_plan = scenario.expanded_graph_plan();
+    let graph_windows = rolling_windows(
+        deployment_plan.len(),
+        scenario.graph_window_pct,
+        scenario.graph_window_size,
+    )?;
+    let query_window_pct = scenario.query_window_pct_effective();
+
+    let queries_file = file_name.clone();
+    let (queries_metadata, queries) = read_queries(file_name).await?;
+    let query_windows =
+        rolling_windows(queries.len(), query_window_pct, scenario.query_window_size)?;
+    if query_windows.is_empty() {
+        return Err(OtherError(
+            "run-multi requires at least one generated query".to_string(),
+        ));
+    }
+
+    let falkor: Falkor<Stopped> =
+        benchmark::falkor::Falkor::new_with_endpoint(Some(endpoint.clone()));
+    let falkor = falkor.start().await?;
+    let falkor_endpoint = Some(endpoint.clone());
+    let engine_version = detect_falkor_engine_version(&falkor_endpoint).await.ok().flatten();
+
+    if !skip_load_existing {
+        for plan in &deployment_plan {
+            load_falkor_multi_graph(&falkor, &endpoint, plan, scenario.load_batch_size).await?;
+        }
+    } else {
+        info!("run-multi: skipping internal graph load phase; expecting preloaded graphs to exist");
+    }
+
+    let latency_hist = Arc::new(tokio::sync::Mutex::new(histogram::Histogram::new(7, 64)?));
+    let per_query = Arc::new(PerQueryLatency::new(queries_metadata.catalog.clone())?);
+    let mut per_query_by_size: BTreeMap<Size, Arc<PerQueryLatency>> = BTreeMap::new();
+    for size in [Size::Small, Size::Medium, Size::Large] {
+        per_query_by_size.insert(
+            size,
+            Arc::new(PerQueryLatency::new(queries_metadata.catalog.clone())?),
+        );
+    }
+    let started_at = SystemTime::now();
+    let start = Instant::now();
+
+    for (window_idx, graph_window) in graph_windows.iter().enumerate() {
+        let query_window = query_windows.get(window_idx).unwrap_or_else(|| {
+            query_windows
+                .last()
+                .expect("query windows must not be empty")
+        });
+        let query_slice = queries[query_window.start..query_window.end].to_vec();
+        for plan in deployment_plan
+            .iter()
+            .skip(graph_window.start)
+            .take(graph_window.end.saturating_sub(graph_window.start))
+        {
+            run_falkor_graph_queries(
+                &falkor,
+                &plan.graph_name,
+                parallel,
+                mps,
+                simulate,
+                query_slice.clone(),
+                latency_hist.clone(),
+                per_query.clone(),
+                per_query_by_size.get(&plan.size).cloned(),
+            )
+            .await?;
+        }
+    }
+
+    let elapsed = start.elapsed();
+    let finished_at = SystemTime::now();
+    {
+        let hist = latency_hist.lock().await;
+        FALKOR_LATENCY_P50_US.set(percentile_us(&hist, 50.0) as i64);
+        FALKOR_LATENCY_P95_US.set(percentile_us(&hist, 95.0) as i64);
+        FALKOR_LATENCY_P99_US.set(percentile_us(&hist, 99.0) as i64);
+    }
+    per_query.export_to_prometheus(Vendor::Falkor);
+    FALKOR_QUERY_LATENCY_PCT_US_BY_SIZE.reset();
+    BENCHMARK_QUERY_TIMEOUT_RATE_PCT_BY_SIZE.reset();
+    BENCHMARK_QUERY_FAILURE_RATE_PCT_BY_SIZE.reset();
+    for (size, tracker) in &per_query_by_size {
+        let size_label = match size {
+            Size::Small => "small",
+            Size::Medium => "medium",
+            Size::Large => "large",
+        };
+        tracker.export_to_prometheus_for_size(Vendor::Falkor, size_label);
+    }
+    let (total_queries, total_failures, total_timeouts) = per_query.totals_summary();
+
+    write_multi_run_results(
+        results_dir,
+        Vendor::Falkor,
+        queries_metadata.dataset,
+        &queries_file,
+        parallel,
+        mps,
+        simulate,
+        &Some(endpoint),
+        total_queries as usize,
+        started_at,
+        finished_at,
+        elapsed,
+        engine_version,
+        target_label.or(scenario.target_label),
+        memory_limit.or(scenario.memory_limit),
+        deployment_plan.len(),
+        scenario.graph_window_pct,
+        query_window_pct,
+        total_failures,
+        total_timeouts,
+    )
+    .await?;
+
+    let _stopped = falkor.stop().await?;
+    Ok(())
+}
+
+async fn load_falkor_multi_graph(
+    falkor: &Falkor<benchmark::falkor::Started>,
+    endpoint: &str,
+    graph_plan: &GraphDeploymentPlan,
+    batch_size: usize,
+) -> BenchmarkResult<()> {
+    clear_falkor_graph(&Some(endpoint.to_string()), &graph_plan.graph_name).await?;
+    let spec = Spec::new(
+        benchmark::scenario::Name::Users,
+        graph_plan.size,
+        Vendor::Falkor,
+    );
+    let mut client = falkor.client_for_graph(&graph_plan.graph_name).await?;
+    client
+        .create_index_if_not_exists(
+            "main",
+            "create_index_user_id",
+            "CREATE INDEX FOR (u:User) ON (u.id)",
+        )
+        .await?;
+    client
+        .create_index_if_not_exists(
+            "main",
+            "create_index_user_age",
+            "CREATE INDEX FOR (u:User) ON (u.age)",
+        )
+        .await?;
+    let data_stream = spec.init_data_iterator().await?;
+    let _ = client
+        .execute_pokec_users_import_unwind(data_stream, batch_size)
+        .await?;
+    client.ensure_friend_capacity_ready().await?;
+    Ok(())
+}
+
+async fn clear_falkor_graph(
+    endpoint: &Option<String>,
+    graph_name: &str,
+) -> BenchmarkResult<()> {
+    let redis_url = benchmark::falkor::falkor_endpoint_to_redis_url(endpoint.as_ref());
+    let client = redis::Client::open(redis_url)?;
+    let mut connection = client.get_multiplexed_async_connection().await?;
+    let mut graph_delete = redis::cmd("GRAPH.DELETE");
+    graph_delete.arg(graph_name);
+    let _: redis::RedisResult<redis::Value> = connection.send_packed_command(&graph_delete).await;
+
+    let mut del = redis::cmd("DEL");
+    del.arg(graph_name);
+    let _ = connection.send_packed_command(&del).await;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_falkor_graph_queries(
+    falkor: &Falkor<benchmark::falkor::Started>,
+    graph_name: &str,
+    parallel: usize,
+    mps: usize,
+    simulate: Option<usize>,
+    queries: Vec<PreparedQuery>,
+    latency_hist: Arc<tokio::sync::Mutex<histogram::Histogram>>,
+    per_query: Arc<PerQueryLatency>,
+    per_query_for_size: Option<Arc<PerQueryLatency>>,
+) -> BenchmarkResult<()> {
+    let number_of_queries = queries.len();
+    if number_of_queries == 0 {
+        return Ok(());
+    }
+    let worker_progress_every = worker_progress_batch_size(number_of_queries);
+    let (tx, rx) = tokio::sync::mpsc::channel::<Msg<PreparedQuery>>(20 * parallel);
+    let rx: Arc<Mutex<Receiver<Msg<PreparedQuery>>>> = Arc::new(Mutex::new(rx));
+    let scheduler_handle = scheduler::spawn_scheduler::<PreparedQuery>(mps, tx.clone(), queries);
+    let mut workers_handles = Vec::with_capacity(parallel);
+
+    let worker_client = falkor.client_for_graph(graph_name).await?;
+    for spawn_id in 0..parallel {
+        let handle = spawn_falkor_worker(
+            worker_client.clone(),
+            spawn_id,
+            &rx,
+            simulate,
+            latency_hist.clone(),
+            per_query.clone(),
+            per_query_for_size.clone(),
+            worker_progress_every,
+        )
+        .await?;
+        workers_handles.push(handle);
+    }
+
+    let _ = scheduler_handle.await;
+    drop(tx);
+    for handle in workers_handles {
+        let _ = handle.await;
+    }
     Ok(())
 }
 
@@ -1280,6 +1822,7 @@ async fn spawn_falkor_worker(
     simulate: Option<usize>,
     latency_hist: Arc<tokio::sync::Mutex<histogram::Histogram>>,
     per_query: Arc<PerQueryLatency>,
+    per_query_for_size: Option<Arc<PerQueryLatency>>,
     worker_progress_every: u32,
 ) -> BenchmarkResult<JoinHandle<()>> {
     info!("spawning worker");
@@ -1314,6 +1857,12 @@ async fn spawn_falkor_worker(
                                 prepared_query.payload.q_id,
                                 duration.as_micros() as u64,
                             );
+                            if let Some(per_query_size) = per_query_for_size.as_ref() {
+                                per_query_size.record_success_us(
+                                    prepared_query.payload.q_id,
+                                    duration.as_micros() as u64,
+                                );
+                            }
                             counter += 1;
                             if counter.is_multiple_of(worker_progress_every) {
                                 info!("worker {} processed {} queries", worker_id, counter);
@@ -1322,7 +1871,17 @@ async fn spawn_falkor_worker(
                         Err(e) => {
                             FALKOR_ERROR_REQUESTS_DURATION_HISTOGRAM
                                 .observe(duration.as_secs_f64());
-                            per_query.record_failure(prepared_query.payload.q_id);
+                            if is_timeout_error(&e) {
+                                per_query.record_timeout(prepared_query.payload.q_id);
+                                if let Some(per_query_size) = per_query_for_size.as_ref() {
+                                    per_query_size.record_timeout(prepared_query.payload.q_id);
+                                }
+                            } else {
+                                per_query.record_failure(prepared_query.payload.q_id);
+                                if let Some(per_query_size) = per_query_for_size.as_ref() {
+                                    per_query_size.record_failure(prepared_query.payload.q_id);
+                                }
+                            }
                             let seconds_wait = 3u64;
                             info!(
                                 "worker {} failed to process query, not sleeping for {} seconds {:?}",
@@ -1444,6 +2003,22 @@ struct RunResultsMeta {
     started_at_epoch_secs: u64,
     finished_at_epoch_secs: u64,
     elapsed_ms: u128,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    engine_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target_label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    memory_limit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    total_graphs: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    graph_window_pct: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    query_window_pct: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    total_failures: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    total_timeouts: Option<u64>,
 }
 
 fn system_time_epoch_secs(t: SystemTime) -> u64 {
@@ -1466,6 +2041,7 @@ async fn write_run_results(
     started_at: SystemTime,
     finished_at: SystemTime,
     elapsed: Duration,
+    engine_version: Option<String>,
 ) -> BenchmarkResult<()> {
     let Some(base_dir) = results_dir else {
         return Ok(());
@@ -1487,6 +2063,14 @@ async fn write_run_results(
         started_at_epoch_secs: system_time_epoch_secs(started_at),
         finished_at_epoch_secs: system_time_epoch_secs(finished_at),
         elapsed_ms: elapsed.as_millis(),
+        engine_version,
+        target_label: None,
+        memory_limit: None,
+        total_graphs: None,
+        graph_window_pct: None,
+        query_window_pct: None,
+        total_failures: None,
+        total_timeouts: None,
     };
 
     let meta_json = serde_json::to_string_pretty(&meta)?;
@@ -1708,6 +2292,7 @@ async fn prepare_queries(
     write_ratio: f32,
     algorithm_selection: AlgorithmQuerySelection,
     query_profile: QueryCoverageProfile,
+    focus_queries: Vec<FocusedQuery>,
 ) -> BenchmarkResult<()> {
     let start = Instant::now();
 
@@ -1729,27 +2314,73 @@ async fn prepare_queries(
         algorithm_selection,
         query_profile,
     );
-    let catalog = queries_repository.catalog();
-    let metadata = PrepareQueriesMetadata {
-        size,
-        dataset,
-        query_profile,
-        catalog,
-    };
-    let queries = Box::new(queries_repository.random_queries(size, write_ratio));
-
-    let file = File::create(file_name).await?;
-    let mut writer = BufWriter::new(file);
-    let metadata_line = serde_json::to_string(&metadata)?;
-    writer.write_all(metadata_line.as_bytes()).await?;
-    writer.write_all(b"\n").await?;
-
-    for query in queries {
-        let json_string = serde_json::to_string(&query)?;
-        writer.write_all(json_string.as_bytes()).await?;
-        writer.write_all(b"\n").await?;
+    let mut catalog = queries_repository.catalog();
+    let focused_names = focused_query_names(&focus_queries);
+    if !focused_names.is_empty() {
+        catalog.retain(|entry| focused_names.contains(&entry.name.as_str()));
     }
-    writer.flush().await?;
+
+    if focused_names.is_empty() {
+        let metadata = PrepareQueriesMetadata {
+            size,
+            dataset,
+            query_profile,
+            catalog,
+        };
+        let file = File::create(file_name).await?;
+        let mut writer = BufWriter::new(file);
+        let metadata_line = serde_json::to_string(&metadata)?;
+        writer.write_all(metadata_line.as_bytes()).await?;
+        writer.write_all(b"\n").await?;
+
+        for query in queries_repository.random_queries(size, write_ratio) {
+            let json_string = serde_json::to_string(&query)?;
+            writer.write_all(json_string.as_bytes()).await?;
+            writer.write_all(b"\n").await?;
+        }
+        writer.flush().await?;
+    } else {
+        let sample_size = size.saturating_mul(200).max(size);
+        let selected_queries: Vec<PreparedQuery> = queries_repository
+            .random_queries(sample_size, write_ratio)
+            .filter(|query| focused_names.contains(&query.q_name.as_str()))
+            .take(size)
+            .collect();
+
+        if selected_queries.is_empty() {
+            return Err(OtherError(
+                "Focused query selection produced zero queries. Check --focus-query values and algorithm toggles."
+                    .to_string(),
+            ));
+        }
+        if selected_queries.len() < size {
+            return Err(OtherError(format!(
+                "Focused query selection could only produce {} queries out of requested {}. Try increasing query variety inputs.",
+                selected_queries.len(),
+                size
+            )));
+        }
+
+        let metadata = PrepareQueriesMetadata {
+            size,
+            dataset,
+            query_profile,
+            catalog,
+        };
+
+        let file = File::create(file_name).await?;
+        let mut writer = BufWriter::new(file);
+        let metadata_line = serde_json::to_string(&metadata)?;
+        writer.write_all(metadata_line.as_bytes()).await?;
+        writer.write_all(b"\n").await?;
+
+        for query in selected_queries {
+            let json_string = serde_json::to_string(&query)?;
+            writer.write_all(json_string.as_bytes()).await?;
+            writer.write_all(b"\n").await?;
+        }
+        writer.flush().await?;
+    }
 
     let duration = start.elapsed();
     info!("Time taken to prepare queries: {:?}", duration);
@@ -1819,6 +2450,7 @@ async fn run_memgraph(
         memgraph.client().await?
     };
     info!("client connected to memgraph");
+    let engine_version = client.detect_engine_version().await.ok().flatten();
 
     // Best-effort Memgraph storage/memory reporting (query-interface metric).
     client.collect_storage_info_metrics().await;
@@ -1943,6 +2575,7 @@ async fn run_memgraph(
         started_at,
         finished_at,
         elapsed,
+        engine_version,
     )
     .await?;
 

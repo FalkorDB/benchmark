@@ -355,6 +355,13 @@ impl Falkor<Started> {
 
 impl<U> Falkor<U> {
     pub async fn client(&self) -> BenchmarkResult<FalkorBenchmarkClient> {
+        self.client_for_graph("falkor").await
+    }
+
+    pub async fn client_for_graph(
+        &self,
+        graph_name: &str,
+    ) -> BenchmarkResult<FalkorBenchmarkClient> {
         let connection_string = self
             .endpoint
             .as_deref()
@@ -370,7 +377,7 @@ impl<U> Falkor<U> {
         info!("Initialized Falkor async client with pooled strategy (size=8)");
         let query_timeout_ms = resolve_falkor_benchmark_query_timeout_ms();
         Ok(FalkorBenchmarkClient {
-            graph: client.select_graph("falkor"),
+            graph: client.select_graph(graph_name),
             query_timeout_ms,
             query_timeout_guard: resolve_falkor_benchmark_query_timeout_guard(query_timeout_ms),
         })
