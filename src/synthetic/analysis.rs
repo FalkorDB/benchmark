@@ -346,8 +346,10 @@ pub struct CellContextSide {
     /// time** — the cohort every dispersion stat (and the gated server p50) describes, counted
     /// after severe-outlier removal and pooled across the C workers. `None` when the side has no
     /// valid server time (a report predating server-time capture, or an engine that doesn't
-    /// report execution time) — the same degradation rule as every server column.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// report execution time) — the same degradation rule as every server column. Accepts the
+    /// transient v2.7 name `n_server` on deserialization (the same server-timed cohort) so cells
+    /// JSON written by that release keeps its count.
+    #[serde(default, alias = "n_server", skip_serializing_if = "Option::is_none")]
     pub server_n: Option<usize>,
     /// **Sample** standard deviation (n−1 denominator — see
     /// [`Summary::sample_stddev`](crate::synthetic::stats::Summary::sample_stddev)) of this
@@ -1893,6 +1895,19 @@ mod tests {
         assert_eq!(side.server_stddev_ms, None);
         assert_eq!(side.server_cv_pct, None);
         assert_eq!(side.total_p50_ms, None);
+
+        // A v2.7 payload (the short-lived wall-clock schema): the removed keys `n`,
+        // `total_stddev_ms` and `total_cv_pct` are ignored, and `n_server` — the same
+        // server-timed cohort — still feeds `server_n` through its serde alias.
+        let side: CellContextSide = serde_json::from_str(
+            r#"{"p90_ms":1.2,"p95_ms":1.3,"p99_ms":1.5,"throughput_ops_per_sec":1000.0,
+                "n":300,"n_server":297,"server_stddev_ms":0.05,"server_cv_pct":12.0,
+                "total_stddev_ms":0.06,"total_cv_pct":13.0}"#,
+        )
+        .unwrap();
+        assert_eq!(side.server_n, Some(297));
+        assert_eq!(side.server_stddev_ms, Some(0.05));
+        assert_eq!(side.server_cv_pct, Some(12.0));
     }
 
     #[test]
