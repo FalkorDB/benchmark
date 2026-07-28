@@ -31,10 +31,11 @@ impl Summary {
     /// over the same `n` values. The n−1 denominator is deliberate: the retained samples are a
     /// *sample* of the operation's latency distribution, and the population formula would
     /// understate its dispersion (most at small `n`). `None` when `n < 2` (dispersion of a single
-    /// sample is undefined) or the result is non-finite — never a NaN/∞ that could poison a
-    /// report.
+    /// sample is undefined) or the stored σ is negative (impossible from this tool — only a
+    /// corrupted/foreign report) or the result is non-finite — never a nonsensical value that
+    /// could poison a report.
     pub fn sample_stddev(&self) -> Option<f64> {
-        if self.n < 2 {
+        if self.n < 2 || self.stddev < 0.0 {
             return None;
         }
         let s = self.stddev * (self.n as f64 / (self.n as f64 - 1.0)).sqrt();
@@ -268,6 +269,10 @@ mod tests {
         let zero = Summary { n: 0, ..s };
         assert_eq!(zero.sample_stddev(), None);
         assert_eq!(zero.cv_pct(), None);
+        // A negative stored σ (corrupted/foreign report): invalid, not a negative "deviation".
+        let corrupt = Summary { n: 4, stddev: -1.0, ..s };
+        assert_eq!(corrupt.sample_stddev(), None);
+        assert_eq!(corrupt.cv_pct(), None);
     }
 
     #[test]
