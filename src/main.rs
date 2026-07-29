@@ -26,9 +26,9 @@ use benchmark::{
     BENCHMARK_QUERY_TIMEOUT_RATE_PCT, BENCHMARK_QUERY_TIMEOUT_RATE_PCT_BY_SIZE,
     FALKOR_ERROR_REQUESTS_DURATION_HISTOGRAM, FALKOR_LATENCY_P50_US, FALKOR_LATENCY_P95_US,
     FALKOR_LATENCY_P99_US, FALKOR_QUERY_LATENCY_PCT_US, FALKOR_QUERY_LATENCY_PCT_US_BY_SIZE,
-    FALKOR_SUCCESS_REQUESTS_DURATION_HISTOGRAM,
-    MEMGRAPH_ERROR_REQUESTS_DURATION_HISTOGRAM, MEMGRAPH_LATENCY_P50_US, MEMGRAPH_LATENCY_P95_US,
-    MEMGRAPH_LATENCY_P99_US, MEMGRAPH_QUERY_LATENCY_PCT_US, MEMGRAPH_QUERY_TIMEOUT_RATE_PCT,
+    FALKOR_SUCCESS_REQUESTS_DURATION_HISTOGRAM, MEMGRAPH_ERROR_REQUESTS_DURATION_HISTOGRAM,
+    MEMGRAPH_LATENCY_P50_US, MEMGRAPH_LATENCY_P95_US, MEMGRAPH_LATENCY_P99_US,
+    MEMGRAPH_QUERY_LATENCY_PCT_US, MEMGRAPH_QUERY_TIMEOUT_RATE_PCT,
     MEMGRAPH_STORAGE_BASE_DATASET_BYTES, MEMGRAPH_SUCCESS_REQUESTS_DURATION_HISTOGRAM,
     NEO4J_ERROR_REQUESTS_DURATION_HISTOGRAM, NEO4J_LATENCY_P50_US, NEO4J_LATENCY_P95_US,
     NEO4J_LATENCY_P99_US, NEO4J_QUERY_LATENCY_PCT_US, NEO4J_STORE_SIZE_BYTES,
@@ -89,7 +89,9 @@ fn focused_query_names(focus_queries: &[FocusedQuery]) -> HashSet<&'static str> 
     names
 }
 
-async fn detect_falkor_engine_version(endpoint: &Option<String>) -> BenchmarkResult<Option<String>> {
+async fn detect_falkor_engine_version(
+    endpoint: &Option<String>
+) -> BenchmarkResult<Option<String>> {
     let redis_url = benchmark::falkor::falkor_endpoint_to_redis_url(endpoint.as_ref());
     let client = redis::Client::open(redis_url)?;
     let mut con = client.get_multiplexed_async_connection().await?;
@@ -242,7 +244,9 @@ fn worker_progress_batch_size(total_queries: usize) -> u32 {
 /// worker threads via `--client-threads N` (default: tokio's default, one per core). Always
 /// `new_multi_thread`, even for N=1 — the FalkorDB client rejects a current-thread runtime
 /// (`RuntimeFlavor::CurrentThread`) and uses `task::block_in_place`.
-fn build_runtime(client_threads: Option<std::num::NonZeroUsize>) -> BenchmarkResult<tokio::runtime::Runtime> {
+fn build_runtime(
+    client_threads: Option<std::num::NonZeroUsize>
+) -> BenchmarkResult<tokio::runtime::Runtime> {
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     if let Some(threads) = client_threads {
         builder.worker_threads(threads.get());
@@ -434,10 +438,6 @@ async fn async_main(cli: Cli) -> BenchmarkResult<()> {
         } => {
             // Lightweight debug helper: run each Memgraph query type once and report failures.
             debug_memgraph_queries(dataset, endpoint, name).await?;
-        }
-
-        Commands::Synthetic { command } => {
-            benchmark::synthetic::run_command(command).await?;
         }
     }
     Ok(())
@@ -1646,7 +1646,10 @@ async fn run_multi(
         benchmark::falkor::Falkor::new_with_endpoint(Some(endpoint.clone()));
     let falkor = falkor.start().await?;
     let falkor_endpoint = Some(endpoint.clone());
-    let engine_version = detect_falkor_engine_version(&falkor_endpoint).await.ok().flatten();
+    let engine_version = detect_falkor_engine_version(&falkor_endpoint)
+        .await
+        .ok()
+        .flatten();
 
     if !skip_load_existing {
         for plan in &deployment_plan {

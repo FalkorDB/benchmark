@@ -28,7 +28,6 @@ pub mod queries_repository;
 pub mod query;
 pub mod scenario;
 pub mod scheduler;
-pub mod synthetic;
 pub mod utils;
 
 // Compile-check the Rust code examples in the Markdown docs as doctests (`cargo test`). Only
