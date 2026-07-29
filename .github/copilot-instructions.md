@@ -34,20 +34,8 @@ Key recipes:
 | `just doc-check` | All Markdown doc checks (the `Docs validation` workflow): `doc-links` + `doc-shell`. |
 | `just doc-links` | Offline broken-link + anchor check (lychee) over every tracked `*.md` except `vendor/`. |
 | `just doc-shell` | Syntax-check (`bash -n`, no execution) the `bash`/`sh` examples in the Markdown docs. |
-| `just coverage` | Codecov JSON coverage via cargo-llvm-cov, including the `#[ignore]`d integration tests (the `coverage` CI job). Needs a reachable FalkorDB — set `FALKORDB_HOST`/`FALKORDB_PORT` or use `just coverage-local`. |
-| `just coverage-local` | Spin up a Docker FalkorDB, run `just coverage`, then tear it down. |
-| `just coverage-html` | Open a browsable HTML coverage report locally (also needs a FalkorDB). |
-| `just synthetic-bench` | Run the synthetic per-operation latency probe (needs a live FalkorDB). |
-| `just synthetic-bench-one <op>` | Sweep one operation over the concurrency curve (needs a live FalkorDB). |
-| `just synthetic-ops` | List the synthetic operations. |
-| `just synthetic-it` | Run the synthetic integration test against a live FalkorDB. |
-| `just synthetic-record <name>` | Record a workload bundle **offline** (dataset load-script + measured commands + `workload_hash`) into `recordings/<name>/` for cross-version replay. |
-| `just synthetic-replay <name> <endpoint>` | Measure a recorded bundle via `synthetic run --recording` (loads the recorded graph, measures across the concurrency sweep + cache modes); writes a report + per-op `result_digest`. |
-| `just synthetic-compare-versions <name> <A> <B>` | `run --recording` one bundle against two FalkorDB versions, then `report --diff` (guards `workload_hash` + result digests, writes a Markdown diff across every op/cache-mode/concurrency). |
-| `just synthetic-sanity` | Self-contained tool sanity: record twice (asserts identical `workload_hash`) + `run --recording` at C=1,4 + `report --diff` (incl. the C>1 result verification) + `report --regression` with a `[cross-engine]` budget profile, `--divergence-policy advisory` and the `--summary`/`--cells` machine artifacts, against a throwaway Docker FalkorDB. |
-| `just synthetic-verify` | **CI non-divergence gate** (the `Synthetic non-divergence` job): record all A/B read shapes (`--repo-reads full`, small determinism-oracle graph), `run --recording` **twice** against the same throwaway FalkorDB at concurrency 1 & 8, uncached (mirroring the per-PR CI matrix), and fail if `report --diff` finds a different `workload_hash` or any per-op result digest. Latency not asserted. Writes the A/B report to `recordings/verify-report.md`, which the CI job publishes to the job summary and upserts as a sticky PR comment (marker `<!-- synthetic-verify -->`). |
-| `just synthetic-baseline <name>` | Save a Criterion C=1 latency baseline (per-op read latencies) for the current build/version (needs a live FalkorDB + `synthetic-bench.toml`). Single-version tracker; prefer record/run/report for cross-version. |
-| `just synthetic-compare <name>` | Compare the current build against a saved baseline — guards via `report --diff` (aborts on workload mismatch), then runs Criterion (needs a live FalkorDB). |
+| `just coverage` | Codecov JSON coverage via cargo-llvm-cov (the `coverage` CI job). |
+| `just coverage-html` | Open a browsable HTML coverage report locally. |
 | `just fmt` / `just fmt-check` | Format Rust in place / check formatting. |
 | `just run -- <args>` | Run the benchmark binary (e.g. `just run -- --help`). |
 | `just ui-install` | `npm ci` in `ui/`. |
@@ -103,12 +91,9 @@ Write **as much test coverage as possible** — cover new code with unit tests a
 coverage high. **Patch coverage must be ≥ 90%** (enforced by Codecov via `codecov.yml`): any diff
 that drops below fails the `codecov/patch` check, so cover new lines before you push. Measure it
 with the exact CI command, **`just coverage`** (cargo-llvm-cov → `codecov.json`), not an ad-hoc
-line count; **`just coverage-html`** opens a browsable report. `just coverage` runs the
-`#[ignore]`d integration tests too (`--include-ignored`), so it needs a reachable FalkorDB — use
-**`just coverage-local`** to spin one up in Docker automatically (CI provides a FalkorDB service).
-Coverage is uploaded to Codecov by the `coverage` workflow (see `codecov.yml` for thresholds).
-Prefer testing real logic (parsing, query building, scheduling, aggregation) with unit tests, and
-cover server-backed paths with integration tests that run under coverage against that FalkorDB.
+line count; **`just coverage-html`** opens a browsable report. Coverage is uploaded to Codecov by
+the `coverage` workflow (see `codecov.yml` for thresholds). Prefer testing real logic (parsing,
+query building, scheduling, aggregation) with unit tests.
 
 ## Flaky tests are a hard no
 

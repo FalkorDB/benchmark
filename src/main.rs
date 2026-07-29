@@ -435,10 +435,6 @@ async fn async_main(cli: Cli) -> BenchmarkResult<()> {
             // Lightweight debug helper: run each Memgraph query type once and report failures.
             debug_memgraph_queries(dataset, endpoint, name).await?;
         }
-
-        Commands::Synthetic { command } => {
-            benchmark::synthetic::run_command(command).await?;
-        }
     }
     Ok(())
 }
