@@ -23,7 +23,7 @@ jobs:
           cache: npm
           cache-dependency-path: ui/package-lock.json
       - name: Install just
-        uses: taiki-e/install-action@065d6a08a14e61e89fb0a4c10eecdbdef39c7d8e # v2.85.4
+        uses: taiki-e/install-action@67729d5c413db75907f0ad1e39bb04b9c868ff60 # v2.85.7
         with:
           tool: just
       # Both steps run a single `just` recipe so the exact command can be reproduced locally
