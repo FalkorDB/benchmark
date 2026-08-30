@@ -549,6 +549,8 @@ export default function DashBoard({
         ? "--Neo4j-color"
         : key === "memgraph"
         ? "--Memgraph-color"
+        : key === "postgres" || key === "postgresql"
+        ? "--Postgres-color"
         : key === "intel" || key === "x86" || key.startsWith("r7i")
         ? "--Intel-color"
         : key === "graviton" || key === "arm" || key.startsWith("r8g")

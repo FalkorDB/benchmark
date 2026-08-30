@@ -66,6 +66,7 @@ export function AppSidebar({
       if (lower === "falkordb2" || lower === "falkordb-rs") return "FalkorDB (Rust)";
       if (lower === "neo4j") return "Neo4j";
       if (lower === "memgraph") return "Memgraph";
+      if (lower === "postgres" || lower === "postgresql") return "Postgres";
       if (lower === "intel") return "Intel";
       if (lower === "graviton") return "Graviton";
       // Generic fallback: Title Case

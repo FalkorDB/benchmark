@@ -1,4 +1,4 @@
-export type VendorKey = "falkordb" | "falkordb2" | "neo4j" | "memgraph" | "unknown";
+export type VendorKey = "falkordb" | "falkordb2" | "neo4j" | "memgraph" | "postgres" | "unknown";
 
 type GradientStops = { offset: number; color: string }[];
 
@@ -23,6 +23,7 @@ export function normalizeVendor(vendor: string): VendorKey {
   if (k === "falkordb" || k === "falkor" || k.includes("falkor") || k.includes("r6g") || k.includes("r7g") || k.includes("r8g") || k.includes("r6i") || k.includes("r7i")) return "falkordb";
   if (k === "neo4j") return "neo4j";
   if (k === "memgraph") return "memgraph";
+  if (k === "postgres" || k === "postgresql") return "postgres";
   return "unknown";
 }
 
@@ -71,6 +72,12 @@ function getStops(vendor: VendorKey): GradientStops {
         { offset: 0.0, color: cssVar("--Memgraph-gradient-start", "#ff2b4a") },
         { offset: 0.55, color: cssVar("--Memgraph-gradient-mid", "#ff7a00") },
         { offset: 1.0, color: cssVar("--Memgraph-gradient-end", "#ffd000") },
+      ];
+    case "postgres":
+      // Postgres brand blue gradient
+      return [
+        { offset: 0.0, color: cssVar("--Postgres-gradient-start", "#336791") },
+        { offset: 1.0, color: cssVar("--Postgres-gradient-end", "#a9c2d6") },
       ];
     default:
       return [{ offset: 0.0, color: "#191919" }];
