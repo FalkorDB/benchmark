@@ -252,20 +252,22 @@ Options:
 - `cargo run --release --bin benchmark -- load --vendor neo4j -s small`
 - `cargo run --release --bin benchmark -- load --vendor memgraph -s small`
 - `cargo run --release --bin benchmark -- load --vendor postgres -s small`
+- `cargo run --release --bin benchmark -- load --vendor mongo -s small`
 
 NOTE: It is possible to use the load command with externally run vendor endpoint:
 - `cargo run --release --bin benchmark -- load --vendor falkor -s small --endpoint falkor://127.0.0.1:6379`
 - `cargo run --release --bin benchmark -- load --vendor neo4j -s small --endpoint neo4j://neo4j:benchmark123@127.0.0.1:7687`
 - `cargo run --release --bin benchmark -- load --vendor memgraph -s small --endpoint bolt://127.0.0.1:7687`
 - `cargo run --release --bin benchmark -- load --vendor postgres -s small --endpoint postgres://postgres:benchmark123@127.0.0.1:5432/postgres`
+- `cargo run --release --bin benchmark -- load --vendor mongo -s small --endpoint mongodb://127.0.0.1:27017/benchmark`
 
 Profile-aware loading (runs additional fixture/index setup when required):
 - `cargo run --release --bin benchmark -- load --vendor neo4j -s small --query-profile fixture-dependent`
 - `cargo run --release --bin benchmark -- load --vendor memgraph -s small --query-profile fixture-dependent`
 - `cargo run --release --bin benchmark -- load --vendor falkor -s small --query-profile fixture-dependent`
 
-NOTE: Postgres does not support the `fixture-dependent` profile (no vector/fulltext index
-equivalent); use `baseline` (default) or `extended-core` instead.
+NOTE: Postgres and Mongo do not support the `fixture-dependent` profile (no vector/fulltext
+index equivalent); use `baseline` (default) or `extended-core` instead.
 
 ##### create a set of queries to be used with the run command
 
@@ -282,6 +284,7 @@ Generate with a broader coverage profile:
 - `cargo run --release --bin benchmark -- generate-queries -s1000000 --dataset small --name=small-extended --write-ratio 0.0 --vendor neo4j --query-profile extended-core`
 - `cargo run --release --bin benchmark -- generate-queries -s1000000 --dataset small --name=small-fixtures --write-ratio 0.0 --vendor memgraph --query-profile fixture-dependent`
 - `cargo run --release --bin benchmark -- generate-queries -s1000000 --dataset small --name=small-readonly-postgres --write-ratio 0.0 --vendor postgres --query-profile baseline`
+- `cargo run --release --bin benchmark -- generate-queries -s1000000 --dataset small --name=small-readonly-mongo --write-ratio 0.0 --vendor mongo --query-profile baseline`
 
 ##### run the benchmarks
 
@@ -289,12 +292,14 @@ Generate with a broader coverage profile:
 - `cargo run --release --bin benchmark run --vendor neo4j --name small-readonly -p40 --mps 4000`
 - `cargo run --release --bin benchmark run --vendor memgraph --name small-readonly -p40 --mps 4000`
 - `cargo run --release --bin benchmark run --vendor postgres --name small-readonly-postgres -p40 --mps 4000`
+- `cargo run --release --bin benchmark run --vendor mongo --name small-readonly-mongo -p40 --mps 4000`
 
 NOTE: It is possible to use the run command externally run vendor endpoint:
 - `cargo run --release --bin benchmark run --vendor falkor --name small-readonly -p40 --mps 4000 --endpoint falkor://127.0.0.1:6379`
 - `cargo run --release --bin benchmark run --vendor neo4j --name small-readonly -p40 --mps 4000 --endpoint neo4j://neo4j:benchmark123@127.0.0.1:7687`
 - `cargo run --release --bin benchmark run --vendor memgraph --name small-readonly -p40 --mps 4000 --endpoint bolt://127.0.0.1:7687`
 - `cargo run --release --bin benchmark run --vendor postgres --name small-readonly-postgres -p40 --mps 4000 --endpoint postgres://postgres:benchmark123@127.0.0.1:5432/postgres`
+- `cargo run --release --bin benchmark run --vendor mongo --name small-readonly-mongo -p40 --mps 4000 --endpoint mongodb://127.0.0.1:27017/benchmark`
 
 Postgres connection parameters can also be supplied via environment variables
 (`POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`) when no
@@ -314,6 +319,25 @@ SQL equivalent and are always excluded from the Postgres catalog. See
 [QUERY_EXPLANATIONS_AND_SAMPLES.md](./QUERY_EXPLANATIONS_AND_SAMPLES.md) for the full capability
 matrix and SQL templates.
 
+Mongo connection parameters can also be supplied via environment variables (`MONGO_URI` for a
+full connection string, or `MONGO_HOST`/`MONGO_PORT`/`MONGO_USER`/`MONGO_PASSWORD`/`MONGO_DB`)
+when no `--endpoint` is given, defaulting to `127.0.0.1:27017` with database `benchmark`. A
+minimal local MongoDB for testing can be started with:
+
+```bash
+docker run --rm -d --name benchmark-mongo -p 27017:27017 mongo:7
+```
+
+Mongo is modeled as two collections, `users` and `friend_edges`, traversed with `$graphLookup`;
+most Cypher query families have a direct aggregation-pipeline translation, but `shortest_path`,
+`shortest_path_with_filter`, `all_shortest_paths_len`, and `pattern_cycle` are Postgres-only
+(`$graphLookup` returns an unordered reachable set and cannot enumerate distinct paths or verify
+cyclic patterns), and algorithm procedures plus vector/fulltext smoke queries have no aggregation
+equivalent and are always excluded from the Mongo catalog. `temporal_spatial_roundtrip` requires
+MongoDB 6.0+ (uses the `$documents` aggregation stage). See
+[QUERY_EXPLANATIONS_AND_SAMPLES.md](./QUERY_EXPLANATIONS_AND_SAMPLES.md) for the full capability
+matrix and aggregation-pipeline templates.
+
 ##### multi-vendor runs and per-vendor comparison reports (UI)
 
 The benchmark is designed to run the same workload against multiple vendors and then generate a **pairwise comparison report**.
@@ -324,6 +348,7 @@ The benchmark is designed to run the same workload against multiple vendors and 
 - `cargo run --release --bin benchmark -- run --vendor neo4j --name small-readonly -p40 --mps 4000 --results-dir Results-YYMMDD-HH:MM`
 - `cargo run --release --bin benchmark -- run --vendor memgraph --name small-readonly -p40 --mps 4000 --results-dir Results-YYMMDD-HH:MM`
 - `cargo run --release --bin benchmark -- run --vendor postgres --name small-readonly-postgres -p40 --mps 4000 --results-dir Results-YYMMDD-HH:MM`
+- `cargo run --release --bin benchmark -- run --vendor mongo --name small-readonly-mongo -p40 --mps 4000 --results-dir Results-YYMMDD-HH:MM`
 
 2) Aggregate into UI-ready JSON summaries:
 
@@ -334,6 +359,7 @@ This produces:
 - `ui/public/summaries/neo4j_vs_falkordb.json`
 - `ui/public/summaries/memgraph_vs_falkordb.json`
 - `ui/public/summaries/postgres_vs_falkordb.json`
+- `ui/public/summaries/mongo_vs_falkordb.json`
 
 AWS instance comparisons (e.g. Graviton vs Intel for FalkorDB runs stored under `aws-tests/`):
 
@@ -348,6 +374,7 @@ The comparison pages load only the relevant vendor pair:
 - `/neo4j` compares Neo4j vs FalkorDB
 - `/memgraph` compares Memgraph vs FalkorDB
 - `/postgres` compares Postgres vs FalkorDB
+- `/mongo` compares Mongo vs FalkorDB
 
 ##### per-query latency tracking (for the "single" view)
 

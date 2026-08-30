@@ -224,8 +224,15 @@ pub fn aggregate_results(
 
     // postgres vs falkor
     if let Ok(postgres) = load_vendor(&results_dir, Vendor::Postgres) {
-        let summary = make_summary(&[falkor, postgres])?;
+        let summary = make_summary(&[falkor.clone(), postgres])?;
         let out_path = out_dir.join("postgres_vs_falkordb.json");
+        write_summary(&out_path, &summary)?;
+    }
+
+    // mongo vs falkor
+    if let Ok(mongo) = load_vendor(&results_dir, Vendor::Mongo) {
+        let summary = make_summary(&[falkor, mongo])?;
+        let out_path = out_dir.join("mongo_vs_falkordb.json");
         write_summary(&out_path, &summary)?;
     }
 
@@ -726,6 +733,10 @@ fn build_ui_run_custom(v: &CustomRunArtifacts) -> BenchmarkResult<UiRun> {
             .get_single_value("postgres_store_size_bytes")
             .map(|v| v.round().max(0.0) as u64)
             .filter(|v| *v > 0),
+        Vendor::Mongo => metrics
+            .get_single_value("mongo_store_size_bytes")
+            .map(|v| v.round().max(0.0) as u64)
+            .filter(|v| *v > 0),
         _ => None,
     };
 
@@ -788,6 +799,7 @@ fn vendor_id(vendor: Vendor) -> String {
         Vendor::Neo4j => "neo4j".to_string(),
         Vendor::Memgraph => "memgraph".to_string(),
         Vendor::Postgres => "postgres".to_string(),
+        Vendor::Mongo => "mongo".to_string(),
     }
 }
 
@@ -889,6 +901,11 @@ impl MetricsIndex {
                 "postgres_latency_p95_us",
                 "postgres_latency_p99_us",
             ),
+            Vendor::Mongo => (
+                "mongo_latency_p50_us",
+                "mongo_latency_p95_us",
+                "mongo_latency_p99_us",
+            ),
         };
 
         let p50v = self.get_single_value(p50)?;
@@ -912,6 +929,7 @@ impl MetricsIndex {
             Vendor::Neo4j => "neo4j_query_latency_pct_us",
             Vendor::Memgraph => "memgraph_query_latency_pct_us",
             Vendor::Postgres => "postgres_query_latency_pct_us",
+            Vendor::Mongo => "mongo_query_latency_pct_us",
         };
         let timeout_metric_legacy = match vendor {
             Vendor::Memgraph => Some("memgraph_query_timeout_rate_pct"),
@@ -1005,6 +1023,7 @@ impl MetricsIndex {
             Vendor::Neo4j => "neo4j_query_latency_pct_us_by_size",
             Vendor::Memgraph => "memgraph_query_latency_pct_us_by_size",
             Vendor::Postgres => "postgres_query_latency_pct_us_by_size",
+            Vendor::Mongo => "mongo_query_latency_pct_us_by_size",
         };
 
         let samples = self.samples.get(metric).cloned().unwrap_or_default();
@@ -1217,6 +1236,7 @@ impl MetricsIndex {
             Vendor::Neo4j => "neo4j",
             Vendor::Memgraph => "memgraph",
             Vendor::Postgres => "postgres",
+            Vendor::Mongo => "mongo",
         };
 
         let base = match kind {
@@ -1299,8 +1319,9 @@ impl MetricsIndex {
             Vendor::Falkor => self.get_single_value("falkor_cpu_usage").unwrap_or(0.0),
             Vendor::Neo4j => self.get_single_value("neo4j_cpu_usage").unwrap_or(0.0),
             Vendor::Memgraph => self.get_single_value("memgraph_cpu_usage").unwrap_or(0.0),
-            // No local process management for Postgres (always an external endpoint).
+            // No local process management for Postgres/Mongo (always an external endpoint).
             Vendor::Postgres => 0.0,
+            Vendor::Mongo => 0.0,
         };
 
         // Prefer query-interface memory metrics when present.
@@ -1343,8 +1364,9 @@ impl MetricsIndex {
                 let mem_kib = self.get_single_value("neo4j_memory_usage").unwrap_or(0.0);
                 format_mem_from_kib(mem_kib)
             }
-            // No local process management for Postgres (always an external endpoint).
+            // No local process management for Postgres/Mongo (always an external endpoint).
             Vendor::Postgres => "0MB".to_string(),
+            Vendor::Mongo => "0MB".to_string(),
         };
 
         (cpu, mem_str)

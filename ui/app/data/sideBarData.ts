@@ -36,6 +36,7 @@ export const sidebarConfig: {
         { id: "neo4j", label: "Neo4j" },
         { id: "memgraph", label: "Memgraph" },
         { id: "postgres", label: "Postgres" },
+        { id: "mongo", label: "Mongo" },
       ],
     },
     {

@@ -1,4 +1,4 @@
-export type VendorKey = "falkordb" | "falkordb2" | "neo4j" | "memgraph" | "postgres" | "unknown";
+export type VendorKey = "falkordb" | "falkordb2" | "neo4j" | "memgraph" | "postgres" | "mongo" | "unknown";
 
 type GradientStops = { offset: number; color: string }[];
 
@@ -24,6 +24,7 @@ export function normalizeVendor(vendor: string): VendorKey {
   if (k === "neo4j") return "neo4j";
   if (k === "memgraph") return "memgraph";
   if (k === "postgres" || k === "postgresql") return "postgres";
+  if (k === "mongo" || k === "mongodb") return "mongo";
   return "unknown";
 }
 
@@ -78,6 +79,12 @@ function getStops(vendor: VendorKey): GradientStops {
       return [
         { offset: 0.0, color: cssVar("--Postgres-gradient-start", "#336791") },
         { offset: 1.0, color: cssVar("--Postgres-gradient-end", "#a9c2d6") },
+      ];
+    case "mongo":
+      // MongoDB brand green gradient
+      return [
+        { offset: 0.0, color: cssVar("--Mongo-gradient-start", "#13AA52") },
+        { offset: 1.0, color: cssVar("--Mongo-gradient-end", "#b8f2d0") },
       ];
     default:
       return [{ offset: 0.0, color: "#191919" }];

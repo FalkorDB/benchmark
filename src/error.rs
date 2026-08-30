@@ -22,6 +22,8 @@ pub enum BenchmarkError {
     FalkorDBError(#[from] FalkorDBError),
     #[error("Postgres error: {0}")]
     PostgresError(#[from] tokio_postgres::Error),
+    #[error("MongoDB error: {0}")]
+    MongoError(#[from] mongodb::error::Error),
     #[error("Redis error: {0}")]
     RedisError(#[from] redis::RedisError),
     #[error("Serde error: {0}")]

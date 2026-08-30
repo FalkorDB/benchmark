@@ -718,7 +718,145 @@ SELECT
   )) AS dist
 ```
 
+## Mongo support
+Mongo is modeled as two collections, `users` and `friend_edges` (edge documents with `src`/`dst`
+fields), traversed with `$graphLookup`. Its own aggregation-pipeline catalog lives in
+`src/mongo_queries_repository.rs` rather than reusing `src/queries_repository.rs`.
+
+### Supported coverage profiles
+- `baseline` (default): the full set of baseline/phase-1 families that have an aggregation-pipeline translation.
+- `extended-core`: baseline + `exact_5_hop_traverse_count`, `exact_6_hop_traverse_count`, `temporal_spatial_roundtrip` (requires MongoDB 6.0+ for the `$documents` stage).
+- `fixture-dependent`: **not supported**. `--vendor mongo --query-profile fixture-dependent` is
+  rejected at startup because Mongo has no vector/fulltext index equivalent for the smoke queries.
+
+### Families excluded from every Mongo profile
+Same exclusions as Postgres (no aggregation-pipeline equivalent):
+- `algo_pagerank_summary`, `algo_max_flow_single_pair`, `algo_msf_summary`, `algo_harmonic_summary`
+- `vector_query_nodes_smoke`, `fulltext_query_nodes_smoke`, `fulltext_query_relationships_smoke`
+- `entity_path_introspection`
+
+### Additional families excluded (Postgres-only)
+`$graphLookup` returns an unordered, deduplicated reachable set per document with a first-seen
+`depthField` (BFS-like); this is usable for reachability/hop-count queries but cannot enumerate
+distinct paths or verify a full cyclic pattern's intermediate nodes, so these remain Postgres-only:
+`shortest_path`, `shortest_path_with_filter`, `all_shortest_paths_len`, `pattern_cycle`.
+
+### Mongo aggregation-pipeline templates (baseline, representative subset)
+```js
+// single_vertex_read
+db.users.findOne({ _id: id })
+
+// single_vertex_write (approximated as MERGE ... ON CREATE, no-op if already present)
+db.users.updateOne({ _id: id }, { $setOnInsert: { created_at: now } }, { upsert: true })
+
+// single_vertex_update
+db.users.updateOne({ _id: id }, { $set: { rpc_social_credit: value } })
+
+// single_edge_update ($sample + $merge is the standard Mongo idiom for "update a random doc")
+db.friend_edges.aggregate([
+  { $sample: { size: 1 } },
+  { $set: { color: value } },
+  { $merge: { into: "friend_edges", whenMatched: "merge", whenNotMatched: "discard" } },
+])
+
+// single_edge_write
+db.friend_edges.updateOne(
+  { src: from, dst: to },
+  { $setOnInsert: { bench_capacity: capacity }, $set: { touch: now } },
+  { upsert: true }
+)
+
+// aggregate_expansion_N[_with_filter] / neighbours_2[_with_filter]
+// Follow src -> dst edges via $graphLookup for (N-1) recursive hops, then filter to exactly
+// that depth (depth 0 == direct out-edges of the seed).
+db.users.aggregate([
+  { $match: { _id: seed } },
+  { $graphLookup: {
+      from: "friend_edges", startWith: "$_id",
+      connectFromField: "dst", connectToField: "src",
+      as: "reachable", maxDepth: hops - 1, depthField: "depth",
+  } },
+  { $unwind: "$reachable" },
+  { $match: { "reachable.depth": hops - 1 } },
+  // with_filter variant joins back to users and filters age >= 18:
+  { $lookup: { from: "users", localField: "reachable.dst", foreignField: "_id", as: "u" } },
+  { $unwind: "$u" },
+  { $match: { "u.age": { $gte: 18 } } },
+  { $project: { _id: "$u._id" } },
+])
+
+// value_join / value_join_cnt
+db.users.aggregate([
+  { $match: { _id: seed } },
+  { $lookup: {
+      from: "users", let: { age: "$age" },
+      pipeline: [ { $match: { $expr: { $eq: ["$age", "$$age"] } } } ],
+      as: "matches",
+  } },
+  { $unwind: "$matches" },
+  { $project: { _id: "$matches._id" } },
+])
+
+// union_all_ids / union_distinct_ids (via $unionWith; distinct adds a trailing $group)
+db.users.aggregate([
+  { $match: { _id: seed } },
+  { $project: { uid: "$_id" } },
+  { $unionWith: { coll: "users", pipeline: [
+      { $match: { _id: { $lt: 10 } } },
+      { $project: { uid: "$_id" } },
+  ] } },
+])
+
+// var_len_with_edge_where_filter (restrictSearchWithMatch filters the traversal itself)
+db.users.aggregate([
+  { $match: { _id: seed } },
+  { $graphLookup: {
+      from: "friend_edges", startWith: "$_id",
+      connectFromField: "dst", connectToField: "src",
+      as: "reachable", maxDepth: 2, depthField: "depth",
+      restrictSearchWithMatch: { bench_capacity: { $gte: min_capacity } },
+  } },
+  { $unwind: "$reachable" },
+  { $group: { _id: "$reachable.dst" } },
+  { $count: "cnt" },
+])
+
+// indexed_or_predicate / indexed_in_list_predicate
+db.users.find({ $or: [ { _id: id1 }, { _id: id2 } ] })
+db.users.find({ _id: { $in: [id1, id2, id3, id4] } })
+```
+
+### Mongo extended-core template
+```js
+// temporal_spatial_roundtrip
+// No $geoNear/PostGIS dependency: distance via the spherical law of cosines using Mongo's
+// trigonometry aggregation operators (MongoDB 4.2+); $documents (MongoDB 6.0+) seeds a single
+// input row without touching a real collection.
+db.users.aggregate([
+  { $documents: [ {} ] },
+  { $project: {
+      d: { $dateFromString: { dateString: "2024-01-01" } },
+      dur_hours: 51,
+      dist: { $multiply: [ 6371000, { $acos: { $add: [
+        { $multiply: [
+            { $cos: { $degreesToRadians: 32.1 } },
+            { $cos: { $degreesToRadians: 32.2 } },
+            { $cos: { $subtract: [ { $degreesToRadians: 34.9 }, { $degreesToRadians: 34.8 } ] } },
+        ] },
+        { $multiply: [ { $sin: { $degreesToRadians: 32.1 } }, { $sin: { $degreesToRadians: 32.2 } } ] },
+      ] } } ] },
+  } },
+])
+```
+
+### Mongo-specific limitations (documented, not fixed this phase)
+- `detach_delete_user`: Mongo has no FK/cascade concept; unlike Postgres's `ON DELETE CASCADE`,
+  deleting a user document does not remove `friend_edges` documents that reference it.
+- `remove_user_property_and_label` / `single_vertex_write` / `foreach_loop_mutation`: same
+  approximations as documented for Postgres (no label concept; single terminal assignment).
+
 ## Reference source
 - Canonical query definitions: `src/queries_repository.rs`
 - Postgres query definitions: `src/postgres_queries_repository.rs`
+- Mongo query definitions: `src/mongo_queries_repository.rs`
 - CLI profile/toggle options: `src/cli.rs` (`--query-profile` and `--enable-algo-*`)
