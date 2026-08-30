@@ -551,6 +551,8 @@ export default function DashBoard({
         ? "--Memgraph-color"
         : key === "postgres" || key === "postgresql"
         ? "--Postgres-color"
+        : key === "mongo" || key === "mongodb"
+        ? "--Mongo-color"
         : key === "intel" || key === "x86" || key.startsWith("r7i")
         ? "--Intel-color"
         : key === "graviton" || key === "arm" || key.startsWith("r8g")

@@ -20,6 +20,10 @@ pub mod error;
 pub mod falkor;
 pub mod memgraph;
 pub mod memgraph_client;
+pub mod mongo;
+pub mod mongo_client;
+pub mod mongo_queries_repository;
+pub mod mongo_query;
 pub mod multi_benchmark;
 pub mod neo4j;
 pub mod neo4j_client;
@@ -444,6 +448,51 @@ lazy_static! {
     pub static ref POSTGRES_STORE_SIZE_BYTES: IntGauge = register_int_gauge!(
         "postgres_store_size_bytes",
         "Approximate size in bytes of Postgres users/friend_edges tables and their indexes"
+    )
+    .unwrap();
+
+    pub static ref MONGO_SUCCESS_REQUESTS_DURATION_HISTOGRAM: Histogram = register_histogram!(
+        "mongo_response_time_success_histogram",
+        "Response time histogram of the successful requests",
+        vec![0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,]
+    )
+    .unwrap();
+    pub static ref MONGO_ERROR_REQUESTS_DURATION_HISTOGRAM: Histogram = register_histogram!(
+        "mongo_response_time_error_histogram",
+        "Response time histogram of the error requests",
+        vec![0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,]
+    )
+    .unwrap();
+    pub static ref MONGO_MSG_DEADLINE_OFFSET_GAUGE: IntGauge = register_int_gauge!(
+        "mongo_msg_deadline_offset",
+        "offset of the message from the deadline",
+    )
+    .unwrap();
+    pub static ref MONGO_LATENCY_P50_US: IntGauge = register_int_gauge!(
+        "mongo_latency_p50_us",
+        "P50 latency in microseconds (computed in-process)"
+    )
+    .unwrap();
+    pub static ref MONGO_LATENCY_P95_US: IntGauge = register_int_gauge!(
+        "mongo_latency_p95_us",
+        "P95 latency in microseconds (computed in-process)"
+    )
+    .unwrap();
+    pub static ref MONGO_LATENCY_P99_US: IntGauge = register_int_gauge!(
+        "mongo_latency_p99_us",
+        "P99 latency in microseconds (computed in-process)"
+    )
+    .unwrap();
+    pub static ref MONGO_QUERY_LATENCY_PCT_US: IntGaugeVec = register_int_gauge_vec!(
+        "mongo_query_latency_pct_us",
+        "Latency percentile per query in microseconds (computed in-process)",
+        &["query", "pct"]
+    )
+    .unwrap();
+    // Combined collection + index size (bytes) for the `users`/`friend_edges` collections.
+    pub static ref MONGO_STORE_SIZE_BYTES: IntGauge = register_int_gauge!(
+        "mongo_store_size_bytes",
+        "Approximate size in bytes of Mongo users/friend_edges collections and their indexes"
     )
     .unwrap();
 }

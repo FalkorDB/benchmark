@@ -24,6 +24,7 @@ module.exports = {
 			Neo4j: 'var(--Neo4j-color)',
 			Memgraph: 'var(--Memgraph-color)',
 			Postgres: 'var(--Postgres-color)',
+			Mongo: 'var(--Mongo-color)',
   			background: 'hsl(var(--background))',
   			foreground: 'hsl(var(--foreground))',
   			card: {

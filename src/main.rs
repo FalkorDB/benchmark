@@ -8,6 +8,9 @@ use benchmark::falkor::{Falkor, FalkorAlgorithmCapabilities, Stopped};
 use benchmark::memgraph_client::{
     MemgraphAlgorithmCapabilities, MemgraphClient, MemgraphFixtureCapabilities,
 };
+use benchmark::mongo_client::MongoClient;
+use benchmark::mongo_queries_repository::MongoUsersQueriesRepository;
+use benchmark::mongo_query::PreparedMongoQuery;
 use benchmark::multi_benchmark::{load_scenario_config, rolling_windows, GraphDeploymentPlan};
 use benchmark::neo4j_client::{Neo4jAlgorithmCapabilities, Neo4jClient, Neo4jFixtureCapabilities};
 use benchmark::postgres_client::PostgresClient;
@@ -33,6 +36,8 @@ use benchmark::{
     MEMGRAPH_ERROR_REQUESTS_DURATION_HISTOGRAM, MEMGRAPH_LATENCY_P50_US, MEMGRAPH_LATENCY_P95_US,
     MEMGRAPH_LATENCY_P99_US, MEMGRAPH_QUERY_LATENCY_PCT_US, MEMGRAPH_QUERY_TIMEOUT_RATE_PCT,
     MEMGRAPH_STORAGE_BASE_DATASET_BYTES, MEMGRAPH_SUCCESS_REQUESTS_DURATION_HISTOGRAM,
+    MONGO_ERROR_REQUESTS_DURATION_HISTOGRAM, MONGO_LATENCY_P50_US, MONGO_LATENCY_P95_US,
+    MONGO_LATENCY_P99_US, MONGO_QUERY_LATENCY_PCT_US, MONGO_SUCCESS_REQUESTS_DURATION_HISTOGRAM,
     NEO4J_ERROR_REQUESTS_DURATION_HISTOGRAM, NEO4J_LATENCY_P50_US, NEO4J_LATENCY_P95_US,
     NEO4J_LATENCY_P99_US, NEO4J_QUERY_LATENCY_PCT_US, NEO4J_STORE_SIZE_BYTES,
     NEO4J_SUCCESS_REQUESTS_DURATION_HISTOGRAM,
@@ -333,6 +338,14 @@ async fn async_main(cli: Cli) -> BenchmarkResult<()> {
                         init_postgres(size, force, batch_size, endpoint, query_profile).await?;
                     }
                 }
+                Vendor::Mongo => {
+                    if dry_run {
+                        info!("Dry run");
+                        todo!()
+                    } else {
+                        init_mongo(size, force, batch_size, endpoint, query_profile).await?;
+                    }
+                }
             }
         }
         Commands::Run {
@@ -362,6 +375,9 @@ async fn async_main(cli: Cli) -> BenchmarkResult<()> {
                 }
                 Vendor::Postgres => {
                     run_postgres(parallel, name, mps, simulate, endpoint, results_dir).await?;
+                }
+                Vendor::Mongo => {
+                    run_mongo(parallel, name, mps, simulate, endpoint, results_dir).await?;
                 }
             }
         }
@@ -566,6 +582,14 @@ fn validate_query_coverage_profile_support(
             "Postgres does not support the 'fixture-dependent' query coverage profile \
              (vector/fulltext index queries have no SQL equivalent in this integration). \
              Use --query-profile baseline or extended-core instead."
+                .to_string(),
+        ));
+    }
+    if vendor == Vendor::Mongo && query_profile.includes_fixture_dependent() {
+        return Err(OtherError(
+            "Mongo does not support the 'fixture-dependent' query coverage profile \
+             (vector/fulltext index queries have no aggregation-pipeline equivalent in this \
+             integration). Use --query-profile baseline or extended-core instead."
                 .to_string(),
         ));
     }
@@ -927,6 +951,7 @@ impl PerQueryLatency {
             Vendor::Neo4j => "neo4j",
             Vendor::Memgraph => "memgraph",
             Vendor::Postgres => "postgres",
+            Vendor::Mongo => "mongo",
         }
     }
 
@@ -940,6 +965,7 @@ impl PerQueryLatency {
             Vendor::Neo4j => NEO4J_QUERY_LATENCY_PCT_US.reset(),
             Vendor::Memgraph => MEMGRAPH_QUERY_LATENCY_PCT_US.reset(),
             Vendor::Postgres => POSTGRES_QUERY_LATENCY_PCT_US.reset(),
+            Vendor::Mongo => MONGO_QUERY_LATENCY_PCT_US.reset(),
         }
         BENCHMARK_QUERY_TIMEOUT_RATE_PCT.reset();
         BENCHMARK_QUERY_FAILURE_RATE_PCT.reset();
@@ -1028,6 +1054,11 @@ impl PerQueryLatency {
                     }
                     Vendor::Postgres => {
                         POSTGRES_QUERY_LATENCY_PCT_US
+                            .with_label_values(&[entry.name.as_str(), pct_label.as_str()])
+                            .set(v);
+                    }
+                    Vendor::Mongo => {
+                        MONGO_QUERY_LATENCY_PCT_US
                             .with_label_values(&[entry.name.as_str(), pct_label.as_str()])
                             .set(v);
                     }
@@ -2592,6 +2623,269 @@ async fn spawn_postgres_worker(
     Ok(handle)
 }
 
+async fn init_mongo(
+    size: Size,
+    force: bool,
+    batch_size: usize,
+    endpoint: Option<String>,
+    query_profile: QueryCoverageProfile,
+) -> BenchmarkResult<()> {
+    validate_query_coverage_profile_support(Vendor::Mongo, query_profile)?;
+    let spec = Spec::new(benchmark::scenario::Name::Users, size, Vendor::Mongo);
+
+    let (uri, dbname) = if let Some(ref endpoint_str) = endpoint {
+        info!(
+            "Using external Mongo endpoint for data loading: {}",
+            redact_endpoint(endpoint_str)
+        );
+        parse_mongo_endpoint(endpoint_str)?
+    } else {
+        benchmark::mongo::default_connection_params()
+    };
+
+    let client = MongoClient::connect(&uri, &dbname).await?;
+    info!("client connected to mongo");
+
+    if force {
+        info!("Clearing existing Mongo collections (--force)");
+        benchmark::mongo::clear_schema(&client).await?;
+    }
+
+    benchmark::mongo::create_schema(&client).await?;
+
+    let (node_count, relation_count) = client.graph_size().await?;
+    info!(
+        "node count: {}, relation count: {}",
+        format_number(node_count),
+        format_number(relation_count)
+    );
+    if node_count != 0 || relation_count != 0 {
+        error!(
+            "Mongo database is not empty, node count: {}, relation count: {}",
+            node_count, relation_count
+        );
+        return Err(OtherError(
+            "Database is not empty. Use --force to clear it first.".to_string(),
+        ));
+    }
+
+    let mut histogram = Histogram::new(7, 64)?;
+    let data_stream = spec.init_data_iterator().await?;
+    info!("importing data (bulk insertMany) in batches of {}", batch_size);
+    let start = Instant::now();
+    let total_processed =
+        benchmark::mongo::load_from_cypher_import(&client, data_stream, batch_size, &mut histogram)
+            .await?;
+    info!(
+        "Processed {} records via bulk-insertMany batches",
+        format_number(total_processed as u64)
+    );
+
+    let (node_count, relation_count) = client.graph_size().await?;
+    info!(
+        "{} nodes and {} relations were imported at {:?}",
+        format_number(node_count),
+        format_number(relation_count),
+        start.elapsed()
+    );
+
+    info!("---> histogram");
+    show_historgam(histogram);
+
+    info!("---> Done");
+    Ok(())
+}
+
+async fn run_mongo(
+    parallel: usize,
+    file_name: String,
+    mps: usize,
+    simulate: Option<usize>,
+    endpoint: Option<String>,
+    results_dir: Option<String>,
+) -> BenchmarkResult<()> {
+    let queries_file = file_name.clone();
+    let (queries_metadata, queries) = read_mongo_queries(file_name).await?;
+    validate_query_coverage_profile_support(Vendor::Mongo, queries_metadata.query_profile)?;
+
+    let (uri, dbname) = if let Some(ref endpoint_str) = endpoint {
+        info!(
+            "Using external Mongo endpoint: {}",
+            redact_endpoint(endpoint_str)
+        );
+        parse_mongo_endpoint(endpoint_str)?
+    } else {
+        benchmark::mongo::default_connection_params()
+    };
+
+    let client = MongoClient::connect(&uri, &dbname).await?;
+    info!("client connected to mongo");
+    let engine_version = client.detect_engine_version().await.ok().flatten();
+
+    // Best-effort store sizing.
+    client.collect_store_size_metrics().await;
+
+    let number_of_queries = queries.len();
+    let worker_progress_every = worker_progress_batch_size(number_of_queries);
+    let (node_count, relation_count) = client.graph_size().await?;
+
+    info!(
+        "graph has {} nodes and {} relations",
+        format_number(node_count),
+        format_number(relation_count)
+    );
+    info!(
+        "running {} queries",
+        format_number(number_of_queries as u64)
+    );
+    info!(
+        "worker query spread batch set to {} (total queries: {})",
+        worker_progress_every,
+        format_number(number_of_queries as u64)
+    );
+
+    let (tx, rx) = tokio::sync::mpsc::channel::<Msg<PreparedMongoQuery>>(20 * parallel);
+    let rx: Arc<Mutex<Receiver<Msg<PreparedMongoQuery>>>> = Arc::new(Mutex::new(rx));
+    let scheduler_handle =
+        scheduler::spawn_scheduler::<PreparedMongoQuery>(mps, tx.clone(), queries);
+    let mut workers_handles = Vec::with_capacity(parallel);
+
+    let latency_hist = Arc::new(tokio::sync::Mutex::new(histogram::Histogram::new(7, 64)?));
+    let per_query = Arc::new(PerQueryLatency::new(queries_metadata.catalog.clone())?);
+
+    let started_at = SystemTime::now();
+    let start = Instant::now();
+    for spawn_id in 0..parallel {
+        let handle = spawn_mongo_worker(
+            client.clone(),
+            spawn_id,
+            &rx,
+            simulate,
+            latency_hist.clone(),
+            per_query.clone(),
+            worker_progress_every,
+        )
+        .await?;
+        workers_handles.push(handle);
+    }
+    let _ = scheduler_handle.await;
+    drop(tx);
+
+    for handle in workers_handles {
+        let _ = handle.await;
+    }
+
+    let elapsed = start.elapsed();
+    let finished_at = SystemTime::now();
+
+    info!(
+        "running {} queries took {:?}",
+        format_number(number_of_queries as u64),
+        elapsed
+    );
+
+    {
+        let hist = latency_hist.lock().await;
+        MONGO_LATENCY_P50_US.set(percentile_us(&hist, 50.0) as i64);
+        MONGO_LATENCY_P95_US.set(percentile_us(&hist, 95.0) as i64);
+        MONGO_LATENCY_P99_US.set(percentile_us(&hist, 99.0) as i64);
+    }
+
+    per_query.export_to_prometheus(Vendor::Mongo);
+
+    write_run_results(
+        results_dir,
+        Vendor::Mongo,
+        queries_metadata.dataset,
+        &queries_file,
+        parallel,
+        mps,
+        simulate,
+        &endpoint,
+        number_of_queries,
+        started_at,
+        finished_at,
+        elapsed,
+        engine_version,
+    )
+    .await?;
+
+    info!("Using external endpoint, skipping Mongo process management");
+    Ok(())
+}
+
+async fn spawn_mongo_worker(
+    client: MongoClient,
+    worker_id: usize,
+    receiver: &Arc<Mutex<Receiver<Msg<PreparedMongoQuery>>>>,
+    simulate: Option<usize>,
+    latency_hist: Arc<tokio::sync::Mutex<histogram::Histogram>>,
+    per_query: Arc<PerQueryLatency>,
+    worker_progress_every: u32,
+) -> BenchmarkResult<JoinHandle<()>> {
+    info!("spawning worker");
+    let receiver = Arc::clone(receiver);
+    let handle = tokio::spawn(async move {
+        let worker_id = worker_id.to_string();
+        let worker_id_str = worker_id.as_str();
+        let mut counter = 0u32;
+        let client = client.clone();
+        loop {
+            let received = receiver.lock().await.recv().await;
+
+            match received {
+                Some(prepared_query) => {
+                    let start_time = Instant::now();
+
+                    let r = client
+                        .execute_prepared_query(worker_id_str, &prepared_query, &simulate)
+                        .await;
+                    let duration = start_time.elapsed();
+                    match r {
+                        Ok(_) => {
+                            MONGO_SUCCESS_REQUESTS_DURATION_HISTOGRAM
+                                .observe(duration.as_secs_f64());
+                            {
+                                let mut h = latency_hist.lock().await;
+                                let _ = h.increment(duration.as_micros() as u64);
+                            }
+                            per_query.record_success_us(
+                                prepared_query.payload.q_id,
+                                duration.as_micros() as u64,
+                            );
+                            counter += 1;
+                            if counter.is_multiple_of(worker_progress_every) {
+                                info!("worker {} processed {} queries", worker_id, counter);
+                            }
+                        }
+                        Err(e) => {
+                            MONGO_ERROR_REQUESTS_DURATION_HISTOGRAM
+                                .observe(duration.as_secs_f64());
+                            if is_timeout_error(&e) {
+                                per_query.record_timeout(prepared_query.payload.q_id);
+                            } else {
+                                per_query.record_failure(prepared_query.payload.q_id);
+                            }
+                            let seconds_wait = 3u64;
+                            info!(
+                                "worker {} failed to process query, not sleeping for {} seconds {:?}",
+                                worker_id, seconds_wait, e
+                            );
+                        }
+                    }
+                }
+                None => {
+                    info!("worker {} received None, exiting", worker_id);
+                    break;
+                }
+            }
+        }
+        info!("worker {} finished", worker_id);
+    });
+
+    Ok(handle)
+}
+
 fn print_completions<G: Generator>(
     gen: G,
     cmd: &mut Command,
@@ -2629,6 +2923,16 @@ async fn prepare_queries(
         )
         .await;
     }
+    if vendor == Vendor::Mongo {
+        return prepare_mongo_queries(
+            dataset,
+            size,
+            file_name,
+            write_ratio,
+            query_profile,
+        )
+        .await;
+    }
 
     let start = Instant::now();
 
@@ -2642,6 +2946,7 @@ async fn prepare_queries(
         Vendor::Neo4j => Flavour::Neo4j,
         Vendor::Memgraph => Flavour::Memgraph,
         Vendor::Postgres => unreachable!("handled above via prepare_postgres_queries"),
+        Vendor::Mongo => unreachable!("handled above via prepare_mongo_queries"),
     };
 
     let queries_repository = benchmark::queries_repository::UsersQueriesRepository::new(
@@ -2872,6 +3177,104 @@ fn parse_postgres_endpoint(
     };
 
     Ok((host, port, user, password, dbname))
+}
+
+/// Mongo analogue of `prepare_postgres_queries`, writing `PreparedMongoQuery` lines instead of
+/// SQL `PreparedSqlQuery` lines.
+async fn prepare_mongo_queries(
+    dataset: Size,
+    size: usize,
+    file_name: String,
+    write_ratio: f32,
+    query_profile: QueryCoverageProfile,
+) -> BenchmarkResult<()> {
+    let start = Instant::now();
+    let spec = Spec::new(Users, dataset, Vendor::Mongo);
+    let vertices = spec.vertices as i32;
+    let edges = spec.edges as i32;
+
+    let queries_repository = MongoUsersQueriesRepository::new(vertices, edges, query_profile);
+    let catalog = queries_repository.catalog();
+
+    let metadata = PrepareQueriesMetadata {
+        size,
+        dataset,
+        query_profile,
+        catalog,
+    };
+
+    let file = File::create(file_name).await?;
+    let mut writer = BufWriter::new(file);
+    let metadata_line = serde_json::to_string(&metadata)?;
+    writer.write_all(metadata_line.as_bytes()).await?;
+    writer.write_all(b"\n").await?;
+
+    for query in queries_repository.random_queries(size, write_ratio) {
+        let json_string = serde_json::to_string(&query)?;
+        writer.write_all(json_string.as_bytes()).await?;
+        writer.write_all(b"\n").await?;
+    }
+    writer.flush().await?;
+
+    let duration = start.elapsed();
+    info!("Time taken to prepare Mongo queries: {:?}", duration);
+    Ok(())
+}
+
+async fn read_mongo_queries(
+    file_name: String
+) -> BenchmarkResult<(PrepareQueriesMetadata, Vec<PreparedMongoQuery>)> {
+    let start = Instant::now();
+    let file = File::open(file_name).await?;
+    let mut reader = BufReader::new(file);
+
+    let mut metadata_line = String::new();
+    reader.read_line(&mut metadata_line).await?;
+
+    match serde_json::from_str::<PrepareQueriesMetadata>(&metadata_line) {
+        Ok(metadata) => {
+            let size = metadata.size;
+            let mut queries = Vec::with_capacity(size);
+            let mut lines = reader.lines();
+
+            while let Some(line) = lines.next_line().await? {
+                let query: PreparedMongoQuery = serde_json::from_str(&line)?;
+                queries.push(query);
+            }
+            let duration = start.elapsed();
+            info!("Reading {} Mongo queries took {:?}", size, duration);
+            Ok((metadata, queries))
+        }
+        Err(e) => Err(OtherError(format!("Error parsing metadata: {}", e))),
+    }
+}
+
+/// Parse a Mongo endpoint string into (uri, dbname). Supports full connection strings like
+/// `mongodb://user:pass@host:27017/dbname` or `mongodb+srv://...`; the whole endpoint string is
+/// passed through as the URI (the Mongo driver understands both schemes natively), and the
+/// database name is extracted from the URL path (falling back to `MONGO_DB`).
+fn parse_mongo_endpoint(endpoint: &str) -> BenchmarkResult<(String, String)> {
+    let url = Url::parse(endpoint)
+        .map_err(|e| OtherError(format!("Invalid Mongo endpoint URL '{}': {}", endpoint, e)))?;
+
+    match url.scheme() {
+        "mongodb" | "mongodb+srv" => {}
+        scheme => {
+            return Err(OtherError(format!(
+                "Unsupported Mongo scheme '{}'. Use mongodb:// or mongodb+srv://",
+                scheme
+            )));
+        }
+    }
+
+    let dbname = url.path().trim_start_matches('/');
+    let dbname = if dbname.is_empty() {
+        std::env::var("MONGO_DB").unwrap_or_else(|_| "benchmark".to_string())
+    } else {
+        dbname.to_string()
+    };
+
+    Ok((endpoint.to_string(), dbname))
 }
 
 async fn run_memgraph(

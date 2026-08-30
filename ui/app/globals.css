@@ -55,6 +55,7 @@ body {
     --Neo4j-color: #0A6190;
     --Memgraph-color: #ff2b4a;
     --Postgres-color: #336791;
+    --Mongo-color: #13AA52;
 
     /* AWS instance comparison colors */
     --Intel-color: #1f77b4;
@@ -82,6 +83,9 @@ body {
 
     --Postgres-gradient-start: #336791;
     --Postgres-gradient-end: #a9c2d6;
+
+    --Mongo-gradient-start: #13AA52;
+    --Mongo-gradient-end: #b8f2d0;
   }
 
   .dark {
