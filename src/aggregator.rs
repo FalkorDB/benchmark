@@ -205,39 +205,58 @@ pub fn aggregate_results(
         ))
     })?;
 
-    // Required baseline vendor
-    let falkor = load_vendor(&results_dir, Vendor::Falkor)?;
-
-    // neo4j vs falkor
-    if let Ok(neo4j) = load_vendor(&results_dir, Vendor::Neo4j) {
-        let summary = make_summary(&[falkor.clone(), neo4j])?;
-        let out_path = out_dir.join("neo4j_vs_falkordb.json");
-        write_summary(&out_path, &summary)?;
+    // Load every known vendor that has artifacts under results-dir.
+    // Pairwise vs Falkor is preserved for existing UI pages; multi-engine
+    // comparison (up to 5) is written for the all-engines dashboard.
+    let mut present: Vec<VendorArtifacts> = Vec::new();
+    for vendor in [
+        Vendor::Falkor,
+        Vendor::Neo4j,
+        Vendor::Memgraph,
+        Vendor::Postgres,
+        Vendor::Mongo,
+    ] {
+        if let Ok(v) = load_vendor(&results_dir, vendor) {
+            present.push(v);
+        }
     }
 
-    // memgraph vs falkor
-    if let Ok(memgraph) = load_vendor(&results_dir, Vendor::Memgraph) {
-        let summary = make_summary(&[falkor.clone(), memgraph])?;
-        let out_path = out_dir.join("memgraph_vs_falkordb.json");
-        write_summary(&out_path, &summary)?;
+    if present.is_empty() {
+        return Err(OtherError(format!(
+            "No vendor result folders found under {}",
+            results_dir.display()
+        )));
     }
 
-    // postgres vs falkor
-    if let Ok(postgres) = load_vendor(&results_dir, Vendor::Postgres) {
-        let summary = make_summary(&[falkor.clone(), postgres])?;
-        let out_path = out_dir.join("postgres_vs_falkordb.json");
-        write_summary(&out_path, &summary)?;
+    let falkor = present.iter().find(|v| matches!(v.vendor, Vendor::Falkor)).cloned();
+
+    // Pairwise pages (legacy UI routes)
+    if let Some(ref falkor) = falkor {
+        for other in present.iter().filter(|v| !matches!(v.vendor, Vendor::Falkor)) {
+            let summary = make_summary(&[falkor.clone(), other.clone()])?;
+            let out_name = match other.vendor {
+                Vendor::Neo4j => "neo4j_vs_falkordb.json",
+                Vendor::Memgraph => "memgraph_vs_falkordb.json",
+                Vendor::Postgres => "postgres_vs_falkordb.json",
+                Vendor::Mongo => "mongo_vs_falkordb.json",
+                Vendor::Falkor => continue,
+            };
+            write_summary(&out_dir.join(out_name), &summary)?;
+        }
     }
 
-    // mongo vs falkor
-    if let Ok(mongo) = load_vendor(&results_dir, Vendor::Mongo) {
-        let summary = make_summary(&[falkor, mongo])?;
-        let out_path = out_dir.join("mongo_vs_falkordb.json");
-        write_summary(&out_path, &summary)?;
+    // Multi-engine comparison (all present vendors, capped at 5).
+    let multi: Vec<VendorArtifacts> = present.into_iter().take(MAX_MULTI_ENGINE_RUNS).collect();
+    if multi.len() >= 2 {
+        let summary = make_summary(&multi)?;
+        write_summary(&out_dir.join("multi_engine_compare.json"), &summary)?;
     }
 
     Ok(())
 }
+
+/// Maximum number of engine/run series shown side-by-side in multi-engine dashboards.
+const MAX_MULTI_ENGINE_RUNS: usize = 5;
 
 #[derive(Debug, Clone)]
 struct VendorArtifacts {
@@ -402,13 +421,14 @@ struct CustomRunArtifacts {
     metrics_text: String,
 }
 
-/// Aggregate `aws-tests/` style folders into a single UI summary JSON.
+/// Aggregate labeled result folders into a single multi-engine UI summary JSON.
 ///
 /// Expected layout:
 ///   <aws_tests_dir>/<run_name>/{meta.json,metrics.prom}
 ///
-/// This is meant for comparing two FalkorDB runs on different AWS instance families
-/// (e.g. Graviton vs Intel) side-by-side in the UI.
+/// Supports up to [`MAX_MULTI_ENGINE_RUNS`] engines/runs side-by-side, including:
+/// - multiple FalkorDB variants / AWS instance families
+/// - heterogeneous engines (FalkorDB, Neo4j, Memgraph, Postgres)
 pub fn aggregate_aws_tests(
     aws_tests_dir: &str,
     out_path: &str,
@@ -449,17 +469,17 @@ pub fn aggregate_aws_tests(
         let meta: RunResultsMeta = serde_json::from_str(&meta_raw)
             .map_err(|e| OtherError(format!("Failed parsing {}: {}", meta_path.display(), e)))?;
 
-        // We're intentionally aggregating Falkor runs.
-        let vendor = Vendor::Falkor;
-
-        let metrics_text = fs::read_to_string(&metrics_path)
-            .map_err(|e| OtherError(format!("Failed reading {}: {}", metrics_path.display(), e)))?;
-
         let dir_name = path
             .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or("run")
             .to_string();
+
+        // Infer engine from folder name / meta so multi-engine runs can live side-by-side.
+        let vendor = infer_vendor_from_name(&dir_name, &meta.vendor);
+
+        let metrics_text = fs::read_to_string(&metrics_path)
+            .map_err(|e| OtherError(format!("Failed reading {}: {}", metrics_path.display(), e)))?;
 
         fn normalize_instance_type(name: &str) -> Option<String> {
             // Accept already-normalized forms like "r7i.2xlarge".
@@ -541,14 +561,38 @@ pub fn aggregate_aws_tests(
             || lower.contains("x86")
         {
             "intel".to_string()
-        } else if lower.contains("falkordb-c") || lower.contains("falkordb-rs") {
+        } else if lower.contains("falkordb-c")
+            || lower.contains("falkordb-rs")
+            || lower.contains("neo4j")
+            || lower.contains("memgraph")
+            || lower.contains("postgres")
+            || lower.contains("mongo")
+        {
             detected_platform()
         } else {
             // Fallback: use the raw directory name as the platform/hardware identifier
             dir_name.clone()
         };
 
-        let ui_vendor = instance;
+        // For multi-engine compare folders (neo4j/, postgres/, ...), prefer stable UI ids.
+        // For instance-family folders keep the AWS-like instance label.
+        let ui_vendor = match vendor {
+            Vendor::Neo4j => "neo4j".to_string(),
+            Vendor::Memgraph => "memgraph".to_string(),
+            Vendor::Postgres => "postgres".to_string(),
+            Vendor::Mongo => "mongo".to_string(),
+            Vendor::Falkor => {
+                if lower.contains("falkordb-c") {
+                    "falkordb-c".to_string()
+                } else if lower.contains("falkordb-rs") || lower.contains("falkordb2") {
+                    "falkordb-rs".to_string()
+                } else if lower == "falkor" || lower == "falkordb" {
+                    "falkordb".to_string()
+                } else {
+                    instance
+                }
+            }
+        };
 
         candidates.push(CustomRunArtifacts {
             vendor,
@@ -567,25 +611,44 @@ pub fn aggregate_aws_tests(
         )));
     }
 
-    // Prefer r7i* (Intel) and r8g* (Graviton) when present; otherwise take first two.
+    // Prefer known labels when present; otherwise take remaining candidates in sorted order.
+    // Cap at MAX_MULTI_ENGINE_RUNS so dashboards can compare up to 5 engines/runs.
     candidates.sort_by(|a, b| a.ui_vendor.cmp(&b.ui_vendor));
 
     let mut picked: Vec<CustomRunArtifacts> = Vec::new();
-    for want_prefix in ["falkordb1", "falkordb2", "r7i", "r8g"] {
-        if let Some(idx) = candidates
-            .iter()
-            .position(|c| c.ui_vendor.to_lowercase().starts_with(want_prefix))
-        {
+    for want_prefix in [
+        "falkordb1",
+        "falkordb2",
+        "falkordb-c",
+        "falkordb-rs",
+        "falkordb",
+        "neo4j",
+        "memgraph",
+        "postgres",
+        "mongo",
+        "r7i",
+        "r8g",
+        "r7g",
+        "r6g",
+        "r6i",
+    ] {
+        if picked.len() >= MAX_MULTI_ENGINE_RUNS {
+            break;
+        }
+        if let Some(idx) = candidates.iter().position(|c| {
+            let v = c.ui_vendor.to_lowercase();
+            v == want_prefix || v.starts_with(want_prefix)
+        }) {
             picked.push(candidates.remove(idx));
         }
     }
 
-    // Fill up to 2.
-    while picked.len() < 2 && !candidates.is_empty() {
+    // Fill remaining slots from leftover candidates.
+    while picked.len() < MAX_MULTI_ENGINE_RUNS && !candidates.is_empty() {
         picked.push(candidates.remove(0));
     }
 
-    picked.truncate(2);
+    picked.truncate(MAX_MULTI_ENGINE_RUNS);
 
     let mut runs = Vec::new();
     for v in &picked {
@@ -800,6 +863,22 @@ fn vendor_id(vendor: Vendor) -> String {
         Vendor::Memgraph => "memgraph".to_string(),
         Vendor::Postgres => "postgres".to_string(),
         Vendor::Mongo => "mongo".to_string(),
+    }
+}
+
+fn infer_vendor_from_name(dir_name: &str, meta_vendor: &str) -> Vendor {
+    let lower = dir_name.to_lowercase();
+    let meta = meta_vendor.to_lowercase();
+    if lower.contains("postgres") || lower.contains("postgresql") || meta.contains("postgres") {
+        Vendor::Postgres
+    } else if lower.contains("mongo") || meta.contains("mongo") {
+        Vendor::Mongo
+    } else if lower.contains("neo4j") || meta.contains("neo4j") {
+        Vendor::Neo4j
+    } else if lower.contains("memgraph") || meta.contains("memgraph") {
+        Vendor::Memgraph
+    } else {
+        Vendor::Falkor
     }
 }
 
