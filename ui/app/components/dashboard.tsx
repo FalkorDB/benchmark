@@ -38,6 +38,67 @@ const hasValidRunResult = (run: unknown): run is Run => {
   );
 };
 
+// Any FalkorDB variant (standard/Rust, or platform-labeled aws-tests entries) that should act
+// as the "baseline" engine when building per-engine comparison tag lines.
+const FALKORDB_VENDOR_KEYS = new Set([
+  "falkordb",
+  "falkor",
+  "falkordb1",
+  "falkordb-c",
+  "falkordb2",
+  "falkordb-rs",
+]);
+
+const isFalkorDbVendor = (vendor: string): boolean =>
+  FALKORDB_VENDOR_KEYS.has((vendor ?? "").toString().trim().toLowerCase());
+
+type VendorValue = { vendor: string; value: number };
+
+/**
+ * Compare FalkorDB against every other engine present, returning one ratio per engine so tag
+ * lines can read "Nx faster than Neo4j, Mx faster than Postgres" instead of an unattributed
+ * min/max ratio across an arbitrary set of engines (ambiguous once more than 2 are shown, e.g.
+ * on the multi-engine dashboard). `higherIsBetter` controls the ratio direction so it always
+ * reads as "FalkorDB is Nx <better>". Returns null when FalkorDB isn't present or there's
+ * nothing else to compare against, so callers can fall back to a generic ratio.
+ */
+const computeFalkordbRatios = (
+  items: VendorValue[],
+  higherIsBetter: boolean
+): { vendor: string; ratio: number }[] | null => {
+  const falkor = items.find(
+    (i) => isFalkorDbVendor(i.vendor) && Number.isFinite(i.value) && i.value > 0
+  );
+  if (!falkor) return null;
+
+  const ratios = items
+    .filter(
+      (i) => !isFalkorDbVendor(i.vendor) && Number.isFinite(i.value) && i.value > 0
+    )
+    .map((i) => ({
+      vendor: i.vendor,
+      ratio: higherIsBetter ? falkor.value / i.value : i.value / falkor.value,
+    }))
+    .filter((r) => Number.isFinite(r.ratio) && r.ratio > 0);
+
+  return ratios.length ? ratios : null;
+};
+
+const joinWithAnd = (parts: string[]): string => {
+  if (parts.length <= 1) return parts.join("");
+  if (parts.length === 2) return `${parts[0]} and ${parts[1]}`;
+  return `${parts.slice(0, -1).join(", ")}, and ${parts[parts.length - 1]}`;
+};
+
+/** Renders e.g. "3x faster than Neo4j, 5x faster than Postgres, and 2x faster than Mongo". */
+const formatFalkordbComparison = (
+  ratios: { vendor: string; ratio: number }[],
+  suffix: string
+): string =>
+  joinWithAnd(
+    ratios.map(({ vendor, ratio }) => `${Math.round(ratio)}x ${suffix} ${vendor}`)
+  );
+
 type DashboardProps = {
   dataUrl?: string;
   initialSelectedOptions?: Partial<Record<string, string[]>>;
@@ -806,13 +867,20 @@ export default function DashBoard({
     ({ vendor, memory, baseDatasetBytes }) => {
       const key = (vendor ?? "").toString().trim().toLowerCase();
 
-      // For Memgraph and Neo4j, prefer the "base dataset" estimate (bytes) as the bar value.
-      // This normalizes the chart to dataset footprint rather than process RSS.
-      if (
-        (key === "memgraph" || key === "neo4j") &&
-        baseDatasetBytes &&
-        baseDatasetBytes > 0
-      ) {
+      // For vendors without a locally-managed process (Memgraph, Neo4j, Postgres, Mongo),
+      // prefer the "base dataset" on-disk/store-size estimate (bytes) as the bar value.
+      // This normalizes the chart to dataset footprint rather than process RSS, which is
+      // always "0MB" for Postgres/Mongo since they only run against external endpoints.
+      const usesBaseDatasetEstimate = [
+        "memgraph",
+        "neo4j",
+        "postgres",
+        "postgresql",
+        "mongo",
+        "mongodb",
+      ].includes(key);
+
+      if (usesBaseDatasetEstimate && baseDatasetBytes && baseDatasetBytes > 0) {
         return {
           vendor,
           memory: baseDatasetBytes / (1024 * 1024),
@@ -903,6 +971,31 @@ export default function DashBoard({
       return elapsedMs > 0 || avgLatency > 0 || ratio > 0 || cv > 0;
     });
   }, [concurrentRuns]);
+
+  // Per-engine ratios vs FalkorDB, so tag lines explicitly name each comparison engine instead
+  // of showing an ambiguous generic min/max ratio across an arbitrary set of vendors.
+  const p99ConcurrentFalkorRatios = computeFalkordbRatios(
+    latencyDataForRealistic.map(({ vendor, p99 }) => ({ vendor, value: p99 })),
+    false
+  );
+  const throughputFalkorRatios = computeFalkordbRatios(
+    throughputData.map(({ vendor, actualMessagesPerSecond }) => ({
+      vendor,
+      value: actualMessagesPerSecond,
+    })),
+    true
+  );
+  const p99SingleFalkorRatios = computeFalkordbRatios(
+    filteredUnrealistic.map(({ vendor, histogram }) => ({
+      vendor,
+      value: histogram[10] ?? 0,
+    })),
+    false
+  );
+  const singleMemoryFalkorRatios = computeFalkordbRatios(
+    singleMemory.map(({ vendor, memory }) => ({ vendor, value: memory })),
+    false
+  );
 
   return (
     <SidebarProvider
@@ -995,11 +1088,14 @@ export default function DashBoard({
                   (LOWER IS BETTER)
                 </p>
                 <p className="text-lg font-semibold text-center mb-2 font-fira">
-                  Superior Latency:{" "}
+                  Superior Latency at P99:{" "}
                   <span className="text-[#FF66B3] font-bold">
-                    {latencyStats ? `${Math.round(latencyStats.p99.ratio)}x` : ""}
-                  </span>{" "}
-                  faster at P99
+                    {p99ConcurrentFalkorRatios
+                      ? formatFalkordbComparison(p99ConcurrentFalkorRatios, "faster than")
+                      : latencyStats.p99.ratio
+                      ? `${Math.round(latencyStats.p99.ratio)}x faster`
+                      : ""}
+                  </span>
                 </p>
                 <div className="w-full flex-grow min-h-0">
                   {latencyStats.p99.ratio > 0 && (
@@ -1071,9 +1167,13 @@ export default function DashBoard({
                 <p className="pt-1 text-lg font-semibold text-center font-fira">
                   Execute{" "}
                   <span className="text-[#FF66B3] font-bold">
-                    {throughputRatio ? throughputRatio : ""}x
+                    {throughputFalkorRatios
+                      ? formatFalkordbComparison(throughputFalkorRatios, "more queries than")
+                      : throughputRatio
+                      ? `${throughputRatio}x more queries`
+                      : ""}
                   </span>{" "}
-                  more queries with the same hardware
+                  with the same hardware
                 </p>
                 <div className="w-full flex-grow min-h-0">
                   <HorizontalBarChart
@@ -1109,11 +1209,14 @@ export default function DashBoard({
                   (LOWER IS BETTER)
                 </p>
                 <p className="text-lg font-semibold text-center mb-2 font-fira">
-                  Superior Latency:{" "}
+                  Superior Latency at P99:{" "}
                   <span className="text-[#FF66B3] font-bold">
-                    {p99SingleRatio ? `${Math.round(p99SingleRatio)}x` : ""}
-                  </span>{" "}
-                  faster at P99
+                    {p99SingleFalkorRatios
+                      ? formatFalkordbComparison(p99SingleFalkorRatios, "faster than")
+                      : p99SingleRatio
+                      ? `${Math.round(p99SingleRatio)}x faster`
+                      : ""}
+                  </span>
                 </p>
                 <div className="w-full flex-grow flex items-center justify-center min-h-0">
                   <div className="w-full h-full">
@@ -1137,9 +1240,15 @@ export default function DashBoard({
                 </p>
                 <p className="pt-1 text-lg font-semibold text-center font-fira pb-1">
                   <span className="text-[#FF66B3] font-bold">
-                    {singleMemoryRatio ? singleMemoryRatio : ""}x
+                    {singleMemoryFalkorRatios
+                      ? formatFalkordbComparison(singleMemoryFalkorRatios, "less memory than")
+                      : singleMemoryRatio
+                      ? `${singleMemoryRatio}x`
+                      : ""}
                   </span>{" "}
-                  Better performance, lower overall costs
+                  {singleMemoryFalkorRatios
+                    ? "— better performance, lower overall costs"
+                    : "Better performance, lower overall costs"}
                 </p>
 
                 {!hideHardware && telemetryBreakdownPerRun.length > 0 && (
