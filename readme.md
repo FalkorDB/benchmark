@@ -1,5 +1,7 @@
 [![Cargo Build & Test](https://github.com/FalkorDB/benchmark/actions/workflows/ci.yml/badge.svg)](https://github.com/FalkorDB/benchmark/actions/workflows/ci.yml)
-[![License](https://img.shields.io/github/license/falkordb/benchmark.svg)](https://github.com/falkordb/benchmark/blob/main/LICENSE)
+[![Code Coverage](https://github.com/FalkorDB/benchmark/actions/workflows/coverage.yml/badge.svg)](https://github.com/FalkorDB/benchmark/actions/workflows/coverage.yml)
+[![codecov](https://codecov.io/gh/FalkorDB/benchmark/graph/badge.svg)](https://codecov.io/gh/FalkorDB/benchmark)
+[![License](https://img.shields.io/github/license/falkordb/benchmark.svg)](https://github.com/falkordb/benchmark/blob/master/LICENSE)
 [![Discord](https://img.shields.io/discord/1146782921294884966.svg?style=social&logo=discord)](https://discord.com/invite/99y2Ubh6tg)
 [![Twitter](https://img.shields.io/twitter/follow/falkordb?style=social)](https://twitter.com/falkordb)
 
@@ -10,6 +12,7 @@
 - [System Requirements](#system-requirements)
   - [Prerequisites](#prerequisites)
   - [Installation Steps](#installation-steps)
+- [Development](#development)
 - [Run the benchmark](#run-the-benchmark)
   - [Run via helper scripts](#run-via-helper-scripts)
   - [CLI workflow](#cli-workflow)
@@ -96,6 +99,67 @@ from `~/`
 - enable autocomplete `source <(./target/release/benchmark generate-auto-complete bash)`
 - copy the falkor shared lib to `cp ~/FalkorDB/bin/linux-x64-release/src/falkordb.so .`
 
+## Development
+
+Automation for this repo is driven by [`just`](https://github.com/casey/just) — run `just --list`
+to see every recipe. CI installs `just` and runs these same recipes, so whatever CI checks you can
+reproduce locally with the identical command.
+
+Install `just` (`cargo install just` or `brew install just`) and, for coverage,
+[`cargo-llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov) (`cargo install cargo-llvm-cov`).
+Building the Rust crate also needs `protoc` (`sudo apt-get install -y protobuf-compiler` or
+`brew install protobuf`).
+
+### Build, lint and test
+
+```bash
+just build            # build all targets/features
+just clippy           # strict clippy (warnings denied)
+just test             # run the unit + integration test suite
+just test-one query_builder  # run a single test by name filter
+just ci               # everything the Rust CI runs: build + clippy + test
+```
+
+### Documentation checks
+
+Markdown docs are validated in CI (the `Docs validation` workflow) and locally with the same recipe:
+
+```bash
+just doc-check        # all doc checks: links + shell examples
+just doc-links        # offline broken-link + anchor check (lychee) over tracked *.md
+just doc-shell        # bash -n syntax-check the shell (bash/sh) examples in the docs
+```
+
+`just doc-links` runs [`lychee`](https://github.com/lycheeverse/lychee) in `--offline` mode, so it
+verifies relative and same-file anchor links without network access (external URLs are skipped to
+keep CI stable). It needs the `lychee` binary on your `PATH` — install it locally with
+`cargo install lychee` or `brew install lychee` (CI installs it automatically via
+`taiki-e/install-action`). Rust code blocks in the docs are compiled as doctests by `just test`
+(via `src/doc_examples.rs`). Because doctests are run as well as compiled, fence an example that
+should type-check but not execute with `rust,no_run`, and one that should not compile at all with
+`rust,ignore` (or a non-Rust language) so it is skipped.
+
+### Code coverage
+
+```bash
+just coverage         # generate codecov.json via cargo-llvm-cov
+just coverage-html    # open a browsable HTML coverage report
+```
+
+Coverage is uploaded to [Codecov](https://codecov.io/gh/FalkorDB/benchmark) by the `coverage`
+workflow. Please cover new code with tests and keep coverage high — **patch coverage must stay
+≥ 90%** (enforced by `codecov.yml`).
+
+### UI dashboard (`ui/`)
+
+```bash
+just ui-install       # npm ci
+just ui-lint          # lint
+just ui-build         # production build
+just ui-dev           # start the dev server
+just ui-smoke         # Playwright smoke test (starts its own dev server)
+```
+
 #### run the benchmark
 ##### run via helper scripts
 
@@ -165,7 +229,7 @@ docker-compose up
 
 The benchmark is a cli tool that can be used to run the benchmarks
 
-```bash
+```text
 ➜  cargo run  --bin benchmark -- --help                                                                  git:(prometheus|✚7…3
     
 Usage: benchmark <COMMAND>

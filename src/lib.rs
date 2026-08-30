@@ -37,6 +37,11 @@ pub mod scheduler;
 pub mod sql_query;
 pub mod utils;
 
+// Compile-check the Rust code examples in the Markdown docs as doctests (`cargo test`). Only
+// present when rustdoc collects doctests, so it never affects normal builds/`cargo doc`/clippy.
+#[cfg(doctest)]
+mod doc_examples;
+
 pub(crate) const REDIS_DATA_DIR: &str = "./redis-data";
 
 lazy_static! {

@@ -2,6 +2,7 @@ use crate::query::{Bolt, Query, QueryBuilder};
 use clap::ValueEnum;
 use rand::prelude::IndexedRandom;
 use rand::random;
+use rand::{Rng, RngExt};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -78,7 +79,7 @@ struct Empty;
 
 pub struct QueryGenerator {
     query_type: QueryType,
-    generator: Box<dyn Fn() -> Query + Send + Sync>,
+    generator: QueryFn,
 }
 
 impl QueryGenerator {
@@ -87,7 +88,7 @@ impl QueryGenerator {
         generator: F,
     ) -> Self
     where
-        F: Fn() -> Query + Send + Sync + 'static,
+        F: Fn(&mut dyn Rng) -> Query + Send + Sync + 'static,
     {
         QueryGenerator {
             query_type,
@@ -95,13 +96,17 @@ impl QueryGenerator {
         }
     }
 
+    /// Render this query from the thread-local RNG (seeded once per thread from OS entropy):
+    /// each call advances that shared stream, so successive renders vary without any
+    /// caller-supplied seed.
     pub fn generate(&self) -> Query {
-        (self.generator)()
+        let mut rng = rand::rng();
+        (self.generator)(&mut rng)
     }
 }
 
-// Define a type alias for the function type
-type QueryFn = Box<dyn Fn() -> Query + Send + Sync>;
+// Define a type alias for the function type: a query generator draws from the supplied RNG.
+type QueryFn = Box<dyn Fn(&mut dyn Rng) -> Query + Send + Sync>;
 
 // Define a type alias for the tuple
 type QueryEntry = (String, QueryType, QueryFn);
@@ -145,7 +150,7 @@ impl QueriesRepositoryBuilder<Flavour> {
         generator: F,
     ) -> Self
     where
-        F: Fn(&RandomUtil, Flavour) -> Query + Send + Sync + 'static,
+        F: Fn(&mut RandomUtil<'_>, Flavour) -> Query + Send + Sync + 'static,
     {
         let vertices = self.vertices;
         let edges = self.edges;
@@ -153,12 +158,13 @@ impl QueriesRepositoryBuilder<Flavour> {
         self.queries.push((
             name.into(),
             query_type,
-            Box::new(move || {
-                let random = RandomUtil {
+            Box::new(move |rng: &mut dyn Rng| {
+                let mut random = RandomUtil {
+                    rng,
                     vertices,
                     _edges: edges,
                 };
-                generator(&random, flavour)
+                generator(&mut random, flavour)
             }),
         ));
         self
@@ -208,15 +214,13 @@ impl QueriesRepository {
         }
     }
 
-    fn add_with_id<F>(
+    fn add_with_id(
         &mut self,
         id: u16,
         name: impl Into<String>,
         query_type: QueryType,
-        generator: F,
-    ) where
-        F: Fn() -> Query + Send + Sync + 'static,
-    {
+        generator: QueryFn,
+    ) {
         let name = name.into();
         self.name_to_id.insert(name.clone(), id);
         self.catalog.push(QueryCatalogEntry {
@@ -225,6 +229,10 @@ impl QueriesRepository {
             q_type: query_type,
         });
 
+        let generator = QueryGenerator {
+            query_type,
+            generator,
+        };
         match query_type {
             QueryType::Read => {
                 self.read_query_names.push(name.clone());
@@ -233,13 +241,11 @@ impl QueriesRepository {
                 } else {
                     self.non_algorithm_read_query_names.push(name.clone());
                 }
-                self.read_queries
-                    .insert(name, QueryGenerator::new(query_type, generator));
+                self.read_queries.insert(name, generator);
             }
             QueryType::Write => {
                 self.write_query_names.push(name.clone());
-                self.write_queries
-                    .insert(name, QueryGenerator::new(query_type, generator));
+                self.write_queries.insert(name, generator);
             }
         }
     }
@@ -289,17 +295,18 @@ impl QueriesRepository {
     }
 }
 
-struct RandomUtil {
+struct RandomUtil<'a> {
+    rng: &'a mut dyn Rng,
     vertices: i32,
     _edges: i32,
 }
 
-impl RandomUtil {
-    fn random_vertex(&self) -> i32 {
-        rand::random_range(1..=self.vertices)
+impl RandomUtil<'_> {
+    fn random_vertex(&mut self) -> i32 {
+        self.rng.random_range(1..=self.vertices)
     }
     #[allow(dead_code)]
-    fn random_path(&self) -> (i32, i32) {
+    fn random_path(&mut self) -> (i32, i32) {
         let start = self.random_vertex();
         let mut end = self.random_vertex();
 
@@ -1172,7 +1179,7 @@ mod tests {
 
     #[test]
     fn test_query_generator() {
-        let generator = QueryGenerator::new(QueryType::Read, || {
+        let generator = QueryGenerator::new(QueryType::Read, |_rng| {
             QueryBuilder::new()
                 .text("MATCH (p:Person) RETURN p")
                 .build()
@@ -1180,6 +1187,33 @@ mod tests {
 
         let query = generator.generate();
         assert_eq!(query.text, "MATCH (p:Person) RETURN p");
+    }
+
+    #[test]
+    fn generate_compatibility_path_uses_entropy_within_range() {
+        use crate::query::QueryParam;
+
+        // The `generate()` compatibility entry seeds its own thread RNG; it must still render a
+        // valid query whose drawn vertex stays within `[1, vertices]`.
+        let repo = QueriesRepositoryBuilder::new(50, 50)
+            .flavour(Flavour::FalkorDB)
+            .add_query("one_vertex", QueryType::Read, |random, _flavour| {
+                QueryBuilder::new()
+                    .text("RETURN $v")
+                    .param("v", random.random_vertex())
+                    .build()
+            })
+            .build();
+        let generator = repo.read_queries.get("one_vertex").expect("shape present");
+
+        for _ in 0..64 {
+            let query = generator.generate();
+            let v = query.params.get("v").expect("v param present");
+            assert!(
+                matches!(v, QueryParam::Integer(n) if (1..=50).contains(n)),
+                "expected an in-range integer 'v' param, got {v:?}"
+            );
+        }
     }
 
     #[test]

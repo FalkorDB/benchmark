@@ -6,6 +6,12 @@ use clap_complete::Shell;
 #[derive(Parser, Debug)]
 #[command(name = "benchmark", version, about="falkor benchmark tool", long_about = None, arg_required_else_help(true), propagate_version(true))]
 pub struct Cli {
+    #[arg(
+        long = "client-threads",
+        global = true,
+        help = "cap the tokio runtime at N worker threads (default: one per CPU core). Always a multi-threaded runtime, even for 1 — the FalkorDB client requires it."
+    )]
+    pub client_threads: Option<std::num::NonZeroUsize>,
     #[command(subcommand)]
     pub command: Commands,
 }
@@ -16,7 +22,7 @@ pub enum FocusedQuery {
     ShortestPath,
     Pagerank,
 }
-
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand, Debug)]
 pub enum Commands {
     #[command(arg_required_else_help = true)]
@@ -336,5 +342,47 @@ fn parse_write_ratio(val: &str) -> Result<f32, String> {
         Ok(value) if (0.0..=1.0).contains(&value) => Ok(value),
         Ok(_) => Err(String::from("Value must be between 0.0 and 1.0")),
         Err(_) => Err(String::from("Invalid float value")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cli_client_threads_is_global_and_rejects_zero() {
+        use clap::Parser;
+        // Before the subcommand.
+        let cli = Cli::try_parse_from([
+            "benchmark",
+            "--client-threads",
+            "3",
+            "generate-auto-complete",
+            "bash",
+        ])
+        .unwrap();
+        assert_eq!(cli.client_threads.map(std::num::NonZeroUsize::get), Some(3));
+        // Global flags also parse after the subcommand.
+        let cli = Cli::try_parse_from([
+            "benchmark",
+            "generate-auto-complete",
+            "bash",
+            "--client-threads",
+            "1",
+        ])
+        .unwrap();
+        assert_eq!(cli.client_threads.map(std::num::NonZeroUsize::get), Some(1));
+        // Absent → None (tokio default).
+        let cli = Cli::try_parse_from(["benchmark", "generate-auto-complete", "bash"]).unwrap();
+        assert_eq!(cli.client_threads, None);
+        // Zero worker threads is impossible; clap's NonZeroUsize parser rejects it.
+        assert!(Cli::try_parse_from([
+            "benchmark",
+            "--client-threads",
+            "0",
+            "generate-auto-complete",
+            "bash",
+        ])
+        .is_err());
     }
 }

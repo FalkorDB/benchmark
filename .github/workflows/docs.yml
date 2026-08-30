@@ -1,0 +1,42 @@
+name: Docs validation
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+# Least privilege: the job only checks out code and validates the Markdown docs.
+permissions:
+  contents: read
+
+# Validate the Markdown docs (links + embedded shell examples) with the same `just` recipe
+# developers run locally. Rust examples in the docs are compiled as doctests by the `test` gate
+# (see src/doc_examples.rs), so they are not repeated here.
+jobs:
+  doc-check:
+    name: Validate Markdown docs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      # `just` is installed from a managed manifest; `lychee` (used by `just doc-links`) is not in
+      # the manifest, so the action installs it via its cargo-binstall fallback from lychee's
+      # release binaries. Pinned to a commit SHA (CodeQL requires SHAs for third-party actions).
+      - name: Install just and lychee
+        uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026 # v2.85.11
+        with:
+          tool: just,lychee
+
+      # Runs the exact recipe developers run locally (see the Justfile): an offline link/anchor
+      # check plus a shell-snippet syntax check across every first-party Markdown file.
+      - name: Validate docs
+        run: just doc-check

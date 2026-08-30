@@ -4,6 +4,8 @@
 .idea
 downloads
 cache
+# code coverage output (`just coverage` / cargo-llvm-cov)
+codecov.json
 backups
 *.so
 redis-data
