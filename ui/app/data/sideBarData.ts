@@ -33,6 +33,8 @@ export const sidebarConfig: {
       icon: Layers,
       options: [
         { id: "falkordb", label: "FalkorDB" },
+        { id: "falkordb-c", label: "FalkorDB (Standard)" },
+        { id: "falkordb-rs", label: "FalkorDB (Rust)" },
         { id: "neo4j", label: "Neo4j" },
         { id: "memgraph", label: "Memgraph" },
         { id: "postgres", label: "Postgres" },

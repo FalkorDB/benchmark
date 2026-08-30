@@ -64,6 +64,12 @@ RUN_FALKOR_2=${RUN_FALKOR_2:-1}
 RUN_NEO4J=${RUN_NEO4J:-0}
 RUN_MEMGRAPH=${RUN_MEMGRAPH:-0}
 
+POSTGRES_ENDPOINT=${POSTGRES_ENDPOINT:-"postgres://postgres:postgres@127.0.0.1:5432/postgres"}
+RUN_POSTGRES=${RUN_POSTGRES:-0}
+
+MONGO_ENDPOINT=${MONGO_ENDPOINT:-"mongodb://127.0.0.1:27017"}
+RUN_MONGO=${RUN_MONGO:-0}
+
 BATCH_SIZE=${BATCH_SIZE:-5000}
 PARALLEL=${PARALLEL:-8}
 MPS=${MPS:-2000}
@@ -98,6 +104,8 @@ QUERIES_FILE_BASE="${QUERIES_FILE}"
 FALKOR_QUERIES_FILE="${QUERIES_FILE_BASE}-falkor"
 NEO4J_QUERIES_FILE="${QUERIES_FILE_BASE}-neo4j"
 MEMGRAPH_QUERIES_FILE="${QUERIES_FILE_BASE}-memgraph"
+POSTGRES_QUERIES_FILE="${QUERIES_FILE}-postgres"
+MONGO_QUERIES_FILE="${QUERIES_FILE}-mongo"
 
 # Use a single shared results directory for all vendors so `benchmark aggregate` can
 # generate neo4j-vs-falkordb and memgraph-vs-falkordb UI summaries from one run.
@@ -363,6 +371,95 @@ else
   fi
   echo "==> Aggregating UI summaries to $SCRIPT_DIR/../ui/public/summaries"
   cargo run --release --bin benchmark -- aggregate --results-dir "$RESULTS_DIR" --out-dir "$SCRIPT_DIR/../ui/public/summaries"
+fi
+
+
+# ---------- Postgres ----------
+if [[ "${RUN_POSTGRES:-0}" == "1" ]]; then
+  echo "==> Preparing Postgres (medium)"
+  cargo run --release --bin benchmark -- load --vendor postgres --size medium \
+    --endpoint "$POSTGRES_ENDPOINT" -b "$BATCH_SIZE" --force --query-profile "$QUERY_PROFILE" || {
+      echo "Postgres load failed; continuing without Postgres results" >&2
+    }
+  echo "==> Generating Postgres query file"
+  cargo run --release --bin benchmark -- generate-queries \
+    --vendor postgres \
+    --dataset medium \
+    --size "$QUERIES_COUNT" \
+    --name "$POSTGRES_QUERIES_FILE" \
+    --write-ratio "$WRITE_RATIO" \
+    --query-profile "$QUERY_PROFILE" || true
+  echo "==> Running Postgres workload"
+  cargo run --release --bin benchmark -- run \
+    --vendor postgres \
+    --name "$POSTGRES_QUERIES_FILE" \
+    --parallel "$PARALLEL" \
+    --mps "$MPS" \
+    --endpoint "$POSTGRES_ENDPOINT" \
+    --results-dir "$RESULTS_DIR" || true
+fi
+
+
+# ---------- MongoDB ----------
+if [[ "${RUN_MONGO:-0}" == "1" ]]; then
+  echo "==> Preparing MongoDB (medium)"
+  cargo run --release --bin benchmark -- load --vendor mongo --size medium \
+    --endpoint "$MONGO_ENDPOINT" -b "$BATCH_SIZE" --force --query-profile "$QUERY_PROFILE" || {
+      echo "MongoDB load failed; continuing without Mongo results" >&2
+    }
+  echo "==> Generating MongoDB query file"
+  cargo run --release --bin benchmark -- generate-queries \
+    --vendor mongo \
+    --dataset medium \
+    --size "$QUERIES_COUNT" \
+    --name "$MONGO_QUERIES_FILE" \
+    --write-ratio "$WRITE_RATIO" \
+    --query-profile "$QUERY_PROFILE" || true
+  echo "==> Running MongoDB workload"
+  cargo run --release --bin benchmark -- run \
+    --vendor mongo \
+    --name "$MONGO_QUERIES_FILE" \
+    --parallel "$PARALLEL" \
+    --mps "$MPS" \
+    --endpoint "$MONGO_ENDPOINT" \
+    --results-dir "$RESULTS_DIR" || true
+fi
+
+
+# ---------- Aggregate multi-engine comparison (up to 5) ----------
+MULTI_SUMMARY="$SCRIPT_DIR/../ui/public/summaries/multi_engine_compare.json"
+PAIRWISE_OUT_DIR="$SCRIPT_DIR/../ui/public/summaries"
+mkdir -p "$PAIRWISE_OUT_DIR"
+
+if [[ "${RUN_FALKOR_2:-0}" == "1" && -d "$RESULTS_DIR/${FALKOR_2_NAME:-falkordb-rs}" ]]; then
+  echo "==> Secondary Falkor results available as $RESULTS_DIR/${FALKOR_2_NAME:-falkordb-rs}"
+fi
+
+echo "==> Aggregating multi-engine comparison into $MULTI_SUMMARY"
+if cargo run --release --bin benchmark -- aggregate-aws-tests \
+  --aws-tests-dir "$RESULTS_DIR" \
+  --out-path "$MULTI_SUMMARY"; then
+  echo "==> Multi-engine summary written"
+else
+  echo "Multi-engine labeled aggregate failed; falling back to pairwise aggregate" >&2
+fi
+
+# Pairwise summaries for dedicated UI pages (neo4j/memgraph/postgres vs falkor).
+# Primary Falkor may have been renamed to $FALKOR_NAME; restore a falkor/ view for the pairwise aggregator.
+if [[ ! -d "$RESULTS_DIR/falkor" ]]; then
+  for cand in "${FALKOR_NAME:-falkordb-c}" falkordb falkordb1; do
+    if [[ -d "$RESULTS_DIR/$cand" ]]; then
+      ln -sfn "$cand" "$RESULTS_DIR/falkor"
+      echo "==> Linked $RESULTS_DIR/falkor -> $cand for pairwise aggregate"
+      break
+    fi
+  done
+fi
+if [[ -d "$RESULTS_DIR/falkor" ]]; then
+  echo "==> Aggregating pairwise vendor summaries into $PAIRWISE_OUT_DIR"
+  cargo run --release --bin benchmark -- aggregate \
+    --results-dir "$RESULTS_DIR" \
+    --out-dir "$PAIRWISE_OUT_DIR" || true
 fi
 
 echo "==> Done"

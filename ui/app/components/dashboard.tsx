@@ -66,7 +66,7 @@ type DashboardProps = {
 
 const DEFAULT_SELECTED_OPTIONS: Record<string, string[]> = {
   "Workload Type": ["concurrent"],
-  Vendors: ["falkordb", "neo4j"],
+  Vendors: ["falkordb", "neo4j", "memgraph", "postgres", "mongo"],
   Clients: ["40"],
   Throughput: ["2500"],
   Hardware: ["arm"],
@@ -332,7 +332,7 @@ export default function DashBoard({
       const groupSelections = prev[groupTitle] || [];
 
       if (groupTitle === "Vendors") {
-        // If this page is restricted to a specific vendor pair, ignore toggles outside it.
+        // If this page is restricted to a specific vendor set, ignore toggles outside it.
         if (
           allowedVendors?.length &&
           !allowedVendors.includes(optionId.toLowerCase())
