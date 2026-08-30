@@ -10,6 +10,8 @@ use benchmark::memgraph_client::{
 };
 use benchmark::multi_benchmark::{load_scenario_config, rolling_windows, GraphDeploymentPlan};
 use benchmark::neo4j_client::{Neo4jAlgorithmCapabilities, Neo4jClient, Neo4jFixtureCapabilities};
+use benchmark::postgres_client::PostgresClient;
+use benchmark::postgres_queries_repository::PostgresUsersQueriesRepository;
 use benchmark::queries_repository::{
     AlgorithmQuerySelection, Flavour, PreparedQuery, QueryCatalogEntry, QueryCoverageProfile,
     NEO4J_ALGORITHM_GRAPH_NAME,
@@ -17,6 +19,7 @@ use benchmark::queries_repository::{
 use benchmark::scenario::Name::Users;
 use benchmark::scenario::{Size, Spec, Vendor};
 use benchmark::scheduler::Msg;
+use benchmark::sql_query::PreparedSqlQuery;
 use benchmark::utils::{
     create_directory_if_not_exists, delete_file, file_exists, format_number, write_to_file,
 };
@@ -33,6 +36,9 @@ use benchmark::{
     NEO4J_ERROR_REQUESTS_DURATION_HISTOGRAM, NEO4J_LATENCY_P50_US, NEO4J_LATENCY_P95_US,
     NEO4J_LATENCY_P99_US, NEO4J_QUERY_LATENCY_PCT_US, NEO4J_STORE_SIZE_BYTES,
     NEO4J_SUCCESS_REQUESTS_DURATION_HISTOGRAM,
+    POSTGRES_ERROR_REQUESTS_DURATION_HISTOGRAM, POSTGRES_LATENCY_P50_US, POSTGRES_LATENCY_P95_US,
+    POSTGRES_LATENCY_P99_US, POSTGRES_QUERY_LATENCY_PCT_US,
+    POSTGRES_SUCCESS_REQUESTS_DURATION_HISTOGRAM,
 };
 use clap::{Command, CommandFactory, Parser};
 use clap_complete::{generate, Generator};
@@ -299,6 +305,14 @@ async fn main() -> BenchmarkResult<()> {
                         init_memgraph(size, force, batch_size, endpoint, query_profile).await?;
                     }
                 }
+                Vendor::Postgres => {
+                    if dry_run {
+                        info!("Dry run");
+                        todo!()
+                    } else {
+                        init_postgres(size, force, batch_size, endpoint, query_profile).await?;
+                    }
+                }
             }
         }
         Commands::Run {
@@ -325,6 +339,9 @@ async fn main() -> BenchmarkResult<()> {
                 }
                 Vendor::Memgraph => {
                     run_memgraph(parallel, name, mps, simulate, endpoint, results_dir).await?;
+                }
+                Vendor::Postgres => {
+                    run_postgres(parallel, name, mps, simulate, endpoint, results_dir).await?;
                 }
             }
         }
@@ -521,9 +538,17 @@ const FULLTEXT_QUERY_NODES_SMOKE_QUERY_NAME: &str = "fulltext_query_nodes_smoke"
 const FULLTEXT_QUERY_RELATIONSHIPS_SMOKE_QUERY_NAME: &str = "fulltext_query_relationships_smoke";
 
 fn validate_query_coverage_profile_support(
-    _vendor: Vendor,
-    _query_profile: QueryCoverageProfile,
+    vendor: Vendor,
+    query_profile: QueryCoverageProfile,
 ) -> BenchmarkResult<()> {
+    if vendor == Vendor::Postgres && query_profile.includes_fixture_dependent() {
+        return Err(OtherError(
+            "Postgres does not support the 'fixture-dependent' query coverage profile \
+             (vector/fulltext index queries have no SQL equivalent in this integration). \
+             Use --query-profile baseline or extended-core instead."
+                .to_string(),
+        ));
+    }
     Ok(())
 }
 
@@ -881,6 +906,7 @@ impl PerQueryLatency {
             Vendor::Falkor => "falkor",
             Vendor::Neo4j => "neo4j",
             Vendor::Memgraph => "memgraph",
+            Vendor::Postgres => "postgres",
         }
     }
 
@@ -893,6 +919,7 @@ impl PerQueryLatency {
             Vendor::Falkor => FALKOR_QUERY_LATENCY_PCT_US.reset(),
             Vendor::Neo4j => NEO4J_QUERY_LATENCY_PCT_US.reset(),
             Vendor::Memgraph => MEMGRAPH_QUERY_LATENCY_PCT_US.reset(),
+            Vendor::Postgres => POSTGRES_QUERY_LATENCY_PCT_US.reset(),
         }
         BENCHMARK_QUERY_TIMEOUT_RATE_PCT.reset();
         BENCHMARK_QUERY_FAILURE_RATE_PCT.reset();
@@ -976,6 +1003,11 @@ impl PerQueryLatency {
                     }
                     Vendor::Memgraph => {
                         MEMGRAPH_QUERY_LATENCY_PCT_US
+                            .with_label_values(&[entry.name.as_str(), pct_label.as_str()])
+                            .set(v);
+                    }
+                    Vendor::Postgres => {
+                        POSTGRES_QUERY_LATENCY_PCT_US
                             .with_label_values(&[entry.name.as_str(), pct_label.as_str()])
                             .set(v);
                     }
@@ -2268,6 +2300,269 @@ async fn init_neo4j(
     Ok(())
 }
 
+async fn init_postgres(
+    size: Size,
+    force: bool,
+    batch_size: usize,
+    endpoint: Option<String>,
+    query_profile: QueryCoverageProfile,
+) -> BenchmarkResult<()> {
+    validate_query_coverage_profile_support(Vendor::Postgres, query_profile)?;
+    let spec = Spec::new(benchmark::scenario::Name::Users, size, Vendor::Postgres);
+
+    let (host, port, user, password, dbname) = if let Some(ref endpoint_str) = endpoint {
+        info!(
+            "Using external Postgres endpoint for data loading: {}",
+            redact_endpoint(endpoint_str)
+        );
+        parse_postgres_endpoint(endpoint_str)?
+    } else {
+        benchmark::postgres::default_connection_params()
+    };
+
+    let client = PostgresClient::connect(&host, port, &user, &password, &dbname).await?;
+    info!("client connected to postgres");
+
+    if force {
+        info!("Clearing existing Postgres schema (--force)");
+        benchmark::postgres::clear_schema(&client).await?;
+    }
+
+    benchmark::postgres::create_schema(&client).await?;
+
+    let (node_count, relation_count) = client.graph_size().await?;
+    info!(
+        "node count: {}, relation count: {}",
+        format_number(node_count),
+        format_number(relation_count)
+    );
+    if node_count != 0 || relation_count != 0 {
+        error!(
+            "Postgres database is not empty, node count: {}, relation count: {}",
+            node_count, relation_count
+        );
+        return Err(OtherError(
+            "Database is not empty. Use --force to clear it first.".to_string(),
+        ));
+    }
+
+    let mut histogram = Histogram::new(7, 64)?;
+    let data_stream = spec.init_data_iterator().await?;
+    info!("importing data (bulk INSERT) in batches of {}", batch_size);
+    let start = Instant::now();
+    let total_processed =
+        benchmark::postgres::load_from_cypher_import(&client, data_stream, batch_size, &mut histogram)
+            .await?;
+    info!(
+        "Processed {} records via bulk-insert batches",
+        format_number(total_processed as u64)
+    );
+
+    let (node_count, relation_count) = client.graph_size().await?;
+    info!(
+        "{} nodes and {} relations were imported at {:?}",
+        format_number(node_count),
+        format_number(relation_count),
+        start.elapsed()
+    );
+
+    info!("---> histogram");
+    show_historgam(histogram);
+
+    info!("---> Done");
+    Ok(())
+}
+
+async fn run_postgres(
+    parallel: usize,
+    file_name: String,
+    mps: usize,
+    simulate: Option<usize>,
+    endpoint: Option<String>,
+    results_dir: Option<String>,
+) -> BenchmarkResult<()> {
+    let queries_file = file_name.clone();
+    let (queries_metadata, queries) = read_sql_queries(file_name).await?;
+    validate_query_coverage_profile_support(Vendor::Postgres, queries_metadata.query_profile)?;
+
+    let (host, port, user, password, dbname) = if let Some(ref endpoint_str) = endpoint {
+        info!(
+            "Using external Postgres endpoint: {}",
+            redact_endpoint(endpoint_str)
+        );
+        parse_postgres_endpoint(endpoint_str)?
+    } else {
+        benchmark::postgres::default_connection_params()
+    };
+
+    let client = PostgresClient::connect(&host, port, &user, &password, &dbname).await?;
+    info!("client connected to postgres");
+    let engine_version = client.detect_engine_version().await.ok().flatten();
+
+    // Best-effort store sizing.
+    client.collect_store_size_metrics().await;
+
+    let number_of_queries = queries.len();
+    let worker_progress_every = worker_progress_batch_size(number_of_queries);
+    let (node_count, relation_count) = client.graph_size().await?;
+
+    info!(
+        "graph has {} nodes and {} relations",
+        format_number(node_count),
+        format_number(relation_count)
+    );
+    info!(
+        "running {} queries",
+        format_number(number_of_queries as u64)
+    );
+    info!(
+        "worker query spread batch set to {} (total queries: {})",
+        worker_progress_every,
+        format_number(number_of_queries as u64)
+    );
+
+    let (tx, rx) = tokio::sync::mpsc::channel::<Msg<PreparedSqlQuery>>(20 * parallel);
+    let rx: Arc<Mutex<Receiver<Msg<PreparedSqlQuery>>>> = Arc::new(Mutex::new(rx));
+    let scheduler_handle =
+        scheduler::spawn_scheduler::<PreparedSqlQuery>(mps, tx.clone(), queries);
+    let mut workers_handles = Vec::with_capacity(parallel);
+
+    let latency_hist = Arc::new(tokio::sync::Mutex::new(histogram::Histogram::new(7, 64)?));
+    let per_query = Arc::new(PerQueryLatency::new(queries_metadata.catalog.clone())?);
+
+    let started_at = SystemTime::now();
+    let start = Instant::now();
+    for spawn_id in 0..parallel {
+        let handle = spawn_postgres_worker(
+            client.clone(),
+            spawn_id,
+            &rx,
+            simulate,
+            latency_hist.clone(),
+            per_query.clone(),
+            worker_progress_every,
+        )
+        .await?;
+        workers_handles.push(handle);
+    }
+    let _ = scheduler_handle.await;
+    drop(tx);
+
+    for handle in workers_handles {
+        let _ = handle.await;
+    }
+
+    let elapsed = start.elapsed();
+    let finished_at = SystemTime::now();
+
+    info!(
+        "running {} queries took {:?}",
+        format_number(number_of_queries as u64),
+        elapsed
+    );
+
+    {
+        let hist = latency_hist.lock().await;
+        POSTGRES_LATENCY_P50_US.set(percentile_us(&hist, 50.0) as i64);
+        POSTGRES_LATENCY_P95_US.set(percentile_us(&hist, 95.0) as i64);
+        POSTGRES_LATENCY_P99_US.set(percentile_us(&hist, 99.0) as i64);
+    }
+
+    per_query.export_to_prometheus(Vendor::Postgres);
+
+    write_run_results(
+        results_dir,
+        Vendor::Postgres,
+        queries_metadata.dataset,
+        &queries_file,
+        parallel,
+        mps,
+        simulate,
+        &endpoint,
+        number_of_queries,
+        started_at,
+        finished_at,
+        elapsed,
+        engine_version,
+    )
+    .await?;
+
+    info!("Using external endpoint, skipping Postgres process management");
+    Ok(())
+}
+
+async fn spawn_postgres_worker(
+    client: PostgresClient,
+    worker_id: usize,
+    receiver: &Arc<Mutex<Receiver<Msg<PreparedSqlQuery>>>>,
+    simulate: Option<usize>,
+    latency_hist: Arc<tokio::sync::Mutex<histogram::Histogram>>,
+    per_query: Arc<PerQueryLatency>,
+    worker_progress_every: u32,
+) -> BenchmarkResult<JoinHandle<()>> {
+    info!("spawning worker");
+    let receiver = Arc::clone(receiver);
+    let handle = tokio::spawn(async move {
+        let worker_id = worker_id.to_string();
+        let worker_id_str = worker_id.as_str();
+        let mut counter = 0u32;
+        let client = client.clone();
+        loop {
+            let received = receiver.lock().await.recv().await;
+
+            match received {
+                Some(prepared_query) => {
+                    let start_time = Instant::now();
+
+                    let r = client
+                        .execute_prepared_query(worker_id_str, &prepared_query, &simulate)
+                        .await;
+                    let duration = start_time.elapsed();
+                    match r {
+                        Ok(_) => {
+                            POSTGRES_SUCCESS_REQUESTS_DURATION_HISTOGRAM
+                                .observe(duration.as_secs_f64());
+                            {
+                                let mut h = latency_hist.lock().await;
+                                let _ = h.increment(duration.as_micros() as u64);
+                            }
+                            per_query.record_success_us(
+                                prepared_query.payload.q_id,
+                                duration.as_micros() as u64,
+                            );
+                            counter += 1;
+                            if counter.is_multiple_of(worker_progress_every) {
+                                info!("worker {} processed {} queries", worker_id, counter);
+                            }
+                        }
+                        Err(e) => {
+                            POSTGRES_ERROR_REQUESTS_DURATION_HISTOGRAM
+                                .observe(duration.as_secs_f64());
+                            if is_timeout_error(&e) {
+                                per_query.record_timeout(prepared_query.payload.q_id);
+                            } else {
+                                per_query.record_failure(prepared_query.payload.q_id);
+                            }
+                            let seconds_wait = 3u64;
+                            info!(
+                                "worker {} failed to process query, not sleeping for {} seconds {:?}",
+                                worker_id, seconds_wait, e
+                            );
+                        }
+                    }
+                }
+                None => {
+                    info!("worker {} received None, exiting", worker_id);
+                    break;
+                }
+            }
+        }
+        info!("worker {} finished", worker_id);
+    });
+
+    Ok(handle)
+}
+
 fn print_completions<G: Generator>(
     gen: G,
     cmd: &mut Command,
@@ -2294,6 +2589,17 @@ async fn prepare_queries(
     query_profile: QueryCoverageProfile,
     focus_queries: Vec<FocusedQuery>,
 ) -> BenchmarkResult<()> {
+    if vendor == Vendor::Postgres {
+        return prepare_postgres_queries(
+            dataset,
+            size,
+            file_name,
+            write_ratio,
+            query_profile,
+        )
+        .await;
+    }
+
     let start = Instant::now();
 
     // Use dataset spec so vertex/edge ID ranges match the actual graph.
@@ -2305,6 +2611,7 @@ async fn prepare_queries(
         Vendor::Falkor => Flavour::FalkorDB,
         Vendor::Neo4j => Flavour::Neo4j,
         Vendor::Memgraph => Flavour::Memgraph,
+        Vendor::Postgres => unreachable!("handled above via prepare_postgres_queries"),
     };
 
     let queries_repository = benchmark::queries_repository::UsersQueriesRepository::new(
@@ -2414,6 +2721,127 @@ async fn read_queries(
         }
         Err(e) => Err(OtherError(format!("Error parsing metadata: {}", e))),
     }
+}
+
+/// Postgres analogue of `prepare_queries`, writing `PreparedSqlQuery` lines instead of Cypher
+/// `PreparedQuery` lines.
+async fn prepare_postgres_queries(
+    dataset: Size,
+    size: usize,
+    file_name: String,
+    write_ratio: f32,
+    query_profile: QueryCoverageProfile,
+) -> BenchmarkResult<()> {
+    let start = Instant::now();
+    let spec = Spec::new(Users, dataset, Vendor::Postgres);
+    let vertices = spec.vertices as i32;
+    let edges = spec.edges as i32;
+
+    let queries_repository =
+        PostgresUsersQueriesRepository::new(vertices, edges, query_profile);
+    let catalog = queries_repository.catalog();
+
+    let metadata = PrepareQueriesMetadata {
+        size,
+        dataset,
+        query_profile,
+        catalog,
+    };
+
+    let file = File::create(file_name).await?;
+    let mut writer = BufWriter::new(file);
+    let metadata_line = serde_json::to_string(&metadata)?;
+    writer.write_all(metadata_line.as_bytes()).await?;
+    writer.write_all(b"\n").await?;
+
+    for query in queries_repository.random_queries(size, write_ratio) {
+        let json_string = serde_json::to_string(&query)?;
+        writer.write_all(json_string.as_bytes()).await?;
+        writer.write_all(b"\n").await?;
+    }
+    writer.flush().await?;
+
+    let duration = start.elapsed();
+    info!("Time taken to prepare Postgres queries: {:?}", duration);
+    Ok(())
+}
+
+async fn read_sql_queries(
+    file_name: String
+) -> BenchmarkResult<(PrepareQueriesMetadata, Vec<PreparedSqlQuery>)> {
+    let start = Instant::now();
+    let file = File::open(file_name).await?;
+    let mut reader = BufReader::new(file);
+
+    let mut metadata_line = String::new();
+    reader.read_line(&mut metadata_line).await?;
+
+    match serde_json::from_str::<PrepareQueriesMetadata>(&metadata_line) {
+        Ok(metadata) => {
+            let size = metadata.size;
+            let mut queries = Vec::with_capacity(size);
+            let mut lines = reader.lines();
+
+            while let Some(line) = lines.next_line().await? {
+                let query: PreparedSqlQuery = serde_json::from_str(&line)?;
+                queries.push(query);
+            }
+            let duration = start.elapsed();
+            info!("Reading {} Postgres queries took {:?}", size, duration);
+            Ok((metadata, queries))
+        }
+        Err(e) => Err(OtherError(format!("Error parsing metadata: {}", e))),
+    }
+}
+
+/// Parse Postgres endpoint string into (host, port, user, password, dbname).
+/// Supports formats like:
+/// - postgres://user:pass@host:5432/dbname
+/// - postgresql://user:pass@host:5432/dbname
+/// - postgres://host:5432/dbname (falls back to POSTGRES_USER/POSTGRES_PASSWORD env vars)
+fn parse_postgres_endpoint(
+    endpoint: &str
+) -> BenchmarkResult<(String, u16, String, String, String)> {
+    let url = Url::parse(endpoint).map_err(|e| {
+        OtherError(format!("Invalid Postgres endpoint URL '{}': {}", endpoint, e))
+    })?;
+
+    match url.scheme() {
+        "postgres" | "postgresql" => {}
+        scheme => {
+            return Err(OtherError(format!(
+                "Unsupported Postgres scheme '{}'. Use postgres:// or postgresql://",
+                scheme
+            )));
+        }
+    }
+
+    let host = url
+        .host_str()
+        .ok_or_else(|| OtherError(format!("No host found in Postgres endpoint: {}", endpoint)))?
+        .to_string();
+    let port = url.port().unwrap_or(5432);
+
+    let user = if !url.username().is_empty() {
+        url.username().to_string()
+    } else {
+        std::env::var("POSTGRES_USER").unwrap_or_else(|_| "postgres".to_string())
+    };
+
+    let password = if let Some(pw) = url.password() {
+        pw.to_string()
+    } else {
+        std::env::var("POSTGRES_PASSWORD").unwrap_or_default()
+    };
+
+    let dbname = url.path().trim_start_matches('/');
+    let dbname = if dbname.is_empty() {
+        std::env::var("POSTGRES_DB").unwrap_or_else(|_| "postgres".to_string())
+    } else {
+        dbname.to_string()
+    };
+
+    Ok((host, port, user, password, dbname))
 }
 
 async fn run_memgraph(

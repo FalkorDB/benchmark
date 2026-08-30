@@ -23,6 +23,7 @@ module.exports = {
 			FalkorDB: 'var(--FalkorDB-color)',
 			Neo4j: 'var(--Neo4j-color)',
 			Memgraph: 'var(--Memgraph-color)',
+			Postgres: 'var(--Postgres-color)',
   			background: 'hsl(var(--background))',
   			foreground: 'hsl(var(--foreground))',
   			card: {

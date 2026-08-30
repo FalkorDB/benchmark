@@ -54,6 +54,7 @@ body {
     --FalkorDB2-color: #ff9a3d;
     --Neo4j-color: #0A6190;
     --Memgraph-color: #ff2b4a;
+    --Postgres-color: #336791;
 
     /* AWS instance comparison colors */
     --Intel-color: #1f77b4;
@@ -78,6 +79,9 @@ body {
     --Memgraph-gradient-start: #ff2b4a;
     --Memgraph-gradient-mid: #ff7a00;
     --Memgraph-gradient-end: #ffd000;
+
+    --Postgres-gradient-start: #336791;
+    --Postgres-gradient-end: #a9c2d6;
   }
 
   .dark {

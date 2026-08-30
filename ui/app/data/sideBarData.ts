@@ -35,6 +35,7 @@ export const sidebarConfig: {
         { id: "falkordb", label: "FalkorDB" },
         { id: "neo4j", label: "Neo4j" },
         { id: "memgraph", label: "Memgraph" },
+        { id: "postgres", label: "Postgres" },
       ],
     },
     {

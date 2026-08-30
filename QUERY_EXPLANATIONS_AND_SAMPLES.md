@@ -471,6 +471,254 @@ RETURN id(edge), score
 LIMIT 10
 ```
 
+## Postgres support
+Postgres is modeled as a plain relational schema (`users`, `friend_edges` tables), not Apache
+AGE, so it has its own SQL query catalog in `src/postgres_queries_repository.rs` rather than
+reusing `src/queries_repository.rs`. There is no `Flavour` concept (single SQL dialect).
+
+### Supported coverage profiles
+- `baseline` (default): the full set of baseline/phase-1 families that have a SQL translation.
+- `extended-core`: baseline + `exact_5_hop_traverse_count`, `exact_6_hop_traverse_count`, `temporal_spatial_roundtrip`.
+- `fixture-dependent`: **not supported**. `--vendor postgres --query-profile fixture-dependent` is
+  rejected at startup because Postgres has no vector/fulltext index equivalent for the smoke queries.
+
+### Families excluded from every Postgres profile
+These have no SQL equivalent and are always omitted from the Postgres catalog, regardless of profile:
+- `algo_pagerank_summary`, `algo_max_flow_single_pair`, `algo_msf_summary`, `algo_harmonic_summary` (no built-in graph-algorithm procedures)
+- `vector_query_nodes_smoke`, `fulltext_query_nodes_smoke`, `fulltext_query_relationships_smoke` (no vector/fulltext index setup)
+- `entity_path_introspection` (no `labels`/`type`/`nodes`/`relationships`/`length` path-introspection equivalent)
+
+### Postgres-only families
+These are implemented for Postgres via recursive CTEs but have no equivalent in the planned
+MongoDB `$graphLookup`-based engine, so they are Postgres-only for cross-engine parity purposes:
+`shortest_path`, `shortest_path_with_filter`, `all_shortest_paths_len`, `pattern_cycle`.
+
+### Postgres SQL templates (baseline)
+```sql
+-- single_vertex_read
+SELECT * FROM users WHERE id = $1
+
+-- single_vertex_write
+INSERT INTO users (id) VALUES ($1) ON CONFLICT (id) DO NOTHING RETURNING id
+
+-- single_vertex_update
+UPDATE users SET rpc_social_credit = $2 WHERE id = $1 RETURNING id
+
+-- single_edge_update
+UPDATE friend_edges SET color = $1,
+  bench_capacity = COALESCE(bench_capacity, 1 + ((src_id * 31 + dst_id * 17) % 20))
+WHERE (src_id, dst_id) = (
+  SELECT src_id, dst_id FROM friend_edges ORDER BY random() LIMIT 1
+) RETURNING src_id, dst_id
+
+-- single_edge_write
+INSERT INTO friend_edges (src_id, dst_id, bench_capacity)
+VALUES ($1, $2, 1 + (($1 * 31 + $2 * 17) % 20))
+ON CONFLICT (src_id, dst_id) DO UPDATE SET
+  bench_capacity = COALESCE(friend_edges.bench_capacity, 1 + (($1 * 31 + $2 * 17) % 20)),
+  touch = CURRENT_DATE
+RETURNING src_id, dst_id
+
+-- aggregate_expansion_1
+SELECT dst_id AS id FROM friend_edges WHERE src_id = $1
+
+-- aggregate_expansion_1_with_filter
+SELECT fe.dst_id AS id FROM friend_edges fe
+JOIN users u ON u.id = fe.dst_id
+WHERE fe.src_id = $1 AND u.age >= 18
+
+-- aggregate_expansion_2 / neighbours_2 (identical shape)
+SELECT DISTINCT fe2.dst_id AS id FROM friend_edges fe1
+JOIN friend_edges fe2 ON fe2.src_id = fe1.dst_id
+WHERE fe1.src_id = $1
+
+-- aggregate_expansion_2_with_filter / neighbours_2_with_filter
+SELECT fe2.dst_id AS id FROM friend_edges fe1
+JOIN friend_edges fe2 ON fe2.src_id = fe1.dst_id
+JOIN users u ON u.id = fe2.dst_id
+WHERE fe1.src_id = $1 AND u.age >= 18
+
+-- aggregate_expansion_3 (aggregate_expansion_4 extends with one more join)
+SELECT DISTINCT fe3.dst_id AS id FROM friend_edges fe1
+JOIN friend_edges fe2 ON fe2.src_id = fe1.dst_id
+JOIN friend_edges fe3 ON fe3.src_id = fe2.dst_id
+WHERE fe1.src_id = $1
+
+-- aggregate_age / aggregate_age_filtered / aggregate_age_distinct / aggregate_age_min_max_avg
+SELECT avg(age) AS avg_age FROM users
+SELECT avg(age) AS avg_age FROM users WHERE age >= 18
+SELECT count(DISTINCT age) AS distinct_ages FROM users
+SELECT min(age) AS min_age, max(age) AS max_age, avg(age) AS avg_age FROM users
+
+-- aggregate_count_users / count_users_plain
+SELECT count(*) AS cnt FROM users
+
+-- neighbours_2_with_data / neighbours_2_with_data_and_filter
+SELECT u.* FROM friend_edges fe1
+JOIN friend_edges fe2 ON fe2.src_id = fe1.dst_id
+JOIN users u ON u.id = fe2.dst_id
+WHERE fe1.src_id = $1 [AND u.age >= 18]
+
+-- shortest_path (Postgres-only)
+-- Bounded BFS via recursive CTE; UNION dedupes (id, depth) so the frontier
+-- doesn't grow combinatorially across reconverging paths.
+WITH RECURSIVE bfs(id, depth) AS (
+  SELECT $1::int, 0
+  UNION
+  SELECT fe.dst_id, bfs.depth + 1
+  FROM bfs JOIN friend_edges fe ON fe.src_id = bfs.id
+  WHERE bfs.depth < 15
+)
+SELECT min(depth) AS length FROM bfs WHERE id = $2
+
+-- shortest_path_with_filter (Postgres-only)
+-- Same as shortest_path, with HAVING min(depth) > 0
+
+-- pattern_cycle (Postgres-only)
+SELECT e1.src_id AS a_id, e1.dst_id AS b_id, e2.dst_id AS c_id
+FROM friend_edges e1
+JOIN friend_edges e2 ON e2.src_id = e1.dst_id
+JOIN friend_edges e3 ON e3.src_id = e2.dst_id AND e3.dst_id = e1.src_id
+WHERE e1.src_id = $1
+
+-- pattern_long / pattern_short
+SELECT $1::int AS a_id, e4.dst_id AS b_id FROM friend_edges e1
+JOIN friend_edges e2 ON e2.src_id = e1.dst_id
+JOIN friend_edges e3 ON e3.src_id = e2.dst_id
+JOIN friend_edges e4 ON e4.src_id = e3.dst_id
+WHERE e1.src_id = $1
+
+-- vertex_on_label_property / vertex_on_label_property_index / vertex_on_property / id_seek
+SELECT * FROM users WHERE id = $1
+
+-- value_join / value_join_cnt
+SELECT b.id FROM users a JOIN users b ON a.age = b.age WHERE a.id = $1
+SELECT count(b.id) AS cnt FROM users a JOIN users b ON a.age = b.age WHERE a.id = $1
+
+-- order_by_age
+SELECT id, age FROM users ORDER BY age, id
+
+-- unwind_rows
+SELECT x FROM users u
+CROSS JOIN LATERAL (VALUES (u.id), (u.id + 1), (u.id + 2)) AS t(x)
+WHERE u.id = $1
+
+-- var_len_friends
+WITH RECURSIVE vlf(id, depth) AS (
+  SELECT dst_id, 1 FROM friend_edges WHERE src_id = $1
+  UNION
+  SELECT fe.dst_id, vlf.depth + 1
+  FROM vlf JOIN friend_edges fe ON fe.src_id = vlf.id
+  WHERE vlf.depth < 2
+)
+SELECT DISTINCT id FROM vlf
+
+-- optional_friend
+SELECT t.a AS a_id, fe.dst_id AS b_id
+FROM (SELECT $1::int AS a) t
+LEFT JOIN friend_edges fe ON fe.src_id = t.a
+
+-- call_subquery
+SELECT sub.bid FROM (SELECT $1::int AS a) t,
+LATERAL (SELECT dst_id AS bid FROM friend_edges WHERE src_id = t.a) sub
+
+-- id_range_scan
+SELECT id FROM users WHERE id >= $1 AND id < $2
+
+-- merge_user_insert_path
+INSERT INTO users (id, created_at, age) VALUES ($1, now(), $2)
+ON CONFLICT (id) DO NOTHING RETURNING id
+
+-- merge_user_upsert_existing
+INSERT INTO users (id, created_at, age) VALUES ($1, now(), $2)
+ON CONFLICT (id) DO UPDATE SET age = EXCLUDED.age, last_seen = now()
+RETURNING id
+
+-- merge_friend_edge_upsert
+INSERT INTO friend_edges (src_id, dst_id, since, bench_capacity)
+VALUES ($1, $2, CURRENT_DATE, 1 + (($1 * 31 + $2 * 17) % 20))
+ON CONFLICT (src_id, dst_id) DO UPDATE SET
+  touch = CURRENT_DATE,
+  bench_capacity = COALESCE(friend_edges.bench_capacity, 1 + (($1 * 31 + $2 * 17) % 20))
+RETURNING src_id, dst_id
+
+-- detach_delete_user
+-- friend_edges has ON DELETE CASCADE on both FKs, matching DETACH DELETE semantics.
+DELETE FROM users WHERE id = $1
+
+-- remove_user_property_and_label
+-- Postgres has no label concept; this drops only the property-removal semantics.
+UPDATE users SET rpc_social_credit = NULL WHERE id = $1 RETURNING id
+
+-- foreach_loop_mutation
+-- Approximated as a single terminal assignment (equivalent end state to the
+-- Cypher FOREACH (x IN [1,2,3] | SET u.loop_counter = x)).
+UPDATE users SET loop_counter = 3 WHERE id = $1 RETURNING loop_counter
+
+-- union_all_ids
+SELECT id AS uid FROM users WHERE id = $1
+UNION ALL SELECT id AS uid FROM users WHERE id < 10
+
+-- union_distinct_ids
+SELECT id AS uid FROM users WHERE id = $1
+UNION SELECT id AS uid FROM users WHERE id = $1
+
+-- all_shortest_paths_len (Postgres-only)
+-- Bounded (depth <= 4) path-array recursive CTE with explicit cycle avoidance.
+WITH RECURSIVE paths(id, depth, path) AS (
+  SELECT $1::int, 0, ARRAY[$1::int]
+  UNION ALL
+  SELECT fe.dst_id, p.depth + 1, p.path || fe.dst_id
+  FROM paths p JOIN friend_edges fe ON fe.src_id = p.id
+  WHERE p.depth < 4 AND NOT (fe.dst_id = ANY(p.path))
+)
+SELECT min(depth) AS length FROM paths WHERE id = $2
+
+-- var_len_with_edge_where_filter
+WITH RECURSIVE vlf(id, depth) AS (
+  SELECT dst_id, 1 FROM friend_edges WHERE src_id = $1 AND bench_capacity >= $2
+  UNION
+  SELECT fe.dst_id, vlf.depth + 1
+  FROM vlf JOIN friend_edges fe ON fe.src_id = vlf.id
+  WHERE vlf.depth < 3 AND fe.bench_capacity >= $2
+)
+SELECT count(DISTINCT id) AS cnt FROM vlf
+
+-- count_friend_edges_plain
+SELECT count(*) AS cnt FROM friend_edges
+
+-- indexed_or_predicate
+SELECT id FROM users WHERE id = $1 OR id = $2
+
+-- indexed_in_list_predicate
+SELECT id FROM users WHERE id IN ($1, $2, $3, $4)
+```
+
+### Postgres SQL templates (extended-core additions)
+```sql
+-- exact_5_hop_traverse_count (exact_6_hop_traverse_count uses depth 6)
+WITH RECURSIVE hops(id, depth) AS (
+  SELECT dst_id, 1 FROM friend_edges WHERE src_id = $1
+  UNION
+  SELECT fe.dst_id, hops.depth + 1
+  FROM hops JOIN friend_edges fe ON fe.src_id = hops.id
+  WHERE hops.depth < 5
+)
+SELECT count(*) AS cnt FROM hops WHERE depth = 5
+
+-- temporal_spatial_roundtrip
+-- No PostGIS dependency: distance is computed manually via the spherical law of cosines.
+SELECT
+  DATE '2024-01-01' AS d,
+  TIME '12:30:00' AS t,
+  INTERVAL '2 days 3 hours' AS dur,
+  (6371000 * acos(
+    cos(radians(32.1)) * cos(radians(32.2)) * cos(radians(34.9) - radians(34.8))
+    + sin(radians(32.1)) * sin(radians(32.2))
+  )) AS dist
+```
+
 ## Reference source
 - Canonical query definitions: `src/queries_repository.rs`
+- Postgres query definitions: `src/postgres_queries_repository.rs`
 - CLI profile/toggle options: `src/cli.rs` (`--query-profile` and `--enable-algo-*`)
