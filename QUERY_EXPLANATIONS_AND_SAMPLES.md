@@ -855,8 +855,140 @@ db.users.aggregate([
 - `remove_user_property_and_label` / `single_vertex_write` / `foreach_loop_mutation`: same
   approximations as documented for Postgres (no label concept; single terminal assignment).
 
+## TigerGraph support
+TigerGraph is modeled as a native property graph: one `User` vertex type and one directed
+`Friend` edge type, attached to a named graph `benchmark_graph`. Unlike Postgres/Mongo (which
+generate query text per request), TigerGraph queries are pre-installed GSQL procedures invoked
+over the REST++ API (`GET /query/{graph}/{name}?param=value`); the GSQL source lives in
+`src/tigergraph_gsql/*.gsql` and its own catalog builder lives in
+`src/tigergraph_queries_repository.rs` rather than reusing `src/queries_repository.rs`.
+
+### Supported coverage profiles
+- `baseline` (default): the full baseline/phase-1 family set (same families Postgres supports)
+  plus the TigerGraph-only additions below, always included. Algorithm families
+  (`algo_pagerank_summary`, `algo_max_flow_single_pair`, `algo_msf_summary`,
+  `algo_harmonic_summary`) are included when their `--enable-algo-*` flags are enabled.
+- `extended-core`: baseline + `exact_5_hop_traverse_count`, `exact_6_hop_traverse_count`,
+  `temporal_spatial_roundtrip`.
+- `fixture-dependent`: **not supported**. `--vendor tigergraph --query-profile fixture-dependent`
+  is rejected at startup because there is no fixture/index setup for the vector/fulltext smoke
+  queries in this integration.
+
+### Families excluded from every TigerGraph profile
+- `vector_query_nodes_smoke`, `fulltext_query_nodes_smoke`, `fulltext_query_relationships_smoke`
+  (no fixture/index setup wired up for this integration)
+- `entity_path_introspection` (no installed query for label/type/path-decomposition introspection)
+
+### TigerGraph-only families (supported here, unlike Postgres/Mongo)
+TigerGraph natively supports unbounded BFS via `WHILE`-loop vertex-set traversal, so unlike
+Postgres (bounded recursive CTEs) and Mongo (no equivalent), it supports the shortest-path/cycle
+family without a depth cutoff on `shortest_path`/`shortest_path_with_filter`:
+`shortest_path`, `shortest_path_with_filter`, `all_shortest_paths_len` (bounded to 4 hops, matching
+the Postgres/Cypher cutoff), `pattern_cycle`. TigerGraph is also a native graph engine, so it
+supports all four algorithm families directly in GSQL (Postgres/Mongo have no equivalent and
+always exclude them): `algo_pagerank_summary`, `algo_max_flow_single_pair`, `algo_msf_summary`,
+`algo_harmonic_summary`. These are simplified/adapted-in-spirit versions of the patterns published
+in [`tigergraph/gsql-graph-algorithms`](https://github.com/tigergraph/gsql-graph-algorithms) (fixed
+iteration counts / single-augmenting-path / plain-BFS spanning tree / single-seed harmonic
+centrality) rather than full convergence-detection implementations, to keep each query
+self-contained, deterministic, and tractable as a repeatable benchmark load.
+
+### GSQL templates (representative subset)
+```gsql
+// single_vertex_read
+CREATE OR REPLACE QUERY single_vertex_read(VERTEX<User> id) FOR GRAPH benchmark_graph {
+  Start = {id};
+  PRINT Start;
+}
+
+// aggregate_expansion_1
+CREATE OR REPLACE QUERY aggregate_expansion_1(VERTEX<User> id) FOR GRAPH benchmark_graph {
+  Start = {id};
+  Result = SELECT t FROM Start:s -(Friend:e)-> User:t;
+  PRINT Result;
+}
+
+// shortest_path (unbounded BFS via WHILE-loop vertex-set traversal)
+CREATE OR REPLACE QUERY shortest_path(VERTEX<User> from_id, VERTEX<User> to_id) FOR GRAPH benchmark_graph {
+  OrAccum @visited = false;
+  SumAccum<INT> @dist = 0;
+  MinAccum<INT> @@result_len = -1;
+
+  Frontier = {from_id};
+  Frontier = SELECT s FROM Frontier:s ACCUM s.@visited = true, s.@dist = 0;
+
+  WHILE Frontier.size() > 0 AND @@result_len == -1 DO
+    Frontier = SELECT t FROM Frontier:s -(Friend:e)-> User:t
+               WHERE t.@visited == false
+               ACCUM t.@dist = s.@dist + 1
+               POST-ACCUM
+                 t.@visited = true,
+                 CASE WHEN t == to_id THEN @@result_len = t.@dist END;
+  END;
+
+  PRINT @@result_len AS length;
+}
+
+// aggregate_age
+CREATE OR REPLACE QUERY aggregate_age() FOR GRAPH benchmark_graph {
+  AvgAccum @@avg_age;
+  Start = {User.*};
+  Start = SELECT s FROM Start:s ACCUM @@avg_age += s.age;
+  PRINT @@avg_age AS avg_age;
+}
+
+// algo_pagerank_summary (fixed 10 iterations, damping 0.85, reports the top-ranked score)
+CREATE OR REPLACE QUERY algo_pagerank_summary() FOR GRAPH benchmark_graph {
+  SumAccum<FLOAT> @recvd_score = 0.0;
+  SumAccum<FLOAT> @rank = 1.0;
+  MaxAccum<FLOAT> @@top_score = 0.0;
+  FLOAT damping = 0.85;
+  INT iterations = 10;
+  INT i = 0;
+  INT num_vertices;
+
+  All = {User.*};
+  num_vertices = All.size();
+
+  WHILE i < iterations DO
+    All = SELECT s FROM All:s -(Friend:e)-> User:t
+          ACCUM t.@recvd_score += s.@rank / (s.outdegree("Friend") + 1);
+    All = SELECT s FROM All:s
+          POST-ACCUM
+            s.@rank = (1.0 - damping) / num_vertices + damping * s.@recvd_score,
+            s.@recvd_score = 0.0;
+    i = i + 1;
+  END;
+
+  All = SELECT s FROM All:s
+        ORDER BY s.@rank DESC
+        LIMIT 1
+        POST-ACCUM @@top_score += s.@rank;
+  PRINT @@top_score AS score;
+}
+```
+See `src/tigergraph_gsql/*.gsql` for the complete set of installed queries, and
+`ui/components/ui/SidebarNavigation.tsx`'s `QUERY_DESCRIPTIONS` hover-card samples for every
+supported family.
+
+### TigerGraph-specific notes and limitations (documented, not fixed this phase)
+- GSQL vertex sets are always deduplicated by vertex id, so there is no bag-preserving
+  `UNION ALL`; `union_all_ids` and `union_distinct_ids` produce the same deduplicated result.
+- No dynamic vertex-label concept and no generic `NULL` for `INT` attributes; label
+  removal/property removal is approximated via the schema's `-1` sentinel default (same
+  approximation Postgres uses).
+- No built-in geo point/distance type; `temporal_spatial_roundtrip` computes distance manually
+  via the spherical law of cosines (matching Postgres's approach) and omits the duration
+  round-trip (no `INTERVAL`/duration literal type).
+- TigerGraph automatically removes a vertex's incident edges on delete, matching `DETACH DELETE`
+  semantics without a separate edge-deletion step.
+- `pattern_cycle` reports a cycle *count* through the anchor vertex rather than the literal
+  `(a.id, b.id, c.id)` triple, since GSQL's set-oriented traversal model makes returning specific
+  paths awkward.
+
 ## Reference source
 - Canonical query definitions: `src/queries_repository.rs`
 - Postgres query definitions: `src/postgres_queries_repository.rs`
 - Mongo query definitions: `src/mongo_queries_repository.rs`
+- TigerGraph query definitions: `src/tigergraph_queries_repository.rs`, GSQL source in `src/tigergraph_gsql/*.gsql`
 - CLI profile/toggle options: `src/cli.rs` (`--query-profile` and `--enable-algo-*`)

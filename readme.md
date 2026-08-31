@@ -253,6 +253,7 @@ Options:
 - `cargo run --release --bin benchmark -- load --vendor memgraph -s small`
 - `cargo run --release --bin benchmark -- load --vendor postgres -s small`
 - `cargo run --release --bin benchmark -- load --vendor mongo -s small`
+- `cargo run --release --bin benchmark -- load --vendor tigergraph -s small`
 
 NOTE: It is possible to use the load command with externally run vendor endpoint:
 - `cargo run --release --bin benchmark -- load --vendor falkor -s small --endpoint falkor://127.0.0.1:6379`
@@ -260,14 +261,15 @@ NOTE: It is possible to use the load command with externally run vendor endpoint
 - `cargo run --release --bin benchmark -- load --vendor memgraph -s small --endpoint bolt://127.0.0.1:7687`
 - `cargo run --release --bin benchmark -- load --vendor postgres -s small --endpoint postgres://postgres:benchmark123@127.0.0.1:5432/postgres`
 - `cargo run --release --bin benchmark -- load --vendor mongo -s small --endpoint mongodb://127.0.0.1:27017/benchmark`
+- `cargo run --release --bin benchmark -- load --vendor tigergraph -s small --endpoint http://127.0.0.1:9000`
 
 Profile-aware loading (runs additional fixture/index setup when required):
 - `cargo run --release --bin benchmark -- load --vendor neo4j -s small --query-profile fixture-dependent`
 - `cargo run --release --bin benchmark -- load --vendor memgraph -s small --query-profile fixture-dependent`
 - `cargo run --release --bin benchmark -- load --vendor falkor -s small --query-profile fixture-dependent`
 
-NOTE: Postgres and Mongo do not support the `fixture-dependent` profile (no vector/fulltext
-index equivalent); use `baseline` (default) or `extended-core` instead.
+NOTE: Postgres, Mongo, and TigerGraph do not support the `fixture-dependent` profile (no
+vector/fulltext index equivalent); use `baseline` (default) or `extended-core` instead.
 
 ##### create a set of queries to be used with the run command
 
@@ -285,6 +287,7 @@ Generate with a broader coverage profile:
 - `cargo run --release --bin benchmark -- generate-queries -s1000000 --dataset small --name=small-fixtures --write-ratio 0.0 --vendor memgraph --query-profile fixture-dependent`
 - `cargo run --release --bin benchmark -- generate-queries -s1000000 --dataset small --name=small-readonly-postgres --write-ratio 0.0 --vendor postgres --query-profile baseline`
 - `cargo run --release --bin benchmark -- generate-queries -s1000000 --dataset small --name=small-readonly-mongo --write-ratio 0.0 --vendor mongo --query-profile baseline`
+- `cargo run --release --bin benchmark -- generate-queries -s1000000 --dataset small --name=small-readonly-tigergraph --write-ratio 0.0 --vendor tigergraph --query-profile baseline`
 
 ##### run the benchmarks
 
@@ -293,6 +296,7 @@ Generate with a broader coverage profile:
 - `cargo run --release --bin benchmark run --vendor memgraph --name small-readonly -p40 --mps 4000`
 - `cargo run --release --bin benchmark run --vendor postgres --name small-readonly-postgres -p40 --mps 4000`
 - `cargo run --release --bin benchmark run --vendor mongo --name small-readonly-mongo -p40 --mps 4000`
+- `cargo run --release --bin benchmark run --vendor tigergraph --name small-readonly-tigergraph -p40 --mps 4000`
 
 NOTE: It is possible to use the run command externally run vendor endpoint:
 - `cargo run --release --bin benchmark run --vendor falkor --name small-readonly -p40 --mps 4000 --endpoint falkor://127.0.0.1:6379`
@@ -300,6 +304,7 @@ NOTE: It is possible to use the run command externally run vendor endpoint:
 - `cargo run --release --bin benchmark run --vendor memgraph --name small-readonly -p40 --mps 4000 --endpoint bolt://127.0.0.1:7687`
 - `cargo run --release --bin benchmark run --vendor postgres --name small-readonly-postgres -p40 --mps 4000 --endpoint postgres://postgres:benchmark123@127.0.0.1:5432/postgres`
 - `cargo run --release --bin benchmark run --vendor mongo --name small-readonly-mongo -p40 --mps 4000 --endpoint mongodb://127.0.0.1:27017/benchmark`
+- `cargo run --release --bin benchmark run --vendor tigergraph --name small-readonly-tigergraph -p40 --mps 4000 --endpoint http://127.0.0.1:9000`
 
 Postgres connection parameters can also be supplied via environment variables
 (`POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`) when no
@@ -338,6 +343,28 @@ MongoDB 6.0+ (uses the `$documents` aggregation stage). See
 [QUERY_EXPLANATIONS_AND_SAMPLES.md](./QUERY_EXPLANATIONS_AND_SAMPLES.md) for the full capability
 matrix and aggregation-pipeline templates.
 
+TigerGraph connection parameters can also be supplied via environment variables
+(`TIGERGRAPH_GSQL_PORT`, `TIGERGRAPH_USERNAME`, `TIGERGRAPH_PASSWORD`) when no `--endpoint` is
+given; the `--endpoint` value is the REST++ endpoint (default `http://127.0.0.1:9000`), and the
+GSQL server port defaults to `14240` (override via `TIGERGRAPH_GSQL_PORT`), with default
+user/password `tigergraph`/`tigergraph`. A minimal local TigerGraph Community Edition for testing
+can be started with:
+
+```bash
+docker run -d -p 14022:22 -p 9000:9000 -p 14240:14240 --name benchmark-tigergraph --ulimit nofile=1000000:1000000 -t tigergraph/community:latest
+```
+
+TigerGraph is modeled as a native property graph (`User` vertex type, `Friend` edge type) with
+pre-installed GSQL queries invoked over the REST++ API, rather than per-request query text. Most
+baseline/phase-1 families have a direct GSQL translation, and unlike Postgres/Mongo it natively
+supports the shortest-path/cycle family (`shortest_path`, `shortest_path_with_filter`,
+`all_shortest_paths_len`, `pattern_cycle`) as well as all four algorithm procedures
+(`algo_pagerank_summary`, `algo_max_flow_single_pair`, `algo_msf_summary`,
+`algo_harmonic_summary`) directly in GSQL. Vector/fulltext smoke queries and
+`entity_path_introspection` have no equivalent and are always excluded from the TigerGraph
+catalog. See [QUERY_EXPLANATIONS_AND_SAMPLES.md](./QUERY_EXPLANATIONS_AND_SAMPLES.md) for the full
+capability matrix and GSQL templates.
+
 ##### multi-vendor runs and per-vendor comparison reports (UI)
 
 The benchmark is designed to run the same workload against multiple vendors and then generate a **pairwise comparison report**.
@@ -349,6 +376,7 @@ The benchmark is designed to run the same workload against multiple vendors and 
 - `cargo run --release --bin benchmark -- run --vendor memgraph --name small-readonly -p40 --mps 4000 --results-dir Results-YYMMDD-HH:MM`
 - `cargo run --release --bin benchmark -- run --vendor postgres --name small-readonly-postgres -p40 --mps 4000 --results-dir Results-YYMMDD-HH:MM`
 - `cargo run --release --bin benchmark -- run --vendor mongo --name small-readonly-mongo -p40 --mps 4000 --results-dir Results-YYMMDD-HH:MM`
+- `cargo run --release --bin benchmark -- run --vendor tigergraph --name small-readonly-tigergraph -p40 --mps 4000 --results-dir Results-YYMMDD-HH:MM`
 
 2) Aggregate into UI-ready JSON summaries:
 
@@ -360,6 +388,7 @@ This produces:
 - `ui/public/summaries/memgraph_vs_falkordb.json`
 - `ui/public/summaries/postgres_vs_falkordb.json`
 - `ui/public/summaries/mongo_vs_falkordb.json`
+- `ui/public/summaries/tigergraph_vs_falkordb.json`
 
 AWS instance comparisons (e.g. Graviton vs Intel for FalkorDB runs stored under `aws-tests/`):
 
@@ -375,6 +404,7 @@ The comparison pages load only the relevant vendor pair:
 - `/memgraph` compares Memgraph vs FalkorDB
 - `/postgres` compares Postgres vs FalkorDB
 - `/mongo` compares Mongo vs FalkorDB
+- `/tigergraph` compares TigerGraph vs FalkorDB
 
 ##### per-query latency tracking (for the "single" view)
 

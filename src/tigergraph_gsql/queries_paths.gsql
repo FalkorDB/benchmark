@@ -1,0 +1,84 @@
+-- Shortest-path / cycle-detection family. Unlike Postgres (bounded recursive CTEs) and Mongo
+-- (unsupported, no `$graphLookup`-based shortest-path primitive), TigerGraph natively supports
+-- unbounded BFS via `WHILE`-loop vertex-set traversal with per-vertex accumulators, so these are
+-- supported here without Postgres's `depth < 15` cutoff.
+
+CREATE OR REPLACE QUERY shortest_path(VERTEX<User> from_id, VERTEX<User> to_id) FOR GRAPH benchmark_graph {
+  OrAccum @visited = false;
+  SumAccum<INT> @dist = 0;
+  MinAccum<INT> @@result_len = -1;
+
+  Frontier = {from_id};
+  Frontier = SELECT s FROM Frontier:s ACCUM s.@visited = true, s.@dist = 0;
+
+  WHILE Frontier.size() > 0 AND @@result_len == -1 DO
+    Frontier = SELECT t FROM Frontier:s -(Friend:e)-> User:t
+               WHERE t.@visited == false
+               ACCUM t.@dist = s.@dist + 1
+               POST-ACCUM
+                 t.@visited = true,
+                 CASE WHEN t == to_id THEN @@result_len = t.@dist END;
+  END;
+
+  PRINT @@result_len AS length;
+}
+
+CREATE OR REPLACE QUERY shortest_path_with_filter(VERTEX<User> from_id, VERTEX<User> to_id) FOR GRAPH benchmark_graph {
+  OrAccum @visited = false;
+  SumAccum<INT> @dist = 0;
+  MinAccum<INT> @@result_len = -1;
+
+  Frontier = {from_id};
+  Frontier = SELECT s FROM Frontier:s ACCUM s.@visited = true, s.@dist = 0;
+
+  WHILE Frontier.size() > 0 AND @@result_len == -1 DO
+    Frontier = SELECT t FROM Frontier:s -(Friend:e)-> User:t
+               WHERE t.@visited == false
+               ACCUM t.@dist = s.@dist + 1
+               POST-ACCUM
+                 t.@visited = true,
+                 CASE WHEN t == to_id THEN @@result_len = t.@dist END;
+  END;
+
+  IF @@result_len > 0 THEN
+    PRINT @@result_len AS length;
+  END;
+}
+
+-- Bounded to a maximum of 4 hops, mirroring the Cypher/Postgres `all_shortest_paths_len` family's
+-- `[:Friend*1..4]`/`depth < 4` cutoff.
+CREATE OR REPLACE QUERY all_shortest_paths_len(VERTEX<User> from_id, VERTEX<User> to_id) FOR GRAPH benchmark_graph {
+  OrAccum @visited = false;
+  SumAccum<INT> @dist = 0;
+  MinAccum<INT> @@result_len = -1;
+  INT max_hops = 4;
+  INT hop = 0;
+
+  Frontier = {from_id};
+  Frontier = SELECT s FROM Frontier:s ACCUM s.@visited = true, s.@dist = 0;
+
+  WHILE Frontier.size() > 0 AND hop < max_hops AND @@result_len == -1 DO
+    Frontier = SELECT t FROM Frontier:s -(Friend:e)-> User:t
+               WHERE t.@visited == false
+               ACCUM t.@dist = s.@dist + 1
+               POST-ACCUM
+                 t.@visited = true,
+                 CASE WHEN t == to_id THEN @@result_len = t.@dist END;
+    hop = hop + 1;
+  END;
+
+  PRINT @@result_len AS length;
+}
+
+-- Counts 3-cycles through the anchor vertex (a -> b -> c -> a). GSQL's set-oriented traversal
+-- model makes it awkward to retain and return the literal (a.id, b.id, c.id) triple the way
+-- Cypher's `MATCH (a)-->(b)-->(c)-->(a) RETURN a.id, b.id, c.id` does, so this reports the count of
+-- such cycles through the anchor instead.
+CREATE OR REPLACE QUERY pattern_cycle(VERTEX<User> id) FOR GRAPH benchmark_graph {
+  SumAccum<INT> @@cycle_count = 0;
+  Start = {id};
+  Hop1 = SELECT t FROM Start:s -(Friend:e1)-> User:t;
+  Hop2 = SELECT t FROM Hop1:s -(Friend:e2)-> User:t;
+  Closed = SELECT t FROM Hop2:s -(Friend:e3)-> User:t WHERE t == id ACCUM @@cycle_count += 1;
+  PRINT @@cycle_count AS cycle_count;
+}

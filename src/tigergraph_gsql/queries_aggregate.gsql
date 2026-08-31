@@ -1,0 +1,55 @@
+-- Global aggregation family, using GSQL's built-in accumulator types (AvgAccum/MinAccum/MaxAccum/
+-- SetAccum) instead of Cypher's `avg()`/`min()`/`max()`/`count(DISTINCT ...)`.
+
+CREATE OR REPLACE QUERY aggregate_age() FOR GRAPH benchmark_graph {
+  AvgAccum @@avg_age;
+  Start = {User.*};
+  Start = SELECT s FROM Start:s ACCUM @@avg_age += s.age;
+  PRINT @@avg_age AS avg_age;
+}
+
+CREATE OR REPLACE QUERY aggregate_age_distinct() FOR GRAPH benchmark_graph {
+  SetAccum<INT> @@ages;
+  Start = {User.*};
+  Start = SELECT s FROM Start:s ACCUM @@ages += s.age;
+  PRINT @@ages.size() AS distinct_ages;
+}
+
+CREATE OR REPLACE QUERY aggregate_age_filtered() FOR GRAPH benchmark_graph {
+  AvgAccum @@avg_age;
+  Start = SELECT s FROM {User.*}:s WHERE s.age >= 18 ACCUM @@avg_age += s.age;
+  PRINT @@avg_age AS avg_age;
+}
+
+CREATE OR REPLACE QUERY aggregate_age_min_max_avg() FOR GRAPH benchmark_graph {
+  MinAccum<INT> @@min_age;
+  MaxAccum<INT> @@max_age;
+  AvgAccum @@avg_age;
+  Start = {User.*};
+  Start = SELECT s FROM Start:s ACCUM @@min_age += s.age, @@max_age += s.age, @@avg_age += s.age;
+  PRINT @@min_age AS min_age, @@max_age AS max_age, @@avg_age AS avg_age;
+}
+
+-- GSQL has no built-in geo `point`/`distance` type (unlike Neo4j's `point()`/`point.distance`), so
+-- the great-circle distance is computed manually via the spherical law of cosines (haversine-style
+-- formula), matching Postgres's approach. GSQL also has no `INTERVAL`/duration literal type, so
+-- unlike the Cypher/Postgres versions this omits the duration round-trip and only exercises
+-- `DATETIME` + trigonometric math functions.
+CREATE OR REPLACE QUERY temporal_spatial_roundtrip() FOR GRAPH benchmark_graph {
+  DATETIME d;
+  FLOAT lat1 = 32.1;
+  FLOAT lon1 = 34.8;
+  FLOAT lat2 = 32.2;
+  FLOAT lon2 = 34.9;
+  FLOAT earth_radius_m = 6371000.0;
+  FLOAT deg2rad = 3.14159265358979 / 180.0;
+  FLOAT dist;
+
+  d = to_datetime("2024-01-01 00:00:00");
+  dist = earth_radius_m * acos(
+    cos(lat1 * deg2rad) * cos(lat2 * deg2rad) * cos(lon2 * deg2rad - lon1 * deg2rad)
+    + sin(lat1 * deg2rad) * sin(lat2 * deg2rad)
+  );
+
+  PRINT d AS d, dist AS dist;
+}

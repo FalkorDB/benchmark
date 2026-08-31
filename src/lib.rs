@@ -39,6 +39,10 @@ pub mod query;
 pub mod scenario;
 pub mod scheduler;
 pub mod sql_query;
+pub mod tigergraph;
+pub mod tigergraph_client;
+pub mod tigergraph_queries_repository;
+pub mod tigergraph_query;
 pub mod utils;
 
 // Compile-check the Rust code examples in the Markdown docs as doctests (`cargo test`). Only
@@ -493,6 +497,53 @@ lazy_static! {
     pub static ref MONGO_STORE_SIZE_BYTES: IntGauge = register_int_gauge!(
         "mongo_store_size_bytes",
         "Approximate size in bytes of Mongo users/friend_edges collections and their indexes"
+    )
+    .unwrap();
+
+    pub static ref TIGERGRAPH_SUCCESS_REQUESTS_DURATION_HISTOGRAM: Histogram = register_histogram!(
+        "tigergraph_response_time_success_histogram",
+        "Response time histogram of the successful requests",
+        vec![0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,]
+    )
+    .unwrap();
+    pub static ref TIGERGRAPH_ERROR_REQUESTS_DURATION_HISTOGRAM: Histogram = register_histogram!(
+        "tigergraph_response_time_error_histogram",
+        "Response time histogram of the error requests",
+        vec![0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,]
+    )
+    .unwrap();
+    pub static ref TIGERGRAPH_MSG_DEADLINE_OFFSET_GAUGE: IntGauge = register_int_gauge!(
+        "tigergraph_msg_deadline_offset",
+        "offset of the message from the deadline",
+    )
+    .unwrap();
+    pub static ref TIGERGRAPH_LATENCY_P50_US: IntGauge = register_int_gauge!(
+        "tigergraph_latency_p50_us",
+        "P50 latency in microseconds (computed in-process)"
+    )
+    .unwrap();
+    pub static ref TIGERGRAPH_LATENCY_P95_US: IntGauge = register_int_gauge!(
+        "tigergraph_latency_p95_us",
+        "P95 latency in microseconds (computed in-process)"
+    )
+    .unwrap();
+    pub static ref TIGERGRAPH_LATENCY_P99_US: IntGauge = register_int_gauge!(
+        "tigergraph_latency_p99_us",
+        "P99 latency in microseconds (computed in-process)"
+    )
+    .unwrap();
+    pub static ref TIGERGRAPH_QUERY_LATENCY_PCT_US: IntGaugeVec = register_int_gauge_vec!(
+        "tigergraph_query_latency_pct_us",
+        "Latency percentile per query in microseconds (computed in-process)",
+        &["query", "pct"]
+    )
+    .unwrap();
+    // TigerGraph does not expose a simple universal on-disk-footprint REST endpoint (see
+    // `tigergraph_client::TigerGraphClient::store_size_bytes`); this gauge is kept for symmetry
+    // with the other vendors and is set to 0 until that becomes available.
+    pub static ref TIGERGRAPH_STORE_SIZE_BYTES: IntGauge = register_int_gauge!(
+        "tigergraph_store_size_bytes",
+        "Approximate size in bytes of the TigerGraph benchmark_graph data (best-effort; 0 if unavailable)"
     )
     .unwrap();
 }

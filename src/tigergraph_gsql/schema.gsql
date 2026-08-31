@@ -1,0 +1,31 @@
+-- TigerGraph schema for the Pokec "Users" benchmark dataset.
+-- Mirrors the Postgres `users`/`friend_edges` tables and the Mongo `users`/`friend_edges`
+-- collections, but as a native property graph: one vertex type (`User`) and one directed edge
+-- type (`Friend`), attached to a single named graph (`benchmark_graph`) that every installed
+-- query in this directory targets via `FOR GRAPH benchmark_graph`.
+--
+-- `WITH STATS="OUTDEGREE_BY_EDGETYPE"` enables the `outdegree("Friend")` built-in used by
+-- algo_pagerank_summary.
+
+CREATE VERTEX User (
+  PRIMARY_ID id INT,
+  completion_percentage INT,
+  gender STRING,
+  age INT,
+  rpc_social_credit INT DEFAULT -1,
+  created_at DATETIME,
+  last_seen DATETIME,
+  loop_counter INT DEFAULT 0,
+  bench_temp_flag BOOL DEFAULT FALSE
+) WITH STATS="OUTDEGREE_BY_EDGETYPE"
+
+CREATE DIRECTED EDGE Friend (
+  FROM User,
+  TO User,
+  color INT,
+  bench_capacity INT,
+  since DATETIME,
+  touch DATETIME
+)
+
+CREATE GRAPH benchmark_graph (User, Friend)

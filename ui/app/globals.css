@@ -56,6 +56,7 @@ body {
     --Memgraph-color: #ff2b4a;
     --Postgres-color: #336791;
     --Mongo-color: #13AA52;
+    --TigerGraph-color: #F7931E;
 
     /* AWS instance comparison colors */
     --Intel-color: #1f77b4;
@@ -86,6 +87,9 @@ body {
 
     --Mongo-gradient-start: #13AA52;
     --Mongo-gradient-end: #b8f2d0;
+
+    --TigerGraph-gradient-start: #F7931E;
+    --TigerGraph-gradient-end: #4A2C0B;
   }
 
   .dark {

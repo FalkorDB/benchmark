@@ -68,6 +68,7 @@ export function AppSidebar({
       if (lower === "memgraph") return "Memgraph";
       if (lower === "postgres" || lower === "postgresql") return "Postgres";
       if (lower === "mongo" || lower === "mongodb") return "Mongo";
+      if (lower === "tigergraph") return "TigerGraph";
       if (lower === "intel") return "Intel";
       if (lower === "graviton") return "Graviton";
       // Generic fallback: Title Case

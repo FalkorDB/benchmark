@@ -38,6 +38,7 @@ pub enum Vendor {
     Memgraph,
     Postgres,
     Mongo,
+    TigerGraph,
 }
 
 #[derive(Debug, Clone)]
@@ -61,11 +62,12 @@ impl Spec<'_> {
             Vendor::Neo4j => "https://s3.eu-west-1.amazonaws.com/deps.memgraph.io/dataset/pokec/benchmark/neo4j.cypher",
             Vendor::Falkor => "https://s3.eu-west-1.amazonaws.com/deps.memgraph.io/dataset/pokec/benchmark/falkordb.cypher",
             Vendor::Memgraph => "https://s3.eu-west-1.amazonaws.com/deps.memgraph.io/dataset/pokec/benchmark/memgraph.cypher",
-            // Postgres and Mongo create their own schema/indexes directly (see
-            // `postgres::create_schema`/`mongo::create_schema`); this URL is unused in practice
-            // but kept so `Spec::new` stays exhaustive.
+            // Postgres, Mongo, and TigerGraph create their own schema/indexes directly (see
+            // `postgres::create_schema`/`mongo::create_schema`/`tigergraph::create_schema`); this
+            // URL is unused in practice but kept so `Spec::new` stays exhaustive.
             Vendor::Postgres => "https://s3.eu-west-1.amazonaws.com/deps.memgraph.io/dataset/pokec/benchmark/neo4j.cypher",
             Vendor::Mongo => "https://s3.eu-west-1.amazonaws.com/deps.memgraph.io/dataset/pokec/benchmark/neo4j.cypher",
+            Vendor::TigerGraph => "https://s3.eu-west-1.amazonaws.com/deps.memgraph.io/dataset/pokec/benchmark/neo4j.cypher",
         };
 
         match (name, size) {

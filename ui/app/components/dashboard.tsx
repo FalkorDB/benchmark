@@ -127,7 +127,7 @@ type DashboardProps = {
 
 const DEFAULT_SELECTED_OPTIONS: Record<string, string[]> = {
   "Workload Type": ["concurrent"],
-  Vendors: ["falkordb", "neo4j", "memgraph", "postgres", "mongo"],
+  Vendors: ["falkordb", "neo4j", "memgraph", "postgres", "mongo", "tigergraph"],
   Clients: ["40"],
   Throughput: ["2500"],
   Hardware: ["arm"],
@@ -614,6 +614,8 @@ export default function DashBoard({
         ? "--Postgres-color"
         : key === "mongo" || key === "mongodb"
         ? "--Mongo-color"
+        : key === "tigergraph"
+        ? "--TigerGraph-color"
         : key === "intel" || key === "x86" || key.startsWith("r7i")
         ? "--Intel-color"
         : key === "graviton" || key === "arm" || key.startsWith("r8g")
@@ -867,10 +869,10 @@ export default function DashBoard({
     ({ vendor, memory, baseDatasetBytes }) => {
       const key = (vendor ?? "").toString().trim().toLowerCase();
 
-      // For vendors without a locally-managed process (Memgraph, Neo4j, Postgres, Mongo),
-      // prefer the "base dataset" on-disk/store-size estimate (bytes) as the bar value.
-      // This normalizes the chart to dataset footprint rather than process RSS, which is
-      // always "0MB" for Postgres/Mongo since they only run against external endpoints.
+      // For vendors without a locally-managed process (Memgraph, Neo4j, Postgres, Mongo,
+      // TigerGraph), prefer the "base dataset" on-disk/store-size estimate (bytes) as the bar
+      // value. This normalizes the chart to dataset footprint rather than process RSS, which is
+      // always "0MB" for Postgres/Mongo/TigerGraph since they only run against external endpoints.
       const usesBaseDatasetEstimate = [
         "memgraph",
         "neo4j",
@@ -878,6 +880,7 @@ export default function DashBoard({
         "postgresql",
         "mongo",
         "mongodb",
+        "tigergraph",
       ].includes(key);
 
       if (usesBaseDatasetEstimate && baseDatasetBytes && baseDatasetBytes > 0) {

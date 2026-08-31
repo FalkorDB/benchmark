@@ -27,6 +27,7 @@ const QUERY_DESCRIPTIONS = [
   {
     name: "Read Vertex",
     id: "single_vertex_read",
+    tigergraph: "CREATE OR REPLACE QUERY single_vertex_read(VERTEX<User> id) FOR GRAPH benchmark_graph {\n  Start = {id};\n  PRINT Start;\n}",
     description: "Point read by user id.",
     cypher: "MATCH (n:User {id: $id})\nRETURN n",
     postgres: "SELECT * FROM users WHERE id = $1",
@@ -35,6 +36,7 @@ const QUERY_DESCRIPTIONS = [
   {
     name: "Write Vertex (Create)",
     id: "single_vertex_write",
+    tigergraph: "CREATE OR REPLACE QUERY single_vertex_write(INT id) FOR GRAPH benchmark_graph {\n  INSERT INTO User (PRIMARY_ID) VALUES (id);\n}",
     description: "Creates a single User node.",
     cypher: "CREATE (n:User {id: $id})\nRETURN n",
     postgres: "INSERT INTO users (id) VALUES ($1)\nON CONFLICT (id) DO NOTHING\nRETURNING id",
@@ -43,6 +45,7 @@ const QUERY_DESCRIPTIONS = [
   {
     name: "Write Vertex (Update)",
     id: "single_vertex_update",
+    tigergraph: "CREATE OR REPLACE QUERY single_vertex_update(VERTEX<User> id, INT rpc_social_credit) FOR GRAPH benchmark_graph {\n  Start = {id};\n  Start = SELECT s FROM Start:s POST-ACCUM s.rpc_social_credit = rpc_social_credit;\n  PRINT Start;\n}",
     description: "Updates a User property for a single vertex.",
     cypher: "MATCH (n:User {id: $id})\nSET n.rpc_social_credit = $rpc_social_credit\nRETURN n",
     postgres: "UPDATE users SET rpc_social_credit = $2\nWHERE id = $1\nRETURNING id",
@@ -51,6 +54,7 @@ const QUERY_DESCRIPTIONS = [
   {
     name: "Write Edge (Update)",
     id: "single_edge_update",
+    tigergraph: "// GSQL has no global-random-edge primitive; approximated via the first outgoing\n// Friend edge from a randomly chosen seed vertex.\nCREATE OR REPLACE QUERY single_edge_update(VERTEX<User> seed_id, INT color) FOR GRAPH benchmark_graph {\n  Start = {seed_id};\n  Result = SELECT t FROM Start:s -(Friend:e)-> User:t\n           LIMIT 1\n           ACCUM e.color = color;\n  PRINT Result;\n}",
     description: "Updates one existing Friend edge selected by random order.",
     cypher: "MATCH (n:User)-[e:Friend]->(m:User)\nWITH e ORDER BY rand() LIMIT 1\nSET e.color = $color\nRETURN e",
     postgres: "UPDATE friend_edges SET color = $1,\n  bench_capacity = COALESCE(bench_capacity, 1 + ((src_id * 31 + dst_id * 17) % 20))\nWHERE (src_id, dst_id) = (\n  SELECT src_id, dst_id FROM friend_edges ORDER BY random() LIMIT 1\n)\nRETURNING src_id, dst_id",
@@ -59,6 +63,7 @@ const QUERY_DESCRIPTIONS = [
   {
     name: "Write Edge (Create)",
     id: "single_edge_write",
+    tigergraph: "CREATE OR REPLACE QUERY single_edge_write(INT from_id, INT to_id) FOR GRAPH benchmark_graph {\n  INSERT INTO Friend (FROM, TO, bench_capacity) VALUES (from_id, to_id, 1 + ((from_id * 31 + to_id * 17) % 20));\n}",
     description: "Creates a Friend edge between two users.",
     cypher: "MATCH (n:User {id: $from}), (m:User {id: $to})\nWITH n, m\nCREATE (n)-[e:Friend]->(m)\nRETURN e",
     postgres: "INSERT INTO friend_edges (src_id, dst_id, bench_capacity)\nVALUES ($1, $2, 1 + (($1 * 31 + $2 * 17) % 20))\nON CONFLICT (src_id, dst_id) DO UPDATE SET\n  bench_capacity = COALESCE(friend_edges.bench_capacity, 1 + (($1 * 31 + $2 * 17) % 20)),\n  touch = CURRENT_DATE\nRETURNING src_id, dst_id",
@@ -67,6 +72,7 @@ const QUERY_DESCRIPTIONS = [
   {
     name: "Expand 1L",
     id: "aggregate_expansion_1",
+    tigergraph: "CREATE OR REPLACE QUERY aggregate_expansion_1(VERTEX<User> id) FOR GRAPH benchmark_graph {\n  Start = {id};\n  Result = SELECT t FROM Start:s -(Friend:e)-> User:t;\n  PRINT Result;\n}",
     description: "1-hop expansion from a seed user.",
     cypher: "MATCH (s:User {id: $id})-->(n:User)\nRETURN n.id",
     postgres: "SELECT dst_id AS id FROM friend_edges WHERE src_id = $1",
@@ -75,6 +81,7 @@ const QUERY_DESCRIPTIONS = [
   {
     name: "Expand 1L (Filtered)",
     id: "aggregate_expansion_1_with_filter",
+    tigergraph: "CREATE OR REPLACE QUERY aggregate_expansion_1_with_filter(VERTEX<User> id) FOR GRAPH benchmark_graph {\n  Start = {id};\n  Result = SELECT t FROM Start:s -(Friend:e)-> User:t WHERE t.age >= 18;\n  PRINT Result;\n}",
     description: "1-hop expansion with destination age filter.",
     cypher: "MATCH (s:User {id: $id})-->(n:User)\nWHERE n.age >= 18\nRETURN n.id",
     postgres: "SELECT fe.dst_id AS id FROM friend_edges fe\nJOIN users u ON u.id = fe.dst_id\nWHERE fe.src_id = $1 AND u.age >= 18",
@@ -83,6 +90,7 @@ const QUERY_DESCRIPTIONS = [
   {
     name: "Expand 2L",
     id: "aggregate_expansion_2",
+    tigergraph: "CREATE OR REPLACE QUERY aggregate_expansion_2(VERTEX<User> id) FOR GRAPH benchmark_graph {\n  Start = {id};\n  Hop1 = SELECT t FROM Start:s -(Friend:e)-> User:t;\n  Result = SELECT t FROM Hop1:s -(Friend:e)-> User:t;\n  PRINT Result;\n}",
     description: "2-hop expansion and distinct destination IDs.",
     cypher: "MATCH (s:User {id: $id})-->()-->(n:User)\nRETURN DISTINCT n.id",
     postgres: "SELECT DISTINCT fe2.dst_id AS id FROM friend_edges fe1\nJOIN friend_edges fe2 ON fe2.src_id = fe1.dst_id\nWHERE fe1.src_id = $1",
@@ -91,6 +99,7 @@ const QUERY_DESCRIPTIONS = [
   {
     name: "Expand 2L (Filtered)",
     id: "aggregate_expansion_2_with_filter",
+    tigergraph: "CREATE OR REPLACE QUERY aggregate_expansion_2_with_filter(VERTEX<User> id) FOR GRAPH benchmark_graph {\n  Start = {id};\n  Hop1 = SELECT t FROM Start:s -(Friend:e)-> User:t;\n  Result = SELECT t FROM Hop1:s -(Friend:e)-> User:t WHERE t.age >= 18;\n  PRINT Result;\n}",
     description: "2-hop expansion with age filter.",
     cypher: "MATCH (s:User {id: $id})-->()-->(n:User)\nWHERE n.age >= 18\nRETURN DISTINCT n.id",
     postgres: "SELECT DISTINCT fe2.dst_id AS id FROM friend_edges fe1\nJOIN friend_edges fe2 ON fe2.src_id = fe1.dst_id\nJOIN users u ON u.id = fe2.dst_id\nWHERE fe1.src_id = $1 AND u.age >= 18",
@@ -99,6 +108,7 @@ const QUERY_DESCRIPTIONS = [
   {
     name: "Expand 3L",
     id: "aggregate_expansion_3",
+    tigergraph: "CREATE OR REPLACE QUERY aggregate_expansion_3(VERTEX<User> id) FOR GRAPH benchmark_graph {\n  Start = {id};\n  Hop1 = SELECT t FROM Start:s -(Friend:e)-> User:t;\n  Hop2 = SELECT t FROM Hop1:s -(Friend:e)-> User:t;\n  Result = SELECT t FROM Hop2:s -(Friend:e)-> User:t;\n  PRINT Result;\n}",
     description: "3-hop expansion and distinct destination IDs.",
     cypher: "MATCH (s:User {id: $id})-->()-->()-->(n:User)\nRETURN DISTINCT n.id",
     postgres: "SELECT DISTINCT fe3.dst_id AS id FROM friend_edges fe1\nJOIN friend_edges fe2 ON fe2.src_id = fe1.dst_id\nJOIN friend_edges fe3 ON fe3.src_id = fe2.dst_id\nWHERE fe1.src_id = $1",
@@ -107,6 +117,7 @@ const QUERY_DESCRIPTIONS = [
   {
     name: "Expand 3L (Filtered)",
     id: "aggregate_expansion_3_with_filter",
+    tigergraph: "CREATE OR REPLACE QUERY aggregate_expansion_3_with_filter(VERTEX<User> id) FOR GRAPH benchmark_graph {\n  Start = {id};\n  Hop1 = SELECT t FROM Start:s -(Friend:e)-> User:t;\n  Hop2 = SELECT t FROM Hop1:s -(Friend:e)-> User:t;\n  Result = SELECT t FROM Hop2:s -(Friend:e)-> User:t WHERE t.age >= 18;\n  PRINT Result;\n}",
     description: "3-hop expansion with age filter.",
     cypher: "MATCH (s:User {id: $id})-->()-->()-->(n:User)\nWHERE n.age >= 18\nRETURN DISTINCT n.id",
     postgres: "SELECT DISTINCT fe3.dst_id AS id FROM friend_edges fe1\nJOIN friend_edges fe2 ON fe2.src_id = fe1.dst_id\nJOIN friend_edges fe3 ON fe3.src_id = fe2.dst_id\nJOIN users u ON u.id = fe3.dst_id\nWHERE fe1.src_id = $1 AND u.age >= 18",
@@ -115,6 +126,7 @@ const QUERY_DESCRIPTIONS = [
   {
     name: "Expand 4L",
     id: "aggregate_expansion_4",
+    tigergraph: "CREATE OR REPLACE QUERY aggregate_expansion_4(VERTEX<User> id) FOR GRAPH benchmark_graph {\n  Start = {id};\n  Hop1 = SELECT t FROM Start:s -(Friend:e)-> User:t;\n  Hop2 = SELECT t FROM Hop1:s -(Friend:e)-> User:t;\n  Hop3 = SELECT t FROM Hop2:s -(Friend:e)-> User:t;\n  Result = SELECT t FROM Hop3:s -(Friend:e)-> User:t;\n  PRINT Result;\n}",
     description: "4-hop expansion and distinct destination IDs.",
     cypher: "MATCH (s:User {id: $id})-->()-->()-->()-->(n:User)\nRETURN DISTINCT n.id",
     postgres: "SELECT DISTINCT fe4.dst_id AS id FROM friend_edges fe1\nJOIN friend_edges fe2 ON fe2.src_id = fe1.dst_id\nJOIN friend_edges fe3 ON fe3.src_id = fe2.dst_id\nJOIN friend_edges fe4 ON fe4.src_id = fe3.dst_id\nWHERE fe1.src_id = $1",
@@ -123,6 +135,7 @@ const QUERY_DESCRIPTIONS = [
   {
     name: "Expand 4L (Filtered)",
     id: "aggregate_expansion_4_with_filter",
+    tigergraph: "CREATE OR REPLACE QUERY aggregate_expansion_4_with_filter(VERTEX<User> id) FOR GRAPH benchmark_graph {\n  Start = {id};\n  Hop1 = SELECT t FROM Start:s -(Friend:e)-> User:t;\n  Hop2 = SELECT t FROM Hop1:s -(Friend:e)-> User:t;\n  Hop3 = SELECT t FROM Hop2:s -(Friend:e)-> User:t;\n  Result = SELECT t FROM Hop3:s -(Friend:e)-> User:t WHERE t.age >= 18;\n  PRINT Result;\n}",
     description: "4-hop expansion with age filter.",
     cypher: "MATCH (s:User {id: $id})-->()-->()-->()-->(n:User)\nWHERE n.age >= 18\nRETURN DISTINCT n.id",
     postgres: "SELECT DISTINCT fe4.dst_id AS id FROM friend_edges fe1\nJOIN friend_edges fe2 ON fe2.src_id = fe1.dst_id\nJOIN friend_edges fe3 ON fe3.src_id = fe2.dst_id\nJOIN friend_edges fe4 ON fe4.src_id = fe3.dst_id\nJOIN users u ON u.id = fe4.dst_id\nWHERE fe1.src_id = $1 AND u.age >= 18",
@@ -131,6 +144,7 @@ const QUERY_DESCRIPTIONS = [
   {
     name: "Aggregate Age",
     id: "aggregate_age",
+    tigergraph: "CREATE OR REPLACE QUERY aggregate_age() FOR GRAPH benchmark_graph {\n  AvgAccum @@avg_age;\n  Start = {User.*};\n  Start = SELECT s FROM Start:s ACCUM @@avg_age += s.age;\n  PRINT @@avg_age AS avg_age;\n}",
     description: "Average age across all User nodes.",
     cypher: "MATCH (n:User)\nRETURN avg(n.age) AS avg_age",
     postgres: "SELECT avg(age) AS avg_age FROM users",
@@ -139,6 +153,7 @@ const QUERY_DESCRIPTIONS = [
   {
     name: "Aggregate Age Distinct",
     id: "aggregate_age_distinct",
+    tigergraph: "CREATE OR REPLACE QUERY aggregate_age_distinct() FOR GRAPH benchmark_graph {\n  SetAccum<INT> @@ages;\n  Start = {User.*};\n  Start = SELECT s FROM Start:s ACCUM @@ages += s.age;\n  PRINT @@ages.size() AS distinct_ages;\n}",
     description: "Count distinct age values in User nodes.",
     cypher: "MATCH (n:User)\nRETURN count(DISTINCT n.age) AS distinct_ages",
     postgres: "SELECT count(DISTINCT age) AS distinct_ages FROM users",
@@ -147,6 +162,7 @@ const QUERY_DESCRIPTIONS = [
   {
     name: "Aggregate Age (Filtered)",
     id: "aggregate_age_filtered",
+    tigergraph: "CREATE OR REPLACE QUERY aggregate_age_filtered() FOR GRAPH benchmark_graph {\n  AvgAccum @@avg_age;\n  Start = SELECT s FROM {User.*}:s WHERE s.age >= 18 ACCUM @@avg_age += s.age;\n  PRINT @@avg_age AS avg_age;\n}",
     description: "Average age for users aged 18+.",
     cypher: "MATCH (n:User)\nWHERE n.age >= 18\nRETURN avg(n.age) AS avg_age",
     postgres: "SELECT avg(age) AS avg_age FROM users WHERE age >= 18",
@@ -155,6 +171,7 @@ const QUERY_DESCRIPTIONS = [
   {
     name: "Aggregate Count Users",
     id: "aggregate_count_users",
+    tigergraph: "CREATE OR REPLACE QUERY aggregate_count_users() FOR GRAPH benchmark_graph {\n  Start = {User.*};\n  PRINT Start.size() AS cnt;\n}",
     description: "Total user count (uses db.meta.stats() optimization in FalkorDB).",
     cypher: "// FalkorDB:\nCALL db.meta.stats() YIELD nodeCount RETURN nodeCount AS cnt\n\n// Neo4j / Memgraph:\nMATCH (n:User) RETURN count(n) AS cnt",
     postgres: "SELECT count(*) AS cnt FROM users",
@@ -163,6 +180,7 @@ const QUERY_DESCRIPTIONS = [
   {
     name: "Aggregate Age Min/Max/Avg",
     id: "aggregate_age_min_max_avg",
+    tigergraph: "CREATE OR REPLACE QUERY aggregate_age_min_max_avg() FOR GRAPH benchmark_graph {\n  MinAccum<INT> @@min_age;\n  MaxAccum<INT> @@max_age;\n  AvgAccum @@avg_age;\n  Start = {User.*};\n  Start = SELECT s FROM Start:s ACCUM @@min_age += s.age, @@max_age += s.age, @@avg_age += s.age;\n  PRINT @@min_age AS min_age, @@max_age AS max_age, @@avg_age AS avg_age;\n}",
     description: "Returns min, max, and average age in one query.",
     cypher: "MATCH (n:User)\nRETURN min(n.age) AS min_age, max(n.age) AS max_age, avg(n.age) AS avg_age",
     postgres: "SELECT min(age) AS min_age, max(age) AS max_age, avg(age) AS avg_age FROM users",
@@ -171,6 +189,7 @@ const QUERY_DESCRIPTIONS = [
   {
     name: "Neighbours 2L",
     id: "neighbours_2",
+    tigergraph: "CREATE OR REPLACE QUERY neighbours_2(VERTEX<User> id) FOR GRAPH benchmark_graph {\n  Start = {id};\n  Hop1 = SELECT t FROM Start:s -(Friend:e)-> User:t;\n  Result = SELECT t FROM Hop1:s -(Friend:e)-> User:t;\n  PRINT Result;\n}",
     description: "Returns 2-hop neighbor IDs.",
     cypher: "MATCH (s:User {id: $id})-->()-->(n:User)\nRETURN n.id",
     postgres: "SELECT fe2.dst_id AS id FROM friend_edges fe1\nJOIN friend_edges fe2 ON fe2.src_id = fe1.dst_id\nWHERE fe1.src_id = $1",
@@ -179,6 +198,7 @@ const QUERY_DESCRIPTIONS = [
   {
     name: "Neighbours 2L (Filtered)",
     id: "neighbours_2_with_filter",
+    tigergraph: "CREATE OR REPLACE QUERY neighbours_2_with_filter(VERTEX<User> id) FOR GRAPH benchmark_graph {\n  Start = {id};\n  Hop1 = SELECT t FROM Start:s -(Friend:e)-> User:t;\n  Result = SELECT t FROM Hop1:s -(Friend:e)-> User:t WHERE t.age >= 18;\n  PRINT Result;\n}",
     description: "Returns 2-hop neighbor IDs filtered by age.",
     cypher: "MATCH (s:User {id: $id})-->()-->(n:User)\nWHERE n.age >= 18\nRETURN n.id",
     postgres: "SELECT fe2.dst_id AS id FROM friend_edges fe1\nJOIN friend_edges fe2 ON fe2.src_id = fe1.dst_id\nJOIN users u ON u.id = fe2.dst_id\nWHERE fe1.src_id = $1 AND u.age >= 18",
@@ -187,6 +207,7 @@ const QUERY_DESCRIPTIONS = [
   {
     name: "Neighbours 2L (Data)",
     id: "neighbours_2_with_data",
+    tigergraph: "// PRINT always serializes full vertex attributes, so this is the same query as\n// neighbours_2, kept separate for catalog/name parity.\nCREATE OR REPLACE QUERY neighbours_2_with_data(VERTEX<User> id) FOR GRAPH benchmark_graph {\n  Start = {id};\n  Hop1 = SELECT t FROM Start:s -(Friend:e)-> User:t;\n  Result = SELECT t FROM Hop1:s -(Friend:e)-> User:t;\n  PRINT Result;\n}",
     description: "Returns 2-hop full node payloads.",
     cypher: "MATCH (s:User {id: $id})-->()-->(n:User)\nRETURN n",
     postgres: "SELECT u.* FROM friend_edges fe1\nJOIN friend_edges fe2 ON fe2.src_id = fe1.dst_id\nJOIN users u ON u.id = fe2.dst_id\nWHERE fe1.src_id = $1",
@@ -195,6 +216,7 @@ const QUERY_DESCRIPTIONS = [
   {
     name: "Neighbours 2L (Data + Filter)",
     id: "neighbours_2_with_data_and_filter",
+    tigergraph: "CREATE OR REPLACE QUERY neighbours_2_with_data_and_filter(VERTEX<User> id) FOR GRAPH benchmark_graph {\n  Start = {id};\n  Hop1 = SELECT t FROM Start:s -(Friend:e)-> User:t;\n  Result = SELECT t FROM Hop1:s -(Friend:e)-> User:t WHERE t.age >= 18;\n  PRINT Result;\n}",
     description: "Returns 2-hop node payloads with age filter.",
     cypher: "MATCH (s:User {id: $id})-->()-->(n:User)\nWHERE n.age >= 18\nRETURN n",
     postgres: "SELECT u.* FROM friend_edges fe1\nJOIN friend_edges fe2 ON fe2.src_id = fe1.dst_id\nJOIN users u ON u.id = fe2.dst_id\nWHERE fe1.src_id = $1 AND u.age >= 18",
@@ -203,6 +225,7 @@ const QUERY_DESCRIPTIONS = [
   {
     name: "Shortest Path",
     id: "shortest_path",
+    tigergraph: "CREATE OR REPLACE QUERY shortest_path(VERTEX<User> from_id, VERTEX<User> to_id) FOR GRAPH benchmark_graph {\n  OrAccum @visited = false;\n  SumAccum<INT> @dist = 0;\n  MinAccum<INT> @@result_len = -1;\n\n  Frontier = {from_id};\n  Frontier = SELECT s FROM Frontier:s ACCUM s.@visited = true, s.@dist = 0;\n\n  WHILE Frontier.size() > 0 AND @@result_len == -1 DO\n    Frontier = SELECT t FROM Frontier:s -(Friend:e)-> User:t\n               WHERE t.@visited == false\n               ACCUM t.@dist = s.@dist + 1\n               POST-ACCUM\n                 t.@visited = true,\n                 CASE WHEN t == to_id THEN @@result_len = t.@dist END;\n  END;\n\n  PRINT @@result_len AS length;\n}",
     description: "Computes shortest path length between two users.",
     cypher: "// FalkorDB:\nMATCH (s:User {id: $from}), (t:User {id: $to})\nWITH shortestPath((s)-[*]->(t)) AS p\nRETURN length(p)\n\n// Neo4j:\nMATCH (s:User {id: $from}), (t:User {id: $to})\nMATCH p = shortestPath((s)-[*]->(t))\nRETURN length(p)\n\n// Memgraph:\nMATCH p = (:User {id: $from})-[*BFS]->(:User {id: $to})\nRETURN length(p)",
     postgres: "-- Postgres-only: bounded BFS via recursive CTE. UNION (not UNION ALL) dedupes\n-- (id, depth) pairs so the frontier doesn't grow combinatorially.\nWITH RECURSIVE bfs(id, depth) AS (\n  SELECT $1::int, 0\n  UNION\n  SELECT fe.dst_id, bfs.depth + 1\n  FROM bfs JOIN friend_edges fe ON fe.src_id = bfs.id\n  WHERE bfs.depth < 15\n)\nSELECT min(depth) AS length FROM bfs WHERE id = $2"
@@ -210,6 +233,7 @@ const QUERY_DESCRIPTIONS = [
   {
     name: "Shortest Path (Filtered)",
     id: "shortest_path_with_filter",
+    tigergraph: "CREATE OR REPLACE QUERY shortest_path_with_filter(VERTEX<User> from_id, VERTEX<User> to_id) FOR GRAPH benchmark_graph {\n  OrAccum @visited = false;\n  SumAccum<INT> @dist = 0;\n  MinAccum<INT> @@result_len = -1;\n\n  Frontier = {from_id};\n  Frontier = SELECT s FROM Frontier:s ACCUM s.@visited = true, s.@dist = 0;\n\n  WHILE Frontier.size() > 0 AND @@result_len == -1 DO\n    Frontier = SELECT t FROM Frontier:s -(Friend:e)-> User:t\n               WHERE t.@visited == false\n               ACCUM t.@dist = s.@dist + 1\n               POST-ACCUM\n                 t.@visited = true,\n                 CASE WHEN t == to_id THEN @@result_len = t.@dist END;\n  END;\n\n  IF @@result_len > 0 THEN\n    PRINT @@result_len AS length;\n  END;\n}",
     description: "Shortest path length, excluding empty paths.",
     cypher: "MATCH (s:User {id: $from}), (t:User {id: $to})\nWITH shortestPath((s)-[*]->(t)) AS p\nWHERE length(p) > 0\nRETURN length(p)",
     postgres: "-- Postgres-only (same bounded BFS as Shortest Path, filtered to non-empty paths).\nWITH RECURSIVE bfs(id, depth) AS (\n  SELECT $1::int, 0\n  UNION\n  SELECT fe.dst_id, bfs.depth + 1\n  FROM bfs JOIN friend_edges fe ON fe.src_id = bfs.id\n  WHERE bfs.depth < 15\n)\nSELECT min(depth) AS length FROM bfs WHERE id = $2 HAVING min(depth) > 0"
@@ -217,6 +241,7 @@ const QUERY_DESCRIPTIONS = [
   {
     name: "Pattern Cycle",
     id: "pattern_cycle",
+    tigergraph: "// Reports the count of 3-cycles through the anchor (a -> b -> c -> a) rather than the\n// literal triple, since GSQL's set-oriented model makes returning specific paths awkward.\nCREATE OR REPLACE QUERY pattern_cycle(VERTEX<User> id) FOR GRAPH benchmark_graph {\n  SumAccum<INT> @@cycle_count = 0;\n  Start = {id};\n  Hop1 = SELECT t FROM Start:s -(Friend:e1)-> User:t;\n  Hop2 = SELECT t FROM Hop1:s -(Friend:e2)-> User:t;\n  Closed = SELECT t FROM Hop2:s -(Friend:e3)-> User:t WHERE t == id ACCUM @@cycle_count += 1;\n  PRINT @@cycle_count AS cycle_count;\n}",
     description: "Finds 3-node cycles anchored at the seed user.",
     cypher: "MATCH (a:User {id: $id})-->(b:User)-->(c:User)-->(a)\nRETURN a.id, b.id, c.id",
     postgres: "-- Postgres-only: $graphLookup can't verify a cycle's intermediate nodes, so this\n-- family has no Mongo equivalent.\nSELECT e1.src_id AS a_id, e1.dst_id AS b_id, e2.dst_id AS c_id\nFROM friend_edges e1\nJOIN friend_edges e2 ON e2.src_id = e1.dst_id\nJOIN friend_edges e3 ON e3.src_id = e2.dst_id AND e3.dst_id = e1.src_id\nWHERE e1.src_id = $1"
@@ -224,6 +249,7 @@ const QUERY_DESCRIPTIONS = [
   {
     name: "Pattern Long",
     id: "pattern_long",
+    tigergraph: "CREATE OR REPLACE QUERY pattern_long(VERTEX<User> id) FOR GRAPH benchmark_graph {\n  Start = {id};\n  Hop1 = SELECT t FROM Start:s -(Friend:e1)-> User:t;\n  Hop2 = SELECT t FROM Hop1:s -(Friend:e2)-> User:t;\n  Hop3 = SELECT t FROM Hop2:s -(Friend:e3)-> User:t;\n  Result = SELECT t FROM Hop3:s -(Friend:e4)-> User:t;\n  PRINT Result;\n}",
     description: "Longer pattern expansion (4 hops).",
     cypher: "MATCH (a:User {id: $id})-->()-->()-->()-->(b:User)\nRETURN a.id, b.id",
     postgres: "SELECT $1::int AS a_id, e4.dst_id AS b_id\nFROM friend_edges e1\nJOIN friend_edges e2 ON e2.src_id = e1.dst_id\nJOIN friend_edges e3 ON e3.src_id = e2.dst_id\nJOIN friend_edges e4 ON e4.src_id = e3.dst_id\nWHERE e1.src_id = $1",
@@ -232,6 +258,7 @@ const QUERY_DESCRIPTIONS = [
   {
     name: "Pattern Short",
     id: "pattern_short",
+    tigergraph: "CREATE OR REPLACE QUERY pattern_short(VERTEX<User> id) FOR GRAPH benchmark_graph {\n  Start = {id};\n  Hop1 = SELECT t FROM Start:s -(Friend:e1)-> User:t;\n  Result = SELECT t FROM Hop1:s -(Friend:e2)-> User:t;\n  PRINT Result;\n}",
     description: "Short pattern expansion (2 hops).",
     cypher: "MATCH (a:User {id: $id})-->()-->(b:User)\nRETURN a.id, b.id",
     postgres: "SELECT $1::int AS a_id, e2.dst_id AS b_id\nFROM friend_edges e1\nJOIN friend_edges e2 ON e2.src_id = e1.dst_id\nWHERE e1.src_id = $1",
@@ -240,6 +267,7 @@ const QUERY_DESCRIPTIONS = [
   {
     name: "Vertex on Label + Property",
     id: "vertex_on_label_property",
+    tigergraph: "CREATE OR REPLACE QUERY vertex_on_label_property(VERTEX<User> id) FOR GRAPH benchmark_graph {\n  Start = {id};\n  PRINT Start;\n}",
     description: "Lookup by label and property predicate.",
     cypher: "MATCH (n:User {id: $id})\nRETURN n",
     postgres: "SELECT * FROM users WHERE id = $1",
@@ -248,6 +276,7 @@ const QUERY_DESCRIPTIONS = [
   {
     name: "Vertex on Label + Property (Indexed)",
     id: "vertex_on_label_property_index",
+    tigergraph: "CREATE OR REPLACE QUERY vertex_on_label_property_index(VERTEX<User> id) FOR GRAPH benchmark_graph {\n  Start = {id};\n  PRINT Start;\n}",
     description: "Same predicate, intended for index-path benchmarking.",
     cypher: "MATCH (n:User {id: $id})\nRETURN n",
     postgres: "SELECT * FROM users WHERE id = $1",
@@ -256,6 +285,7 @@ const QUERY_DESCRIPTIONS = [
   {
     name: "Vertex on Property",
     id: "vertex_on_property",
+    tigergraph: "// TigerGraph has no separate label concept, so this is the same shape as\n// vertex_on_label_property.\nCREATE OR REPLACE QUERY vertex_on_property(VERTEX<User> id) FOR GRAPH benchmark_graph {\n  Start = {id};\n  PRINT Start;\n}",
     description: "Lookup by property without label restriction.",
     cypher: "MATCH (n {id: $id})\nRETURN n",
     postgres: "SELECT * FROM users WHERE id = $1",
@@ -264,6 +294,7 @@ const QUERY_DESCRIPTIONS = [
   {
     name: "Value Join",
     id: "value_join",
+    tigergraph: "CREATE OR REPLACE QUERY value_join(VERTEX<User> id) FOR GRAPH benchmark_graph {\n  SumAccum<INT> @@anchor_age = 0;\n  Anchor = {id};\n  Anchor = SELECT s FROM Anchor:s ACCUM @@anchor_age += s.age;\n  Result = SELECT b FROM {User.*}:b WHERE b.age == @@anchor_age;\n  PRINT Result;\n}",
     description: "Joins users on matching age against a seeded user.",
     cypher: "MATCH (a:User {id: $id}), (b:User)\nWHERE a.age = b.age\nRETURN b.id",
     postgres: "SELECT b.id FROM users a JOIN users b ON a.age = b.age WHERE a.id = $1",
@@ -272,6 +303,7 @@ const QUERY_DESCRIPTIONS = [
   {
     name: "Value Join Count",
     id: "value_join_cnt",
+    tigergraph: "CREATE OR REPLACE QUERY value_join_cnt(VERTEX<User> id) FOR GRAPH benchmark_graph {\n  SumAccum<INT> @@anchor_age = 0;\n  Anchor = {id};\n  Anchor = SELECT s FROM Anchor:s ACCUM @@anchor_age += s.age;\n  Result = SELECT b FROM {User.*}:b WHERE b.age == @@anchor_age;\n  PRINT Result.size() AS cnt;\n}",
     description: "Counts matches for value-join shape.",
     cypher: "MATCH (a:User {id: $id}), (b:User)\nWHERE a.age = b.age\nRETURN count(b)",
     postgres: "SELECT count(b.id) AS cnt FROM users a JOIN users b ON a.age = b.age WHERE a.id = $1",
@@ -280,6 +312,7 @@ const QUERY_DESCRIPTIONS = [
   {
     name: "Order by Age",
     id: "order_by_age",
+    tigergraph: "CREATE OR REPLACE QUERY order_by_age() FOR GRAPH benchmark_graph {\n  Start = SELECT u FROM {User.*}:u\n          ORDER BY u.age ASC, u.id ASC;\n  PRINT Start;\n}",
     description: "Full sort over users by age then id.",
     cypher: "MATCH (n:User)\nRETURN n.id, n.age\nORDER BY n.age, n.id",
     postgres: "SELECT id, age FROM users ORDER BY age, id",
@@ -288,6 +321,7 @@ const QUERY_DESCRIPTIONS = [
   {
     name: "Unwind Rows",
     id: "unwind_rows",
+    tigergraph: "CREATE OR REPLACE QUERY unwind_rows(VERTEX<User> id) FOR GRAPH benchmark_graph {\n  ListAccum<INT> @@values;\n  Start = {id};\n  Start = SELECT s FROM Start:s ACCUM @@values += s.id, @@values += s.id + 1, @@values += s.id + 2;\n  PRINT @@values AS x;\n}",
     description: "UNWIND fan-out from row-local values.",
     cypher: "MATCH (n:User {id: $id})\nUNWIND [n.id, n.id + 1, n.id + 2] AS x\nRETURN x",
     postgres: "SELECT x FROM users u\nCROSS JOIN LATERAL (VALUES (u.id), (u.id + 1), (u.id + 2)) AS t(x)\nWHERE u.id = $1",
@@ -296,6 +330,7 @@ const QUERY_DESCRIPTIONS = [
   {
     name: "Variable Length Friends",
     id: "var_len_friends",
+    tigergraph: "CREATE OR REPLACE QUERY var_len_friends(VERTEX<User> id) FOR GRAPH benchmark_graph {\n  Start = {id};\n  Hop1 = SELECT t FROM Start:s -(Friend:e)-> User:t;\n  Hop2 = SELECT t FROM Hop1:s -(Friend:e)-> User:t;\n  Result = Hop1 UNION Hop2;\n  PRINT Result;\n}",
     description: "Variable-length expansion (1..2 hops).",
     cypher: "MATCH (a:User {id: $id})-[*1..2]->(b:User)\nRETURN b.id",
     postgres: "WITH RECURSIVE vlf(id, depth) AS (\n  SELECT dst_id, 1 FROM friend_edges WHERE src_id = $1\n  UNION\n  SELECT fe.dst_id, vlf.depth + 1\n  FROM vlf JOIN friend_edges fe ON fe.src_id = vlf.id\n  WHERE vlf.depth < 2\n)\nSELECT DISTINCT id FROM vlf",
@@ -304,6 +339,7 @@ const QUERY_DESCRIPTIONS = [
   {
     name: "Optional Friend",
     id: "optional_friend",
+    tigergraph: "CREATE OR REPLACE QUERY optional_friend(VERTEX<User> id) FOR GRAPH benchmark_graph {\n  Start = {id};\n  Friends = SELECT t FROM Start:s -(Friend:e)-> User:t;\n  PRINT Start, Friends;\n}",
     description: "OPTIONAL MATCH expansion from seeded user.",
     cypher: "MATCH (a:User {id: $id})\nOPTIONAL MATCH (a)-->(b:User)\nRETURN a.id, b.id",
     postgres: "SELECT t.a AS a_id, fe.dst_id AS b_id\nFROM (SELECT $1::int AS a) t\nLEFT JOIN friend_edges fe ON fe.src_id = t.a",
@@ -312,6 +348,7 @@ const QUERY_DESCRIPTIONS = [
   {
     name: "Call Subquery",
     id: "call_subquery",
+    tigergraph: "CREATE OR REPLACE QUERY call_subquery(VERTEX<User> id) FOR GRAPH benchmark_graph {\n  Start = {id};\n  Result = SELECT t FROM Start:s -(Friend:e)-> User:t;\n  PRINT Result;\n}",
     description: "Correlated subquery using CALL { ... }.",
     cypher: "MATCH (a:User {id: $id})\nCALL {\n  WITH a\n  MATCH (a)-->(b:User)\n  RETURN b.id AS bid\n}\nRETURN bid",
     postgres: "SELECT sub.bid FROM (SELECT $1::int AS a) t,\nLATERAL (SELECT dst_id AS bid FROM friend_edges WHERE src_id = t.a) sub",
@@ -320,6 +357,7 @@ const QUERY_DESCRIPTIONS = [
   {
     name: "MERGE User (Insert Path)",
     id: "merge_user_insert_path",
+    tigergraph: "CREATE OR REPLACE QUERY merge_user_insert_path(INT id, INT age) FOR GRAPH benchmark_graph {\n  INSERT INTO User (PRIMARY_ID, age, created_at) VALUES (id, age, now());\n}",
     description: "MERGE branch that creates a new User when id does not exist.",
     cypher: "MERGE (u:User {id: $id})\nON CREATE SET u.created_at = timestamp(), u.age = $age\nRETURN u.id",
     postgres: "INSERT INTO users (id, created_at, age) VALUES ($1, now(), $2)\nON CONFLICT (id) DO NOTHING\nRETURNING id",
@@ -328,6 +366,7 @@ const QUERY_DESCRIPTIONS = [
   {
     name: "MERGE User (Upsert Existing)",
     id: "merge_user_upsert_existing",
+    tigergraph: "CREATE OR REPLACE QUERY merge_user_upsert_existing(INT id, INT age) FOR GRAPH benchmark_graph {\n  INSERT INTO User (PRIMARY_ID, age, last_seen) VALUES (id, age, now());\n}",
     description: "MERGE branch that updates an existing User via ON MATCH.",
     cypher: "MERGE (u:User {id: $id})\nON CREATE SET u.created_at = timestamp()\nON MATCH SET u.age = $age, u.last_seen = timestamp()\nRETURN u.id",
     postgres: "INSERT INTO users (id, created_at, age) VALUES ($1, now(), $2)\nON CONFLICT (id) DO UPDATE SET age = EXCLUDED.age, last_seen = now()\nRETURNING id",
@@ -336,6 +375,7 @@ const QUERY_DESCRIPTIONS = [
   {
     name: "MERGE Friend Edge (Upsert)",
     id: "merge_friend_edge_upsert",
+    tigergraph: "CREATE OR REPLACE QUERY merge_friend_edge_upsert(INT from_id, INT to_id) FOR GRAPH benchmark_graph {\n  INSERT INTO Friend (FROM, TO, since, bench_capacity)\n    VALUES (from_id, to_id, now(), 1 + ((from_id * 31 + to_id * 17) % 20));\n}",
     description: "MERGE on relationship pattern with ON CREATE/ON MATCH updates.",
     cypher: "MATCH (a:User {id: $from}), (b:User {id: $to})\nMERGE (a)-[r:Friend]->(b)\nON CREATE SET r.since = date()\nON MATCH SET r.touch = date()\nRETURN id(r)",
     postgres: "INSERT INTO friend_edges (src_id, dst_id, since, bench_capacity)\nVALUES ($1, $2, CURRENT_DATE, 1 + (($1 * 31 + $2 * 17) % 20))\nON CONFLICT (src_id, dst_id) DO UPDATE SET\n  touch = CURRENT_DATE,\n  bench_capacity = COALESCE(friend_edges.bench_capacity, 1 + (($1 * 31 + $2 * 17) % 20))\nRETURNING src_id, dst_id",
@@ -344,6 +384,7 @@ const QUERY_DESCRIPTIONS = [
   {
     name: "Detach Delete User",
     id: "detach_delete_user",
+    tigergraph: "// TigerGraph automatically removes a vertex's incident edges on delete, matching\n// DETACH DELETE semantics.\nCREATE OR REPLACE QUERY detach_delete_user(VERTEX<User> id) FOR GRAPH benchmark_graph {\n  Start = {id};\n  DELETE s FROM Start:s;\n}",
     description: "Deletes a user and all incident relationships.",
     cypher: "MATCH (u:User {id: $id})\nDETACH DELETE u",
     postgres: "-- friend_edges has ON DELETE CASCADE on both FKs, matching DETACH DELETE semantics.\nDELETE FROM users WHERE id = $1",
@@ -352,6 +393,7 @@ const QUERY_DESCRIPTIONS = [
   {
     name: "Remove Property and Label",
     id: "remove_user_property_and_label",
+    tigergraph: "// No dynamic label concept and no generic NULL for INT attributes; approximated via the\n// schema's -1 sentinel default (same approximation Postgres uses).\nCREATE OR REPLACE QUERY remove_user_property_and_label(VERTEX<User> id) FOR GRAPH benchmark_graph {\n  Start = {id};\n  Start = SELECT s FROM Start:s POST-ACCUM s.rpc_social_credit = -1;\n  PRINT Start;\n}",
     description: "Exercises REMOVE on both property and label targets.",
     cypher: "MATCH (u:User {id: $id})\nREMOVE u.rpc_social_credit, u:TemporaryLabel\nRETURN u.id",
     postgres: "-- Postgres has no label concept; this drops only the property-removal semantics.\nUPDATE users SET rpc_social_credit = NULL WHERE id = $1 RETURNING id",
@@ -360,6 +402,7 @@ const QUERY_DESCRIPTIONS = [
   {
     name: "FOREACH Loop Mutation",
     id: "foreach_loop_mutation",
+    tigergraph: "// Approximated as a single terminal assignment (same approximation Postgres/Mongo use).\nCREATE OR REPLACE QUERY foreach_loop_mutation(VERTEX<User> id) FOR GRAPH benchmark_graph {\n  Start = {id};\n  Start = SELECT s FROM Start:s POST-ACCUM s.loop_counter = 3;\n  PRINT Start;\n}",
     description: "Uses FOREACH to apply repeated SET mutations in one query.",
     cypher: "MATCH (u:User {id: $id})\nFOREACH (x IN [1,2,3] | SET u.loop_counter = x)\nRETURN u.loop_counter",
     postgres: "-- Approximated as a single terminal assignment (equivalent end state to\n-- FOREACH (x IN [1,2,3] | SET u.loop_counter = x)).\nUPDATE users SET loop_counter = 3 WHERE id = $1 RETURNING loop_counter",
@@ -368,6 +411,7 @@ const QUERY_DESCRIPTIONS = [
   {
     name: "UNION ALL IDs",
     id: "union_all_ids",
+    tigergraph: "// GSQL vertex sets are always deduplicated by id, so there is no bag-preserving UNION ALL;\n// this produces the same deduplicated result as union_distinct_ids.\nCREATE OR REPLACE QUERY union_all_ids(VERTEX<User> id) FOR GRAPH benchmark_graph {\n  Anchor = {id};\n  Others = SELECT u FROM {User.*}:u WHERE u.id < 10;\n  Result = Anchor UNION Others;\n  PRINT Result;\n}",
     description: "UNION ALL composition without deduplication.",
     cypher: "MATCH (u:User {id: $id})\nRETURN u.id AS uid\nUNION ALL\nMATCH (v:User) WHERE v.id < 10\nRETURN v.id AS uid",
     postgres: "SELECT id AS uid FROM users WHERE id = $1\nUNION ALL SELECT id AS uid FROM users WHERE id < 10",
@@ -376,6 +420,7 @@ const QUERY_DESCRIPTIONS = [
   {
     name: "UNION Distinct IDs",
     id: "union_distinct_ids",
+    tigergraph: "CREATE OR REPLACE QUERY union_distinct_ids(VERTEX<User> id) FOR GRAPH benchmark_graph {\n  Anchor = {id};\n  Result = Anchor UNION Anchor;\n  PRINT Result;\n}",
     description: "UNION composition with distinct semantics.",
     cypher: "MATCH (u:User {id: $id})\nRETURN u.id AS uid\nUNION\nMATCH (v:User {id: $id})\nRETURN v.id AS uid",
     postgres: "SELECT id AS uid FROM users WHERE id = $1\nUNION SELECT id AS uid FROM users WHERE id = $1",
@@ -384,6 +429,7 @@ const QUERY_DESCRIPTIONS = [
   {
     name: "All Shortest Paths Length",
     id: "all_shortest_paths_len",
+    tigergraph: "// Bounded to 4 hops, mirroring the Cypher/Postgres depth<4 cutoff.\nCREATE OR REPLACE QUERY all_shortest_paths_len(VERTEX<User> from_id, VERTEX<User> to_id) FOR GRAPH benchmark_graph {\n  OrAccum @visited = false;\n  SumAccum<INT> @dist = 0;\n  MinAccum<INT> @@result_len = -1;\n  INT max_hops = 4;\n  INT hop = 0;\n\n  Frontier = {from_id};\n  Frontier = SELECT s FROM Frontier:s ACCUM s.@visited = true, s.@dist = 0;\n\n  WHILE Frontier.size() > 0 AND hop < max_hops AND @@result_len == -1 DO\n    Frontier = SELECT t FROM Frontier:s -(Friend:e)-> User:t\n               WHERE t.@visited == false\n               ACCUM t.@dist = s.@dist + 1\n               POST-ACCUM\n                 t.@visited = true,\n                 CASE WHEN t == to_id THEN @@result_len = t.@dist END;\n    hop = hop + 1;\n  END;\n\n  PRINT @@result_len AS length;\n}",
     description: "allShortestPaths coverage with vendor-specific syntax.",
     cypher: "// FalkorDB:\nMATCH (s:User {id: $from}), (t:User {id: $to})\nWITH s, t\nMATCH p = allShortestPaths((s)-[:Friend*1..4]->(t))\nRETURN length(p)\n\n// Neo4j:\nMATCH (s:User {id: $from}), (t:User {id: $to})\nMATCH p = allShortestPaths((s)-[:Friend*1..4]->(t))\nRETURN length(p)\n\n// Memgraph:\nMATCH p = (:User {id: $from})-[*BFS]->(:User {id: $to})\nRETURN length(p)",
     postgres: "-- Postgres-only: bounded (depth <= 4) path-array recursive CTE with explicit\n-- cycle-avoidance, approximating allShortestPaths. No Mongo equivalent since\n-- $graphLookup can't enumerate distinct paths.\nWITH RECURSIVE paths(id, depth, path) AS (\n  SELECT $1::int, 0, ARRAY[$1::int]\n  UNION ALL\n  SELECT fe.dst_id, p.depth + 1, p.path || fe.dst_id\n  FROM paths p JOIN friend_edges fe ON fe.src_id = p.id\n  WHERE p.depth < 4 AND NOT (fe.dst_id = ANY(p.path))\n)\nSELECT min(depth) AS length FROM paths WHERE id = $2"
@@ -391,6 +437,7 @@ const QUERY_DESCRIPTIONS = [
   {
     name: "Var-Length with Edge Filter",
     id: "var_len_with_edge_where_filter",
+    tigergraph: "CREATE OR REPLACE QUERY var_len_with_edge_where_filter(VERTEX<User> id, INT min_capacity) FOR GRAPH benchmark_graph {\n  Start = {id};\n  Hop1 = SELECT t FROM Start:s -(Friend:e)-> User:t WHERE e.bench_capacity >= min_capacity;\n  Hop2 = SELECT t FROM Hop1:s -(Friend:e)-> User:t WHERE e.bench_capacity >= min_capacity;\n  Hop3 = SELECT t FROM Hop2:s -(Friend:e)-> User:t WHERE e.bench_capacity >= min_capacity;\n  AllHops = Hop1 UNION Hop2 UNION Hop3;\n  PRINT AllHops.size() AS cnt;\n}",
     description: "Variable-length traversal with edge property filtering.",
     cypher: "// FalkorDB:\nMATCH (s:User {id: $id})-[r:Friend*1..3]->(t:User)\nWHERE r.bench_capacity >= $min_capacity\nRETURN count(t)\n\n// Neo4j / Memgraph:\nMATCH (s:User {id: $id})-[r:Friend*1..3]->(t:User)\nWHERE all(rel IN r WHERE rel.bench_capacity >= $min_capacity)\nRETURN count(t)",
     postgres: "WITH RECURSIVE vlf(id, depth) AS (\n  SELECT dst_id, 1 FROM friend_edges WHERE src_id = $1 AND bench_capacity >= $2\n  UNION\n  SELECT fe.dst_id, vlf.depth + 1\n  FROM vlf JOIN friend_edges fe ON fe.src_id = vlf.id\n  WHERE vlf.depth < 3 AND fe.bench_capacity >= $2\n)\nSELECT count(DISTINCT id) AS cnt FROM vlf",
@@ -399,6 +446,7 @@ const QUERY_DESCRIPTIONS = [
   {
     name: "Exact 5-Hop Traverse Count",
     id: "exact_5_hop_traverse_count",
+    tigergraph: "CREATE OR REPLACE QUERY exact_5_hop_traverse_count(VERTEX<User> id) FOR GRAPH benchmark_graph {\n  SumAccum<INT> @@cnt = 0;\n  Start = {id};\n  H1 = SELECT t FROM Start:s -(Friend:e)-> User:t;\n  H2 = SELECT t FROM H1:s -(Friend:e)-> User:t;\n  H3 = SELECT t FROM H2:s -(Friend:e)-> User:t;\n  H4 = SELECT t FROM H3:s -(Friend:e)-> User:t;\n  H5 = SELECT t FROM H4:s -(Friend:e)-> User:t ACCUM @@cnt += 1;\n  PRINT @@cnt AS cnt;\n}",
     description: "Fixed-depth 5-hop traversal count for deeper expansion profiling.",
     cypher: "MATCH (s:User {id: $id})-[:Friend*5..5]->(t:User)\nRETURN count(t) AS cnt",
     postgres: "WITH RECURSIVE hops(id, depth) AS (\n  SELECT dst_id, 1 FROM friend_edges WHERE src_id = $1\n  UNION\n  SELECT fe.dst_id, hops.depth + 1\n  FROM hops JOIN friend_edges fe ON fe.src_id = hops.id\n  WHERE hops.depth < 5\n)\nSELECT count(*) AS cnt FROM hops WHERE depth = 5",
@@ -407,6 +455,7 @@ const QUERY_DESCRIPTIONS = [
   {
     name: "Exact 6-Hop Traverse Count",
     id: "exact_6_hop_traverse_count",
+    tigergraph: "CREATE OR REPLACE QUERY exact_6_hop_traverse_count(VERTEX<User> id) FOR GRAPH benchmark_graph {\n  SumAccum<INT> @@cnt = 0;\n  Start = {id};\n  H1 = SELECT t FROM Start:s -(Friend:e)-> User:t;\n  H2 = SELECT t FROM H1:s -(Friend:e)-> User:t;\n  H3 = SELECT t FROM H2:s -(Friend:e)-> User:t;\n  H4 = SELECT t FROM H3:s -(Friend:e)-> User:t;\n  H5 = SELECT t FROM H4:s -(Friend:e)-> User:t;\n  H6 = SELECT t FROM H5:s -(Friend:e)-> User:t ACCUM @@cnt += 1;\n  PRINT @@cnt AS cnt;\n}",
     description: "Fixed-depth 6-hop traversal count for depth scaling analysis.",
     cypher: "MATCH (s:User {id: $id})-[:Friend*6..6]->(t:User)\nRETURN count(t) AS cnt",
     postgres: "WITH RECURSIVE hops(id, depth) AS (\n  SELECT dst_id, 1 FROM friend_edges WHERE src_id = $1\n  UNION\n  SELECT fe.dst_id, hops.depth + 1\n  FROM hops JOIN friend_edges fe ON fe.src_id = hops.id\n  WHERE hops.depth < 6\n)\nSELECT count(*) AS cnt FROM hops WHERE depth = 6",
@@ -415,6 +464,7 @@ const QUERY_DESCRIPTIONS = [
   {
     name: "Count Users (Plain)",
     id: "count_users_plain",
+    tigergraph: "CREATE OR REPLACE QUERY count_users_plain() FOR GRAPH benchmark_graph {\n  Start = {User.*};\n  PRINT Start.size() AS cnt;\n}",
     description: "Simple node count used for count-reduction optimizer paths.",
     cypher: "MATCH (u:User)\nRETURN count(u) AS cnt",
     postgres: "SELECT count(*) AS cnt FROM users",
@@ -423,6 +473,7 @@ const QUERY_DESCRIPTIONS = [
   {
     name: "Count Friend Edges (Plain)",
     id: "count_friend_edges_plain",
+    tigergraph: "CREATE OR REPLACE QUERY count_friend_edges_plain() FOR GRAPH benchmark_graph {\n  SumAccum<INT> @@edge_count = 0;\n  Start = {User.*};\n  Tmp = SELECT t FROM Start:s -(Friend:e)-> User:t ACCUM @@edge_count += 1;\n  PRINT @@edge_count AS cnt;\n}",
     description: "Simple edge count used for relationship count-reduction paths.",
     cypher: "MATCH ()-[r:Friend]->()\nRETURN count(r) AS cnt",
     postgres: "SELECT count(*) AS cnt FROM friend_edges",
@@ -431,6 +482,7 @@ const QUERY_DESCRIPTIONS = [
   {
     name: "Indexed OR Predicate",
     id: "indexed_or_predicate",
+    tigergraph: "CREATE OR REPLACE QUERY indexed_or_predicate(INT id1, INT id2) FOR GRAPH benchmark_graph {\n  Start = SELECT u FROM {User.*}:u WHERE u.id == id1 OR u.id == id2;\n  PRINT Start;\n}",
     description: "Predicate shape intended to trigger OR index utilization.",
     cypher: "MATCH (u:User)\nWHERE u.id = $id1 OR u.id = $id2\nRETURN u.id",
     postgres: "SELECT id FROM users WHERE id = $1 OR id = $2",
@@ -439,6 +491,7 @@ const QUERY_DESCRIPTIONS = [
   {
     name: "Indexed IN-List Predicate",
     id: "indexed_in_list_predicate",
+    tigergraph: "CREATE OR REPLACE QUERY indexed_in_list_predicate(INT id1, INT id2, INT id3, INT id4) FOR GRAPH benchmark_graph {\n  Start = SELECT u FROM {User.*}:u WHERE u.id == id1 OR u.id == id2 OR u.id == id3 OR u.id == id4;\n  PRINT Start;\n}",
     description: "IN-list predicate shape intended to trigger index utilization.",
     cypher: "MATCH (u:User)\nWHERE u.id IN [$id1, $id2, $id3, $id4]\nRETURN u.id",
     postgres: "SELECT id FROM users WHERE id IN ($1, $2, $3, $4)",
@@ -453,6 +506,7 @@ const QUERY_DESCRIPTIONS = [
   {
     name: "Temporal + Spatial Roundtrip",
     id: "temporal_spatial_roundtrip",
+    tigergraph: "// No PostGIS-style geo type or INTERVAL/duration literal; distance via the spherical law\n// of cosines, and the duration round-trip is omitted (only DATETIME + trig functions).\nCREATE OR REPLACE QUERY temporal_spatial_roundtrip() FOR GRAPH benchmark_graph {\n  DATETIME d;\n  FLOAT lat1 = 32.1;\n  FLOAT lon1 = 34.8;\n  FLOAT lat2 = 32.2;\n  FLOAT lon2 = 34.9;\n  FLOAT earth_radius_m = 6371000.0;\n  FLOAT deg2rad = 3.14159265358979 / 180.0;\n  FLOAT dist;\n\n  d = to_datetime(\"2024-01-01 00:00:00\");\n  dist = earth_radius_m * acos(\n    cos(lat1 * deg2rad) * cos(lat2 * deg2rad) * cos(lon2 * deg2rad - lon1 * deg2rad)\n    + sin(lat1 * deg2rad) * sin(lat2 * deg2rad)\n  );\n\n  PRINT d AS d, dist AS dist;\n}",
     description: "Extended-core scalar/function sanity query (available on FalkorDB and Neo4j profiles).",
     cypher: `RETURN
   date('2024-01-01') AS d,
@@ -531,6 +585,7 @@ LIMIT 10`
   {
     name: "ID Seek (Columnar)",
     id: "id_seek",
+    tigergraph: "// No separate internal id distinct from the primary id; same shape as a plain lookup.\nCREATE OR REPLACE QUERY id_seek(VERTEX<User> id) FOR GRAPH benchmark_graph {\n  Start = {id};\n  PRINT Start;\n}",
     description: "Internal id point lookup (columnar/id-path coverage).",
     cypher: "MATCH (n)\nWHERE id(n) = $id\nRETURN n.id",
     postgres: "SELECT id FROM users WHERE id = $1",
@@ -539,6 +594,7 @@ LIMIT 10`
   {
     name: "ID Range Scan (Columnar)",
     id: "id_range_scan",
+    tigergraph: "CREATE OR REPLACE QUERY id_range_scan(INT start_id, INT end_id) FOR GRAPH benchmark_graph {\n  Start = SELECT u FROM {User.*}:u WHERE u.id >= start_id AND u.id < end_id;\n  PRINT Start;\n}",
     description: "Internal id range scan for columnar fan-out behavior.",
     cypher: "MATCH (n)\nWHERE id(n) >= $start AND id(n) < $end\nRETURN n.id",
     postgres: "SELECT id FROM users WHERE id >= $1 AND id < $2",
@@ -548,25 +604,29 @@ LIMIT 10`
     name: "Algorithm: PageRank Summary",
     id: "algo_pagerank_summary",
     description: "Runs PageRank and returns one representative score.",
-    cypher: "// FalkorDB:\nCALL algo.pageRank('User', null)\nYIELD node, score\nRETURN score\nLIMIT 1\n\n// Neo4j:\nCALL gds.pageRank.stream('benchmark_algo_graph')\nYIELD nodeId, score\nRETURN score\nLIMIT 1\n\n// Memgraph:\nCALL pagerank.get()\nYIELD node, rank\nRETURN rank AS score\nLIMIT 1"
+    cypher: "// FalkorDB:\nCALL algo.pageRank('User', null)\nYIELD node, score\nRETURN score\nLIMIT 1\n\n// Neo4j:\nCALL gds.pageRank.stream('benchmark_algo_graph')\nYIELD nodeId, score\nRETURN score\nLIMIT 1\n\n// Memgraph:\nCALL pagerank.get()\nYIELD node, rank\nRETURN rank AS score\nLIMIT 1",
+    tigergraph: "// Fixed at 10 iterations / damping 0.85 for deterministic runtime; reports the\n// top-ranked vertex's score (mirrors the other engines' LIMIT 1 on score).\nCREATE OR REPLACE QUERY algo_pagerank_summary() FOR GRAPH benchmark_graph {\n  SumAccum<FLOAT> @recvd_score = 0.0;\n  SumAccum<FLOAT> @rank = 1.0;\n  MaxAccum<FLOAT> @@top_score = 0.0;\n  FLOAT damping = 0.85;\n  INT iterations = 10;\n  INT i = 0;\n  INT num_vertices;\n\n  All = {User.*};\n  num_vertices = All.size();\n\n  WHILE i < iterations DO\n    All = SELECT s FROM All:s -(Friend:e)-> User:t\n          ACCUM t.@recvd_score += s.@rank / (s.outdegree(\"Friend\") + 1);\n    All = SELECT s FROM All:s\n          POST-ACCUM\n            s.@rank = (1.0 - damping) / num_vertices + damping * s.@recvd_score,\n            s.@recvd_score = 0.0;\n    i = i + 1;\n  END;\n\n  All = SELECT s FROM All:s\n        ORDER BY s.@rank DESC\n        LIMIT 1\n        POST-ACCUM @@top_score += s.@rank;\n  PRINT @@top_score AS score;\n}"
   },
   {
     name: "Algorithm: Max Flow (Single Pair)",
     id: "algo_max_flow_single_pair",
     description: "Computes max-flow between source and target users with bench_capacity.",
-    cypher: "// FalkorDB:\nMATCH (s:User {id: $source_id}), (t:User {id: $target_id})\nCALL db.relationshipTypes() YIELD relationshipType\nWITH s, t, relationshipType ORDER BY relationshipType LIMIT 1\nCALL algo.maxFlow({ sourceNodes: [s], targetNodes: [t], relationshipTypes: [relationshipType], capacityProperty: 'bench_capacity' })\nYIELD maxFlow\nRETURN coalesce(toFloat(maxFlow), 0.0) AS max_flow"
+    cypher: "// FalkorDB:\nMATCH (s:User {id: $source_id}), (t:User {id: $target_id})\nCALL db.relationshipTypes() YIELD relationshipType\nWITH s, t, relationshipType ORDER BY relationshipType LIMIT 1\nCALL algo.maxFlow({ sourceNodes: [s], targetNodes: [t], relationshipTypes: [relationshipType], capacityProperty: 'bench_capacity' })\nYIELD maxFlow\nRETURN coalesce(toFloat(maxFlow), 0.0) AS max_flow",
+    tigergraph: "// Single-augmenting-path approximation (bottleneck capacity along the first BFS path\n// found), rather than a full Edmonds-Karp computation with residual graphs.\nCREATE OR REPLACE QUERY algo_max_flow_single_pair(VERTEX<User> source_id, VERTEX<User> target_id) FOR GRAPH benchmark_graph {\n  OrAccum @visited = false;\n  MinAccum<INT> @bottleneck = 2147483647;\n  MinAccum<FLOAT> @@flow = -1.0;\n\n  Frontier = {source_id};\n  Frontier = SELECT s FROM Frontier:s ACCUM s.@visited = true;\n\n  WHILE Frontier.size() > 0 AND @@flow == -1.0 DO\n    Frontier = SELECT t FROM Frontier:s -(Friend:e)-> User:t\n               WHERE t.@visited == false AND e.bench_capacity > 0\n               ACCUM t.@bottleneck += min(s.@bottleneck, e.bench_capacity)\n               POST-ACCUM\n                 t.@visited = true,\n                 CASE WHEN t == target_id THEN @@flow = t.@bottleneck END;\n  END;\n\n  IF @@flow == -1.0 THEN\n    @@flow = 0.0;\n  END;\n  PRINT @@flow AS max_flow;\n}"
   },
   {
     name: "Algorithm: MSF Summary",
     id: "algo_msf_summary",
     description: "Runs minimum spanning forest style summary and returns edge/weight stats.",
-    cypher: "// FalkorDB:\nCALL algo.MSF({ weightAttribute: 'bench_capacity' })\nYIELD edges\nRETURN size(edges) AS edge_count,\nreduce(total = 0.0, edge IN edges | total + coalesce(toFloat(edge.bench_capacity), 0.0)) AS total_weight"
+    cypher: "// FalkorDB:\nCALL algo.MSF({ weightAttribute: 'bench_capacity' })\nYIELD edges\nRETURN size(edges) AS edge_count,\nreduce(total = 0.0, edge IN edges | total + coalesce(toFloat(edge.bench_capacity), 0.0)) AS total_weight",
+    tigergraph: "// Approximates a spanning tree via plain BFS (non-tree edges are skipped), rather than a\n// true minimum-weight spanning forest via Boruvka/Kruskal/Prim + union-find.\nCREATE OR REPLACE QUERY algo_msf_summary(VERTEX<User> source_id) FOR GRAPH benchmark_graph {\n  OrAccum @visited = false;\n  SumAccum<INT> @@edge_count = 0;\n  SumAccum<FLOAT> @@total_weight = 0.0;\n\n  Frontier = {source_id};\n  Frontier = SELECT s FROM Frontier:s ACCUM s.@visited = true;\n\n  WHILE Frontier.size() > 0 DO\n    Frontier = SELECT t FROM Frontier:s -(Friend:e)-> User:t\n               WHERE t.@visited == false\n               ACCUM @@edge_count += 1, @@total_weight += e.bench_capacity\n               POST-ACCUM t.@visited = true;\n  END;\n\n  PRINT @@edge_count AS edge_count, @@total_weight AS total_weight;\n}"
   },
   {
     name: "Algorithm: Harmonic Summary",
     id: "algo_harmonic_summary",
     description: "Computes harmonic centrality summary statistics.",
-    cypher: "// FalkorDB:\nCALL algo.HarmonicCentrality()\nYIELD node, score\nRETURN count(node) AS node_count, avg(score) AS avg_score, max(score) AS max_score"
+    cypher: "// FalkorDB:\nCALL algo.HarmonicCentrality()\nYIELD node, score\nRETURN count(node) AS node_count, avg(score) AS avg_score, max(score) AS max_score",
+    tigergraph: "// Scoped to a single fixed seed vertex (id=1) to keep the query tractable, rather than\n// full O(V*(V+E)) harmonic centrality over every vertex.\nCREATE OR REPLACE QUERY algo_harmonic_summary() FOR GRAPH benchmark_graph {\n  VERTEX<User> seed = to_vertex(\"1\", \"User\");\n  OrAccum @visited = false;\n  SumAccum<INT> @dist = 0;\n  SumAccum<FLOAT> @@score = 0.0;\n\n  Frontier = {seed};\n  Frontier = SELECT s FROM Frontier:s ACCUM s.@visited = true, s.@dist = 0;\n\n  WHILE Frontier.size() > 0 DO\n    Frontier = SELECT t FROM Frontier:s -(Friend:e)-> User:t\n               WHERE t.@visited == false\n               ACCUM t.@dist = s.@dist + 1\n               POST-ACCUM\n                 t.@visited = true,\n                 @@score += 1.0 / t.@dist;\n  END;\n\n  PRINT 1 AS node_count, @@score AS avg_score, @@score AS max_score;\n}"
   }
 ];
 
@@ -737,6 +797,14 @@ export function NavMain({
                                 <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-wide mt-1.5 mb-0.5">Mongo</p>
                                 <pre className="bg-gray-900 text-gray-100 p-2 rounded text-[10px] font-mono overflow-x-auto whitespace-pre leading-normal">
                                   {q.mongo}
+                                </pre>
+                              </>
+                            )}
+                            {q.tigergraph && (
+                              <>
+                                <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-wide mt-1.5 mb-0.5">TigerGraph</p>
+                                <pre className="bg-gray-900 text-gray-100 p-2 rounded text-[10px] font-mono overflow-x-auto whitespace-pre leading-normal">
+                                  {q.tigergraph}
                                 </pre>
                               </>
                             )}
