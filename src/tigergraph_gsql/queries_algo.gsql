@@ -1,14 +1,14 @@
--- Graph-algorithm family. Unlike Postgres/Mongo (which have no equivalent and skip these
--- entirely), TigerGraph is a native graph engine and can express all four algorithm families
--- directly in GSQL. These are simplified/adapted-in-spirit versions of the patterns published in
--- https://github.com/tigergraph/gsql-graph-algorithms, trimmed down to keep each query
--- self-contained, deterministic, and tractable as a repeatable benchmark load (fixed iteration
--- counts / bounded sample sizes instead of full convergence-detection or full O(V) fan-out).
+# Graph-algorithm family. Unlike Postgres/Mongo (which have no equivalent and skip these
+# entirely), TigerGraph is a native graph engine and can express all four algorithm families
+# directly in GSQL. These are simplified/adapted-in-spirit versions of the patterns published in
+# https://github.com/tigergraph/gsql-graph-algorithms, trimmed down to keep each query
+# self-contained, deterministic, and tractable as a repeatable benchmark load (fixed iteration
+# counts / bounded sample sizes instead of full convergence-detection or full O(V) fan-out).
 
--- Fixed at 10 iterations and damping factor 0.85 (standard PageRank defaults) rather than
--- iterating to convergence, to keep the query's cost and runtime deterministic across benchmark
--- runs. Reports the highest-ranked vertex's score as the single summary value (mirrors the other
--- engines' `LIMIT 1` on a `score` column).
+# Fixed at 10 iterations and damping factor 0.85 (standard PageRank defaults) rather than
+# iterating to convergence, to keep the query's cost and runtime deterministic across benchmark
+# runs. Reports the highest-ranked vertex's score as the single summary value (mirrors the other
+# engines' `LIMIT 1` on a `score` column).
 CREATE OR REPLACE QUERY algo_pagerank_summary() FOR GRAPH benchmark_graph {
   SumAccum<FLOAT> @recvd_score = 0.0;
   SumAccum<FLOAT> @rank = 1.0;
@@ -32,16 +32,16 @@ CREATE OR REPLACE QUERY algo_pagerank_summary() FOR GRAPH benchmark_graph {
   END;
 
   All = SELECT s FROM All:s
+        POST-ACCUM @@top_score += s.@rank
         ORDER BY s.@rank DESC
-        LIMIT 1
-        POST-ACCUM @@top_score += s.@rank;
+        LIMIT 1;
   PRINT @@top_score AS score;
 }
 
--- Simplified single-augmenting-path approximation (the bottleneck capacity along the first BFS
--- path found from source to target using `bench_capacity` as edge capacity), rather than a full
--- Edmonds-Karp max-flow computation with residual graphs and multiple augmenting rounds. Still
--- exercises the same BFS + accumulator machinery a full implementation would use.
+# Simplified single-augmenting-path approximation (the bottleneck capacity along the first BFS
+# path found from source to target using `bench_capacity` as edge capacity), rather than a full
+# Edmonds-Karp max-flow computation with residual graphs and multiple augmenting rounds. Still
+# exercises the same BFS + accumulator machinery a full implementation would use.
 CREATE OR REPLACE QUERY algo_max_flow_single_pair(VERTEX<User> source_id, VERTEX<User> target_id) FOR GRAPH benchmark_graph {
   OrAccum @visited = false;
   MinAccum<INT> @bottleneck = 2147483647;
@@ -53,10 +53,10 @@ CREATE OR REPLACE QUERY algo_max_flow_single_pair(VERTEX<User> source_id, VERTEX
   WHILE Frontier.size() > 0 AND @@flow == -1.0 DO
     Frontier = SELECT t FROM Frontier:s -(Friend:e)-> User:t
                WHERE t.@visited == false AND e.bench_capacity > 0
-               ACCUM t.@bottleneck += min(s.@bottleneck, e.bench_capacity)
+               ACCUM t.@bottleneck += e.bench_capacity, t.@bottleneck += s.@bottleneck
                POST-ACCUM
                  t.@visited = true,
-                 CASE WHEN t == target_id THEN @@flow = t.@bottleneck END;
+                 CASE WHEN t == target_id THEN @@flow += t.@bottleneck END;
   END;
 
   IF @@flow == -1.0 THEN
@@ -65,10 +65,10 @@ CREATE OR REPLACE QUERY algo_max_flow_single_pair(VERTEX<User> source_id, VERTEX
   PRINT @@flow AS max_flow;
 }
 
--- Approximates a spanning tree via plain BFS from `source_id` (every non-tree-edge is simply
--- skipped because its endpoint is already visited), rather than a true minimum-weight spanning
--- forest, which would need a full Boruvka/Kruskal/Prim implementation with union-find. Reports the
--- resulting tree's edge count and the sum of `bench_capacity` across its edges.
+# Approximates a spanning tree via plain BFS from `source_id` (every non-tree-edge is simply
+# skipped because its endpoint is already visited), rather than a true minimum-weight spanning
+# forest, which would need a full Boruvka/Kruskal/Prim implementation with union-find. Reports the
+# resulting tree's edge count and the sum of `bench_capacity` across its edges.
 CREATE OR REPLACE QUERY algo_msf_summary(VERTEX<User> source_id) FOR GRAPH benchmark_graph {
   OrAccum @visited = false;
   SumAccum<INT> @@edge_count = 0;
@@ -87,13 +87,13 @@ CREATE OR REPLACE QUERY algo_msf_summary(VERTEX<User> source_id) FOR GRAPH bench
   PRINT @@edge_count AS edge_count, @@total_weight AS total_weight;
 }
 
--- Full harmonic centrality is O(V*(V+E)) if computed for every vertex, which would dominate
--- benchmark runtime; this scopes the BFS to a single fixed seed vertex (id = 1) to keep the query
--- tractable and repeatable, consistent with this family's "_summary" naming (aggregate statistics
--- for a representative vertex, not the full per-vertex distribution every other engine's version
--- also stops short of by using `LIMIT`/small-graph assumptions).
+# Full harmonic centrality is O(V*(V+E)) if computed for every vertex, which would dominate
+# benchmark runtime; this scopes the BFS to a single fixed seed vertex (id = 1) to keep the query
+# tractable and repeatable, consistent with this family's "_summary" naming (aggregate statistics
+# for a representative vertex, not the full per-vertex distribution every other engine's version
+# also stops short of by using `LIMIT`/small-graph assumptions).
 CREATE OR REPLACE QUERY algo_harmonic_summary() FOR GRAPH benchmark_graph {
-  VERTEX<User> seed = to_vertex("1", "User");
+  VERTEX seed = to_vertex("1", "User");
   OrAccum @visited = false;
   SumAccum<INT> @dist = 0;
   SumAccum<FLOAT> @@score = 0.0;

@@ -1,6 +1,6 @@
--- Multi-hop traversal query family. GSQL vertex sets returned by `SELECT ... FROM setName:s
--- -(EdgeType:e)-> VertexType:t` are deduplicated by vertex id (matching Cypher's
--- `RETURN DISTINCT n.id` semantics used throughout this family in queries_repository.rs).
+# Multi-hop traversal query family. GSQL vertex sets returned by `SELECT ... FROM setName:s
+# -(EdgeType:e)-> VertexType:t` are deduplicated by vertex id (matching Cypher's
+# `RETURN DISTINCT n.id` semantics used throughout this family in queries_repository.rs).
 
 CREATE OR REPLACE QUERY aggregate_expansion_1(VERTEX<User> id) FOR GRAPH benchmark_graph {
   Start = {id};
@@ -62,8 +62,8 @@ CREATE OR REPLACE QUERY aggregate_expansion_4_with_filter(VERTEX<User> id) FOR G
   PRINT Result;
 }
 
--- Same shape as `aggregate_expansion_2`/`_with_filter`; installed separately to line up 1:1 with
--- the `neighbours_2*` family.
+# Same shape as `aggregate_expansion_2`/`_with_filter`; installed separately to line up 1:1 with
+# the `neighbours_2*` family.
 CREATE OR REPLACE QUERY neighbours_2(VERTEX<User> id) FOR GRAPH benchmark_graph {
   Start = {id};
   Hop1 = SELECT t FROM Start:s -(Friend:e)-> User:t;
@@ -78,8 +78,8 @@ CREATE OR REPLACE QUERY neighbours_2_with_filter(VERTEX<User> id) FOR GRAPH benc
   PRINT Result;
 }
 
--- `PRINT` always serializes full vertex attributes, so "with_data" is naturally the same query as
--- the plain id-returning version; kept separate purely for catalog/name parity.
+# `PRINT` always serializes full vertex attributes, so "with_data" is naturally the same query as
+# the plain id-returning version; kept separate purely for catalog/name parity.
 CREATE OR REPLACE QUERY neighbours_2_with_data(VERTEX<User> id) FOR GRAPH benchmark_graph {
   Start = {id};
   Hop1 = SELECT t FROM Start:s -(Friend:e)-> User:t;
@@ -110,7 +110,7 @@ CREATE OR REPLACE QUERY pattern_long(VERTEX<User> id) FOR GRAPH benchmark_graph 
   PRINT Result;
 }
 
--- 1..2 hop union, mirroring Cypher's `-[*1..2]->` variable-length expansion.
+# 1..2 hop union, mirroring Cypher's `-[*1..2]->` variable-length expansion.
 CREATE OR REPLACE QUERY var_len_friends(VERTEX<User> id) FOR GRAPH benchmark_graph {
   Start = {id};
   Hop1 = SELECT t FROM Start:s -(Friend:e)-> User:t;
@@ -119,25 +119,25 @@ CREATE OR REPLACE QUERY var_len_friends(VERTEX<User> id) FOR GRAPH benchmark_gra
   PRINT Result;
 }
 
--- Mirrors Cypher's `OPTIONAL MATCH`: the anchor is always printed even when it has no outgoing
--- `Friend` edges (the `Friends` set is simply empty in that case).
+# Mirrors Cypher's `OPTIONAL MATCH`: the anchor is always printed even when it has no outgoing
+# `Friend` edges (the `Friends` set is simply empty in that case).
 CREATE OR REPLACE QUERY optional_friend(VERTEX<User> id) FOR GRAPH benchmark_graph {
   Start = {id};
   Friends = SELECT t FROM Start:s -(Friend:e)-> User:t;
   PRINT Start, Friends;
 }
 
--- Same traversal shape as `aggregate_expansion_1`; approximates Cypher's correlated
--- `CALL { WITH a ... } RETURN bid` subquery.
+# Same traversal shape as `aggregate_expansion_1`; approximates Cypher's correlated
+# `CALL { WITH a ... } RETURN bid` subquery.
 CREATE OR REPLACE QUERY call_subquery(VERTEX<User> id) FOR GRAPH benchmark_graph {
   Start = {id};
   Result = SELECT t FROM Start:s -(Friend:e)-> User:t;
   PRINT Result;
 }
 
--- Bounded 1..3 hop traversal filtered on the edge's `bench_capacity`, counting the deduplicated
--- union of all reachable vertices across the three hops (mirrors `count(t)` over a variable-length
--- edge-filtered expansion).
+# Bounded 1..3 hop traversal filtered on the edge's `bench_capacity`, counting the deduplicated
+# union of all reachable vertices across the three hops (mirrors `count(t)` over a variable-length
+# edge-filtered expansion).
 CREATE OR REPLACE QUERY var_len_with_edge_where_filter(VERTEX<User> id, INT min_capacity) FOR GRAPH benchmark_graph {
   Start = {id};
   Hop1 = SELECT t FROM Start:s -(Friend:e)-> User:t WHERE e.bench_capacity >= min_capacity;
@@ -147,10 +147,10 @@ CREATE OR REPLACE QUERY var_len_with_edge_where_filter(VERTEX<User> id, INT min_
   PRINT AllHops.size() AS cnt;
 }
 
--- Exact-depth hop counts. Unlike the `_expansion_N`/`neighbours_*` families (which report
--- deduplicated destination vertices), these count matching traversal paths at the accumulation
--- step, before the final hop's output vertex set dedupes — matching Cypher's non-distinct
--- `count(t)` over `-[:Friend*5..5]->`.
+# Exact-depth hop counts. Unlike the `_expansion_N`/`neighbours_*` families (which report
+# deduplicated destination vertices), these count matching traversal paths at the accumulation
+# step, before the final hop's output vertex set dedupes — matching Cypher's non-distinct
+# `count(t)` over `-[:Friend*5..5]->`.
 CREATE OR REPLACE QUERY exact_5_hop_traverse_count(VERTEX<User> id) FOR GRAPH benchmark_graph {
   SumAccum<INT> @@cnt = 0;
   Start = {id};

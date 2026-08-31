@@ -74,6 +74,9 @@ RUN_POSTGRES=${RUN_POSTGRES:-0}
 MONGO_ENDPOINT=${MONGO_ENDPOINT:-"mongodb://127.0.0.1:27017"}
 RUN_MONGO=${RUN_MONGO:-0}
 
+TIGERGRAPH_ENDPOINT=${TIGERGRAPH_ENDPOINT:-"http://127.0.0.1:9000"}
+RUN_TIGERGRAPH=${RUN_TIGERGRAPH:-0}
+
 BATCH_SIZE=${BATCH_SIZE:-10000}
 PARALLEL=${PARALLEL:-10}
 MPS=${MPS:-200}
@@ -115,6 +118,7 @@ NEO4J_QUERIES_FILE="${QUERIES_FILE_BASE}-neo4j"
 MEMGRAPH_QUERIES_FILE="${QUERIES_FILE_BASE}-memgraph"
 POSTGRES_QUERIES_FILE="${QUERIES_FILE}-postgres"
 MONGO_QUERIES_FILE="${QUERIES_FILE}-mongo"
+TIGERGRAPH_QUERIES_FILE="${QUERIES_FILE}-tigergraph"
 
 # Use a single shared results directory for all vendors so `benchmark aggregate` can
 # generate neo4j-vs-falkordb and memgraph-vs-falkordb UI summaries from one run.
@@ -729,6 +733,32 @@ if [[ "${RUN_MONGO:-0}" == "1" ]]; then
     --parallel "$PARALLEL" \
     --mps "$MPS" \
     --endpoint "$MONGO_ENDPOINT" \
+    --results-dir "$RESULTS_DIR" || true
+fi
+
+
+# ---------- TigerGraph ----------
+if [[ "${RUN_TIGERGRAPH:-0}" == "1" ]]; then
+  echo "==> Preparing TigerGraph (large)"
+  cargo run --release --bin benchmark -- load --vendor tigergraph --size large \
+    --endpoint "$TIGERGRAPH_ENDPOINT" -b "$BATCH_SIZE" --force --query-profile "$QUERY_PROFILE" || {
+      echo "TigerGraph load failed; continuing without TigerGraph results" >&2
+    }
+  echo "==> Generating TigerGraph query file"
+  cargo run --release --bin benchmark -- generate-queries \
+    --vendor tigergraph \
+    --dataset large \
+    --size "$QUERIES_COUNT" \
+    --name "$TIGERGRAPH_QUERIES_FILE" \
+    --write-ratio "$WRITE_RATIO" \
+    --query-profile "$QUERY_PROFILE" || true
+  echo "==> Running TigerGraph workload"
+  cargo run --release --bin benchmark -- run \
+    --vendor tigergraph \
+    --name "$TIGERGRAPH_QUERIES_FILE" \
+    --parallel "$PARALLEL" \
+    --mps "$MPS" \
+    --endpoint "$TIGERGRAPH_ENDPOINT" \
     --results-dir "$RESULTS_DIR" || true
 fi
 

@@ -1,5 +1,5 @@
 use crate::data_prep::bench_capacity;
-use crate::error::BenchmarkResult;
+use crate::error::{BenchmarkError, BenchmarkResult};
 use crate::pokec_cypher_parser::{parse_edge_line, parse_node_line, EdgeRecord, NodeRecord};
 use crate::tigergraph_client::{TigerGraphClient, TIGERGRAPH_GRAPH_NAME};
 use futures::StreamExt;
@@ -37,18 +37,41 @@ pub fn default_connection_params() -> (String, String, String, String) {
     )
 }
 
+/// GSQL has no `DROP ... IF EXISTS` syntax, so dropping a graph/edge/vertex type that doesn't
+/// exist yet (e.g. on a freshly provisioned server) always fails with a "could not be found" /
+/// "could not be dropped" message. Treat that specific case as a benign no-op so `clear_schema`
+/// stays idempotent, while still propagating genuine failures (e.g. connection errors).
+fn is_missing_object_error(message: &str) -> bool {
+    let lower = message.to_lowercase();
+    lower.contains("could not be found") || lower.contains("could not be dropped")
+}
+
 pub async fn clear_schema(client: &TigerGraphClient) -> BenchmarkResult<()> {
     // Order matters: the graph must be dropped before the edge/vertex types it references, and
-    // the edge type before the vertex type it connects.
+    // the edge type before the vertex type it connects. `CASCADE` is required because a prior
+    // `create_schema` run's installed queries are dependent objects of the graph — a plain
+    // `DROP GRAPH` fails with "has dependent objects: N queries: [...]" once any query has been
+    // installed against it.
     let script = format!(
-        "DROP GRAPH {graph}\nDROP EDGE Friend\nDROP VERTEX User\n",
+        "DROP GRAPH {graph} CASCADE\nDROP EDGE Friend\nDROP VERTEX User\n",
         graph = TIGERGRAPH_GRAPH_NAME
     );
-    client.execute_gsql_script(&script).await
+    match client.execute_gsql_script(&script).await {
+        Err(BenchmarkError::OtherError(message)) if is_missing_object_error(&message) => {
+            info!("TigerGraph schema already absent, nothing to clear: {message}");
+            Ok(())
+        }
+        other => other,
+    }
 }
 
 pub async fn create_schema(client: &TigerGraphClient) -> BenchmarkResult<()> {
     client.execute_gsql_script(SCHEMA_GSQL).await?;
+    // `CREATE QUERY ... FOR GRAPH benchmark_graph` and `INSTALL QUERY` still require an active
+    // `USE GRAPH` session context on this GSQL server version — the explicit `FOR GRAPH` clause
+    // alone is not sufficient — so every script below is prefixed with it. Each `execute_gsql_script`
+    // call is an independent HTTP request/session, so the prefix must be repeated each time.
+    let use_graph = format!("USE GRAPH {}\n", TIGERGRAPH_GRAPH_NAME);
     for script in [
         QUERIES_POINT_GSQL,
         QUERIES_TRAVERSAL_GSQL,
@@ -56,10 +79,14 @@ pub async fn create_schema(client: &TigerGraphClient) -> BenchmarkResult<()> {
         QUERIES_AGGREGATE_GSQL,
         QUERIES_ALGO_GSQL,
     ] {
-        client.execute_gsql_script(script).await?;
+        client
+            .execute_gsql_script(&format!("{use_graph}{script}"))
+            .await?;
     }
     // Compiles and installs every `CREATE QUERY` defined above as a callable REST++ endpoint.
-    client.execute_gsql_script("INSTALL QUERY ALL\n").await?;
+    client
+        .execute_gsql_script(&format!("{use_graph}INSTALL QUERY ALL\n"))
+        .await?;
     Ok(())
 }
 
@@ -69,6 +96,11 @@ fn nodes_upsert_body(nodes: &[NodeRecord]) -> Value {
         vertex_map.insert(
             n.id.to_string(),
             json!({
+                // `id` is redeclared as a regular attribute (in addition to `PRIMARY_ID`) in
+                // schema.gsql so installed queries can reference `.id` in their bodies — GSQL
+                // does not expose the primary id itself as a queryable attribute — so it must be
+                // populated explicitly here rather than relying on the primary-id key alone.
+                "id": {"value": n.id},
                 "completion_percentage": {"value": n.completion_percentage},
                 "gender": {"value": n.gender},
                 "age": {"value": n.age},

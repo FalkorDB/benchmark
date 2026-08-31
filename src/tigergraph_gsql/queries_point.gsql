@@ -1,8 +1,8 @@
--- Point-lookup / single-vertex / single-edge query family, installed together.
--- `VERTEX<User>` parameters accept the raw primary-id value over REST++ (e.g. `?id=123`) and let
--- TigerGraph seed the query directly from the primary-id index instead of a full vertex scan.
--- Insert/merge-style queries take plain `INT` ids since they may reference not-yet-existing
--- vertices.
+# Point-lookup / single-vertex / single-edge query family, installed together.
+# `VERTEX<User>` parameters accept the raw primary-id value over REST++ (e.g. `?id=123`) and let
+# TigerGraph seed the query directly from the primary-id index instead of a full vertex scan.
+# Insert/merge-style queries take plain `INT` ids since they may reference not-yet-existing
+# vertices.
 
 CREATE OR REPLACE QUERY single_vertex_read(VERTEX<User> id) FOR GRAPH benchmark_graph {
   Start = {id};
@@ -19,14 +19,14 @@ CREATE OR REPLACE QUERY single_vertex_update(VERTEX<User> id, INT rpc_social_cre
   PRINT Start;
 }
 
--- Cypher's version picks a uniformly random edge in the whole graph
--- (`ORDER BY rand() LIMIT 1`); GSQL has no equivalent global-random-edge primitive, so this
--- approximates it by taking the first outgoing `Friend` edge from a randomly chosen seed vertex.
+# Cypher's version picks a uniformly random edge in the whole graph
+# (`ORDER BY rand() LIMIT 1`); GSQL has no equivalent global-random-edge primitive, so this
+# approximates it by taking the first outgoing `Friend` edge from a randomly chosen seed vertex.
 CREATE OR REPLACE QUERY single_edge_update(VERTEX<User> seed_id, INT color) FOR GRAPH benchmark_graph {
   Start = {seed_id};
   Result = SELECT t FROM Start:s -(Friend:e)-> User:t
-           LIMIT 1
-           ACCUM e.color = color;
+           ACCUM e.color = color
+           LIMIT 1;
   PRINT Result;
 }
 
@@ -44,32 +44,35 @@ CREATE OR REPLACE QUERY vertex_on_label_property_index(VERTEX<User> id) FOR GRAP
   PRINT Start;
 }
 
--- TigerGraph has no separate "label" concept distinct from vertex type, so this is equivalent to
--- a plain primary-id lookup (same shape as `vertex_on_label_property`).
+# TigerGraph has no separate "label" concept distinct from vertex type, so this is equivalent to
+# a plain primary-id lookup (same shape as `vertex_on_label_property`).
 CREATE OR REPLACE QUERY vertex_on_property(VERTEX<User> id) FOR GRAPH benchmark_graph {
   Start = {id};
   PRINT Start;
 }
 
--- TigerGraph vertices have no separate "internal id" distinct from the primary id, so this is
--- equivalent to a plain primary-id lookup (same shape as Postgres/Mongo's `id_seek`).
+# TigerGraph vertices have no separate "internal id" distinct from the primary id, so this is
+# equivalent to a plain primary-id lookup (same shape as Postgres/Mongo's `id_seek`).
 CREATE OR REPLACE QUERY id_seek(VERTEX<User> id) FOR GRAPH benchmark_graph {
   Start = {id};
   PRINT Start;
 }
 
 CREATE OR REPLACE QUERY id_range_scan(INT start_id, INT end_id) FOR GRAPH benchmark_graph {
-  Start = SELECT u FROM {User.*}:u WHERE u.id >= start_id AND u.id < end_id;
+  AllUsers = {User.*};
+  Start = SELECT u FROM AllUsers:u WHERE u.id >= start_id AND u.id < end_id;
   PRINT Start;
 }
 
 CREATE OR REPLACE QUERY indexed_or_predicate(INT id1, INT id2) FOR GRAPH benchmark_graph {
-  Start = SELECT u FROM {User.*}:u WHERE u.id == id1 OR u.id == id2;
+  AllUsers = {User.*};
+  Start = SELECT u FROM AllUsers:u WHERE u.id == id1 OR u.id == id2;
   PRINT Start;
 }
 
 CREATE OR REPLACE QUERY indexed_in_list_predicate(INT id1, INT id2, INT id3, INT id4) FOR GRAPH benchmark_graph {
-  Start = SELECT u FROM {User.*}:u WHERE u.id == id1 OR u.id == id2 OR u.id == id3 OR u.id == id4;
+  AllUsers = {User.*};
+  Start = SELECT u FROM AllUsers:u WHERE u.id == id1 OR u.id == id2 OR u.id == id3 OR u.id == id4;
   PRINT Start;
 }
 
@@ -78,8 +81,8 @@ CREATE OR REPLACE QUERY count_users_plain() FOR GRAPH benchmark_graph {
   PRINT Start.size() AS cnt;
 }
 
--- Same shape as `count_users_plain`; installed under a separate name so the catalog entry lines
--- up 1:1 with the Cypher/Postgres/Mongo `aggregate_count_users` family.
+# Same shape as `count_users_plain`; installed under a separate name so the catalog entry lines
+# up 1:1 with the Cypher/Postgres/Mongo `aggregate_count_users` family.
 CREATE OR REPLACE QUERY aggregate_count_users() FOR GRAPH benchmark_graph {
   Start = {User.*};
   PRINT Start.size() AS cnt;
@@ -96,7 +99,8 @@ CREATE OR REPLACE QUERY value_join(VERTEX<User> id) FOR GRAPH benchmark_graph {
   SumAccum<INT> @@anchor_age = 0;
   Anchor = {id};
   Anchor = SELECT s FROM Anchor:s ACCUM @@anchor_age += s.age;
-  Result = SELECT b FROM {User.*}:b WHERE b.age == @@anchor_age;
+  AllUsers = {User.*};
+  Result = SELECT b FROM AllUsers:b WHERE b.age == @@anchor_age;
   PRINT Result;
 }
 
@@ -104,12 +108,14 @@ CREATE OR REPLACE QUERY value_join_cnt(VERTEX<User> id) FOR GRAPH benchmark_grap
   SumAccum<INT> @@anchor_age = 0;
   Anchor = {id};
   Anchor = SELECT s FROM Anchor:s ACCUM @@anchor_age += s.age;
-  Result = SELECT b FROM {User.*}:b WHERE b.age == @@anchor_age;
+  AllUsers = {User.*};
+  Result = SELECT b FROM AllUsers:b WHERE b.age == @@anchor_age;
   PRINT Result.size() AS cnt;
 }
 
 CREATE OR REPLACE QUERY order_by_age() FOR GRAPH benchmark_graph {
-  Start = SELECT u FROM {User.*}:u
+  AllUsers = {User.*};
+  Start = SELECT u FROM AllUsers:u
           ORDER BY u.age ASC, u.id ASC;
   PRINT Start;
 }
@@ -121,10 +127,10 @@ CREATE OR REPLACE QUERY unwind_rows(VERTEX<User> id) FOR GRAPH benchmark_graph {
   PRINT @@values AS x;
 }
 
--- GSQL's `INSERT INTO` upserts vertices by primary id (create-if-absent, otherwise update the
--- listed attributes), so this doesn't distinguish an "ON CREATE"-only branch the way Cypher's
--- `MERGE ... ON CREATE SET` does; the Rust generator always supplies a fresh out-of-range id for
--- this family, so in practice it behaves as a pure insert.
+# GSQL's `INSERT INTO` upserts vertices by primary id (create-if-absent, otherwise update the
+# listed attributes), so this doesn't distinguish an "ON CREATE"-only branch the way Cypher's
+# `MERGE ... ON CREATE SET` does; the Rust generator always supplies a fresh out-of-range id for
+# this family, so in practice it behaves as a pure insert.
 CREATE OR REPLACE QUERY merge_user_insert_path(INT id, INT age) FOR GRAPH benchmark_graph {
   INSERT INTO User (PRIMARY_ID, age, created_at) VALUES (id, age, now());
 }
@@ -138,36 +144,37 @@ CREATE OR REPLACE QUERY merge_friend_edge_upsert(INT from_id, INT to_id) FOR GRA
     VALUES (from_id, to_id, now(), 1 + ((from_id * 31 + to_id * 17) % 20));
 }
 
--- TigerGraph automatically removes a vertex's incident edges when the vertex is deleted, matching
--- Cypher's `DETACH DELETE` semantics without needing a separate edge-deletion step.
+# TigerGraph automatically removes a vertex's incident edges when the vertex is deleted, matching
+# Cypher's `DETACH DELETE` semantics without needing a separate edge-deletion step.
 CREATE OR REPLACE QUERY detach_delete_user(VERTEX<User> id) FOR GRAPH benchmark_graph {
   Start = {id};
   DELETE s FROM Start:s;
 }
 
--- TigerGraph has no dynamic vertex-label concept and no generic NULL for `INT` attributes, so
--- "removing" the property is approximated with the schema's `-1` sentinel default (same
--- approximation Postgres uses via `SET rpc_social_credit = NULL`).
+# TigerGraph has no dynamic vertex-label concept and no generic NULL for `INT` attributes, so
+# "removing" the property is approximated with the schema's `-1` sentinel default (same
+# approximation Postgres uses via `SET rpc_social_credit = NULL`).
 CREATE OR REPLACE QUERY remove_user_property_and_label(VERTEX<User> id) FOR GRAPH benchmark_graph {
   Start = {id};
   Start = SELECT s FROM Start:s POST-ACCUM s.rpc_social_credit = -1;
   PRINT Start;
 }
 
--- Approximated as a single terminal assignment (equivalent end state to Cypher's
--- `FOREACH (x IN [1,2,3] | SET u.loop_counter = x)`), matching the Postgres approximation.
+# Approximated as a single terminal assignment (equivalent end state to Cypher's
+# `FOREACH (x IN [1,2,3] | SET u.loop_counter = x)`), matching the Postgres approximation.
 CREATE OR REPLACE QUERY foreach_loop_mutation(VERTEX<User> id) FOR GRAPH benchmark_graph {
   Start = {id};
   Start = SELECT s FROM Start:s POST-ACCUM s.loop_counter = 3;
   PRINT Start;
 }
 
--- GSQL vertex sets are inherently deduplicated (keyed by vertex id), so there is no bag-like
--- "UNION ALL" that preserves duplicates the way Cypher's does; both `union_all_ids` and
--- `union_distinct_ids` therefore produce the same deduplicated result set in this integration.
+# GSQL vertex sets are inherently deduplicated (keyed by vertex id), so there is no bag-like
+# "UNION ALL" that preserves duplicates the way Cypher's does; both `union_all_ids` and
+# `union_distinct_ids` therefore produce the same deduplicated result set in this integration.
 CREATE OR REPLACE QUERY union_all_ids(VERTEX<User> id) FOR GRAPH benchmark_graph {
   Anchor = {id};
-  Others = SELECT u FROM {User.*}:u WHERE u.id < 10;
+  AllUsers = {User.*};
+  Others = SELECT u FROM AllUsers:u WHERE u.id < 10;
   Result = Anchor UNION Others;
   PRINT Result;
 }

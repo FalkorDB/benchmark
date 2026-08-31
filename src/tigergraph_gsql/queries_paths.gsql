@@ -1,7 +1,7 @@
--- Shortest-path / cycle-detection family. Unlike Postgres (bounded recursive CTEs) and Mongo
--- (unsupported, no `$graphLookup`-based shortest-path primitive), TigerGraph natively supports
--- unbounded BFS via `WHILE`-loop vertex-set traversal with per-vertex accumulators, so these are
--- supported here without Postgres's `depth < 15` cutoff.
+# Shortest-path / cycle-detection family. Unlike Postgres (bounded recursive CTEs) and Mongo
+# (unsupported, no `$graphLookup`-based shortest-path primitive), TigerGraph natively supports
+# unbounded BFS via `WHILE`-loop vertex-set traversal with per-vertex accumulators, so these are
+# supported here without Postgres's `depth < 15` cutoff.
 
 CREATE OR REPLACE QUERY shortest_path(VERTEX<User> from_id, VERTEX<User> to_id) FOR GRAPH benchmark_graph {
   OrAccum @visited = false;
@@ -17,7 +17,7 @@ CREATE OR REPLACE QUERY shortest_path(VERTEX<User> from_id, VERTEX<User> to_id) 
                ACCUM t.@dist = s.@dist + 1
                POST-ACCUM
                  t.@visited = true,
-                 CASE WHEN t == to_id THEN @@result_len = t.@dist END;
+                 CASE WHEN t == to_id THEN @@result_len += t.@dist END;
   END;
 
   PRINT @@result_len AS length;
@@ -37,7 +37,7 @@ CREATE OR REPLACE QUERY shortest_path_with_filter(VERTEX<User> from_id, VERTEX<U
                ACCUM t.@dist = s.@dist + 1
                POST-ACCUM
                  t.@visited = true,
-                 CASE WHEN t == to_id THEN @@result_len = t.@dist END;
+                 CASE WHEN t == to_id THEN @@result_len += t.@dist END;
   END;
 
   IF @@result_len > 0 THEN
@@ -45,8 +45,8 @@ CREATE OR REPLACE QUERY shortest_path_with_filter(VERTEX<User> from_id, VERTEX<U
   END;
 }
 
--- Bounded to a maximum of 4 hops, mirroring the Cypher/Postgres `all_shortest_paths_len` family's
--- `[:Friend*1..4]`/`depth < 4` cutoff.
+# Bounded to a maximum of 4 hops, mirroring the Cypher/Postgres `all_shortest_paths_len` family's
+# `[:Friend*1..4]`/`depth < 4` cutoff.
 CREATE OR REPLACE QUERY all_shortest_paths_len(VERTEX<User> from_id, VERTEX<User> to_id) FOR GRAPH benchmark_graph {
   OrAccum @visited = false;
   SumAccum<INT> @dist = 0;
@@ -63,17 +63,17 @@ CREATE OR REPLACE QUERY all_shortest_paths_len(VERTEX<User> from_id, VERTEX<User
                ACCUM t.@dist = s.@dist + 1
                POST-ACCUM
                  t.@visited = true,
-                 CASE WHEN t == to_id THEN @@result_len = t.@dist END;
+                 CASE WHEN t == to_id THEN @@result_len += t.@dist END;
     hop = hop + 1;
   END;
 
   PRINT @@result_len AS length;
 }
 
--- Counts 3-cycles through the anchor vertex (a -> b -> c -> a). GSQL's set-oriented traversal
--- model makes it awkward to retain and return the literal (a.id, b.id, c.id) triple the way
--- Cypher's `MATCH (a)-->(b)-->(c)-->(a) RETURN a.id, b.id, c.id` does, so this reports the count of
--- such cycles through the anchor instead.
+# Counts 3-cycles through the anchor vertex (a -> b -> c -> a). GSQL's set-oriented traversal
+# model makes it awkward to retain and return the literal (a.id, b.id, c.id) triple the way
+# Cypher's `MATCH (a)-->(b)-->(c)-->(a) RETURN a.id, b.id, c.id` does, so this reports the count of
+# such cycles through the anchor instead.
 CREATE OR REPLACE QUERY pattern_cycle(VERTEX<User> id) FOR GRAPH benchmark_graph {
   SumAccum<INT> @@cycle_count = 0;
   Start = {id};

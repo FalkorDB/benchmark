@@ -1,5 +1,5 @@
--- Global aggregation family, using GSQL's built-in accumulator types (AvgAccum/MinAccum/MaxAccum/
--- SetAccum) instead of Cypher's `avg()`/`min()`/`max()`/`count(DISTINCT ...)`.
+# Global aggregation family, using GSQL's built-in accumulator types (AvgAccum/MinAccum/MaxAccum/
+# SetAccum) instead of Cypher's `avg()`/`min()`/`max()`/`count(DISTINCT ...)`.
 
 CREATE OR REPLACE QUERY aggregate_age() FOR GRAPH benchmark_graph {
   AvgAccum @@avg_age;
@@ -17,7 +17,8 @@ CREATE OR REPLACE QUERY aggregate_age_distinct() FOR GRAPH benchmark_graph {
 
 CREATE OR REPLACE QUERY aggregate_age_filtered() FOR GRAPH benchmark_graph {
   AvgAccum @@avg_age;
-  Start = SELECT s FROM {User.*}:s WHERE s.age >= 18 ACCUM @@avg_age += s.age;
+  AllUsers = {User.*};
+  Start = SELECT s FROM AllUsers:s WHERE s.age >= 18 ACCUM @@avg_age += s.age;
   PRINT @@avg_age AS avg_age;
 }
 
@@ -30,11 +31,11 @@ CREATE OR REPLACE QUERY aggregate_age_min_max_avg() FOR GRAPH benchmark_graph {
   PRINT @@min_age AS min_age, @@max_age AS max_age, @@avg_age AS avg_age;
 }
 
--- GSQL has no built-in geo `point`/`distance` type (unlike Neo4j's `point()`/`point.distance`), so
--- the great-circle distance is computed manually via the spherical law of cosines (haversine-style
--- formula), matching Postgres's approach. GSQL also has no `INTERVAL`/duration literal type, so
--- unlike the Cypher/Postgres versions this omits the duration round-trip and only exercises
--- `DATETIME` + trigonometric math functions.
+# GSQL has no built-in geo `point`/`distance` type (unlike Neo4j's `point()`/`point.distance`), so
+# the great-circle distance is computed manually via the spherical law of cosines (haversine-style
+# formula), matching Postgres's approach. GSQL also has no `INTERVAL`/duration literal type, so
+# unlike the Cypher/Postgres versions this omits the duration round-trip and only exercises
+# `DATETIME` + trigonometric math functions.
 CREATE OR REPLACE QUERY temporal_spatial_roundtrip() FOR GRAPH benchmark_graph {
   DATETIME d;
   FLOAT lat1 = 32.1;

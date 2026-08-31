@@ -53,6 +53,11 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 #  RESULTS_DIR (default: Results-YYMMDD-HH:MM)
 #    Passed to `benchmark run --results-dir` so all engines write into the same run folder.
 
+
+# Default 3-engine smoke config (override via env):
+#   engines: FalkorDB :6379 + Postgres + MongoDB
+#   query package: baseline (minimal)
+#   queries: 10_000
 FALKOR_ENDPOINT=${FALKOR_ENDPOINT:-"falkor://127.0.0.1:6379"}
 # Secondary FalkorDB endpoint for version comparison (e.g. rust-based)
 FALKOR_ENDPOINT_2=${FALKOR_ENDPOINT_2:-"falkor://127.0.0.1:6800"}
@@ -74,21 +79,24 @@ MEMGRAPH_PASSWORD=${MEMGRAPH_PASSWORD:-"six666six"}
 # Vendor toggles: set to 1 to enable, 0 to disable
 RUN_FALKOR=${RUN_FALKOR:-1}
 # Set to 1 to run comparison against the secondary FalkorDB version
-RUN_FALKOR_2=${RUN_FALKOR_2:-1}
+RUN_FALKOR_2=${RUN_FALKOR_2:-0}
 RUN_NEO4J=${RUN_NEO4J:-0}
 RUN_MEMGRAPH=${RUN_MEMGRAPH:-0}
 
 POSTGRES_ENDPOINT=${POSTGRES_ENDPOINT:-"postgres://postgres:postgres@127.0.0.1:5432/postgres"}
-RUN_POSTGRES=${RUN_POSTGRES:-0}
+RUN_POSTGRES=${RUN_POSTGRES:-1}
 
 MONGO_ENDPOINT=${MONGO_ENDPOINT:-"mongodb://127.0.0.1:27017"}
-RUN_MONGO=${RUN_MONGO:-0}
+RUN_MONGO=${RUN_MONGO:-1}
+
+TIGERGRAPH_ENDPOINT=${TIGERGRAPH_ENDPOINT:-"http://127.0.0.1:9000"}
+RUN_TIGERGRAPH=${RUN_TIGERGRAPH:-1}
 
 BATCH_SIZE=${BATCH_SIZE:-5000}
-PARALLEL=${PARALLEL:-20}
-MPS=${MPS:-5000}
+PARALLEL=${PARALLEL:-8}
+MPS=${MPS:-1000}
 QUERIES_FILE=${QUERIES_FILE:-"small-readonly"}
-QUERIES_COUNT=${QUERIES_COUNT:-1000000}
+QUERIES_COUNT=${QUERIES_COUNT:-10000}
 WRITE_RATIO=${WRITE_RATIO:-0.00}
 ENABLE_ALGO_PAGERANK=${ENABLE_ALGO_PAGERANK:-0}
 ENABLE_ALGO_MAX_FLOW=${ENABLE_ALGO_MAX_FLOW:-0}
@@ -97,7 +105,7 @@ ENABLE_ALGO_HARMONIC=${ENABLE_ALGO_HARMONIC:-0}
 # Optional in-script query profile override.
 # Set this value directly in the script to force a profile for every run.
 # Leave empty ("") to keep env-based behavior (QUERY_PROFILE env var, else baseline).
-IN_SCRIPT_QUERY_PROFILE="baseline"
+IN_SCRIPT_QUERY_PROFILE="baseline"  # minimal query package
 if [[ -n "$IN_SCRIPT_QUERY_PROFILE" ]]; then
   QUERY_PROFILE="$IN_SCRIPT_QUERY_PROFILE"
 else
@@ -119,6 +127,7 @@ NEO4J_QUERIES_FILE="${QUERIES_FILE_BASE}-neo4j"
 MEMGRAPH_QUERIES_FILE="${QUERIES_FILE_BASE}-memgraph"
 POSTGRES_QUERIES_FILE="${QUERIES_FILE}-postgres"
 MONGO_QUERIES_FILE="${QUERIES_FILE}-mongo"
+TIGERGRAPH_QUERIES_FILE="${QUERIES_FILE}-tigergraph"
 
 # Use a single shared results directory for all vendors so `benchmark aggregate` can
 # generate neo4j-vs-falkordb and memgraph-vs-falkordb UI summaries from one run.
@@ -367,6 +376,32 @@ if [[ "${RUN_MONGO:-0}" == "1" ]]; then
     --parallel "$PARALLEL" \
     --mps "$MPS" \
     --endpoint "$MONGO_ENDPOINT" \
+    --results-dir "$RESULTS_DIR" || true
+fi
+
+
+# ---------- TigerGraph ----------
+if [[ "${RUN_TIGERGRAPH:-0}" == "1" ]]; then
+  echo "==> Preparing TigerGraph (small)"
+  cargo run --release --bin benchmark -- load --vendor tigergraph --size small \
+    --endpoint "$TIGERGRAPH_ENDPOINT" -b "$BATCH_SIZE" --force --query-profile "$QUERY_PROFILE" || {
+      echo "TigerGraph load failed; continuing without TigerGraph results" >&2
+    }
+  echo "==> Generating TigerGraph query file"
+  cargo run --release --bin benchmark -- generate-queries \
+    --vendor tigergraph \
+    --dataset small \
+    --size "$QUERIES_COUNT" \
+    --name "$TIGERGRAPH_QUERIES_FILE" \
+    --write-ratio "$WRITE_RATIO" \
+    --query-profile "$QUERY_PROFILE" || true
+  echo "==> Running TigerGraph workload"
+  cargo run --release --bin benchmark -- run \
+    --vendor tigergraph \
+    --name "$TIGERGRAPH_QUERIES_FILE" \
+    --parallel "$PARALLEL" \
+    --mps "$MPS" \
+    --endpoint "$TIGERGRAPH_ENDPOINT" \
     --results-dir "$RESULTS_DIR" || true
 fi
 

@@ -150,28 +150,56 @@ impl TigerGraphClient {
 
     /// Execute a raw GSQL script (schema DDL or `CREATE QUERY`/`INSTALL QUERY` statements)
     /// against the GSQL server's script-execution endpoint, authenticated via HTTP Basic auth.
+    ///
+    /// TigerGraph 4.x removed the legacy `/gsqlserver/gsql/file` multipart file-upload endpoint
+    /// in favor of `/gsql/v1/statements`, which accepts a raw `text/plain` body containing one or
+    /// more newline-separated GSQL statements (verified against a live 4.2.4 Community Edition
+    /// server: multi-statement scripts, including a `CREATE GRAPH` that takes ~30s while GPE/GSE
+    /// reload, complete correctly in a single request).
+    ///
+    /// Unlike the legacy endpoint, `/gsql/v1/statements` always responds with HTTP 200 and reports
+    /// failures only via plain-text messages in the body (e.g. `"Semantic Check Fails: ..."`,
+    /// `"Failed to create vertex types: ..."`, or a parser `"Encountered ..."` message), so errors
+    /// must be detected by scanning the response text rather than the HTTP status code.
     pub async fn execute_gsql_script(
         &self,
         script: &str,
     ) -> BenchmarkResult<()> {
-        let url = format!("{}/gsqlserver/gsql/file", self.gsql_base_url);
+        let url = format!("{}/gsql/v1/statements", self.gsql_base_url);
         let response = self
             .http
             .post(&url)
             .basic_auth(&self.username, Some(&self.password))
+            .header("Content-Type", "text/plain")
             .body(script.to_string())
             .send()
             .await?;
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let text = response.text().await.unwrap_or_default();
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+
+        if !status.is_success() || Self::gsql_response_indicates_failure(&text) {
             return Err(OtherError(format!(
                 "TigerGraph GSQL script execution failed ({}): {}",
                 status, text
             )));
         }
         Ok(())
+    }
+
+    /// Heuristically detect failure markers in a `/gsql/v1/statements` plain-text response, since
+    /// the endpoint reports errors via message content rather than HTTP status codes.
+    fn gsql_response_indicates_failure(text: &str) -> bool {
+        const FAILURE_MARKERS: [&str; 6] = [
+            "semantic check fail",
+            "failed to",
+            "encountered \"",
+            "error:",
+            "gsql error",
+            "could not be",
+        ];
+        let lower = text.to_lowercase();
+        FAILURE_MARKERS.iter().any(|marker| lower.contains(marker))
     }
 
     pub async fn detect_engine_version(&self) -> BenchmarkResult<Option<String>> {
@@ -209,11 +237,15 @@ impl TigerGraphClient {
         if !response.status().is_success() {
             return 0;
         }
+        // The REST++ response shape is e.g.
+        // `{"results":[{"v_type":"User","count":10000}]}` — the count is always under the
+        // `count` key, not under a key named after `type_name` (which only ever appears as the
+        // *value* of the `v_type`/`e_type` field).
         let json: Value = response.json().await.unwrap_or(Value::Null);
         json.get("results")
             .and_then(|r| r.as_array())
             .and_then(|arr| arr.first())
-            .and_then(|entry| entry.get(type_name))
+            .and_then(|entry| entry.get("count"))
             .and_then(|v| v.as_u64())
             .unwrap_or(0)
     }

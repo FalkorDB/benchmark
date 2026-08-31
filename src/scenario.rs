@@ -38,6 +38,10 @@ pub enum Vendor {
     Memgraph,
     Postgres,
     Mongo,
+    // clap's ValueEnum derive kebab-cases multi-word variant names by default ("tiger-graph"),
+    // but every script/doc/UI reference uses the single-word "tigergraph"; pin the CLI value
+    // explicitly so `--vendor tigergraph` works as documented.
+    #[value(name = "tigergraph")]
     TigerGraph,
 }
 
