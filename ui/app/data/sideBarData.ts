@@ -39,6 +39,7 @@ export const sidebarConfig: {
         { id: "memgraph", label: "Memgraph" },
         { id: "postgres", label: "Postgres" },
         { id: "mongo", label: "Mongo" },
+        { id: "tigergraph", label: "TigerGraph" },
       ],
     },
     {

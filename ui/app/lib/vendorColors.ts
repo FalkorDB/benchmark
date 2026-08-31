@@ -1,4 +1,4 @@
-export type VendorKey = "falkordb" | "falkordb2" | "neo4j" | "memgraph" | "postgres" | "mongo" | "unknown";
+export type VendorKey = "falkordb" | "falkordb2" | "neo4j" | "memgraph" | "postgres" | "mongo" | "tigergraph" | "unknown";
 
 type GradientStops = { offset: number; color: string }[];
 
@@ -25,6 +25,7 @@ export function normalizeVendor(vendor: string): VendorKey {
   if (k === "memgraph") return "memgraph";
   if (k === "postgres" || k === "postgresql") return "postgres";
   if (k === "mongo" || k === "mongodb") return "mongo";
+  if (k === "tigergraph") return "tigergraph";
   return "unknown";
 }
 
@@ -85,6 +86,12 @@ function getStops(vendor: VendorKey): GradientStops {
       return [
         { offset: 0.0, color: cssVar("--Mongo-gradient-start", "#13AA52") },
         { offset: 1.0, color: cssVar("--Mongo-gradient-end", "#b8f2d0") },
+      ];
+    case "tigergraph":
+      // TigerGraph brand orange -> dark brown gradient
+      return [
+        { offset: 0.0, color: cssVar("--TigerGraph-gradient-start", "#F7931E") },
+        { offset: 1.0, color: cssVar("--TigerGraph-gradient-end", "#4A2C0B") },
       ];
     default:
       return [{ offset: 0.0, color: "#191919" }];

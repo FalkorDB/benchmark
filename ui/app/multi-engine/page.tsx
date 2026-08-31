@@ -16,6 +16,7 @@ const MULTI_ENGINE_VENDORS = [
   "memgraph",
   "postgres",
   "mongo",
+  "tigergraph",
 ];
 
 export default async function MultiEngineCompare() {

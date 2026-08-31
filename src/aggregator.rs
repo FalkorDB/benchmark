@@ -215,6 +215,7 @@ pub fn aggregate_results(
         Vendor::Memgraph,
         Vendor::Postgres,
         Vendor::Mongo,
+        Vendor::TigerGraph,
     ] {
         if let Ok(v) = load_vendor(&results_dir, vendor) {
             present.push(v);
@@ -239,6 +240,7 @@ pub fn aggregate_results(
                 Vendor::Memgraph => "memgraph_vs_falkordb.json",
                 Vendor::Postgres => "postgres_vs_falkordb.json",
                 Vendor::Mongo => "mongo_vs_falkordb.json",
+                Vendor::TigerGraph => "tigergraph_vs_falkordb.json",
                 Vendor::Falkor => continue,
             };
             write_summary(&out_dir.join(out_name), &summary)?;
@@ -581,6 +583,7 @@ pub fn aggregate_aws_tests(
             Vendor::Memgraph => "memgraph".to_string(),
             Vendor::Postgres => "postgres".to_string(),
             Vendor::Mongo => "mongo".to_string(),
+            Vendor::TigerGraph => "tigergraph".to_string(),
             Vendor::Falkor => {
                 if lower.contains("falkordb-c") {
                     "falkordb-c".to_string()
@@ -800,6 +803,10 @@ fn build_ui_run_custom(v: &CustomRunArtifacts) -> BenchmarkResult<UiRun> {
             .get_single_value("mongo_store_size_bytes")
             .map(|v| v.round().max(0.0) as u64)
             .filter(|v| *v > 0),
+        Vendor::TigerGraph => metrics
+            .get_single_value("tigergraph_store_size_bytes")
+            .map(|v| v.round().max(0.0) as u64)
+            .filter(|v| *v > 0),
         _ => None,
     };
 
@@ -863,6 +870,7 @@ fn vendor_id(vendor: Vendor) -> String {
         Vendor::Memgraph => "memgraph".to_string(),
         Vendor::Postgres => "postgres".to_string(),
         Vendor::Mongo => "mongo".to_string(),
+        Vendor::TigerGraph => "tigergraph".to_string(),
     }
 }
 
@@ -873,6 +881,8 @@ fn infer_vendor_from_name(dir_name: &str, meta_vendor: &str) -> Vendor {
         Vendor::Postgres
     } else if lower.contains("mongo") || meta.contains("mongo") {
         Vendor::Mongo
+    } else if lower.contains("tigergraph") || meta.contains("tigergraph") {
+        Vendor::TigerGraph
     } else if lower.contains("neo4j") || meta.contains("neo4j") {
         Vendor::Neo4j
     } else if lower.contains("memgraph") || meta.contains("memgraph") {
@@ -985,6 +995,11 @@ impl MetricsIndex {
                 "mongo_latency_p95_us",
                 "mongo_latency_p99_us",
             ),
+            Vendor::TigerGraph => (
+                "tigergraph_latency_p50_us",
+                "tigergraph_latency_p95_us",
+                "tigergraph_latency_p99_us",
+            ),
         };
 
         let p50v = self.get_single_value(p50)?;
@@ -1009,6 +1024,7 @@ impl MetricsIndex {
             Vendor::Memgraph => "memgraph_query_latency_pct_us",
             Vendor::Postgres => "postgres_query_latency_pct_us",
             Vendor::Mongo => "mongo_query_latency_pct_us",
+            Vendor::TigerGraph => "tigergraph_query_latency_pct_us",
         };
         let timeout_metric_legacy = match vendor {
             Vendor::Memgraph => Some("memgraph_query_timeout_rate_pct"),
@@ -1103,6 +1119,7 @@ impl MetricsIndex {
             Vendor::Memgraph => "memgraph_query_latency_pct_us_by_size",
             Vendor::Postgres => "postgres_query_latency_pct_us_by_size",
             Vendor::Mongo => "mongo_query_latency_pct_us_by_size",
+            Vendor::TigerGraph => "tigergraph_query_latency_pct_us_by_size",
         };
 
         let samples = self.samples.get(metric).cloned().unwrap_or_default();
@@ -1316,6 +1333,7 @@ impl MetricsIndex {
             Vendor::Memgraph => "memgraph",
             Vendor::Postgres => "postgres",
             Vendor::Mongo => "mongo",
+            Vendor::TigerGraph => "tigergraph",
         };
 
         let base = match kind {
@@ -1398,9 +1416,10 @@ impl MetricsIndex {
             Vendor::Falkor => self.get_single_value("falkor_cpu_usage").unwrap_or(0.0),
             Vendor::Neo4j => self.get_single_value("neo4j_cpu_usage").unwrap_or(0.0),
             Vendor::Memgraph => self.get_single_value("memgraph_cpu_usage").unwrap_or(0.0),
-            // No local process management for Postgres/Mongo (always an external endpoint).
+            // No local process management for Postgres/Mongo/TigerGraph (always an external endpoint).
             Vendor::Postgres => 0.0,
             Vendor::Mongo => 0.0,
+            Vendor::TigerGraph => 0.0,
         };
 
         // Prefer query-interface memory metrics when present.
@@ -1443,9 +1462,10 @@ impl MetricsIndex {
                 let mem_kib = self.get_single_value("neo4j_memory_usage").unwrap_or(0.0);
                 format_mem_from_kib(mem_kib)
             }
-            // No local process management for Postgres/Mongo (always an external endpoint).
+            // No local process management for Postgres/Mongo/TigerGraph (always an external endpoint).
             Vendor::Postgres => "0MB".to_string(),
             Vendor::Mongo => "0MB".to_string(),
+            Vendor::TigerGraph => "0MB".to_string(),
         };
 
         (cpu, mem_str)

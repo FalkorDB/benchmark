@@ -25,6 +25,7 @@ module.exports = {
 			Memgraph: 'var(--Memgraph-color)',
 			Postgres: 'var(--Postgres-color)',
 			Mongo: 'var(--Mongo-color)',
+			TigerGraph: 'var(--TigerGraph-color)',
   			background: 'hsl(var(--background))',
   			foreground: 'hsl(var(--foreground))',
   			card: {
