@@ -394,7 +394,8 @@ if [[ "${RUN_TIGERGRAPH:-0}" == "1" ]]; then
     --size "$QUERIES_COUNT" \
     --name "$TIGERGRAPH_QUERIES_FILE" \
     --write-ratio "$WRITE_RATIO" \
-    --query-profile "$QUERY_PROFILE" || true
+    --query-profile "$QUERY_PROFILE" \
+    "${ALGO_QUERY_ARGS[@]}" || true
   echo "==> Running TigerGraph workload"
   cargo run --release --bin benchmark -- run \
     --vendor tigergraph \
