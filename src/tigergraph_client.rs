@@ -213,9 +213,39 @@ impl TigerGraphClient {
         Ok(Some(
             json.get("message")
                 .and_then(|m| m.as_str())
-                .map(|v| format!("TigerGraph ({v})"))
+                .map(Self::summarize_version_message)
                 .unwrap_or_else(|| "TigerGraph".to_string()),
         ))
+    }
+
+    /// The `/version` endpoint's `message` field is a verbose multi-line dump listing a build
+    /// hash/date for every internal subcomponent (`product`, `cqrs`, `gle`,
+    /// `gsql-graph-algorithms`, `gus`, `tools`, `engine`, `loader`, `regress`, ...), which is far
+    /// too long to display inline (e.g. in the UI's per-vendor "Engine versions" summary, where
+    /// every other vendor reports a single short line like `"PostgreSQL 14.20 (Homebrew)"`).
+    /// Extract just the top-level `TigerGraph version: X.Y.Z` line into a concise single-line
+    /// summary, falling back to a truncated first line if that marker isn't present.
+    fn summarize_version_message(message: &str) -> String {
+        const MARKER: &str = "TigerGraph version:";
+        for line in message.lines() {
+            if let Some(version) = line.trim().strip_prefix(MARKER) {
+                let version = version.trim();
+                if !version.is_empty() {
+                    return format!("TigerGraph {version}");
+                }
+            }
+        }
+
+        const MAX_FALLBACK_LEN: usize = 80;
+        let first_line = message.lines().next().unwrap_or("").trim();
+        if first_line.is_empty() {
+            "TigerGraph".to_string()
+        } else if first_line.chars().count() > MAX_FALLBACK_LEN {
+            let truncated: String = first_line.chars().take(MAX_FALLBACK_LEN).collect();
+            format!("TigerGraph ({truncated}…)")
+        } else {
+            format!("TigerGraph ({first_line})")
+        }
     }
 
     async fn stat_count(
@@ -385,5 +415,33 @@ impl TigerGraphClient {
                 )))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TigerGraphClient;
+
+    #[test]
+    fn summarizes_verbose_version_dump_into_concise_string() {
+        let message = "TigerGraph RESTPP: \n --- Version --- \nTigerGraph version: 4.2.4\nproduct           release_4.2.4_07-17-2026          cd6a73b6\ncqrs              release_4.2.4_07-17-2026          85aba055\n";
+        assert_eq!(
+            TigerGraphClient::summarize_version_message(message),
+            "TigerGraph 4.2.4"
+        );
+    }
+
+    #[test]
+    fn falls_back_to_truncated_first_line_when_marker_is_missing() {
+        let message = "a".repeat(120);
+        let summarized = TigerGraphClient::summarize_version_message(&message);
+        assert!(summarized.starts_with("TigerGraph ("));
+        assert!(summarized.contains('…'));
+        assert!(summarized.len() < message.len());
+    }
+
+    #[test]
+    fn falls_back_to_plain_label_for_empty_message() {
+        assert_eq!(TigerGraphClient::summarize_version_message(""), "TigerGraph");
     }
 }

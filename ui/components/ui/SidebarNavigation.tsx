@@ -725,11 +725,19 @@ export function NavMain({
                   {datasetSummary.engineVersions && Object.keys(datasetSummary.engineVersions).length > 0 && (
                     <div className="pt-1">
                       <div className="text-gray-500 mb-0.5">Engine versions</div>
-                      <div className="space-y-0.5">
+                      <div className="space-y-0.5 max-w-full overflow-x-auto">
                         {Object.entries(datasetSummary.engineVersions).map(([vendor, version]) => (
-                          <div key={`${vendor}-${version}`} className="flex justify-between gap-2">
-                            <span className="text-gray-500">{vendor}</span>
-                            <span className="tabular-nums text-right">{version}</span>
+                          <div
+                            key={`${vendor}-${version}`}
+                            className="flex justify-between gap-2"
+                          >
+                            <span className="text-gray-500 shrink-0">{vendor}</span>
+                            <span
+                              className="tabular-nums text-right whitespace-nowrap overflow-x-auto max-w-[9.5rem]"
+                              title={version}
+                            >
+                              {version}
+                            </span>
                           </div>
                         ))}
                       </div>
