@@ -485,6 +485,14 @@ async fn async_main(cli: Cli) -> BenchmarkResult<()> {
             // Lightweight debug helper: run each Memgraph query type once and report failures.
             debug_memgraph_queries(dataset, endpoint, name).await?;
         }
+        Commands::DebugMongoQueries {
+            dataset,
+            endpoint,
+            name,
+        } => {
+            // Lightweight debug helper: run each Mongo query type once and report failures.
+            debug_mongo_queries(dataset, endpoint, name).await?;
+        }
     }
     Ok(())
 }
@@ -1422,16 +1430,16 @@ async fn spawn_neo4j_worker(
 
             match received {
                 Some(prepared_query) => {
-                    // Coordinated-omission correction: anchor latency at the
-                    // intended schedule time, not dequeue time. Running behind
-                    // schedule counts as latency; the driver's catch-up sleep
-                    // (when ahead of schedule) does not.
-                    let intended_start = prepared_query.intended_start();
+                    // Measure actual per-query execution latency (dequeue to completion),
+                    // disregarding the target --mps schedule. P50/P95/P99 reflect real query
+                    // execution time rather than scheduler backlog when the offered rate
+                    // exceeds what the engine can sustain.
+                    let start_time = Instant::now();
 
                     let r = client
                         .execute_prepared_query(worker_id_str, &prepared_query, &simulate)
                         .await;
-                    let duration = Instant::now().saturating_duration_since(intended_start);
+                    let duration = start_time.elapsed();
                     match r {
                         Ok(_) => {
                             NEO4J_SUCCESS_REQUESTS_DURATION_HISTOGRAM
@@ -1958,16 +1966,16 @@ async fn spawn_falkor_worker(
 
             match received {
                 Some(prepared_query) => {
-                    // Coordinated-omission correction: anchor latency at the
-                    // intended schedule time, not dequeue time. Running behind
-                    // schedule counts as latency; the driver's catch-up sleep
-                    // (when ahead of schedule) does not.
-                    let intended_start = prepared_query.intended_start();
+                    // Measure actual per-query execution latency (dequeue to completion),
+                    // disregarding the target --mps schedule. P50/P95/P99 reflect real query
+                    // execution time rather than scheduler backlog when the offered rate
+                    // exceeds what the engine can sustain.
+                    let start_time = Instant::now();
 
                     let r = client
                         .execute_prepared_query(worker_id_str, &prepared_query, &simulate)
                         .await;
-                    let duration = Instant::now().saturating_duration_since(intended_start);
+                    let duration = start_time.elapsed();
                     match r {
                         Ok(_) => {
                             FALKOR_SUCCESS_REQUESTS_DURATION_HISTOGRAM
@@ -2413,7 +2421,8 @@ async fn init_postgres(
         benchmark::postgres::default_connection_params()
     };
 
-    let client = PostgresClient::connect(&host, port, &user, &password, &dbname).await?;
+    // A single connection is sufficient for the (single-threaded) data-loading path.
+    let client = PostgresClient::connect(&host, port, &user, &password, &dbname, 1).await?;
     info!("client connected to postgres");
 
     if force {
@@ -2488,7 +2497,9 @@ async fn run_postgres(
         benchmark::postgres::default_connection_params()
     };
 
-    let client = PostgresClient::connect(&host, port, &user, &password, &dbname).await?;
+    // Size the connection pool to the worker count so each worker gets its own Postgres backend
+    // process, allowing queries to run truly in parallel across CPU cores.
+    let client = PostgresClient::connect(&host, port, &user, &password, &dbname, parallel).await?;
     info!("client connected to postgres");
     let engine_version = client.detect_engine_version().await.ok().flatten();
 
@@ -2595,11 +2606,13 @@ async fn spawn_postgres_worker(
 ) -> BenchmarkResult<JoinHandle<()>> {
     info!("spawning worker");
     let receiver = Arc::clone(receiver);
+    // Each worker gets a dedicated pooled connection so its queries run on their own Postgres
+    // backend process (and thus their own CPU core) instead of contending on a shared one.
+    let worker_client = client.worker_connection(worker_id);
     let handle = tokio::spawn(async move {
         let worker_id = worker_id.to_string();
         let worker_id_str = worker_id.as_str();
         let mut counter = 0u32;
-        let client = client.clone();
         loop {
             let received = receiver.lock().await.recv().await;
 
@@ -2607,7 +2620,7 @@ async fn spawn_postgres_worker(
                 Some(prepared_query) => {
                     let start_time = Instant::now();
 
-                    let r = client
+                    let r = worker_client
                         .execute_prepared_query(worker_id_str, &prepared_query, &simulate)
                         .await;
                     let duration = start_time.elapsed();
@@ -3997,6 +4010,98 @@ async fn debug_memgraph_queries(
     }
 }
 
+/// Mongo analogue of `debug_memgraph_queries`: run one sample query per `q_name` against a live
+/// Mongo endpoint and report failures. Useful for smoke-testing changes to the query catalog
+/// (e.g. the bounded-traversal rewrite in `mongo_queries_repository.rs`) before committing to a
+/// full parallel run.
+async fn debug_mongo_queries(
+    dataset: Size,
+    endpoint: String,
+    file_name: String,
+) -> BenchmarkResult<()> {
+    info!("Debugging Mongo queries from file '{}'", file_name);
+
+    // Read all prepared queries from the given file.
+    let (metadata, queries) = read_mongo_queries(file_name).await?;
+
+    // Build a single Mongo client against the provided endpoint.
+    let (uri, dbname) = parse_mongo_endpoint(&endpoint)?;
+    let client = MongoClient::connect(&uri, &dbname).await?;
+    info!(
+        "Debug Mongo client connected; dataset: {:?}, unique query types: {}",
+        dataset,
+        metadata.catalog.len()
+    );
+
+    // Pick exactly one sample query per q_name.
+    let mut seen = HashSet::new();
+    let mut samples: Vec<PreparedMongoQuery> = Vec::new();
+    for q in queries {
+        if seen.insert(q.q_name.clone()) {
+            samples.push(q);
+        }
+    }
+
+    info!(
+        "Testing {} distinct query names against Mongo",
+        samples.len()
+    );
+
+    let simulate: Option<usize> = None;
+    let mut failures = 0usize;
+
+    for pq in samples {
+        // Capture the fields we want to log *before* moving `pq` into the message.
+        let q_id = pq.q_id;
+        let q_name = pq.q_name.clone();
+
+        let msg = Msg {
+            start_time: Instant::now(),
+            offset: 0,
+            payload: pq,
+        };
+
+        info!(
+            "[Mongo debug] Executing query id={} name='{}'",
+            q_id, q_name
+        );
+
+        let start = Instant::now();
+        match client
+            .execute_prepared_query("debug", &msg, &simulate)
+            .await
+        {
+            Ok(()) => {
+                info!(
+                    "[Mongo debug] OK: id={} name='{}' in {:?}",
+                    q_id,
+                    q_name,
+                    start.elapsed()
+                );
+            }
+            Err(e) => {
+                failures += 1;
+                error!(
+                    "[Mongo debug] FAIL: id={} name='{}' error={:?}",
+                    q_id,
+                    q_name,
+                    e.to_string()
+                );
+            }
+        }
+    }
+
+    if failures > 0 {
+        Err(OtherError(format!(
+            "{} Mongo query type(s) failed; see logs above for details",
+            failures
+        )))
+    } else {
+        info!("All tested Mongo query types succeeded");
+        Ok(())
+    }
+}
+
 async fn spawn_memgraph_worker(
     client: MemgraphClient,
     worker_id: usize,
@@ -4019,16 +4124,16 @@ async fn spawn_memgraph_worker(
 
             match received {
                 Some(prepared_query) => {
-                    // Coordinated-omission correction: anchor latency at the
-                    // intended schedule time, not dequeue time. Running behind
-                    // schedule counts as latency; the driver's catch-up sleep
-                    // (when ahead of schedule) does not.
-                    let intended_start = prepared_query.intended_start();
+                    // Measure actual per-query execution latency (dequeue to completion),
+                    // disregarding the target --mps schedule. P50/P95/P99 reflect real query
+                    // execution time rather than scheduler backlog when the offered rate
+                    // exceeds what the engine can sustain.
+                    let start_time = Instant::now();
 
                     let r = client
                         .execute_prepared_query(worker_id_str, &prepared_query, &simulate)
                         .await;
-                    let duration = Instant::now().saturating_duration_since(intended_start);
+                    let duration = start_time.elapsed();
                     match r {
                         Ok(_) => {
                             MEMGRAPH_SUCCESS_REQUESTS_DURATION_HISTOGRAM

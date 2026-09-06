@@ -449,6 +449,13 @@ export default function DashBoard({
     }
 
     const selectedQuery = selectedOptions.Queries[0];
+    const selectedVendors = selectedOptions.Vendors;
+    const isVendorMatch = (vendor: string) =>
+      selectedVendors?.length
+        ? selectedVendors.some(
+            (v) => v.toLowerCase() === (vendor ?? "").toString().toLowerCase()
+          )
+        : true;
     const normalizeHistogram = (histogram: number[] | undefined) => {
       const source = Array.isArray(histogram) ? histogram : [];
       if (source.length === 0) return [];
@@ -464,6 +471,7 @@ export default function DashBoard({
     if (data.unrealstic?.length) {
       setFilteredUnrealistic(
         data.unrealstic
+          .filter(({ vendor }) => isVendorMatch(vendor))
           .map(({ vendor, histogram_for_type, memory }) => ({
             vendor,
             histogram: normalizeHistogram(histogram_for_type[selectedQuery]),
@@ -478,6 +486,7 @@ export default function DashBoard({
       // Note: aggregated summaries store the histogram on runs[].result.histogram_for_type.
       setFilteredUnrealistic(
         validRuns
+          .filter((run: Run) => isVendorMatch(run.vendor))
           .map((run: Run) => ({
             vendor: run.vendor,
             histogram: normalizeHistogram(
@@ -492,7 +501,7 @@ export default function DashBoard({
     }
 
     setFilteredUnrealistic([]);
-  }, [data, validRuns, selectedOptions.Queries]);
+  }, [data, validRuns, selectedOptions.Queries, selectedOptions.Vendors]);
 
   // filter realstic data
   useEffect(() => {
@@ -1049,7 +1058,7 @@ export default function DashBoard({
           }
         >
           {showSidebar && <MobileFiltersBar />}
-          {!hideHardware && pastRuns.length > 0 && (
+          {pastRuns.length > 0 && (
             <div className="bg-muted/30 border-b border-gray-200/40 p-4 flex flex-wrap items-center justify-between gap-4 font-space">
               <div className="flex flex-col">
                 <span className="text-xs text-gray-500 font-medium">Select Run History</span>

@@ -5,7 +5,7 @@ use crate::scheduler::Msg;
 use crate::{MONGO_MSG_DEADLINE_OFFSET_GAUGE, MONGO_STORE_SIZE_BYTES, OPERATION_COUNTER};
 use futures::TryStreamExt;
 use mongodb::bson::{doc, Document};
-use mongodb::options::UpdateOptions;
+use mongodb::options::{AggregateOptions, UpdateOptions};
 use mongodb::{Client, Database};
 use std::time::Duration;
 use tracing::{info, warn};
@@ -203,9 +203,15 @@ impl MongoClient {
                     .map_err(MongoError)?;
             }
             MongoOperation::Aggregate { collection, pipeline } => {
+                // allowDiskUse lets blocking stages ($group, $sort, ...) spill to disk instead of
+                // hard-failing once they exceed MongoDB's fixed in-memory stage limit (100MB by
+                // default). This is a safety net: the bounded-traversal query shapes (see
+                // mongo_queries_repository.rs) already cap array growth explicitly, but this
+                // keeps any stage that still gets large degrading gracefully instead of erroring.
+                let options = AggregateOptions::builder().allow_disk_use(true).build();
                 let mut cursor = self
                     .collection(collection)
-                    .aggregate(pipeline.clone(), None)
+                    .aggregate(pipeline.clone(), options)
                     .await
                     .map_err(MongoError)?;
                 // Drain the cursor so the aggregation actually executes end-to-end.

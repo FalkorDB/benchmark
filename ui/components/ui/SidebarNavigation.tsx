@@ -12,7 +12,7 @@ import {
   HoverCardTrigger,
 } from "@/components/ui/hover-card";
 import { HardwareInfo } from "@/app/components/HardwareInfo";
-import { Layers } from "lucide-react";
+import { Layers, ExternalLink } from "lucide-react";
 
 type Platforms = Record<
   string,
@@ -76,7 +76,7 @@ const QUERY_DESCRIPTIONS = [
     description: "1-hop expansion from a seed user.",
     cypher: "MATCH (s:User {id: $id})-->(n:User)\nRETURN n.id",
     postgres: "SELECT dst_id AS id FROM friend_edges WHERE src_id = $1",
-    mongo: "db.users.aggregate([\n  { $match: { _id: seed } },\n  { $graphLookup: {\n      from: \"friend_edges\", startWith: \"$_id\",\n      connectFromField: \"dst\", connectToField: \"src\",\n      as: \"reachable\", maxDepth: 0, depthField: \"depth\",\n  } },\n  { $unwind: \"$reachable\" },\n  { $match: { \"reachable.depth\": 0 } },\n  { $project: { _id: \"$reachable.dst\" } },\n])"
+    mongo: "// Bounded hop-by-hop traversal (replaces $graphLookup, which OOMs on hub vertices):\ndb.users.aggregate([\n  { $match: { _id: seed } },\n  { $project: { visited: [\"$_id\"], frontier: [\"$_id\"], reached: [] } },\n  { $lookup: { from: \"friend_edges\", localField: \"frontier\", foreignField: \"src\", as: \"_edges\" } },\n  { $project: { frontier: { $slice: [{ $setDifference: [\"$_edges.dst\", \"$visited\"] }, fanoutCap] } } },\n  { $project: { visited: { $setUnion: [\"$visited\", \"$frontier\"] }, reached: { $setUnion: [\"$reached\", \"$frontier\"] } } },\n  { $unwind: \"$frontier\" },\n  { $project: { _id: \"$frontier\" } },\n])"
   },
   {
     name: "Expand 1L (Filtered)",
@@ -85,7 +85,7 @@ const QUERY_DESCRIPTIONS = [
     description: "1-hop expansion with destination age filter.",
     cypher: "MATCH (s:User {id: $id})-->(n:User)\nWHERE n.age >= 18\nRETURN n.id",
     postgres: "SELECT fe.dst_id AS id FROM friend_edges fe\nJOIN users u ON u.id = fe.dst_id\nWHERE fe.src_id = $1 AND u.age >= 18",
-    mongo: "// Same $graphLookup as Expand 1L, then joins back to users for the age filter:\ndb.users.aggregate([\n  { $match: { _id: seed } },\n  { $graphLookup: { ..., maxDepth: 0, depthField: \"depth\" } },\n  { $unwind: \"$reachable\" },\n  { $match: { \"reachable.depth\": 0 } },\n  { $lookup: { from: \"users\", localField: \"reachable.dst\", foreignField: \"_id\", as: \"u\" } },\n  { $unwind: \"$u\" },\n  { $match: { \"u.age\": { $gte: 18 } } },\n  { $project: { _id: \"$u._id\" } },\n])"
+    mongo: "// Same bounded 1-hop traversal as Expand 1L, then joins users for the age filter:\ndb.users.aggregate([\n  { $match: { _id: seed } },\n  { $project: { visited: [\"$_id\"], frontier: [\"$_id\"], reached: [] } },\n  { $lookup: { from: \"friend_edges\", localField: \"frontier\", foreignField: \"src\", as: \"_edges\" } },\n  { $project: { frontier: { $slice: [{ $setDifference: [\"$_edges.dst\", \"$visited\"] }, fanoutCap] } } },\n  { $project: { visited: { $setUnion: [\"$visited\", \"$frontier\"] }, reached: { $setUnion: [\"$reached\", \"$frontier\"] } } },\n  { $unwind: \"$frontier\" },\n  { $lookup: { from: \"users\", localField: \"frontier\", foreignField: \"_id\", as: \"u\" } },\n  { $unwind: \"$u\" },\n  { $match: { \"u.age\": { $gte: 18 } } },\n  { $project: { _id: \"$u._id\" } },\n])"
   },
   {
     name: "Expand 2L",
@@ -94,7 +94,7 @@ const QUERY_DESCRIPTIONS = [
     description: "2-hop expansion and distinct destination IDs.",
     cypher: "MATCH (s:User {id: $id})-->()-->(n:User)\nRETURN DISTINCT n.id",
     postgres: "SELECT DISTINCT fe2.dst_id AS id FROM friend_edges fe1\nJOIN friend_edges fe2 ON fe2.src_id = fe1.dst_id\nWHERE fe1.src_id = $1",
-    mongo: "db.users.aggregate([\n  { $match: { _id: seed } },\n  { $graphLookup: { ..., maxDepth: 1, depthField: \"depth\" } },\n  { $unwind: \"$reachable\" },\n  { $match: { \"reachable.depth\": 1 } },\n  { $project: { _id: \"$reachable.dst\" } },\n  { $group: { _id: \"$_id\" } }, // DISTINCT\n])"
+    mongo: "// Bounded hop-by-hop traversal (replaces $graphLookup, which OOMs on hub vertices):\ndb.users.aggregate([\n  { $match: { _id: seed } },\n  { $project: { visited: [\"$_id\"], frontier: [\"$_id\"], reached: [] } },\n  // Repeated 2x (once per hop): self-dedupe + cap newly-discovered nodes\n  { $lookup: { from: \"friend_edges\", localField: \"frontier\", foreignField: \"src\", as: \"_edges\" } },\n  { $project: { frontier: { $slice: [{ $setDifference: [\"$_edges.dst\", \"$visited\"] }, fanoutCap] } } },\n  { $project: { visited: { $setUnion: [\"$visited\", \"$frontier\"] }, reached: { $setUnion: [\"$reached\", \"$frontier\"] } } },\n  { $unwind: \"$frontier\" },\n  { $project: { _id: \"$frontier\" } },\n  { $group: { _id: \"$_id\" } }, // DISTINCT\n])"
   },
   {
     name: "Expand 2L (Filtered)",
@@ -103,7 +103,7 @@ const QUERY_DESCRIPTIONS = [
     description: "2-hop expansion with age filter.",
     cypher: "MATCH (s:User {id: $id})-->()-->(n:User)\nWHERE n.age >= 18\nRETURN DISTINCT n.id",
     postgres: "SELECT DISTINCT fe2.dst_id AS id FROM friend_edges fe1\nJOIN friend_edges fe2 ON fe2.src_id = fe1.dst_id\nJOIN users u ON u.id = fe2.dst_id\nWHERE fe1.src_id = $1 AND u.age >= 18",
-    mongo: "db.users.aggregate([\n  { $match: { _id: seed } },\n  { $graphLookup: { ..., maxDepth: 1, depthField: \"depth\" } },\n  { $unwind: \"$reachable\" },\n  { $match: { \"reachable.depth\": 1 } },\n  { $lookup: { from: \"users\", localField: \"reachable.dst\", foreignField: \"_id\", as: \"u\" } },\n  { $unwind: \"$u\" },\n  { $match: { \"u.age\": { $gte: 18 } } },\n  { $project: { _id: \"$u._id\" } },\n  { $group: { _id: \"$_id\" } }, // DISTINCT\n])"
+    mongo: "// Same bounded 2-hop traversal as Expand 2L, then joins users for the age filter:\ndb.users.aggregate([\n  { $match: { _id: seed } },\n  { $project: { visited: [\"$_id\"], frontier: [\"$_id\"], reached: [] } },\n  // Repeated 2x (once per hop): self-dedupe + cap newly-discovered nodes\n  { $lookup: { from: \"friend_edges\", localField: \"frontier\", foreignField: \"src\", as: \"_edges\" } },\n  { $project: { frontier: { $slice: [{ $setDifference: [\"$_edges.dst\", \"$visited\"] }, fanoutCap] } } },\n  { $project: { visited: { $setUnion: [\"$visited\", \"$frontier\"] }, reached: { $setUnion: [\"$reached\", \"$frontier\"] } } },\n  { $unwind: \"$frontier\" },\n  { $lookup: { from: \"users\", localField: \"frontier\", foreignField: \"_id\", as: \"u\" } },\n  { $unwind: \"$u\" },\n  { $match: { \"u.age\": { $gte: 18 } } },\n  { $project: { _id: \"$u._id\" } },\n  { $group: { _id: \"$_id\" } }, // DISTINCT\n])"
   },
   {
     name: "Expand 3L",
@@ -111,8 +111,8 @@ const QUERY_DESCRIPTIONS = [
     tigergraph: "CREATE OR REPLACE QUERY aggregate_expansion_3(VERTEX<User> id) FOR GRAPH benchmark_graph {\n  Start = {id};\n  Hop1 = SELECT t FROM Start:s -(Friend:e)-> User:t;\n  Hop2 = SELECT t FROM Hop1:s -(Friend:e)-> User:t;\n  Result = SELECT t FROM Hop2:s -(Friend:e)-> User:t;\n  PRINT Result;\n}",
     description: "3-hop expansion and distinct destination IDs.",
     cypher: "MATCH (s:User {id: $id})-->()-->()-->(n:User)\nRETURN DISTINCT n.id",
-    postgres: "SELECT DISTINCT fe3.dst_id AS id FROM friend_edges fe1\nJOIN friend_edges fe2 ON fe2.src_id = fe1.dst_id\nJOIN friend_edges fe3 ON fe3.src_id = fe2.dst_id\nWHERE fe1.src_id = $1",
-    mongo: "db.users.aggregate([\n  { $match: { _id: seed } },\n  { $graphLookup: { ..., maxDepth: 2, depthField: \"depth\" } },\n  { $unwind: \"$reachable\" },\n  { $match: { \"reachable.depth\": 2 } },\n  { $project: { _id: \"$reachable.dst\" } },\n  { $group: { _id: \"$_id\" } }, // DISTINCT\n])"
+    postgres: "-- Bounded recursive CTE (replaces a plain 3-way self-join + DISTINCT): UNION dedupes\n-- (id, depth) pairs per hop, and the inner LIMIT caps newly-discovered nodes per hop\n-- ($2 = fan-out cap, defaults to the vertex count so it never truncates a legitimate result).\nWITH RECURSIVE hops(id, depth) AS (\n  SELECT dst_id, 1 FROM friend_edges WHERE src_id = $1\n  UNION\n  SELECT * FROM (\n    SELECT DISTINCT fe.dst_id AS id, hops.depth + 1 AS depth\n    FROM hops JOIN friend_edges fe ON fe.src_id = hops.id\n    WHERE hops.depth < 3\n    LIMIT $2::int\n  ) AS capped_step\n)\nSELECT id FROM hops WHERE depth = 3",
+    mongo: "// Bounded hop-by-hop traversal (replaces $graphLookup, which OOMs on hub vertices):\ndb.users.aggregate([\n  { $match: { _id: seed } },\n  { $project: { visited: [\"$_id\"], frontier: [\"$_id\"], reached: [] } },\n  // Repeated 3x (once per hop): self-dedupe + cap newly-discovered nodes\n  { $lookup: { from: \"friend_edges\", localField: \"frontier\", foreignField: \"src\", as: \"_edges\" } },\n  { $project: { frontier: { $slice: [{ $setDifference: [\"$_edges.dst\", \"$visited\"] }, fanoutCap] } } },\n  { $project: { visited: { $setUnion: [\"$visited\", \"$frontier\"] }, reached: { $setUnion: [\"$reached\", \"$frontier\"] } } },\n  { $unwind: \"$frontier\" },\n  { $project: { _id: \"$frontier\" } },\n  { $group: { _id: \"$_id\" } }, // DISTINCT\n])"
   },
   {
     name: "Expand 3L (Filtered)",
@@ -120,8 +120,8 @@ const QUERY_DESCRIPTIONS = [
     tigergraph: "CREATE OR REPLACE QUERY aggregate_expansion_3_with_filter(VERTEX<User> id) FOR GRAPH benchmark_graph {\n  Start = {id};\n  Hop1 = SELECT t FROM Start:s -(Friend:e)-> User:t;\n  Hop2 = SELECT t FROM Hop1:s -(Friend:e)-> User:t;\n  Result = SELECT t FROM Hop2:s -(Friend:e)-> User:t WHERE t.age >= 18;\n  PRINT Result;\n}",
     description: "3-hop expansion with age filter.",
     cypher: "MATCH (s:User {id: $id})-->()-->()-->(n:User)\nWHERE n.age >= 18\nRETURN DISTINCT n.id",
-    postgres: "SELECT DISTINCT fe3.dst_id AS id FROM friend_edges fe1\nJOIN friend_edges fe2 ON fe2.src_id = fe1.dst_id\nJOIN friend_edges fe3 ON fe3.src_id = fe2.dst_id\nJOIN users u ON u.id = fe3.dst_id\nWHERE fe1.src_id = $1 AND u.age >= 18",
-    mongo: "db.users.aggregate([\n  { $match: { _id: seed } },\n  { $graphLookup: { ..., maxDepth: 2, depthField: \"depth\" } },\n  { $unwind: \"$reachable\" },\n  { $match: { \"reachable.depth\": 2 } },\n  { $lookup: { from: \"users\", localField: \"reachable.dst\", foreignField: \"_id\", as: \"u\" } },\n  { $unwind: \"$u\" },\n  { $match: { \"u.age\": { $gte: 18 } } },\n  { $project: { _id: \"$u._id\" } },\n  { $group: { _id: \"$_id\" } }, // DISTINCT\n])"
+    postgres: "-- Same bounded recursive CTE as Expand 3L, then joins users for the age filter.\nWITH RECURSIVE hops(id, depth) AS (\n  SELECT dst_id, 1 FROM friend_edges WHERE src_id = $1\n  UNION\n  SELECT * FROM (\n    SELECT DISTINCT fe.dst_id AS id, hops.depth + 1 AS depth\n    FROM hops JOIN friend_edges fe ON fe.src_id = hops.id\n    WHERE hops.depth < 3\n    LIMIT $2::int\n  ) AS capped_step\n)\nSELECT u.id FROM hops h JOIN users u ON u.id = h.id\nWHERE h.depth = 3 AND u.age >= 18",
+    mongo: "// Same bounded 3-hop traversal as Expand 3L, then joins users for the age filter:\ndb.users.aggregate([\n  { $match: { _id: seed } },\n  { $project: { visited: [\"$_id\"], frontier: [\"$_id\"], reached: [] } },\n  // Repeated 3x (once per hop): self-dedupe + cap newly-discovered nodes\n  { $lookup: { from: \"friend_edges\", localField: \"frontier\", foreignField: \"src\", as: \"_edges\" } },\n  { $project: { frontier: { $slice: [{ $setDifference: [\"$_edges.dst\", \"$visited\"] }, fanoutCap] } } },\n  { $project: { visited: { $setUnion: [\"$visited\", \"$frontier\"] }, reached: { $setUnion: [\"$reached\", \"$frontier\"] } } },\n  { $unwind: \"$frontier\" },\n  { $lookup: { from: \"users\", localField: \"frontier\", foreignField: \"_id\", as: \"u\" } },\n  { $unwind: \"$u\" },\n  { $match: { \"u.age\": { $gte: 18 } } },\n  { $project: { _id: \"$u._id\" } },\n  { $group: { _id: \"$_id\" } }, // DISTINCT\n])"
   },
   {
     name: "Expand 4L",
@@ -129,8 +129,8 @@ const QUERY_DESCRIPTIONS = [
     tigergraph: "CREATE OR REPLACE QUERY aggregate_expansion_4(VERTEX<User> id) FOR GRAPH benchmark_graph {\n  Start = {id};\n  Hop1 = SELECT t FROM Start:s -(Friend:e)-> User:t;\n  Hop2 = SELECT t FROM Hop1:s -(Friend:e)-> User:t;\n  Hop3 = SELECT t FROM Hop2:s -(Friend:e)-> User:t;\n  Result = SELECT t FROM Hop3:s -(Friend:e)-> User:t;\n  PRINT Result;\n}",
     description: "4-hop expansion and distinct destination IDs.",
     cypher: "MATCH (s:User {id: $id})-->()-->()-->()-->(n:User)\nRETURN DISTINCT n.id",
-    postgres: "SELECT DISTINCT fe4.dst_id AS id FROM friend_edges fe1\nJOIN friend_edges fe2 ON fe2.src_id = fe1.dst_id\nJOIN friend_edges fe3 ON fe3.src_id = fe2.dst_id\nJOIN friend_edges fe4 ON fe4.src_id = fe3.dst_id\nWHERE fe1.src_id = $1",
-    mongo: "db.users.aggregate([\n  { $match: { _id: seed } },\n  { $graphLookup: { ..., maxDepth: 3, depthField: \"depth\" } },\n  { $unwind: \"$reachable\" },\n  { $match: { \"reachable.depth\": 3 } },\n  { $project: { _id: \"$reachable.dst\" } },\n  { $group: { _id: \"$_id\" } }, // DISTINCT\n])"
+    postgres: "-- Bounded recursive CTE (replaces a plain 4-way self-join + DISTINCT that measured\n-- ~30s from a hub vertex): UNION dedupes (id, depth) pairs per hop, and the inner LIMIT\n-- caps newly-discovered nodes per hop ($2 = fan-out cap, defaults to the vertex count).\nWITH RECURSIVE hops(id, depth) AS (\n  SELECT dst_id, 1 FROM friend_edges WHERE src_id = $1\n  UNION\n  SELECT * FROM (\n    SELECT DISTINCT fe.dst_id AS id, hops.depth + 1 AS depth\n    FROM hops JOIN friend_edges fe ON fe.src_id = hops.id\n    WHERE hops.depth < 4\n    LIMIT $2::int\n  ) AS capped_step\n)\nSELECT id FROM hops WHERE depth = 4",
+    mongo: "// Bounded hop-by-hop traversal (replaces $graphLookup, which OOMs on hub vertices):\ndb.users.aggregate([\n  { $match: { _id: seed } },\n  { $project: { visited: [\"$_id\"], frontier: [\"$_id\"], reached: [] } },\n  // Repeated 4x (once per hop): self-dedupe + cap newly-discovered nodes\n  { $lookup: { from: \"friend_edges\", localField: \"frontier\", foreignField: \"src\", as: \"_edges\" } },\n  { $project: { frontier: { $slice: [{ $setDifference: [\"$_edges.dst\", \"$visited\"] }, fanoutCap] } } },\n  { $project: { visited: { $setUnion: [\"$visited\", \"$frontier\"] }, reached: { $setUnion: [\"$reached\", \"$frontier\"] } } },\n  { $unwind: \"$frontier\" },\n  { $project: { _id: \"$frontier\" } },\n  { $group: { _id: \"$_id\" } }, // DISTINCT\n])"
   },
   {
     name: "Expand 4L (Filtered)",
@@ -138,8 +138,8 @@ const QUERY_DESCRIPTIONS = [
     tigergraph: "CREATE OR REPLACE QUERY aggregate_expansion_4_with_filter(VERTEX<User> id) FOR GRAPH benchmark_graph {\n  Start = {id};\n  Hop1 = SELECT t FROM Start:s -(Friend:e)-> User:t;\n  Hop2 = SELECT t FROM Hop1:s -(Friend:e)-> User:t;\n  Hop3 = SELECT t FROM Hop2:s -(Friend:e)-> User:t;\n  Result = SELECT t FROM Hop3:s -(Friend:e)-> User:t WHERE t.age >= 18;\n  PRINT Result;\n}",
     description: "4-hop expansion with age filter.",
     cypher: "MATCH (s:User {id: $id})-->()-->()-->()-->(n:User)\nWHERE n.age >= 18\nRETURN DISTINCT n.id",
-    postgres: "SELECT DISTINCT fe4.dst_id AS id FROM friend_edges fe1\nJOIN friend_edges fe2 ON fe2.src_id = fe1.dst_id\nJOIN friend_edges fe3 ON fe3.src_id = fe2.dst_id\nJOIN friend_edges fe4 ON fe4.src_id = fe3.dst_id\nJOIN users u ON u.id = fe4.dst_id\nWHERE fe1.src_id = $1 AND u.age >= 18",
-    mongo: "db.users.aggregate([\n  { $match: { _id: seed } },\n  { $graphLookup: { ..., maxDepth: 3, depthField: \"depth\" } },\n  { $unwind: \"$reachable\" },\n  { $match: { \"reachable.depth\": 3 } },\n  { $lookup: { from: \"users\", localField: \"reachable.dst\", foreignField: \"_id\", as: \"u\" } },\n  { $unwind: \"$u\" },\n  { $match: { \"u.age\": { $gte: 18 } } },\n  { $project: { _id: \"$u._id\" } },\n  { $group: { _id: \"$_id\" } }, // DISTINCT\n])"
+    postgres: "-- Same bounded recursive CTE as Expand 4L, then joins users for the age filter.\nWITH RECURSIVE hops(id, depth) AS (\n  SELECT dst_id, 1 FROM friend_edges WHERE src_id = $1\n  UNION\n  SELECT * FROM (\n    SELECT DISTINCT fe.dst_id AS id, hops.depth + 1 AS depth\n    FROM hops JOIN friend_edges fe ON fe.src_id = hops.id\n    WHERE hops.depth < 4\n    LIMIT $2::int\n  ) AS capped_step\n)\nSELECT u.id FROM hops h JOIN users u ON u.id = h.id\nWHERE h.depth = 4 AND u.age >= 18",
+    mongo: "// Same bounded 4-hop traversal as Expand 4L, then joins users for the age filter:\ndb.users.aggregate([\n  { $match: { _id: seed } },\n  { $project: { visited: [\"$_id\"], frontier: [\"$_id\"], reached: [] } },\n  // Repeated 4x (once per hop): self-dedupe + cap newly-discovered nodes\n  { $lookup: { from: \"friend_edges\", localField: \"frontier\", foreignField: \"src\", as: \"_edges\" } },\n  { $project: { frontier: { $slice: [{ $setDifference: [\"$_edges.dst\", \"$visited\"] }, fanoutCap] } } },\n  { $project: { visited: { $setUnion: [\"$visited\", \"$frontier\"] }, reached: { $setUnion: [\"$reached\", \"$frontier\"] } } },\n  { $unwind: \"$frontier\" },\n  { $lookup: { from: \"users\", localField: \"frontier\", foreignField: \"_id\", as: \"u\" } },\n  { $unwind: \"$u\" },\n  { $match: { \"u.age\": { $gte: 18 } } },\n  { $project: { _id: \"$u._id\" } },\n  { $group: { _id: \"$_id\" } }, // DISTINCT\n])"
   },
   {
     name: "Aggregate Age",
@@ -193,7 +193,7 @@ const QUERY_DESCRIPTIONS = [
     description: "Returns 2-hop neighbor IDs.",
     cypher: "MATCH (s:User {id: $id})-->()-->(n:User)\nRETURN n.id",
     postgres: "SELECT fe2.dst_id AS id FROM friend_edges fe1\nJOIN friend_edges fe2 ON fe2.src_id = fe1.dst_id\nWHERE fe1.src_id = $1",
-    mongo: "db.users.aggregate([\n  { $match: { _id: seed } },\n  { $graphLookup: { ..., maxDepth: 1, depthField: \"depth\" } },\n  { $unwind: \"$reachable\" },\n  { $match: { \"reachable.depth\": 1 } },\n  { $project: { _id: \"$reachable.dst\" } },\n])"
+    mongo: "// Bounded hop-by-hop traversal (replaces $graphLookup, which OOMs on hub vertices):\ndb.users.aggregate([\n  { $match: { _id: seed } },\n  { $project: { visited: [\"$_id\"], frontier: [\"$_id\"], reached: [] } },\n  // Repeated 2x (once per hop): self-dedupe + cap newly-discovered nodes\n  { $lookup: { from: \"friend_edges\", localField: \"frontier\", foreignField: \"src\", as: \"_edges\" } },\n  { $project: { frontier: { $slice: [{ $setDifference: [\"$_edges.dst\", \"$visited\"] }, fanoutCap] } } },\n  { $project: { visited: { $setUnion: [\"$visited\", \"$frontier\"] }, reached: { $setUnion: [\"$reached\", \"$frontier\"] } } },\n  { $unwind: \"$frontier\" },\n  { $project: { _id: \"$frontier\" } },\n])"
   },
   {
     name: "Neighbours 2L (Filtered)",
@@ -202,7 +202,7 @@ const QUERY_DESCRIPTIONS = [
     description: "Returns 2-hop neighbor IDs filtered by age.",
     cypher: "MATCH (s:User {id: $id})-->()-->(n:User)\nWHERE n.age >= 18\nRETURN n.id",
     postgres: "SELECT fe2.dst_id AS id FROM friend_edges fe1\nJOIN friend_edges fe2 ON fe2.src_id = fe1.dst_id\nJOIN users u ON u.id = fe2.dst_id\nWHERE fe1.src_id = $1 AND u.age >= 18",
-    mongo: "db.users.aggregate([\n  { $match: { _id: seed } },\n  { $graphLookup: { ..., maxDepth: 1, depthField: \"depth\" } },\n  { $unwind: \"$reachable\" },\n  { $match: { \"reachable.depth\": 1 } },\n  { $lookup: { from: \"users\", localField: \"reachable.dst\", foreignField: \"_id\", as: \"u\" } },\n  { $unwind: \"$u\" },\n  { $match: { \"u.age\": { $gte: 18 } } },\n  { $project: { _id: \"$u._id\" } },\n])"
+    mongo: "// Same bounded 2-hop traversal as Neighbours 2L, then joins users for the age filter:\ndb.users.aggregate([\n  { $match: { _id: seed } },\n  { $project: { visited: [\"$_id\"], frontier: [\"$_id\"], reached: [] } },\n  // Repeated 2x (once per hop): self-dedupe + cap newly-discovered nodes\n  { $lookup: { from: \"friend_edges\", localField: \"frontier\", foreignField: \"src\", as: \"_edges\" } },\n  { $project: { frontier: { $slice: [{ $setDifference: [\"$_edges.dst\", \"$visited\"] }, fanoutCap] } } },\n  { $project: { visited: { $setUnion: [\"$visited\", \"$frontier\"] }, reached: { $setUnion: [\"$reached\", \"$frontier\"] } } },\n  { $unwind: \"$frontier\" },\n  { $lookup: { from: \"users\", localField: \"frontier\", foreignField: \"_id\", as: \"u\" } },\n  { $unwind: \"$u\" },\n  { $match: { \"u.age\": { $gte: 18 } } },\n  { $project: { _id: \"$u._id\" } },\n])"
   },
   {
     name: "Neighbours 2L (Data)",
@@ -211,7 +211,7 @@ const QUERY_DESCRIPTIONS = [
     description: "Returns 2-hop full node payloads.",
     cypher: "MATCH (s:User {id: $id})-->()-->(n:User)\nRETURN n",
     postgres: "SELECT u.* FROM friend_edges fe1\nJOIN friend_edges fe2 ON fe2.src_id = fe1.dst_id\nJOIN users u ON u.id = fe2.dst_id\nWHERE fe1.src_id = $1",
-    mongo: "db.users.aggregate([\n  { $match: { _id: seed } },\n  { $graphLookup: { ..., maxDepth: 1, depthField: \"depth\" } },\n  { $unwind: \"$reachable\" },\n  { $match: { \"reachable.depth\": 1 } },\n  { $lookup: { from: \"users\", localField: \"reachable.dst\", foreignField: \"_id\", as: \"u\" } },\n  { $unwind: \"$u\" },\n  { $replaceRoot: { newRoot: \"$u\" } },\n])"
+    mongo: "// Bounded hop-by-hop traversal (replaces $graphLookup, which OOMs on hub vertices):\ndb.users.aggregate([\n  { $match: { _id: seed } },\n  { $project: { visited: [\"$_id\"], frontier: [\"$_id\"], reached: [] } },\n  // Repeated 2x (once per hop): self-dedupe + cap newly-discovered nodes\n  { $lookup: { from: \"friend_edges\", localField: \"frontier\", foreignField: \"src\", as: \"_edges\" } },\n  { $project: { frontier: { $slice: [{ $setDifference: [\"$_edges.dst\", \"$visited\"] }, fanoutCap] } } },\n  { $project: { visited: { $setUnion: [\"$visited\", \"$frontier\"] }, reached: { $setUnion: [\"$reached\", \"$frontier\"] } } },\n  { $unwind: \"$frontier\" },\n  { $lookup: { from: \"users\", localField: \"frontier\", foreignField: \"_id\", as: \"u\" } },\n  { $unwind: \"$u\" },\n  { $replaceRoot: { newRoot: \"$u\" } },\n])"
   },
   {
     name: "Neighbours 2L (Data + Filter)",
@@ -220,7 +220,7 @@ const QUERY_DESCRIPTIONS = [
     description: "Returns 2-hop node payloads with age filter.",
     cypher: "MATCH (s:User {id: $id})-->()-->(n:User)\nWHERE n.age >= 18\nRETURN n",
     postgres: "SELECT u.* FROM friend_edges fe1\nJOIN friend_edges fe2 ON fe2.src_id = fe1.dst_id\nJOIN users u ON u.id = fe2.dst_id\nWHERE fe1.src_id = $1 AND u.age >= 18",
-    mongo: "db.users.aggregate([\n  { $match: { _id: seed } },\n  { $graphLookup: { ..., maxDepth: 1, depthField: \"depth\" } },\n  { $unwind: \"$reachable\" },\n  { $match: { \"reachable.depth\": 1 } },\n  { $lookup: { from: \"users\", localField: \"reachable.dst\", foreignField: \"_id\", as: \"u\" } },\n  { $unwind: \"$u\" },\n  { $match: { \"u.age\": { $gte: 18 } } },\n  { $replaceRoot: { newRoot: \"$u\" } },\n])"
+    mongo: "// Same bounded 2-hop traversal as Neighbours 2L (Data), plus an age filter before replaceRoot:\ndb.users.aggregate([\n  { $match: { _id: seed } },\n  { $project: { visited: [\"$_id\"], frontier: [\"$_id\"], reached: [] } },\n  // Repeated 2x (once per hop): self-dedupe + cap newly-discovered nodes\n  { $lookup: { from: \"friend_edges\", localField: \"frontier\", foreignField: \"src\", as: \"_edges\" } },\n  { $project: { frontier: { $slice: [{ $setDifference: [\"$_edges.dst\", \"$visited\"] }, fanoutCap] } } },\n  { $project: { visited: { $setUnion: [\"$visited\", \"$frontier\"] }, reached: { $setUnion: [\"$reached\", \"$frontier\"] } } },\n  { $unwind: \"$frontier\" },\n  { $lookup: { from: \"users\", localField: \"frontier\", foreignField: \"_id\", as: \"u\" } },\n  { $unwind: \"$u\" },\n  { $match: { \"u.age\": { $gte: 18 } } },\n  { $replaceRoot: { newRoot: \"$u\" } },\n])"
   },
   {
     name: "Shortest Path",
@@ -252,8 +252,8 @@ const QUERY_DESCRIPTIONS = [
     tigergraph: "CREATE OR REPLACE QUERY pattern_long(VERTEX<User> id) FOR GRAPH benchmark_graph {\n  Start = {id};\n  Hop1 = SELECT t FROM Start:s -(Friend:e1)-> User:t;\n  Hop2 = SELECT t FROM Hop1:s -(Friend:e2)-> User:t;\n  Hop3 = SELECT t FROM Hop2:s -(Friend:e3)-> User:t;\n  Result = SELECT t FROM Hop3:s -(Friend:e4)-> User:t;\n  PRINT Result;\n}",
     description: "Longer pattern expansion (4 hops).",
     cypher: "MATCH (a:User {id: $id})-->()-->()-->()-->(b:User)\nRETURN a.id, b.id",
-    postgres: "SELECT $1::int AS a_id, e4.dst_id AS b_id\nFROM friend_edges e1\nJOIN friend_edges e2 ON e2.src_id = e1.dst_id\nJOIN friend_edges e3 ON e3.src_id = e2.dst_id\nJOIN friend_edges e4 ON e4.src_id = e3.dst_id\nWHERE e1.src_id = $1",
-    mongo: "db.users.aggregate([\n  { $match: { _id: seed } },\n  { $graphLookup: { ..., maxDepth: 3, depthField: \"depth\" } },\n  { $unwind: \"$reachable\" },\n  { $match: { \"reachable.depth\": 3 } },\n  { $project: { a_id: seed, b_id: \"$reachable.dst\" } },\n])"
+    postgres: "-- Bounded recursive CTE (replaces a plain 4-way self-join with no dedup at all, which\n-- measured ~30s and 165M rows from the dataset's top hub vertex). Same shape as Expand 4L.\nWITH RECURSIVE hops(id, depth) AS (\n  SELECT dst_id, 1 FROM friend_edges WHERE src_id = $1\n  UNION\n  SELECT * FROM (\n    SELECT DISTINCT fe.dst_id AS id, hops.depth + 1 AS depth\n    FROM hops JOIN friend_edges fe ON fe.src_id = hops.id\n    WHERE hops.depth < 4\n    LIMIT $2::int\n  ) AS capped_step\n)\nSELECT $1::int AS a_id, id AS b_id FROM hops WHERE depth = 4",
+    mongo: "// Bounded hop-by-hop traversal (replaces $graphLookup, which OOMs on hub vertices):\ndb.users.aggregate([\n  { $match: { _id: seed } },\n  { $project: { visited: [\"$_id\"], frontier: [\"$_id\"], reached: [] } },\n  // Repeated 4x (once per hop): self-dedupe + cap newly-discovered nodes\n  { $lookup: { from: \"friend_edges\", localField: \"frontier\", foreignField: \"src\", as: \"_edges\" } },\n  { $project: { frontier: { $slice: [{ $setDifference: [\"$_edges.dst\", \"$visited\"] }, fanoutCap] } } },\n  { $project: { visited: { $setUnion: [\"$visited\", \"$frontier\"] }, reached: { $setUnion: [\"$reached\", \"$frontier\"] } } },\n  { $unwind: \"$frontier\" },\n  { $project: { a_id: seed, b_id: \"$frontier\" } },\n])"
   },
   {
     name: "Pattern Short",
@@ -262,7 +262,7 @@ const QUERY_DESCRIPTIONS = [
     description: "Short pattern expansion (2 hops).",
     cypher: "MATCH (a:User {id: $id})-->()-->(b:User)\nRETURN a.id, b.id",
     postgres: "SELECT $1::int AS a_id, e2.dst_id AS b_id\nFROM friend_edges e1\nJOIN friend_edges e2 ON e2.src_id = e1.dst_id\nWHERE e1.src_id = $1",
-    mongo: "db.users.aggregate([\n  { $match: { _id: seed } },\n  { $graphLookup: { ..., maxDepth: 1, depthField: \"depth\" } },\n  { $unwind: \"$reachable\" },\n  { $match: { \"reachable.depth\": 1 } },\n  { $project: { a_id: seed, b_id: \"$reachable.dst\" } },\n])"
+    mongo: "// Bounded hop-by-hop traversal (replaces $graphLookup, which OOMs on hub vertices):\ndb.users.aggregate([\n  { $match: { _id: seed } },\n  { $project: { visited: [\"$_id\"], frontier: [\"$_id\"], reached: [] } },\n  // Repeated 2x (once per hop): self-dedupe + cap newly-discovered nodes\n  { $lookup: { from: \"friend_edges\", localField: \"frontier\", foreignField: \"src\", as: \"_edges\" } },\n  { $project: { frontier: { $slice: [{ $setDifference: [\"$_edges.dst\", \"$visited\"] }, fanoutCap] } } },\n  { $project: { visited: { $setUnion: [\"$visited\", \"$frontier\"] }, reached: { $setUnion: [\"$reached\", \"$frontier\"] } } },\n  { $unwind: \"$frontier\" },\n  { $project: { a_id: seed, b_id: \"$frontier\" } },\n])"
   },
   {
     name: "Vertex on Label + Property",
@@ -334,7 +334,7 @@ const QUERY_DESCRIPTIONS = [
     description: "Variable-length expansion (1..2 hops).",
     cypher: "MATCH (a:User {id: $id})-[*1..2]->(b:User)\nRETURN b.id",
     postgres: "WITH RECURSIVE vlf(id, depth) AS (\n  SELECT dst_id, 1 FROM friend_edges WHERE src_id = $1\n  UNION\n  SELECT fe.dst_id, vlf.depth + 1\n  FROM vlf JOIN friend_edges fe ON fe.src_id = vlf.id\n  WHERE vlf.depth < 2\n)\nSELECT DISTINCT id FROM vlf",
-    mongo: "db.users.aggregate([\n  { $match: { _id: seed } },\n  { $graphLookup: { ..., maxDepth: 1, depthField: \"depth\" } },\n  { $unwind: \"$reachable\" },\n  { $group: { _id: \"$reachable.dst\" } },\n])"
+    mongo: "// Bounded hop-by-hop traversal (replaces $graphLookup, which OOMs on hub vertices). Unwinds\n// `reached` (union of every hop's frontier = nodes 1..hops away) instead of `frontier`\n// (exactly-hops-away nodes) to get the variable-length union semantics:\ndb.users.aggregate([\n  { $match: { _id: seed } },\n  { $project: { visited: [\"$_id\"], frontier: [\"$_id\"], reached: [] } },\n  // Repeated 2x (once per hop): self-dedupe + cap newly-discovered nodes\n  { $lookup: { from: \"friend_edges\", localField: \"frontier\", foreignField: \"src\", as: \"_edges\" } },\n  { $project: { frontier: { $slice: [{ $setDifference: [\"$_edges.dst\", \"$visited\"] }, fanoutCap] } } },\n  { $project: { visited: { $setUnion: [\"$visited\", \"$frontier\"] }, reached: { $setUnion: [\"$reached\", \"$frontier\"] } } },\n  { $unwind: \"$reached\" },\n  { $group: { _id: \"$reached\" } },\n])"
   },
   {
     name: "Optional Friend",
@@ -432,7 +432,7 @@ const QUERY_DESCRIPTIONS = [
     tigergraph: "// Bounded to 4 hops, mirroring the Cypher/Postgres depth<4 cutoff.\nCREATE OR REPLACE QUERY all_shortest_paths_len(VERTEX<User> from_id, VERTEX<User> to_id) FOR GRAPH benchmark_graph {\n  OrAccum @visited = false;\n  SumAccum<INT> @dist = 0;\n  MinAccum<INT> @@result_len = -1;\n  INT max_hops = 4;\n  INT hop = 0;\n\n  Frontier = {from_id};\n  Frontier = SELECT s FROM Frontier:s ACCUM s.@visited = true, s.@dist = 0;\n\n  WHILE Frontier.size() > 0 AND hop < max_hops AND @@result_len == -1 DO\n    Frontier = SELECT t FROM Frontier:s -(Friend:e)-> User:t\n               WHERE t.@visited == false\n               ACCUM t.@dist = s.@dist + 1\n               POST-ACCUM\n                 t.@visited = true,\n                 CASE WHEN t == to_id THEN @@result_len = t.@dist END;\n    hop = hop + 1;\n  END;\n\n  PRINT @@result_len AS length;\n}",
     description: "allShortestPaths coverage with vendor-specific syntax.",
     cypher: "// FalkorDB:\nMATCH (s:User {id: $from}), (t:User {id: $to})\nWITH s, t\nMATCH p = allShortestPaths((s)-[:Friend*1..4]->(t))\nRETURN length(p)\n\n// Neo4j:\nMATCH (s:User {id: $from}), (t:User {id: $to})\nMATCH p = allShortestPaths((s)-[:Friend*1..4]->(t))\nRETURN length(p)\n\n// Memgraph:\nMATCH p = (:User {id: $from})-[*BFS]->(:User {id: $to})\nRETURN length(p)",
-    postgres: "-- Postgres-only: bounded (depth <= 4) path-array recursive CTE with explicit\n-- cycle-avoidance, approximating allShortestPaths. No Mongo equivalent since\n-- $graphLookup can't enumerate distinct paths.\nWITH RECURSIVE paths(id, depth, path) AS (\n  SELECT $1::int, 0, ARRAY[$1::int]\n  UNION ALL\n  SELECT fe.dst_id, p.depth + 1, p.path || fe.dst_id\n  FROM paths p JOIN friend_edges fe ON fe.src_id = p.id\n  WHERE p.depth < 4 AND NOT (fe.dst_id = ANY(p.path))\n)\nSELECT min(depth) AS length FROM paths WHERE id = $2"
+    postgres: "-- Bounded UNION-deduped BFS (replaces a path-array + cycle-check recursive CTE that\n-- measured ~43.5s despite only ever selecting min(depth) and discarding the path array). No\n-- Mongo equivalent since $graphLookup can't enumerate distinct paths. Same shape as Shortest\n-- Path, with an added per-hop fan-out cap ($3).\nWITH RECURSIVE bfs(id, depth) AS (\n  SELECT $1::int, 0\n  UNION\n  SELECT * FROM (\n    SELECT DISTINCT fe.dst_id AS id, bfs.depth + 1 AS depth\n    FROM bfs JOIN friend_edges fe ON fe.src_id = bfs.id\n    WHERE bfs.depth < 4\n    LIMIT $3::int\n  ) AS capped_step\n)\nSELECT min(depth) AS length FROM bfs WHERE id = $2"
   },
   {
     name: "Var-Length with Edge Filter",
@@ -441,7 +441,7 @@ const QUERY_DESCRIPTIONS = [
     description: "Variable-length traversal with edge property filtering.",
     cypher: "// FalkorDB:\nMATCH (s:User {id: $id})-[r:Friend*1..3]->(t:User)\nWHERE r.bench_capacity >= $min_capacity\nRETURN count(t)\n\n// Neo4j / Memgraph:\nMATCH (s:User {id: $id})-[r:Friend*1..3]->(t:User)\nWHERE all(rel IN r WHERE rel.bench_capacity >= $min_capacity)\nRETURN count(t)",
     postgres: "WITH RECURSIVE vlf(id, depth) AS (\n  SELECT dst_id, 1 FROM friend_edges WHERE src_id = $1 AND bench_capacity >= $2\n  UNION\n  SELECT fe.dst_id, vlf.depth + 1\n  FROM vlf JOIN friend_edges fe ON fe.src_id = vlf.id\n  WHERE vlf.depth < 3 AND fe.bench_capacity >= $2\n)\nSELECT count(DISTINCT id) AS cnt FROM vlf",
-    mongo: "db.users.aggregate([\n  { $match: { _id: seed } },\n  { $graphLookup: {\n      ..., maxDepth: 2, depthField: \"depth\",\n      restrictSearchWithMatch: { bench_capacity: { $gte: minCapacity } },\n  } },\n  { $unwind: \"$reachable\" },\n  { $group: { _id: \"$reachable.dst\" } },\n  { $count: \"cnt\" },\n])"
+    mongo: "// Bounded hop-by-hop traversal restricted to edges matching the capacity filter (replaces\n// $graphLookup's restrictSearchWithMatch, which suffers the same OOM risk on hub vertices).\n// Each hop's $lookup applies a `pipeline` filter on friend_edges so only qualifying edges\n// expand the frontier:\ndb.users.aggregate([\n  { $match: { _id: seed } },\n  { $project: { visited: [\"$_id\"], frontier: [\"$_id\"], reached: [] } },\n  // Repeated 3x (once per hop): self-dedupe + cap newly-discovered nodes\n  { $lookup: {\n      from: \"friend_edges\", localField: \"frontier\", foreignField: \"src\", as: \"_edges\",\n      pipeline: [ { $match: { bench_capacity: { $gte: minCapacity } } } ],\n  } },\n  { $project: { frontier: { $slice: [{ $setDifference: [\"$_edges.dst\", \"$visited\"] }, fanoutCap] } } },\n  { $project: { visited: { $setUnion: [\"$visited\", \"$frontier\"] }, reached: { $setUnion: [\"$reached\", \"$frontier\"] } } },\n  { $unwind: \"$reached\" },\n  { $group: { _id: \"$reached\" } },\n  { $count: \"cnt\" },\n])"
   },
   {
     name: "Exact 5-Hop Traverse Count",
@@ -450,7 +450,7 @@ const QUERY_DESCRIPTIONS = [
     description: "Fixed-depth 5-hop traversal count for deeper expansion profiling.",
     cypher: "MATCH (s:User {id: $id})-[:Friend*5..5]->(t:User)\nRETURN count(t) AS cnt",
     postgres: "WITH RECURSIVE hops(id, depth) AS (\n  SELECT dst_id, 1 FROM friend_edges WHERE src_id = $1\n  UNION\n  SELECT fe.dst_id, hops.depth + 1\n  FROM hops JOIN friend_edges fe ON fe.src_id = hops.id\n  WHERE hops.depth < 5\n)\nSELECT count(*) AS cnt FROM hops WHERE depth = 5",
-    mongo: "db.users.aggregate([\n  { $match: { _id: seed } },\n  { $graphLookup: { ..., maxDepth: 4, depthField: \"depth\" } },\n  { $unwind: \"$reachable\" },\n  { $match: { \"reachable.depth\": 4 } },\n  { $count: \"cnt\" },\n])"
+    mongo: "// Bounded hop-by-hop traversal (replaces $graphLookup, which OOMs on hub vertices):\ndb.users.aggregate([\n  { $match: { _id: seed } },\n  { $project: { visited: [\"$_id\"], frontier: [\"$_id\"], reached: [] } },\n  // Repeated 5x (once per hop): self-dedupe + cap newly-discovered nodes\n  { $lookup: { from: \"friend_edges\", localField: \"frontier\", foreignField: \"src\", as: \"_edges\" } },\n  { $project: { frontier: { $slice: [{ $setDifference: [\"$_edges.dst\", \"$visited\"] }, fanoutCap] } } },\n  { $project: { visited: { $setUnion: [\"$visited\", \"$frontier\"] }, reached: { $setUnion: [\"$reached\", \"$frontier\"] } } },\n  { $unwind: \"$frontier\" },\n  { $count: \"cnt\" },\n])"
   },
   {
     name: "Exact 6-Hop Traverse Count",
@@ -459,7 +459,7 @@ const QUERY_DESCRIPTIONS = [
     description: "Fixed-depth 6-hop traversal count for depth scaling analysis.",
     cypher: "MATCH (s:User {id: $id})-[:Friend*6..6]->(t:User)\nRETURN count(t) AS cnt",
     postgres: "WITH RECURSIVE hops(id, depth) AS (\n  SELECT dst_id, 1 FROM friend_edges WHERE src_id = $1\n  UNION\n  SELECT fe.dst_id, hops.depth + 1\n  FROM hops JOIN friend_edges fe ON fe.src_id = hops.id\n  WHERE hops.depth < 6\n)\nSELECT count(*) AS cnt FROM hops WHERE depth = 6",
-    mongo: "db.users.aggregate([\n  { $match: { _id: seed } },\n  { $graphLookup: { ..., maxDepth: 5, depthField: \"depth\" } },\n  { $unwind: \"$reachable\" },\n  { $match: { \"reachable.depth\": 5 } },\n  { $count: \"cnt\" },\n])"
+    mongo: "// Bounded hop-by-hop traversal (replaces $graphLookup, which OOMs on hub vertices):\ndb.users.aggregate([\n  { $match: { _id: seed } },\n  { $project: { visited: [\"$_id\"], frontier: [\"$_id\"], reached: [] } },\n  // Repeated 6x (once per hop): self-dedupe + cap newly-discovered nodes\n  { $lookup: { from: \"friend_edges\", localField: \"frontier\", foreignField: \"src\", as: \"_edges\" } },\n  { $project: { frontier: { $slice: [{ $setDifference: [\"$_edges.dst\", \"$visited\"] }, fanoutCap] } } },\n  { $project: { visited: { $setUnion: [\"$visited\", \"$frontier\"] }, reached: { $setUnion: [\"$reached\", \"$frontier\"] } } },\n  { $unwind: \"$frontier\" },\n  { $count: \"cnt\" },\n])"
   },
   {
     name: "Count Users (Plain)",
@@ -677,6 +677,22 @@ export function NavMain({
     return true;
   });
 
+  const openQueryExplanationsInNewTab = () => {
+    const sections = [...QUERY_DESCRIPTIONS]
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .map((q) => {
+        const parts = [`${q.name} (${q.id})`, q.description, "", "Cypher:", q.cypher];
+        if (q.postgres) parts.push("", "Postgres:", q.postgres);
+        if (q.mongo) parts.push("", "Mongo:", q.mongo);
+        if (q.tigergraph) parts.push("", "TigerGraph:", q.tigergraph);
+        return parts.join("\n");
+      });
+    const text = sections.join("\n\n" + "-".repeat(80) + "\n\n");
+    const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    window.open(url, "_blank", "noopener,noreferrer");
+  };
+
   return (
     <SidebarMenu>
       {datasetSummary && (
@@ -777,9 +793,20 @@ export function NavMain({
                       </span>
                     </HoverCardTrigger>
                     <HoverCardContent className="bg-gray-100 text-gray-800 p-4 rounded-md shadow-xl w-[480px] max-w-[90vw] max-h-[450px] overflow-y-auto font-space">
-                      <h3 className="text-sm font-bold border-b border-gray-200 pb-2 mb-3 text-gray-900">
-                        Query Explanations &amp; Samples
-                      </h3>
+                      <div className="flex items-center justify-between gap-2 border-b border-gray-200 pb-2 mb-3">
+                        <h3 className="text-sm font-bold text-gray-900">
+                          Query Explanations &amp; Samples
+                        </h3>
+                        <button
+                          type="button"
+                          onClick={openQueryExplanationsInNewTab}
+                          className="flex items-center gap-1 text-[11px] font-semibold text-gray-600 hover:text-gray-900 shrink-0 cursor-pointer"
+                          title="Open in a new browser tab"
+                        >
+                          <ExternalLink className="w-3.5 h-3.5" />
+                          Open in new tab
+                        </button>
+                      </div>
                       <div className="flex flex-col gap-4">
                         {[...QUERY_DESCRIPTIONS].sort((a, b) => a.name.localeCompare(b.name)).map((q) => (
                           <div key={q.id} className="text-xs border-b border-gray-200/60 pb-3 last:border-0 last:pb-0 text-left">

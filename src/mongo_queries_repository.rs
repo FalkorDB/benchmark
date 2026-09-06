@@ -165,49 +165,106 @@ impl MongoQueriesRepositoryBuilder {
     }
 }
 
-/// Traverse `friend_edges` starting from `seed`, following `src -> dst` edges up to `max_depth`
-/// recursive hops (depth 0 = direct edges out of `seed`). Mirrors the shape of a Cypher
-/// `(seed)-->()...-->(n)` chain, using `$graphLookup`'s BFS-like traversal.
-fn graph_lookup_stage(
-    max_depth: i32,
-    restrict_with_match: Option<Document>,
-) -> Document {
-    let mut stage = doc! {
-        "from": "friend_edges",
-        "startWith": "$_id",
-        "connectFromField": "dst",
-        "connectToField": "src",
-        "as": "reachable",
-        "maxDepth": max_depth,
-        "depthField": "depth",
-    };
-    if let Some(restrict) = restrict_with_match {
-        stage.insert("restrictSearchWithMatch", restrict);
-    }
-    doc! { "$graphLookup": stage }
+/// Per-hop cap on the number of newly-discovered nodes considered when expanding the traversal
+/// frontier (see `bounded_traversal_stages`). MongoDB's `$graphLookup` accumulates every matched
+/// edge *document* along every traversal path without deduplicating the frontier between hops;
+/// on this dataset's small-world graph (max out-degree in the thousands) that grows
+/// combinatorially and reliably exceeds `$graphLookup`'s fixed, non-spillable memory limit
+/// (`Location40099: $graphLookup reached maximum memory consumption`) within 2-3 hops, even from
+/// non-hub seeds. `bounded_traversal_stages` below replaces `$graphLookup` with an explicit,
+/// self-deduplicating hop-by-hop expansion whose output is capped to at most
+/// `hops * fanout_cap` nodes, bounding memory regardless of vertex degree. Override via
+/// `MONGO_GRAPH_FANOUT_CAP` for experimentation.
+fn mongo_graph_fanout_cap() -> i64 {
+    const DEFAULT_FANOUT_CAP: i64 = 5000;
+    std::env::var("MONGO_GRAPH_FANOUT_CAP")
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(DEFAULT_FANOUT_CAP)
 }
 
-/// Expansion pipeline: from `seed`, follow exactly `hops` edges (`hops - 1` recursive
-/// `$graphLookup` steps), optionally joining back to `users` to apply an `age >= 18` filter.
-/// Mirrors `aggregate_expansion_N[_with_filter]` / `neighbours_2[_with_filter]`.
+/// Builds the aggregation stages that compute, from the pipeline's current document's `_id`,
+/// the set of nodes reachable by following `friend_edges` (`src -> dst`) for exactly `hops`
+/// steps. Unlike `$graphLookup`, the frontier is explicitly deduplicated (via `$setUnion` /
+/// `$setDifference`) and capped to `fanout_cap` newly-discovered nodes after every hop, so
+/// output size is bounded by `hops * fanout_cap` instead of growing combinatorially with vertex
+/// degree. Leaves two array fields on a single working document:
+/// - `frontier`: exactly the nodes reached after the final hop (mirrors the previous
+///   `$graphLookup` + `$match { depth: hops - 1 }` "exactly N hops away" semantics).
+/// - `reached`: the union of every hop's frontier (mirrors the previous `$graphLookup` (no depth
+///   filter) "1..hops hops away" semantics used by `var_len_friends`).
+///
+/// Callers typically follow with `$unwind` on whichever field they need.
+fn bounded_traversal_stages(hops: i32) -> Vec<Document> {
+    bounded_traversal_stages_with_edge_filter(hops, None)
+}
+
+/// Like `bounded_traversal_stages`, but additionally restricts which `friend_edges` documents
+/// may be traversed via `edge_filter` (mirrors `$graphLookup`'s `restrictSearchWithMatch`).
+/// Combining `localField`/`foreignField` with a `pipeline` filter still lets `$lookup` use the
+/// `src` index for the join itself (supported since MongoDB 5.1) while filtering the matched
+/// edges further.
+fn bounded_traversal_stages_with_edge_filter(
+    hops: i32,
+    edge_filter: Option<Document>,
+) -> Vec<Document> {
+    let fanout_cap = mongo_graph_fanout_cap();
+    let mut stages = vec![doc! {
+        "$project": { "visited": ["$_id"], "frontier": ["$_id"], "reached": [] }
+    }];
+    for _ in 0..hops {
+        let mut lookup = doc! {
+            "from": "friend_edges",
+            "localField": "frontier",
+            "foreignField": "src",
+            "as": "_edges",
+        };
+        if let Some(ref filter) = edge_filter {
+            lookup.insert("pipeline", vec![doc! { "$match": filter.clone() }]);
+        }
+        stages.push(doc! { "$lookup": lookup });
+        stages.push(doc! {
+            "$project": {
+                "visited": 1,
+                "reached": 1,
+                "frontier": {
+                    "$slice": [
+                        { "$setDifference": [ { "$ifNull": ["$_edges.dst", []] }, "$visited" ] },
+                        fanout_cap,
+                    ]
+                },
+            }
+        });
+        stages.push(doc! {
+            "$project": {
+                "frontier": 1,
+                "visited": { "$setUnion": ["$visited", "$frontier"] },
+                "reached": { "$setUnion": ["$reached", "$frontier"] },
+            }
+        });
+    }
+    stages
+}
+
+/// Expansion pipeline: from `seed`, follow exactly `hops` edges via `bounded_traversal_stages`,
+/// optionally joining back to `users` to apply an `age >= 18` filter. Mirrors
+/// `aggregate_expansion_N[_with_filter]` / `neighbours_2[_with_filter]`.
 fn expansion_pipeline(
     seed: i32,
     hops: i32,
     with_filter: bool,
     distinct: bool,
 ) -> Vec<Document> {
-    let mut pipeline = vec![
-        doc! { "$match": { "_id": seed } },
-        graph_lookup_stage(hops - 1, None),
-        doc! { "$unwind": "$reachable" },
-        doc! { "$match": { "reachable.depth": hops - 1 } },
-    ];
+    let mut pipeline = vec![doc! { "$match": { "_id": seed } }];
+    pipeline.extend(bounded_traversal_stages(hops));
+    pipeline.push(doc! { "$unwind": "$frontier" });
 
     if with_filter {
         pipeline.push(doc! {
             "$lookup": {
                 "from": "users",
-                "localField": "reachable.dst",
+                "localField": "frontier",
                 "foreignField": "_id",
                 "as": "u",
             }
@@ -216,7 +273,7 @@ fn expansion_pipeline(
         pipeline.push(doc! { "$match": { "u.age": { "$gte": 18 } } });
         pipeline.push(doc! { "$project": { "_id": "$u._id" } });
     } else {
-        pipeline.push(doc! { "$project": { "_id": "$reachable.dst" } });
+        pipeline.push(doc! { "$project": { "_id": "$frontier" } });
     }
 
     if distinct {
@@ -231,21 +288,18 @@ fn expansion_with_data_pipeline(
     hops: i32,
     with_filter: bool,
 ) -> Vec<Document> {
-    let mut pipeline = vec![
-        doc! { "$match": { "_id": seed } },
-        graph_lookup_stage(hops - 1, None),
-        doc! { "$unwind": "$reachable" },
-        doc! { "$match": { "reachable.depth": hops - 1 } },
-        doc! {
-            "$lookup": {
-                "from": "users",
-                "localField": "reachable.dst",
-                "foreignField": "_id",
-                "as": "u",
-            }
-        },
-        doc! { "$unwind": "$u" },
-    ];
+    let mut pipeline = vec![doc! { "$match": { "_id": seed } }];
+    pipeline.extend(bounded_traversal_stages(hops));
+    pipeline.push(doc! { "$unwind": "$frontier" });
+    pipeline.push(doc! {
+        "$lookup": {
+            "from": "users",
+            "localField": "frontier",
+            "foreignField": "_id",
+            "as": "u",
+        }
+    });
+    pipeline.push(doc! { "$unwind": "$u" });
     if with_filter {
         pipeline.push(doc! { "$match": { "u.age": { "$gte": 18 } } });
     }
@@ -465,28 +519,28 @@ impl MongoUsersQueriesRepository {
             })
             .add_query("pattern_long", QueryType::Read, |random| {
                 let seed = random.random_vertex();
+                let mut pipeline = vec![doc! { "$match": { "_id": seed } }];
+                // Previously $graphLookup(maxDepth: 3) + $match{depth: 3} = nodes exactly 4 edges
+                // away.
+                pipeline.extend(bounded_traversal_stages(4));
+                pipeline.push(doc! { "$unwind": "$frontier" });
+                pipeline.push(doc! { "$project": { "a_id": seed, "b_id": "$frontier" } });
                 MongoOperation::Aggregate {
                     collection: "users".to_string(),
-                    pipeline: vec![
-                        doc! { "$match": { "_id": seed } },
-                        graph_lookup_stage(3, None),
-                        doc! { "$unwind": "$reachable" },
-                        doc! { "$match": { "reachable.depth": 3 } },
-                        doc! { "$project": { "a_id": seed, "b_id": "$reachable.dst" } },
-                    ],
+                    pipeline,
                 }
             })
             .add_query("pattern_short", QueryType::Read, |random| {
                 let seed = random.random_vertex();
+                let mut pipeline = vec![doc! { "$match": { "_id": seed } }];
+                // Previously $graphLookup(maxDepth: 1) + $match{depth: 1} = nodes exactly 2 edges
+                // away.
+                pipeline.extend(bounded_traversal_stages(2));
+                pipeline.push(doc! { "$unwind": "$frontier" });
+                pipeline.push(doc! { "$project": { "a_id": seed, "b_id": "$frontier" } });
                 MongoOperation::Aggregate {
                     collection: "users".to_string(),
-                    pipeline: vec![
-                        doc! { "$match": { "_id": seed } },
-                        graph_lookup_stage(1, None),
-                        doc! { "$unwind": "$reachable" },
-                        doc! { "$match": { "reachable.depth": 1 } },
-                        doc! { "$project": { "a_id": seed, "b_id": "$reachable.dst" } },
-                    ],
+                    pipeline,
                 }
             })
             .add_query("vertex_on_label_property", QueryType::Read, |random| {
@@ -562,14 +616,15 @@ impl MongoUsersQueriesRepository {
             })
             .add_query("var_len_friends", QueryType::Read, |random| {
                 let seed = random.random_vertex();
+                let mut pipeline = vec![doc! { "$match": { "_id": seed } }];
+                // Previously $graphLookup(maxDepth: 1), no depth filter = union of nodes 1-2 edges
+                // away (variable-length 1..2 hop friends).
+                pipeline.extend(bounded_traversal_stages(2));
+                pipeline.push(doc! { "$unwind": "$reached" });
+                pipeline.push(doc! { "$group": { "_id": "$reached" } });
                 MongoOperation::Aggregate {
                     collection: "users".to_string(),
-                    pipeline: vec![
-                        doc! { "$match": { "_id": seed } },
-                        graph_lookup_stage(1, None),
-                        doc! { "$unwind": "$reachable" },
-                        doc! { "$group": { "_id": "$reachable.dst" } },
-                    ],
+                    pipeline,
                 }
             })
             .add_query("optional_friend", QueryType::Read, |random| {
@@ -703,15 +758,19 @@ impl MongoUsersQueriesRepository {
             })
             .add_query("var_len_with_edge_where_filter", QueryType::Read, |random| {
                 let seed = random.random_vertex();
+                let mut pipeline = vec![doc! { "$match": { "_id": seed } }];
+                // Previously $graphLookup(maxDepth: 2, restrictSearchWithMatch), no depth filter
+                // = union of nodes 1-3 edges away reached only via edges matching the filter.
+                pipeline.extend(bounded_traversal_stages_with_edge_filter(
+                    3,
+                    Some(doc! { "bench_capacity": { "$gte": 1 } }),
+                ));
+                pipeline.push(doc! { "$unwind": "$reached" });
+                pipeline.push(doc! { "$group": { "_id": "$reached" } });
+                pipeline.push(doc! { "$count": "cnt" });
                 MongoOperation::Aggregate {
                     collection: "users".to_string(),
-                    pipeline: vec![
-                        doc! { "$match": { "_id": seed } },
-                        graph_lookup_stage(2, Some(doc! { "bench_capacity": { "$gte": 1 } })),
-                        doc! { "$unwind": "$reachable" },
-                        doc! { "$group": { "_id": "$reachable.dst" } },
-                        doc! { "$count": "cnt" },
-                    ],
+                    pipeline,
                 }
             })
             .add_query("count_users_plain", QueryType::Read, |_random| {
@@ -748,28 +807,28 @@ impl MongoUsersQueriesRepository {
             builder = builder
                 .add_query("exact_5_hop_traverse_count", QueryType::Read, |random| {
                     let seed = random.random_vertex();
+                    let mut pipeline = vec![doc! { "$match": { "_id": seed } }];
+                    // Previously $graphLookup(maxDepth: 4) + $match{depth: 4} = nodes exactly 5
+                    // edges away.
+                    pipeline.extend(bounded_traversal_stages(5));
+                    pipeline.push(doc! { "$unwind": "$frontier" });
+                    pipeline.push(doc! { "$count": "cnt" });
                     MongoOperation::Aggregate {
                         collection: "users".to_string(),
-                        pipeline: vec![
-                            doc! { "$match": { "_id": seed } },
-                            graph_lookup_stage(4, None),
-                            doc! { "$unwind": "$reachable" },
-                            doc! { "$match": { "reachable.depth": 4 } },
-                            doc! { "$count": "cnt" },
-                        ],
+                        pipeline,
                     }
                 })
                 .add_query("exact_6_hop_traverse_count", QueryType::Read, |random| {
                     let seed = random.random_vertex();
+                    let mut pipeline = vec![doc! { "$match": { "_id": seed } }];
+                    // Previously $graphLookup(maxDepth: 5) + $match{depth: 5} = nodes exactly 6
+                    // edges away.
+                    pipeline.extend(bounded_traversal_stages(6));
+                    pipeline.push(doc! { "$unwind": "$frontier" });
+                    pipeline.push(doc! { "$count": "cnt" });
                     MongoOperation::Aggregate {
                         collection: "users".to_string(),
-                        pipeline: vec![
-                            doc! { "$match": { "_id": seed } },
-                            graph_lookup_stage(5, None),
-                            doc! { "$unwind": "$reachable" },
-                            doc! { "$match": { "reachable.depth": 5 } },
-                            doc! { "$count": "cnt" },
-                        ],
+                        pipeline,
                     }
                 })
                 .add_query("temporal_spatial_roundtrip", QueryType::Read, |_random| {
