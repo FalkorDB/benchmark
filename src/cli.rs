@@ -335,6 +335,28 @@ pub enum Commands {
         )]
         name: String,
     },
+
+    #[command(
+        about = "Run each generated Mongo query type once against a Mongo endpoint to detect failing queries"
+    )]
+    DebugMongoQueries {
+        #[arg(short, long, value_enum)]
+        dataset: crate::scenario::Size,
+        #[arg(
+            short,
+            long,
+            help = "endpoint for external Mongo (e.g., mongodb://127.0.0.1:27017)",
+            required = true
+        )]
+        endpoint: String,
+        #[arg(
+            short,
+            long,
+            default_value = "small-readonly-mongo",
+            help = "name of json file to load the generated Mongo queries from"
+        )]
+        name: String,
+    },
 }
 
 fn parse_write_ratio(val: &str) -> Result<f32, String> {

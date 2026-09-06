@@ -30,6 +30,17 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 #  QUERIES_COUNT (default: 20000)
 #  WRITE_RATIO   (default: 0.03)
 #  FALKOR_QUERY_TIMEOUT_MS (default: 900000)
+#  MONGO_QUERY_TIMEOUT_MS (default: 30000)
+#    Lower than Falkor's: bounded-traversal Mongo queries (see mongo_queries_repository.rs)
+#    should complete in well under a second; a short timeout fails pathological queries fast
+#    instead of tying up a worker for minutes.
+#  MONGO_GRAPH_FANOUT_CAP (default: 5000)
+#    Per-hop cap on newly-discovered nodes for Mongo's multi-hop traversal queries; bounds
+#    output size against high-degree hub vertices. See mongo_queries_repository.rs.
+#  POSTGRES_GRAPH_FANOUT_CAP (default: dataset vertex count)
+#    Per-hop cap for Postgres's bounded recursive-CTE traversal queries (aggregate_expansion_3/4,
+#    pattern_long, all_shortest_paths_len). Defaults to the dataset's vertex count so it never
+#    truncates a legitimately reachable node. See postgres_queries_repository.rs.
 #  ENABLE_ALGO_PAGERANK (default: 0)
 #  ENABLE_ALGO_MAX_FLOW (default: 0)
 #  ENABLE_ALGO_MSF (default: 0)
@@ -73,6 +84,11 @@ RUN_POSTGRES=${RUN_POSTGRES:-0}
 
 MONGO_ENDPOINT=${MONGO_ENDPOINT:-"mongodb://127.0.0.1:27017"}
 RUN_MONGO=${RUN_MONGO:-0}
+MONGO_QUERY_TIMEOUT_MS=${MONGO_QUERY_TIMEOUT_MS:-30000}
+MONGO_GRAPH_FANOUT_CAP=${MONGO_GRAPH_FANOUT_CAP:-5000}
+# Empty by default: falls through to postgres_queries_repository.rs's own default (the dataset's
+# vertex count). Set to override with a tighter/looser bound.
+POSTGRES_GRAPH_FANOUT_CAP=${POSTGRES_GRAPH_FANOUT_CAP:-}
 
 TIGERGRAPH_ENDPOINT=${TIGERGRAPH_ENDPOINT:-"http://127.0.0.1:9000"}
 RUN_TIGERGRAPH=${RUN_TIGERGRAPH:-0}
@@ -292,6 +308,11 @@ export MEMGRAPH_PASSWORD
 export NEO4J_USER
 export MEMGRAPH_USER
 export FALKOR_QUERY_TIMEOUT_MS
+export MONGO_QUERY_TIMEOUT_MS
+export MONGO_GRAPH_FANOUT_CAP
+if [[ -n "${POSTGRES_GRAPH_FANOUT_CAP}" ]]; then
+  export POSTGRES_GRAPH_FANOUT_CAP
+fi
 
 if [[ "${RUN_NEO4J}" == "1" ]]; then
   echo "==> Clearing Neo4j database (neo4j)"

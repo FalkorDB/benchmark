@@ -27,9 +27,20 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 #  PARALLEL (default: 20)
 #  MPS      (default: 7500)
 #  QUERIES_FILE (default: medium-readonly)
-#  QUERIES_COUNT (default: 20000)
+#  QUERIES_COUNT (default: 10000)
 #  WRITE_RATIO (default: 0.0)
 #  FALKOR_QUERY_TIMEOUT_MS (default: 900000)
+#  MONGO_QUERY_TIMEOUT_MS (default: 30000)
+#    Lower than Falkor's: bounded-traversal Mongo queries (see mongo_queries_repository.rs)
+#    should complete in well under a second; a short timeout fails pathological queries fast
+#    instead of tying up a worker for minutes.
+#  MONGO_GRAPH_FANOUT_CAP (default: 5000)
+#    Per-hop cap on newly-discovered nodes for Mongo's multi-hop traversal queries; bounds
+#    output size against high-degree hub vertices. See mongo_queries_repository.rs.
+#  POSTGRES_GRAPH_FANOUT_CAP (default: dataset vertex count)
+#    Per-hop cap for Postgres's bounded recursive-CTE traversal queries (aggregate_expansion_3/4,
+#    pattern_long, all_shortest_paths_len). Defaults to the dataset's vertex count so it never
+#    truncates a legitimately reachable node. See postgres_queries_repository.rs.
 #  ENABLE_ALGO_PAGERANK (default: 1)
 #  ENABLE_ALGO_MAX_FLOW (default: 1)
 #  ENABLE_ALGO_MSF (default: 1)
@@ -58,17 +69,23 @@ MEMGRAPH_USER=${MEMGRAPH_USER:-"memgraph"}
 MEMGRAPH_PASSWORD=${MEMGRAPH_PASSWORD:-"six666six"}
 
 # Vendor toggles: set to 1 to enable, 0 to disable
+# Default run: FalkorDB + MongoDB + PostgreSQL (read-only, 10K, baseline)
 RUN_FALKOR=${RUN_FALKOR:-1}
 # Set to 1 to run comparison against the secondary FalkorDB version
-RUN_FALKOR_2=${RUN_FALKOR_2:-1}
+RUN_FALKOR_2=${RUN_FALKOR_2:-0}
 RUN_NEO4J=${RUN_NEO4J:-0}
 RUN_MEMGRAPH=${RUN_MEMGRAPH:-0}
 
 POSTGRES_ENDPOINT=${POSTGRES_ENDPOINT:-"postgres://postgres:postgres@127.0.0.1:5432/postgres"}
-RUN_POSTGRES=${RUN_POSTGRES:-0}
+RUN_POSTGRES=${RUN_POSTGRES:-1}
 
 MONGO_ENDPOINT=${MONGO_ENDPOINT:-"mongodb://127.0.0.1:27017"}
-RUN_MONGO=${RUN_MONGO:-0}
+RUN_MONGO=${RUN_MONGO:-1}
+MONGO_QUERY_TIMEOUT_MS=${MONGO_QUERY_TIMEOUT_MS:-30000}
+MONGO_GRAPH_FANOUT_CAP=${MONGO_GRAPH_FANOUT_CAP:-5000}
+# Empty by default: falls through to postgres_queries_repository.rs's own default (the dataset's
+# vertex count). Set to override with a tighter/looser bound.
+POSTGRES_GRAPH_FANOUT_CAP=${POSTGRES_GRAPH_FANOUT_CAP:-}
 
 TIGERGRAPH_ENDPOINT=${TIGERGRAPH_ENDPOINT:-"http://127.0.0.1:9000"}
 RUN_TIGERGRAPH=${RUN_TIGERGRAPH:-0}
@@ -77,7 +94,7 @@ BATCH_SIZE=${BATCH_SIZE:-5000}
 PARALLEL=${PARALLEL:-8}
 MPS=${MPS:-2000}
 QUERIES_FILE=${QUERIES_FILE:-"medium-readonly"}
-QUERIES_COUNT=${QUERIES_COUNT:-200000}
+QUERIES_COUNT=${QUERIES_COUNT:-10000}
 WRITE_RATIO=${WRITE_RATIO:-0.0}
 FALKOR_QUERY_TIMEOUT_MS=${FALKOR_QUERY_TIMEOUT_MS:-20000}
 ENABLE_ALGO_PAGERANK=${ENABLE_ALGO_PAGERANK:-0}
@@ -166,6 +183,11 @@ fi
 export NEO4J_PASSWORD
 export MEMGRAPH_PASSWORD
 export FALKOR_QUERY_TIMEOUT_MS
+export MONGO_QUERY_TIMEOUT_MS
+export MONGO_GRAPH_FANOUT_CAP
+if [[ -n "${POSTGRES_GRAPH_FANOUT_CAP}" ]]; then
+  export POSTGRES_GRAPH_FANOUT_CAP
+fi
 
 # The benchmark binary now supports credentials via env vars when endpoint URL omits them.
 export NEO4J_USER

@@ -163,6 +163,34 @@ impl PostgresQueriesRepositoryBuilder {
     }
 }
 
+/// Per-hop cap on the number of newly-discovered frontier rows considered when expanding a
+/// bounded recursive-CTE traversal (see `aggregate_expansion_3/4`, `pattern_long`,
+/// `all_shortest_paths_len`). The `UNION` in these CTEs already deduplicates `(id, depth)` pairs,
+/// which prevents the same node from being reprocessed at the same depth via a different path
+/// (unlike a plain N-way self-join, whose intermediate row count multiplies by vertex degree at
+/// every hop).
+///
+/// IMPORTANT: this dataset is a small-world graph with a diameter of about 4 -- even an ordinary
+/// (non-hub) vertex can have tens of thousands of *distinct* nodes newly reachable at hop 3-4
+/// (measured up to ~88,000 on the medium dataset), not just high-degree hubs. Since the LIMIT is
+/// applied without an `ORDER BY` (there is no meaningful ordering to prefer), capping below the
+/// true per-hop frontier size silently drops an arbitrary subset of legitimately reachable nodes
+/// and produces wrong answers (e.g. `all_shortest_paths_len` returning "unreachable" for pairs
+/// that are genuinely reachable within the depth bound). The number of *distinct* nodes at any
+/// hop can never exceed the dataset's total vertex count, so defaulting the cap to `vertices`
+/// guarantees it never truncates a legitimate result while still bounding per-hop work to a
+/// fixed, dataset-size-proportional ceiling (measured ~600ms worst case on the medium dataset's
+/// top hub, versus ~30-43s before this file's `UNION`-dedup rewrite). Override via
+/// `POSTGRES_GRAPH_FANOUT_CAP` to test a tighter bound (e.g. for approximate results on much
+/// larger datasets where a tighter cap's accuracy/speed tradeoff is acceptable).
+fn postgres_graph_fanout_cap(vertices: i32) -> i32 {
+    std::env::var("POSTGRES_GRAPH_FANOUT_CAP")
+        .ok()
+        .and_then(|v| v.parse::<i32>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(vertices)
+}
+
 pub struct PostgresUsersQueriesRepository {
     repo: PostgresQueriesRepository,
 }
@@ -289,52 +317,91 @@ impl PostgresUsersQueriesRepository {
                     .param(random.random_vertex())
                     .build()
             })
+            // Previously a plain 3-way self-join + DISTINCT. On this dataset's power-law degree
+            // distribution (out-degrees up to several thousand), a plain join's intermediate row
+            // count multiplies by degree at every hop and DISTINCT can't help since Postgres must
+            // materialize the full join before collapsing it -- measured ~700ms-30s depending on
+            // whether the traversal passes through a hub vertex. Rewritten as a bounded recursive
+            // CTE (depth-limited, `UNION`-deduped per (id, depth), with a per-hop frontier cap),
+            // mirroring the already-safe pattern used by `shortest_path`/`exact_5_hop_traverse_count`
+            // below. `UNION` dedup means a given id is unique within a fixed depth, so no final
+            // `DISTINCT` is needed.
             .add_query("aggregate_expansion_3", QueryType::Read, |random| {
                 SqlQueryBuilder::new()
                     .text(
-                        "SELECT DISTINCT fe3.dst_id AS id FROM friend_edges fe1 \
-                         JOIN friend_edges fe2 ON fe2.src_id = fe1.dst_id \
-                         JOIN friend_edges fe3 ON fe3.src_id = fe2.dst_id \
-                         WHERE fe1.src_id = $1",
+                        "WITH RECURSIVE hops(id, depth) AS ( \
+                            SELECT dst_id, 1 FROM friend_edges WHERE src_id = $1 \
+                            UNION \
+                            SELECT * FROM ( \
+                                SELECT DISTINCT fe.dst_id AS id, hops.depth + 1 AS depth \
+                                FROM hops JOIN friend_edges fe ON fe.src_id = hops.id \
+                                WHERE hops.depth < 3 \
+                                LIMIT $2::int \
+                            ) AS capped_step \
+                         ) \
+                         SELECT id FROM hops WHERE depth = 3",
                     )
                     .param(random.random_vertex())
+                    .param(postgres_graph_fanout_cap(random.vertices))
                     .build()
             })
             .add_query("aggregate_expansion_3_with_filter", QueryType::Read, |random| {
                 SqlQueryBuilder::new()
                     .text(
-                        "SELECT DISTINCT fe3.dst_id AS id FROM friend_edges fe1 \
-                         JOIN friend_edges fe2 ON fe2.src_id = fe1.dst_id \
-                         JOIN friend_edges fe3 ON fe3.src_id = fe2.dst_id \
-                         JOIN users u ON u.id = fe3.dst_id \
-                         WHERE fe1.src_id = $1 AND u.age >= 18",
+                        "WITH RECURSIVE hops(id, depth) AS ( \
+                            SELECT dst_id, 1 FROM friend_edges WHERE src_id = $1 \
+                            UNION \
+                            SELECT * FROM ( \
+                                SELECT DISTINCT fe.dst_id AS id, hops.depth + 1 AS depth \
+                                FROM hops JOIN friend_edges fe ON fe.src_id = hops.id \
+                                WHERE hops.depth < 3 \
+                                LIMIT $2::int \
+                            ) AS capped_step \
+                         ) \
+                         SELECT u.id FROM hops h JOIN users u ON u.id = h.id \
+                         WHERE h.depth = 3 AND u.age >= 18",
                     )
                     .param(random.random_vertex())
+                    .param(postgres_graph_fanout_cap(random.vertices))
                     .build()
             })
             .add_query("aggregate_expansion_4", QueryType::Read, |random| {
                 SqlQueryBuilder::new()
                     .text(
-                        "SELECT DISTINCT fe4.dst_id AS id FROM friend_edges fe1 \
-                         JOIN friend_edges fe2 ON fe2.src_id = fe1.dst_id \
-                         JOIN friend_edges fe3 ON fe3.src_id = fe2.dst_id \
-                         JOIN friend_edges fe4 ON fe4.src_id = fe3.dst_id \
-                         WHERE fe1.src_id = $1",
+                        "WITH RECURSIVE hops(id, depth) AS ( \
+                            SELECT dst_id, 1 FROM friend_edges WHERE src_id = $1 \
+                            UNION \
+                            SELECT * FROM ( \
+                                SELECT DISTINCT fe.dst_id AS id, hops.depth + 1 AS depth \
+                                FROM hops JOIN friend_edges fe ON fe.src_id = hops.id \
+                                WHERE hops.depth < 4 \
+                                LIMIT $2::int \
+                            ) AS capped_step \
+                         ) \
+                         SELECT id FROM hops WHERE depth = 4",
                     )
                     .param(random.random_vertex())
+                    .param(postgres_graph_fanout_cap(random.vertices))
                     .build()
             })
             .add_query("aggregate_expansion_4_with_filter", QueryType::Read, |random| {
                 SqlQueryBuilder::new()
                     .text(
-                        "SELECT DISTINCT fe4.dst_id AS id FROM friend_edges fe1 \
-                         JOIN friend_edges fe2 ON fe2.src_id = fe1.dst_id \
-                         JOIN friend_edges fe3 ON fe3.src_id = fe2.dst_id \
-                         JOIN friend_edges fe4 ON fe4.src_id = fe3.dst_id \
-                         JOIN users u ON u.id = fe4.dst_id \
-                         WHERE fe1.src_id = $1 AND u.age >= 18",
+                        "WITH RECURSIVE hops(id, depth) AS ( \
+                            SELECT dst_id, 1 FROM friend_edges WHERE src_id = $1 \
+                            UNION \
+                            SELECT * FROM ( \
+                                SELECT DISTINCT fe.dst_id AS id, hops.depth + 1 AS depth \
+                                FROM hops JOIN friend_edges fe ON fe.src_id = hops.id \
+                                WHERE hops.depth < 4 \
+                                LIMIT $2::int \
+                            ) AS capped_step \
+                         ) \
+                         SELECT u.id FROM hops h JOIN users u ON u.id = h.id \
+                         WHERE h.depth = 4 AND u.age >= 18",
                     )
                     .param(random.random_vertex())
+                    .param(postgres_graph_fanout_cap(random.vertices))
                     .build()
             })
             .add_query("aggregate_age", QueryType::Read, |_random| {
@@ -456,17 +523,27 @@ impl PostgresUsersQueriesRepository {
                     .param(random.random_vertex())
                     .build()
             })
+            // Previously a plain 4-way self-join with no dedup at all -- measured ~30s and 165M
+            // rows from the dataset's top hub vertex (out-degree 6,661). Rewritten as a bounded
+            // recursive CTE (depth-limited, `UNION`-deduped per (id, depth), with a per-hop
+            // frontier cap), same shape as `aggregate_expansion_4` above.
             .add_query("pattern_long", QueryType::Read, |random| {
                 SqlQueryBuilder::new()
                     .text(
-                        "SELECT $1::int AS a_id, e4.dst_id AS b_id \
-                         FROM friend_edges e1 \
-                         JOIN friend_edges e2 ON e2.src_id = e1.dst_id \
-                         JOIN friend_edges e3 ON e3.src_id = e2.dst_id \
-                         JOIN friend_edges e4 ON e4.src_id = e3.dst_id \
-                         WHERE e1.src_id = $1",
+                        "WITH RECURSIVE hops(id, depth) AS ( \
+                            SELECT dst_id, 1 FROM friend_edges WHERE src_id = $1 \
+                            UNION \
+                            SELECT * FROM ( \
+                                SELECT DISTINCT fe.dst_id AS id, hops.depth + 1 AS depth \
+                                FROM hops JOIN friend_edges fe ON fe.src_id = hops.id \
+                                WHERE hops.depth < 4 \
+                                LIMIT $2::int \
+                            ) AS capped_step \
+                         ) \
+                         SELECT $1::int AS a_id, id AS b_id FROM hops WHERE depth = 4",
                     )
                     .param(random.random_vertex())
+                    .param(postgres_graph_fanout_cap(random.vertices))
                     .build()
             })
             .add_query("pattern_short", QueryType::Read, |random| {
@@ -651,23 +728,33 @@ impl PostgresUsersQueriesRepository {
                     .param(random.random_vertex())
                     .build()
             })
-            // Postgres-only: bounded (depth <= 4) path-array recursive CTE with explicit
-            // cycle-avoidance (`NOT (dst_id = ANY(path))`), approximating `allShortestPaths`.
+            // Postgres-only, approximating `allShortestPaths`'s length. Previously built a
+            // growing path array with `NOT (dst_id = ANY(path))` cycle-avoidance per row (`UNION
+            // ALL`, no id-level dedup) -- measured ~43.5s from the dataset's top hub, the worst of
+            // all reviewed queries, despite only ever selecting `min(depth)` and discarding the
+            // path array entirely. Simplified to the same bounded, `UNION`-deduped BFS shape as
+            // `shortest_path` above (depth-limited to 4, with a per-hop frontier cap): dropping
+            // the path array/cycle-check doesn't change the result (`min(depth)` to a fixed
+            // target) since duplicate (id, depth) pairs contribute nothing to that minimum anyway.
             .add_query("all_shortest_paths_len", QueryType::Read, |random| {
                 let (from, to) = random.random_path();
                 SqlQueryBuilder::new()
                     .text(
-                        "WITH RECURSIVE paths(id, depth, path) AS ( \
-                            SELECT $1::int, 0, ARRAY[$1::int] \
-                            UNION ALL \
-                            SELECT fe.dst_id, p.depth + 1, p.path || fe.dst_id \
-                            FROM paths p JOIN friend_edges fe ON fe.src_id = p.id \
-                            WHERE p.depth < 4 AND NOT (fe.dst_id = ANY(p.path)) \
+                        "WITH RECURSIVE bfs(id, depth) AS ( \
+                            SELECT $1::int, 0 \
+                            UNION \
+                            SELECT * FROM ( \
+                                SELECT DISTINCT fe.dst_id AS id, bfs.depth + 1 AS depth \
+                                FROM bfs JOIN friend_edges fe ON fe.src_id = bfs.id \
+                                WHERE bfs.depth < 4 \
+                                LIMIT $3::int \
+                            ) AS capped_step \
                          ) \
-                         SELECT min(depth) AS length FROM paths WHERE id = $2",
+                         SELECT min(depth) AS length FROM bfs WHERE id = $2",
                     )
                     .param(from)
                     .param(to)
+                    .param(postgres_graph_fanout_cap(random.vertices))
                     .build()
             })
             .add_query("var_len_with_edge_where_filter", QueryType::Read, |random| {
