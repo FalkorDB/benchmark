@@ -123,6 +123,12 @@ type DashboardProps = {
    * Disable for focused pages that need full-width content.
    */
   showSidebar?: boolean;
+  /**
+   * Renders the "Select Run History" past-run picker when true. Defaults to
+   * false since public-facing dashboards should only show the curated
+   * default result set, not arbitrary historical runs.
+   */
+  showRunHistory?: boolean;
 };
 
 const DEFAULT_SELECTED_OPTIONS: Record<string, string[]> = {
@@ -159,6 +165,7 @@ export default function DashBoard({
   hideHardware = false,
   fullHeight = true,
   showSidebar = true,
+  showRunHistory = false,
 }: DashboardProps) {
   const allowedVendors = useMemo(() => {
     const v = (comparisonVendors ?? [])
@@ -1058,7 +1065,7 @@ export default function DashBoard({
           }
         >
           {showSidebar && <MobileFiltersBar />}
-          {pastRuns.length > 0 && (
+          {showRunHistory && pastRuns.length > 0 && (
             <div className="bg-muted/30 border-b border-gray-200/40 p-4 flex flex-wrap items-center justify-between gap-4 font-space">
               <div className="flex flex-col">
                 <span className="text-xs text-gray-500 font-medium">Select Run History</span>
