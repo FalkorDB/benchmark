@@ -22,7 +22,7 @@
     "@radix-ui/react-toggle-group": "^1.1.19",
     "@radix-ui/react-tooltip": "^1.2.16",
     "@shadcn/ui": "^0.0.4",
-    "autoprefixer": "^10.5.4",
+    "autoprefixer": "^10.5.5",
     "chart.js": "^4.4.7",
     "chartjs-plugin-datalabels": "^2.2.0",
     "class-variance-authority": "^0.7.1",
@@ -35,7 +35,7 @@
     "react-dom": "^19.2.8",
     "react-gtm-module": "^2.0.11",
     "react-icons": "^5.7.0",
-    "react-resizable-panels": "^4.12.3",
+    "react-resizable-panels": "^4.12.4",
     "tailwind-merge": "^3.6.0",
     "tailwindcss-animate": "^1.0.7"
   },
