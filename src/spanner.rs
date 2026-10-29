@@ -128,7 +128,7 @@ async fn flush_edges(
             (
                 e.src as i64,
                 e.dst as i64,
-                bench_capacity(e.src as u64, e.dst as u64) as i64,
+                bench_capacity(e.src as u64, e.dst as u64),
             )
         })
         .collect();
