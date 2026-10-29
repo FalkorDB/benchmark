@@ -1,4 +1,4 @@
-export type VendorKey = "falkordb" | "falkordb2" | "neo4j" | "memgraph" | "postgres" | "mongo" | "tigergraph" | "unknown";
+export type VendorKey = "falkordb" | "falkordb2" | "neo4j" | "memgraph" | "postgres" | "mongo" | "tigergraph" | "spanner" | "unknown";
 
 type GradientStops = { offset: number; color: string }[];
 
@@ -26,6 +26,7 @@ export function normalizeVendor(vendor: string): VendorKey {
   if (k === "postgres" || k === "postgresql") return "postgres";
   if (k === "mongo" || k === "mongodb") return "mongo";
   if (k === "tigergraph") return "tigergraph";
+  if (k === "spanner" || k === "google-spanner" || k.includes("spanner")) return "spanner";
   return "unknown";
 }
 
@@ -92,6 +93,12 @@ function getStops(vendor: VendorKey): GradientStops {
       return [
         { offset: 0.0, color: cssVar("--TigerGraph-gradient-start", "#F7931E") },
         { offset: 1.0, color: cssVar("--TigerGraph-gradient-end", "#4A2C0B") },
+      ];
+    case "spanner":
+      // Google Spanner blue gradient
+      return [
+        { offset: 0.0, color: cssVar("--Spanner-gradient-start", "#4285F4") },
+        { offset: 1.0, color: cssVar("--Spanner-gradient-end", "#A8C7FA") },
       ];
     default:
       return [{ offset: 0.0, color: "#191919" }];
