@@ -69,11 +69,11 @@ MEMGRAPH_USER=${MEMGRAPH_USER:-"memgraph"}
 MEMGRAPH_PASSWORD=${MEMGRAPH_PASSWORD:-"six666six"}
 
 # Vendor toggles: set to 1 to enable, 0 to disable
-# Default run: FalkorDB + MongoDB + PostgreSQL (read-only, 10K, baseline)
+# Default run: FalkorDB + Neo4j + MongoDB + PostgreSQL (read-only, 10K, baseline)
 RUN_FALKOR=${RUN_FALKOR:-1}
 # Set to 1 to run comparison against the secondary FalkorDB version
 RUN_FALKOR_2=${RUN_FALKOR_2:-0}
-RUN_NEO4J=${RUN_NEO4J:-0}
+RUN_NEO4J=${RUN_NEO4J:-1}
 RUN_MEMGRAPH=${RUN_MEMGRAPH:-0}
 
 POSTGRES_ENDPOINT=${POSTGRES_ENDPOINT:-"postgres://postgres:postgres@127.0.0.1:5432/postgres"}
@@ -88,7 +88,10 @@ MONGO_GRAPH_FANOUT_CAP=${MONGO_GRAPH_FANOUT_CAP:-5000}
 POSTGRES_GRAPH_FANOUT_CAP=${POSTGRES_GRAPH_FANOUT_CAP:-}
 
 TIGERGRAPH_ENDPOINT=${TIGERGRAPH_ENDPOINT:-"http://127.0.0.1:9000"}
+# Spanner Graph: projects/<p>/instances/<i>/databases/<d> (or spanner://...)
+SPANNER_ENDPOINT=${SPANNER_ENDPOINT:-""}
 RUN_TIGERGRAPH=${RUN_TIGERGRAPH:-0}
+RUN_SPANNER=${RUN_SPANNER:-0}
 
 BATCH_SIZE=${BATCH_SIZE:-5000}
 PARALLEL=${PARALLEL:-8}
@@ -475,6 +478,31 @@ if [[ "${RUN_TIGERGRAPH:-0}" == "1" ]]; then
     --parallel "$PARALLEL" \
     --mps "$MPS" \
     --endpoint "$TIGERGRAPH_ENDPOINT" \
+    --results-dir "$RESULTS_DIR" || true
+fi
+
+if [[ "${RUN_SPANNER:-0}" == "1" ]]; then
+  echo "==> Preparing Spanner Graph (medium)"
+  cargo run --release --bin benchmark -- load --vendor spanner --size medium \
+    --endpoint "$SPANNER_ENDPOINT" -b "$BATCH_SIZE" --force --query-profile "$QUERY_PROFILE" || {
+      echo "Spanner Graph load failed; continuing without Spanner Graph results" >&2
+    }
+  echo "==> Generating Spanner Graph query file"
+  cargo run --release --bin benchmark -- generate-queries \
+    --vendor spanner \
+    --dataset medium \
+    --size "$QUERIES_COUNT" \
+    --name "$SPANNER_QUERIES_FILE" \
+    --write-ratio "$WRITE_RATIO" \
+    --query-profile "$QUERY_PROFILE" \
+    "${ALGO_QUERY_ARGS[@]}" || true
+  echo "==> Running Spanner Graph workload"
+  cargo run --release --bin benchmark -- run \
+    --vendor spanner \
+    --name "$SPANNER_QUERIES_FILE" \
+    --parallel "$PARALLEL" \
+    --mps "$MPS" \
+    --endpoint "$SPANNER_ENDPOINT" \
     --results-dir "$RESULTS_DIR" || true
 fi
 

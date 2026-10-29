@@ -51,6 +51,9 @@ lazy_static = "1.5"
 hyper = { version = "0.14.31", features = ["server", "runtime", "http1", "tcp"] }
 nonzero = "0.2.0"
 sysinfo = "0.39.5"
+google-cloud-spanner = "0.33.0"
+google-cloud-googleapis = { version = "0.16", features = ["spanner"] }
+google-cloud-gax = "0.19"
 [patch."https://github.com/FalkorDB/falkordb-rs.git"]
 falkordb = { path = "vendor/falkordb-rs" }
 

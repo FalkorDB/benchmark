@@ -241,6 +241,7 @@ pub fn aggregate_results(
                 Vendor::Postgres => "postgres_vs_falkordb.json",
                 Vendor::Mongo => "mongo_vs_falkordb.json",
                 Vendor::TigerGraph => "tigergraph_vs_falkordb.json",
+                Vendor::Spanner => "spanner_vs_falkordb.json",
                 Vendor::Falkor => continue,
             };
             write_summary(&out_dir.join(out_name), &summary)?;
@@ -584,6 +585,7 @@ pub fn aggregate_aws_tests(
             Vendor::Postgres => "postgres".to_string(),
             Vendor::Mongo => "mongo".to_string(),
             Vendor::TigerGraph => "tigergraph".to_string(),
+            Vendor::Spanner => "spanner".to_string(),
             Vendor::Falkor => {
                 if lower.contains("falkordb-c") {
                     "falkordb-c".to_string()
@@ -807,6 +809,10 @@ fn build_ui_run_custom(v: &CustomRunArtifacts) -> BenchmarkResult<UiRun> {
             .get_single_value("tigergraph_store_size_bytes")
             .map(|v| v.round().max(0.0) as u64)
             .filter(|v| *v > 0),
+        Vendor::Spanner => metrics
+            .get_single_value("spanner_store_size_bytes")
+            .map(|v| v.round().max(0.0) as u64)
+            .filter(|v| *v > 0),
         _ => None,
     };
 
@@ -871,6 +877,7 @@ fn vendor_id(vendor: Vendor) -> String {
         Vendor::Postgres => "postgres".to_string(),
         Vendor::Mongo => "mongo".to_string(),
         Vendor::TigerGraph => "tigergraph".to_string(),
+        Vendor::Spanner => "spanner".to_string(),
     }
 }
 
@@ -1000,6 +1007,11 @@ impl MetricsIndex {
                 "tigergraph_latency_p95_us",
                 "tigergraph_latency_p99_us",
             ),
+            Vendor::Spanner => (
+                "spanner_latency_p50_us",
+                "spanner_latency_p95_us",
+                "spanner_latency_p99_us",
+            ),
         };
 
         let p50v = self.get_single_value(p50)?;
@@ -1025,6 +1037,7 @@ impl MetricsIndex {
             Vendor::Postgres => "postgres_query_latency_pct_us",
             Vendor::Mongo => "mongo_query_latency_pct_us",
             Vendor::TigerGraph => "tigergraph_query_latency_pct_us",
+            Vendor::Spanner => "spanner_query_latency_pct_us",
         };
         let timeout_metric_legacy = match vendor {
             Vendor::Memgraph => Some("memgraph_query_timeout_rate_pct"),
@@ -1120,6 +1133,7 @@ impl MetricsIndex {
             Vendor::Postgres => "postgres_query_latency_pct_us_by_size",
             Vendor::Mongo => "mongo_query_latency_pct_us_by_size",
             Vendor::TigerGraph => "tigergraph_query_latency_pct_us_by_size",
+            Vendor::Spanner => "spanner_query_latency_pct_us_by_size",
         };
 
         let samples = self.samples.get(metric).cloned().unwrap_or_default();
@@ -1334,6 +1348,7 @@ impl MetricsIndex {
             Vendor::Postgres => "postgres",
             Vendor::Mongo => "mongo",
             Vendor::TigerGraph => "tigergraph",
+        Vendor::Spanner => "spanner",
         };
 
         let base = match kind {
@@ -1416,10 +1431,11 @@ impl MetricsIndex {
             Vendor::Falkor => self.get_single_value("falkor_cpu_usage").unwrap_or(0.0),
             Vendor::Neo4j => self.get_single_value("neo4j_cpu_usage").unwrap_or(0.0),
             Vendor::Memgraph => self.get_single_value("memgraph_cpu_usage").unwrap_or(0.0),
-            // No local process management for Postgres/Mongo/TigerGraph (always an external endpoint).
+            // No local process management for Postgres/Mongo/TigerGraph/Spanner (always external).
             Vendor::Postgres => 0.0,
             Vendor::Mongo => 0.0,
             Vendor::TigerGraph => 0.0,
+            Vendor::Spanner => 0.0,
         };
 
         // Prefer query-interface memory metrics when present.
@@ -1462,10 +1478,11 @@ impl MetricsIndex {
                 let mem_kib = self.get_single_value("neo4j_memory_usage").unwrap_or(0.0);
                 format_mem_from_kib(mem_kib)
             }
-            // No local process management for Postgres/Mongo/TigerGraph (always an external endpoint).
+            // No local process management for Postgres/Mongo/TigerGraph/Spanner (always external).
             Vendor::Postgres => "0MB".to_string(),
             Vendor::Mongo => "0MB".to_string(),
             Vendor::TigerGraph => "0MB".to_string(),
+            Vendor::Spanner => "0MB".to_string(),
         };
 
         (cpu, mem_str)

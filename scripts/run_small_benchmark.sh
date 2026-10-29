@@ -90,7 +90,10 @@ MONGO_ENDPOINT=${MONGO_ENDPOINT:-"mongodb://127.0.0.1:27017"}
 RUN_MONGO=${RUN_MONGO:-1}
 
 TIGERGRAPH_ENDPOINT=${TIGERGRAPH_ENDPOINT:-"http://127.0.0.1:9000"}
+# Spanner Graph: projects/<p>/instances/<i>/databases/<d> (or spanner://...)
+SPANNER_ENDPOINT=${SPANNER_ENDPOINT:-""}
 RUN_TIGERGRAPH=${RUN_TIGERGRAPH:-1}
+RUN_SPANNER=${RUN_SPANNER:-0}
 
 BATCH_SIZE=${BATCH_SIZE:-5000}
 PARALLEL=${PARALLEL:-8}
@@ -403,6 +406,31 @@ if [[ "${RUN_TIGERGRAPH:-0}" == "1" ]]; then
     --parallel "$PARALLEL" \
     --mps "$MPS" \
     --endpoint "$TIGERGRAPH_ENDPOINT" \
+    --results-dir "$RESULTS_DIR" || true
+fi
+
+if [[ "${RUN_SPANNER:-0}" == "1" ]]; then
+  echo "==> Preparing Spanner Graph (small)"
+  cargo run --release --bin benchmark -- load --vendor spanner --size small \
+    --endpoint "$SPANNER_ENDPOINT" -b "$BATCH_SIZE" --force --query-profile "$QUERY_PROFILE" || {
+      echo "Spanner Graph load failed; continuing without Spanner Graph results" >&2
+    }
+  echo "==> Generating Spanner Graph query file"
+  cargo run --release --bin benchmark -- generate-queries \
+    --vendor spanner \
+    --dataset small \
+    --size "$QUERIES_COUNT" \
+    --name "$SPANNER_QUERIES_FILE" \
+    --write-ratio "$WRITE_RATIO" \
+    --query-profile "$QUERY_PROFILE" \
+    "${ALGO_QUERY_ARGS[@]}" || true
+  echo "==> Running Spanner Graph workload"
+  cargo run --release --bin benchmark -- run \
+    --vendor spanner \
+    --name "$SPANNER_QUERIES_FILE" \
+    --parallel "$PARALLEL" \
+    --mps "$MPS" \
+    --endpoint "$SPANNER_ENDPOINT" \
     --results-dir "$RESULTS_DIR" || true
 fi
 

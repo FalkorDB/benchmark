@@ -511,4 +511,13 @@ development.
 - redis_process_id
   =======
 
+## Google Spanner Graph (optional)
+
+Enable with `RUN_SPANNER=1`. Requires:
+
+- `SPANNER_DATABASE` or `--endpoint projects/<p>/instances/<i>/databases/<d>` (also `spanner://...`)
+- Application Default Credentials (`GOOGLE_APPLICATION_CREDENTIALS`) or `SPANNER_EMULATOR_HOST` for the emulator
+- Optional `SPANNER_GRAPH_NAME` (default `PokecGraph`)
+
+Spanner uses **GQL** (not Cypher). Baseline reads cover expansions, patterns, and `ANY SHORTEST` paths; all-shortest and algorithm procedures are omitted. Fair comparisons need same-region topology; emulator results are not for performance claims.
 

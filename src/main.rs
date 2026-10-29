@@ -23,6 +23,9 @@ use benchmark::scenario::Name::Users;
 use benchmark::scenario::{Size, Spec, Vendor};
 use benchmark::scheduler::Msg;
 use benchmark::sql_query::PreparedSqlQuery;
+use benchmark::spanner_client::SpannerClient;
+use benchmark::spanner_queries_repository::SpannerUsersQueriesRepository;
+use benchmark::spanner_query::PreparedSpannerQuery;
 use benchmark::tigergraph_client::{TigerGraphClient, TIGERGRAPH_GRAPH_NAME};
 use benchmark::tigergraph_queries_repository::TigerGraphUsersQueriesRepository;
 use benchmark::tigergraph_query::PreparedTigerGraphQuery;
@@ -50,6 +53,9 @@ use benchmark::{
     TIGERGRAPH_ERROR_REQUESTS_DURATION_HISTOGRAM, TIGERGRAPH_LATENCY_P50_US,
     TIGERGRAPH_LATENCY_P95_US, TIGERGRAPH_LATENCY_P99_US, TIGERGRAPH_QUERY_LATENCY_PCT_US,
     TIGERGRAPH_SUCCESS_REQUESTS_DURATION_HISTOGRAM,
+    SPANNER_ERROR_REQUESTS_DURATION_HISTOGRAM, SPANNER_LATENCY_P50_US, SPANNER_LATENCY_P95_US,
+    SPANNER_LATENCY_P99_US, SPANNER_QUERY_LATENCY_PCT_US,
+    SPANNER_SUCCESS_REQUESTS_DURATION_HISTOGRAM,
 };
 use clap::{Command, CommandFactory, Parser};
 use clap_complete::{generate, Generator};
@@ -360,6 +366,14 @@ async fn async_main(cli: Cli) -> BenchmarkResult<()> {
                         init_tigergraph(size, force, batch_size, endpoint, query_profile).await?;
                     }
                 }
+                Vendor::Spanner => {
+                    if dry_run {
+                        info!("Dry run");
+                        todo!()
+                    } else {
+                        init_spanner(size, force, batch_size, endpoint, query_profile).await?;
+                    }
+                }
             }
         }
         Commands::Run {
@@ -395,6 +409,9 @@ async fn async_main(cli: Cli) -> BenchmarkResult<()> {
                 }
                 Vendor::TigerGraph => {
                     run_tigergraph(parallel, name, mps, simulate, endpoint, results_dir).await?;
+                }
+                Vendor::Spanner => {
+                    run_spanner(parallel, name, mps, simulate, endpoint, results_dir).await?;
                 }
             }
         }
@@ -624,6 +641,14 @@ fn validate_query_coverage_profile_support(
              (vector/fulltext smoke queries would require the TigerVector feature / a separate \
              text-search integration, out of scope this phase). Use --query-profile baseline or \
              extended-core instead."
+                .to_string(),
+        ));
+    }
+    if vendor == Vendor::Spanner && query_profile.includes_fixture_dependent() {
+        return Err(OtherError(
+            "Spanner Graph does not support the 'fixture-dependent' query coverage profile \
+             (vector/fulltext index queries have no GQL equivalent in this integration). \
+             Use --query-profile baseline or extended-core instead."
                 .to_string(),
         ));
     }
@@ -987,6 +1012,7 @@ impl PerQueryLatency {
             Vendor::Postgres => "postgres",
             Vendor::Mongo => "mongo",
             Vendor::TigerGraph => "tigergraph",
+            Vendor::Spanner => "spanner",
         }
     }
 
@@ -1002,6 +1028,7 @@ impl PerQueryLatency {
             Vendor::Postgres => POSTGRES_QUERY_LATENCY_PCT_US.reset(),
             Vendor::Mongo => MONGO_QUERY_LATENCY_PCT_US.reset(),
             Vendor::TigerGraph => TIGERGRAPH_QUERY_LATENCY_PCT_US.reset(),
+            Vendor::Spanner => SPANNER_QUERY_LATENCY_PCT_US.reset(),
         }
         BENCHMARK_QUERY_TIMEOUT_RATE_PCT.reset();
         BENCHMARK_QUERY_FAILURE_RATE_PCT.reset();
@@ -1100,6 +1127,11 @@ impl PerQueryLatency {
                     }
                     Vendor::TigerGraph => {
                         TIGERGRAPH_QUERY_LATENCY_PCT_US
+                            .with_label_values(&[entry.name.as_str(), pct_label.as_str()])
+                            .set(v);
+                    }
+                    Vendor::Spanner => {
+                        SPANNER_QUERY_LATENCY_PCT_US
                             .with_label_values(&[entry.name.as_str(), pct_label.as_str()])
                             .set(v);
                     }
@@ -3276,6 +3308,16 @@ async fn prepare_queries(
         )
         .await;
     }
+    if vendor == Vendor::Spanner {
+        return prepare_spanner_queries(
+            dataset,
+            size,
+            file_name,
+            write_ratio,
+            query_profile,
+        )
+        .await;
+    }
 
     let start = Instant::now();
 
@@ -3291,6 +3333,7 @@ async fn prepare_queries(
         Vendor::Postgres => unreachable!("handled above via prepare_postgres_queries"),
         Vendor::Mongo => unreachable!("handled above via prepare_mongo_queries"),
         Vendor::TigerGraph => unreachable!("handled above via prepare_tigergraph_queries"),
+        Vendor::Spanner => unreachable!("handled above via prepare_spanner_queries"),
     };
 
     let queries_repository = benchmark::queries_repository::UsersQueriesRepository::new(
@@ -3745,6 +3788,382 @@ fn parse_tigergraph_endpoint(
         password,
     ))
 }
+
+async fn init_spanner(
+    size: Size,
+    force: bool,
+    batch_size: usize,
+    endpoint: Option<String>,
+    query_profile: QueryCoverageProfile,
+) -> BenchmarkResult<()> {
+    validate_query_coverage_profile_support(Vendor::Spanner, query_profile)?;
+    let spec = Spec::new(benchmark::scenario::Name::Users, size, Vendor::Spanner);
+
+    let (database, graph_name) = if let Some(ref endpoint_str) = endpoint {
+        info!(
+            "Using external Spanner endpoint for data loading: {}",
+            redact_endpoint(endpoint_str)
+        );
+        parse_spanner_endpoint(endpoint_str)?
+    } else {
+        benchmark::spanner::default_connection_params()?
+    };
+
+    let client = SpannerClient::connect(&database, &graph_name).await?;
+    info!("client connected to spanner graph={}", graph_name);
+
+    if force {
+        info!("Clearing existing Spanner schema (--force)");
+        benchmark::spanner::clear_schema(&client).await?;
+    }
+
+    benchmark::spanner::create_schema(&client).await?;
+
+    let (node_count, relation_count) = client.graph_size().await?;
+    info!(
+        "node count: {}, relation count: {}",
+        format_number(node_count),
+        format_number(relation_count)
+    );
+    if node_count != 0 || relation_count != 0 {
+        error!(
+            "Spanner database is not empty, node count: {}, relation count: {}",
+            node_count, relation_count
+        );
+        return Err(OtherError(
+            "Database is not empty. Use --force to clear it first.".to_string(),
+        ));
+    }
+
+    let mut histogram = Histogram::new(7, 64)?;
+    let data_stream = spec.init_data_iterator().await?;
+    info!("importing data (Spanner mutations) in batches of {}", batch_size);
+    let start = Instant::now();
+    let total_processed = benchmark::spanner::load_from_cypher_import(
+        &client,
+        data_stream,
+        batch_size,
+        &mut histogram,
+    )
+    .await?;
+    info!(
+        "Processed {} records via Spanner mutation batches",
+        format_number(total_processed as u64)
+    );
+
+    let (node_count, relation_count) = client.graph_size().await?;
+    info!(
+        "{} nodes and {} relations were imported at {:?}",
+        format_number(node_count),
+        format_number(relation_count),
+        start.elapsed()
+    );
+
+    info!("---> histogram");
+    show_historgam(histogram);
+
+    info!("---> Done");
+    Ok(())
+}
+
+async fn run_spanner(
+    parallel: usize,
+    file_name: String,
+    mps: usize,
+    simulate: Option<usize>,
+    endpoint: Option<String>,
+    results_dir: Option<String>,
+) -> BenchmarkResult<()> {
+    let queries_file = file_name.clone();
+    let (queries_metadata, queries) = read_spanner_queries(file_name).await?;
+    validate_query_coverage_profile_support(Vendor::Spanner, queries_metadata.query_profile)?;
+
+    let (database, graph_name) = if let Some(ref endpoint_str) = endpoint {
+        info!(
+            "Using external Spanner endpoint: {}",
+            redact_endpoint(endpoint_str)
+        );
+        parse_spanner_endpoint(endpoint_str)?
+    } else {
+        benchmark::spanner::default_connection_params()?
+    };
+
+    let client = SpannerClient::connect(&database, &graph_name).await?;
+    info!("client connected to spanner graph={}", graph_name);
+    let engine_version = client.detect_engine_version().await.ok().flatten();
+
+    client.collect_store_size_metrics().await;
+
+    let number_of_queries = queries.len();
+    let worker_progress_every = worker_progress_batch_size(number_of_queries);
+    let (node_count, relation_count) = client.graph_size().await?;
+
+    info!(
+        "graph has {} nodes and {} relations",
+        format_number(node_count),
+        format_number(relation_count)
+    );
+    info!(
+        "running {} queries",
+        format_number(number_of_queries as u64)
+    );
+    info!(
+        "worker query spread batch set to {} (total queries: {})",
+        worker_progress_every,
+        format_number(number_of_queries as u64)
+    );
+
+    let (tx, rx) = tokio::sync::mpsc::channel::<Msg<PreparedSpannerQuery>>(20 * parallel);
+    let rx: Arc<Mutex<Receiver<Msg<PreparedSpannerQuery>>>> = Arc::new(Mutex::new(rx));
+    let scheduler_handle =
+        scheduler::spawn_scheduler::<PreparedSpannerQuery>(mps, tx.clone(), queries);
+    let mut workers_handles = Vec::with_capacity(parallel);
+
+    let latency_hist = Arc::new(tokio::sync::Mutex::new(histogram::Histogram::new(7, 64)?));
+    let per_query = Arc::new(PerQueryLatency::new(queries_metadata.catalog.clone())?);
+
+    let started_at = SystemTime::now();
+    let start = Instant::now();
+    for spawn_id in 0..parallel {
+        let handle = spawn_spanner_worker(
+            client.clone(),
+            spawn_id,
+            &rx,
+            simulate,
+            latency_hist.clone(),
+            per_query.clone(),
+            worker_progress_every,
+        )
+        .await?;
+        workers_handles.push(handle);
+    }
+    let _ = scheduler_handle.await;
+    drop(tx);
+
+    for handle in workers_handles {
+        let _ = handle.await;
+    }
+
+    let elapsed = start.elapsed();
+    let finished_at = SystemTime::now();
+
+    info!(
+        "running {} queries took {:?}",
+        format_number(number_of_queries as u64),
+        elapsed
+    );
+
+    {
+        let hist = latency_hist.lock().await;
+        SPANNER_LATENCY_P50_US.set(percentile_us(&hist, 50.0) as i64);
+        SPANNER_LATENCY_P95_US.set(percentile_us(&hist, 95.0) as i64);
+        SPANNER_LATENCY_P99_US.set(percentile_us(&hist, 99.0) as i64);
+    }
+
+    per_query.export_to_prometheus(Vendor::Spanner);
+
+    write_run_results(
+        results_dir,
+        Vendor::Spanner,
+        queries_metadata.dataset,
+        &queries_file,
+        parallel,
+        mps,
+        simulate,
+        &endpoint,
+        number_of_queries,
+        started_at,
+        finished_at,
+        elapsed,
+        engine_version,
+    )
+    .await?;
+
+    info!("Using external Spanner endpoint, skipping process management");
+    Ok(())
+}
+
+async fn spawn_spanner_worker(
+    client: SpannerClient,
+    worker_id: usize,
+    receiver: &Arc<Mutex<Receiver<Msg<PreparedSpannerQuery>>>>,
+    simulate: Option<usize>,
+    latency_hist: Arc<tokio::sync::Mutex<histogram::Histogram>>,
+    per_query: Arc<PerQueryLatency>,
+    worker_progress_every: u32,
+) -> BenchmarkResult<JoinHandle<()>> {
+    info!("spawning spanner worker");
+    let receiver = Arc::clone(receiver);
+    let handle = tokio::spawn(async move {
+        let worker_id = worker_id.to_string();
+        let worker_id_str = worker_id.as_str();
+        let mut counter = 0u32;
+        loop {
+            let received = receiver.lock().await.recv().await;
+
+            match received {
+                Some(prepared_query) => {
+                    let start_time = Instant::now();
+
+                    let r = client
+                        .execute_prepared_query(worker_id_str, &prepared_query, &simulate)
+                        .await;
+                    let duration = start_time.elapsed();
+                    match r {
+                        Ok(_) => {
+                            SPANNER_SUCCESS_REQUESTS_DURATION_HISTOGRAM
+                                .observe(duration.as_secs_f64());
+                            {
+                                let mut h = latency_hist.lock().await;
+                                let _ = h.increment(duration.as_micros() as u64);
+                            }
+                            per_query.record_success_us(
+                                prepared_query.payload.q_id,
+                                duration.as_micros() as u64,
+                            );
+                            counter += 1;
+                            if counter.is_multiple_of(worker_progress_every) {
+                                info!("worker {} processed {} queries", worker_id, counter);
+                            }
+                        }
+                        Err(e) => {
+                            SPANNER_ERROR_REQUESTS_DURATION_HISTOGRAM
+                                .observe(duration.as_secs_f64());
+                            if is_timeout_error(&e) {
+                                per_query.record_timeout(prepared_query.payload.q_id);
+                            } else {
+                                per_query.record_failure(prepared_query.payload.q_id);
+                            }
+                            let seconds_wait = 3u64;
+                            info!(
+                                "worker {} failed to process query, not sleeping for {} seconds {:?}",
+                                worker_id, seconds_wait, e
+                            );
+                        }
+                    }
+                }
+                None => {
+                    info!("worker {} received None, exiting", worker_id);
+                    break;
+                }
+            }
+        }
+        info!("worker {} finished", worker_id);
+    });
+
+    Ok(handle)
+}
+
+async fn prepare_spanner_queries(
+    dataset: Size,
+    size: usize,
+    file_name: String,
+    write_ratio: f32,
+    query_profile: QueryCoverageProfile,
+) -> BenchmarkResult<()> {
+    let start = Instant::now();
+    let spec = Spec::new(Users, dataset, Vendor::Spanner);
+    let vertices = spec.vertices as i32;
+    let edges = spec.edges as i32;
+    let graph_name = std::env::var("SPANNER_GRAPH_NAME")
+        .unwrap_or_else(|_| benchmark::spanner::DEFAULT_GRAPH_NAME.to_string());
+
+    let queries_repository =
+        SpannerUsersQueriesRepository::new(vertices, edges, query_profile, &graph_name);
+    let catalog = queries_repository.catalog();
+
+    let metadata = PrepareQueriesMetadata {
+        size,
+        dataset,
+        query_profile,
+        catalog,
+    };
+
+    let file = File::create(file_name).await?;
+    let mut writer = BufWriter::new(file);
+    let metadata_line = serde_json::to_string(&metadata)?;
+    writer.write_all(metadata_line.as_bytes()).await?;
+    writer.write_all(b"\n").await?;
+
+    for query in queries_repository.random_queries(size, write_ratio) {
+        let json_string = serde_json::to_string(&query)?;
+        writer.write_all(json_string.as_bytes()).await?;
+        writer.write_all(b"\n").await?;
+    }
+    writer.flush().await?;
+
+    let duration = start.elapsed();
+    info!("Time taken to prepare Spanner queries: {:?}", duration);
+    Ok(())
+}
+
+async fn read_spanner_queries(
+    file_name: String
+) -> BenchmarkResult<(PrepareQueriesMetadata, Vec<PreparedSpannerQuery>)> {
+    let start = Instant::now();
+    let file = File::open(file_name).await?;
+    let mut reader = BufReader::new(file);
+
+    let mut metadata_line = String::new();
+    reader.read_line(&mut metadata_line).await?;
+
+    match serde_json::from_str::<PrepareQueriesMetadata>(&metadata_line) {
+        Ok(metadata) => {
+            let size = metadata.size;
+            let mut queries = Vec::with_capacity(size);
+            let mut lines = reader.lines();
+
+            while let Some(line) = lines.next_line().await? {
+                let query: PreparedSpannerQuery = serde_json::from_str(&line)?;
+                queries.push(query);
+            }
+            let duration = start.elapsed();
+            info!("Reading {} Spanner queries took {:?}", size, duration);
+            Ok((metadata, queries))
+        }
+        Err(e) => Err(OtherError(format!("Error parsing metadata: {}", e))),
+    }
+}
+
+/// Parse Spanner endpoint into (database_path, graph_name).
+/// Supports:
+/// - projects/<p>/instances/<i>/databases/<d>
+/// - spanner://projects/<p>/instances/<i>/databases/<d>
+/// - spanner://projects/.../databases/<d>?graph=PokecGraph
+fn parse_spanner_endpoint(
+    endpoint: &str
+) -> BenchmarkResult<(String, String)> {
+    let graph_default = std::env::var("SPANNER_GRAPH_NAME")
+        .unwrap_or_else(|_| benchmark::spanner::DEFAULT_GRAPH_NAME.to_string());
+
+    let raw = endpoint.trim();
+    if raw.starts_with("projects/") {
+        return Ok((raw.to_string(), graph_default));
+    }
+
+    if raw.starts_with("spanner://") {
+        let without = raw.trim_start_matches("spanner://");
+        if let Some((path, query)) = without.split_once('?') {
+            let mut graph = graph_default;
+            for part in query.split('&') {
+                if let Some((k, v)) = part.split_once('=') {
+                    if k == "graph" && !v.is_empty() {
+                        graph = v.to_string();
+                    }
+                }
+            }
+            return Ok((path.to_string(), graph));
+        }
+        return Ok((without.to_string(), graph_default));
+    }
+
+    Err(OtherError(format!(
+        "Invalid Spanner endpoint '{}'. Use projects/<p>/instances/<i>/databases/<d> \
+         or spanner://projects/.../databases/<d>[?graph=Name]",
+        endpoint
+    )))
+}
+
 
 async fn run_memgraph(
     parallel: usize,

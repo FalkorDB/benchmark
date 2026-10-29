@@ -43,6 +43,7 @@ pub enum Vendor {
     // explicitly so `--vendor tigergraph` works as documented.
     #[value(name = "tigergraph")]
     TigerGraph,
+    Spanner,
 }
 
 #[derive(Debug, Clone)]
@@ -72,6 +73,8 @@ impl Spec<'_> {
             Vendor::Postgres => "https://s3.eu-west-1.amazonaws.com/deps.memgraph.io/dataset/pokec/benchmark/neo4j.cypher",
             Vendor::Mongo => "https://s3.eu-west-1.amazonaws.com/deps.memgraph.io/dataset/pokec/benchmark/neo4j.cypher",
             Vendor::TigerGraph => "https://s3.eu-west-1.amazonaws.com/deps.memgraph.io/dataset/pokec/benchmark/neo4j.cypher",
+            // Spanner Graph creates schema/indexes via DDL (see `spanner::create_schema`); URL unused.
+            Vendor::Spanner => "https://s3.eu-west-1.amazonaws.com/deps.memgraph.io/dataset/pokec/benchmark/neo4j.cypher",
         };
 
         match (name, size) {
