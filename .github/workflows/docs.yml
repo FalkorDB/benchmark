@@ -32,7 +32,7 @@ jobs:
       # the manifest, so the action installs it via its cargo-binstall fallback from lychee's
       # release binaries. Pinned to a commit SHA (CodeQL requires SHAs for third-party actions).
       - name: Install just and lychee
-        uses: taiki-e/install-action@84f5ac3124727fb3d284d4d22ee9ab3654fd09a6 # v2.87.7
+        uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: just,lychee
 
