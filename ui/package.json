@@ -40,7 +40,7 @@
     "tailwindcss-animate": "^1.0.7"
   },
   "devDependencies": {
-    "@tailwindcss/postcss": "^4.3.3",
+    "@tailwindcss/postcss": "^4.3.5",
     "@playwright/test": "^1.63.0",
     "@types/node": "^26",
     "@types/react": "^19",
@@ -48,7 +48,7 @@
     "@types/react-gtm-module": "^2.0.4",
     "eslint": "^10",
     "eslint-config-next": "16.3.4",
-    "postcss": "^8.5.31",
+    "postcss": "^8.5.32",
     "tailwindcss": "^4.3.2",
     "typescript": "^5"
   }
