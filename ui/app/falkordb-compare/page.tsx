@@ -18,6 +18,7 @@ export default async function FalkorDBCompare() {
         dataUrl={dataUrl}
         initialData={initialData}
         initialManifest={initialManifest}
+        showRunHistory
         comparisonVendors={["falkordb-c", "falkordb-rs", "falkordb1", "falkordb2", "r6g.xl", "r7g.xl", "r8g.xl", "r6i.xl", "r7i.xl"]}
         initialSelectedOptions={{
           "Workload Type": ["concurrent"],

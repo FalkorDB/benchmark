@@ -16,6 +16,7 @@ export default async function Neo4jVsFalkor() {
         dataUrl={dataUrl}
         initialData={initialData}
         initialManifest={initialManifest}
+        showRunHistory
         comparisonVendors={["falkordb", "neo4j"]}
         hideHardware
         initialSelectedOptions={{

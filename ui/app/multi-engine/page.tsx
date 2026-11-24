@@ -45,6 +45,7 @@ export default async function MultiEngineCompare() {
         dataUrl={dataUrl}
         initialData={initialData}
         initialManifest={initialManifest}
+        showRunHistory
         comparisonVendors={comparisonVendors}
         hideHardware
         initialSelectedOptions={{
