@@ -16,6 +16,7 @@ export default async function MemgraphVsFalkor() {
         dataUrl={dataUrl}
         initialData={initialData}
         initialManifest={initialManifest}
+        showRunHistory
         comparisonVendors={["falkordb", "memgraph"]}
         initialSelectedOptions={{
           "Workload Type": ["concurrent"],

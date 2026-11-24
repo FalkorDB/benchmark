@@ -16,6 +16,7 @@ export default async function TigerGraphVsFalkor() {
         dataUrl={dataUrl}
         initialData={initialData}
         initialManifest={initialManifest}
+        showRunHistory
         comparisonVendors={["falkordb", "tigergraph"]}
         initialSelectedOptions={{
           "Workload Type": ["concurrent"],

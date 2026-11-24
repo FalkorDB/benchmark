@@ -16,6 +16,7 @@ export default async function MongoVsFalkor() {
         dataUrl={dataUrl}
         initialData={initialData}
         initialManifest={initialManifest}
+        showRunHistory
         comparisonVendors={["falkordb", "mongo"]}
         initialSelectedOptions={{
           "Workload Type": ["concurrent"],

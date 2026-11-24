@@ -2,14 +2,15 @@
 
 import { AppSidebar } from "@/components/ui/app-sidebar";
 import { SidebarInset, SidebarProvider, useSidebar } from "@/components/ui/sidebar";
-import { SlidersHorizontal } from "lucide-react";
+import { FileDown, SlidersHorizontal } from "lucide-react";
 import FooterComponent from "./footer";
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BenchmarkData, Run } from "../types/benchmark";
 import { useToast } from "@/hooks/use-toast";
 import HorizontalBarChart from "./HorizontalBarChart";
 import VerticalBarChart from "./VerticalBarChart";
 import MemoryBarChart from "./MemoryBarChart";
+import { exportDashboardToPdf } from "../lib/export-dashboard-pdf";
 type RunsManifest = Record<string, { filename: string; timestamp: number }[]>;
 
 const filterDataByVendors = (
@@ -178,6 +179,9 @@ export default function DashBoard({
     initialData ? filterDataByVendors(initialData, allowedVendors) : null
   );
   const { toast } = useToast();
+  const exportRootRef = useRef<HTMLDivElement | null>(null);
+  const [isExportingPdf, setIsExportingPdf] = useState(false);
+  const [exportProgress, setExportProgress] = useState<string | null>(null);
   const [gridKey, setGridKey] = useState(0);
   const [p99SingleRatio, setP99SingleRatio] = useState<number | null>(null);
   const [filteredResults, setFilteredResults] = useState<Run[]>([]);
@@ -445,6 +449,88 @@ export default function DashBoard({
       };
     });
   };
+
+  const handleExportPdf = useCallback(async () => {
+    const root = exportRootRef.current;
+    if (!root) {
+      toast({
+        title: "Nothing to export",
+        description: "Dashboard charts are not ready yet.",
+        variant: "destructive",
+      });
+      return;
+    }
+    if (isExportingPdf) return;
+
+    setIsExportingPdf(true);
+    setExportProgress("Starting…");
+    const previousOptions = selectedOptions;
+
+    try {
+      const selectWorkload = async (workload: "concurrent" | "single") => {
+        setSelectedOptions((prev) => ({
+          ...prev,
+          "Workload Type": [workload],
+        }));
+        // Allow React to re-render charts for the new workload.
+        await new Promise((r) => setTimeout(r, 400));
+      };
+      const selectQuery = async (queryName: string) => {
+        setSelectedOptions((prev) => ({
+          ...prev,
+          Queries: [queryName],
+        }));
+        await new Promise((r) => setTimeout(r, 350));
+      };
+
+      const base =
+        activeUrl.replace("/summaries/", "").replace(/\.json$/i, "") ||
+        "benchmark-dashboard";
+
+      await exportDashboardToPdf({
+        root,
+        title: "Graph Database Performance Benchmarks",
+        subtitle: `Summary: ${activeUrl}`,
+        fileBaseName: `benchmark-${base}`,
+        // Export every query histogram (no A–D truncation).
+        queryNames: availableQueries,
+        maxQueries: availableQueries.length || undefined,
+        selectWorkload,
+        selectQuery: availableQueries.length ? selectQuery : undefined,
+        onProgress: (msg) => setExportProgress(msg),
+      });
+
+      toast({
+        title: "PDF exported",
+        description: availableQueries.length
+          ? `Saved multi-page PDF (concurrent overview + all ${availableQueries.length} query histograms).`
+          : "Saved multi-page PDF of the current dashboard charts.",
+      });
+    } catch (error) {
+      console.error("PDF export failed", error);
+      toast({
+        title: "PDF export failed",
+        description:
+          error instanceof Error
+            ? error.message
+            : typeof error === "string"
+              ? error
+              : "Unknown error — check the browser console for details",
+        variant: "destructive",
+      });
+    } finally {
+      // Restore user filter selection after export walk.
+      setSelectedOptions(previousOptions);
+      setIsExportingPdf(false);
+      setExportProgress(null);
+    }
+  }, [
+    activeUrl,
+    availableQueries,
+    isExportingPdf,
+    selectedOptions,
+    toast,
+  ]);
 
   // filter unrealistic (single-workload) data
   // Preferred source: data.unrealstic (legacy file format)
@@ -1060,18 +1146,35 @@ export default function DashBoard({
         <SidebarInset
           className={
             fullHeight
-              ? `flex-grow h-auto md:h-full min-h-0 min-w-0 max-h-none md:max-h-svh overflow-visible md:overflow-y-auto ${showSidebar ? "" : "max-h-none"}`
-              : `flex-grow h-auto min-h-0 min-w-0 overflow-visible ${showSidebar ? "" : "max-h-none"}`
+              ? `flex flex-col flex-grow h-auto md:h-full min-h-0 min-w-0 max-h-none md:max-h-svh overflow-visible md:overflow-y-auto ${showSidebar ? "" : "max-h-none"}`
+              : `flex flex-col flex-grow h-auto min-h-0 min-w-0 overflow-visible ${showSidebar ? "" : "max-h-none"}`
           }
         >
           {showSidebar && <MobileFiltersBar />}
-          {showRunHistory && pastRuns.length > 0 && (
-            <div className="bg-muted/30 border-b border-gray-200/40 p-4 flex flex-wrap items-center justify-between gap-4 font-space">
-              <div className="flex flex-col">
-                <span className="text-xs text-gray-500 font-medium">Select Run History</span>
-                <h1 className="text-sm font-semibold text-gray-800">Viewing Benchmark Run</h1>
-              </div>
-              <div className="flex items-center gap-3 w-full md:w-auto">
+          <div
+            className="shrink-0 bg-muted/30 border-b border-gray-200/40 p-3 md:p-4 flex flex-wrap items-center justify-between gap-3 font-space"
+            data-pdf-ignore="true"
+          >
+            <div className="flex flex-col min-w-0">
+              {showRunHistory && pastRuns.length > 0 ? (
+                <>
+                  <span className="text-xs text-gray-500 font-medium">Select Run History</span>
+                  <h1 className="text-sm font-semibold text-gray-800">Viewing Benchmark Run</h1>
+                </>
+              ) : (
+                <>
+                  <span className="text-xs text-gray-500 font-medium">Dashboard</span>
+                  <h1 className="text-sm font-semibold text-gray-800 truncate">
+                    {baseFileName || "Benchmark summary"}
+                  </h1>
+                </>
+              )}
+              {exportProgress && (
+                <span className="text-xs text-primary mt-1">{exportProgress}</span>
+              )}
+            </div>
+            <div className="flex flex-wrap items-center gap-3 w-full md:w-auto">
+              {showRunHistory && pastRuns.length > 0 && (
                 <select
                   value={activeUrl.replace("/summaries/", "")}
                   onChange={(e) => {
@@ -1094,12 +1197,35 @@ export default function DashBoard({
                     </option>
                   ))}
                 </select>
-              </div>
+              )}
+              <button
+                type="button"
+                onClick={handleExportPdf}
+                disabled={isExportingPdf || !data}
+                className="inline-flex items-center justify-center gap-2 rounded-lg bg-gradient-to-r from-[#EC806C] via-[#B66EBD] to-[#7568F2] px-3 py-2 text-sm font-medium text-white shadow-sm hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
+                title="Export multi-page PDF of concurrent charts and all query histograms"
+              >
+                <FileDown className="size-4 shrink-0" />
+                {isExportingPdf ? "Exporting…" : "Export to PDF"}
+              </button>
             </div>
-          )}
+          </div>
+          {/* flex-1 + min-h-0 keeps single/concurrent grids filling viewport height (pre-export layout). */}
+          <div
+            ref={exportRootRef}
+            className={
+              fullHeight
+                ? "flex-1 min-h-0 min-w-0 w-full flex flex-col"
+                : "w-full min-w-0 flex flex-col"
+            }
+          >
           {isConcurrent ? (
-            <div key={gridKey} className="flex flex-col w-full min-w-0 gap-2 p-1">
-              <div className="bg-muted/50 rounded-xl p-4 w-full flex flex-col items-center justify-between min-h-[420px]">
+            <div key={gridKey} className="flex flex-col w-full min-w-0 flex-1 min-h-0 gap-2 p-1">
+              <div
+                className="bg-muted/50 rounded-xl p-4 w-full flex flex-1 flex-col items-center justify-between min-h-[420px]"
+                data-pdf-section="latency"
+                id="latency-chart-concurrent"
+              >
                 <h2 className="text-2xl font-bold text-center font-space">
                   LATENCY
                 </h2>
@@ -1129,7 +1255,10 @@ export default function DashBoard({
               </div>
 
               {hasConcurrentRunDetails && (
-                <div className="bg-muted/50 rounded-xl p-4 w-full flex flex-col min-h-[180px]">
+                <div
+                  className="bg-muted/50 rounded-xl p-4 w-full flex flex-col min-h-[180px]"
+                  data-pdf-section="run-details"
+                >
                   <h2 className="text-2xl font-bold text-center font-space">
                     RUN DETAILS
                   </h2>
@@ -1174,8 +1303,9 @@ export default function DashBoard({
               )}
 
               <div
-                className="bg-muted/50 rounded-xl p-4 w-full flex flex-col items-center justify-between min-h-[420px]"
+                className="bg-muted/50 rounded-xl p-4 w-full flex flex-1 flex-col items-center justify-between min-h-[420px]"
                 id="throughput-chart"
+                data-pdf-section="throughput"
               >
                 <h2 className="text-2xl font-bold text-center font-space">
                   MAX THROUGHPUT
@@ -1215,11 +1345,12 @@ export default function DashBoard({
           ) : (
             <div
               key={gridKey}
-              className="grid w-full h-full min-w-0 grid-cols-1 md:grid-cols-[7fr_3fr] grid-rows-[auto_auto_auto] md:grid-rows-[2fr,50px] gap-2 p-1"
+              className="grid w-full flex-1 min-h-0 h-full min-w-0 grid-cols-1 md:grid-cols-[7fr_3fr] grid-rows-[auto_auto_auto] md:grid-rows-[2fr_50px] gap-2 p-1"
             >
               <div
-                className="bg-muted/50 rounded-xl p-4 min-h-[360px] md:min-h-0 w-full flex flex-col min-w-0 items-center justify-between"
+                className="bg-muted/50 rounded-xl p-4 min-h-[360px] md:min-h-0 w-full h-full flex flex-col min-w-0 items-center justify-between"
                 id="latency-chart"
+                data-pdf-section="latency"
               >
                 <h2 className="text-2xl font-bold text-center font-space">
                   LATENCY
@@ -1250,7 +1381,10 @@ export default function DashBoard({
                   </div>
                 </div>
               </div>
-              <div className="bg-muted/50 rounded-xl p-4 min-h-[360px] md:min-h-0 w-full flex flex-col min-w-0 items-center justify-between">
+              <div
+                className="bg-muted/50 rounded-xl p-4 min-h-[360px] md:min-h-0 w-full h-full flex flex-col min-w-0 items-center justify-between"
+                data-pdf-section="memory"
+              >
                 <h2 className="text-2xl font-bold text-center font-space">
                   MEMORY USAGE
                 </h2>
@@ -1332,6 +1466,7 @@ export default function DashBoard({
               </div>
             </div>
           )}
+          </div>
         </SidebarInset>
       </div>
     </SidebarProvider>

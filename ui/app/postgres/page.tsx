@@ -16,6 +16,7 @@ export default async function PostgresVsFalkor() {
         dataUrl={dataUrl}
         initialData={initialData}
         initialManifest={initialManifest}
+        showRunHistory
         comparisonVendors={["falkordb", "postgres"]}
         initialSelectedOptions={{
           "Workload Type": ["concurrent"],

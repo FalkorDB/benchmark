@@ -16,6 +16,7 @@ export default async function AwsTestsFalkorGravitonVsIntel() {
         dataUrl={dataUrl}
         initialData={initialData}
         initialManifest={initialManifest}
+        showRunHistory
         // Do not hardcode comparisonVendors: aws-tests labels are instance types (e.g. r7i.2xlarge).
         initialSelectedOptions={{
           "Workload Type": ["concurrent"],
