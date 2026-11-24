@@ -1248,6 +1248,39 @@ mod tests {
     }
 
     #[test]
+    fn extended_core_multi_hop_queries_include_limit_100() {
+        let repository = UsersQueriesRepository::new(
+            100,
+            1000,
+            Flavour::FalkorDB,
+            AlgorithmQuerySelection::default(),
+            QueryCoverageProfile::ExtendedCore,
+        );
+        let mut multi_hop = 0usize;
+        for name in repository.queries_repository.read_query_names.clone() {
+            let generator = repository
+                .queries_repository
+                .read_queries
+                .get(&name)
+                .expect("read query present");
+            let text = generator.generate().text.to_ascii_uppercase();
+            let is_multi_hop = text.contains("-->()-->")
+                || text.contains("[*1..2]")
+                || text.contains("WITH T LIMIT 100")
+                || text.contains("-->()-->()-->");
+            if !is_multi_hop {
+                continue;
+            }
+            multi_hop += 1;
+            assert!(
+                text.contains("LIMIT 100"),
+                "query {name} missing LIMIT 100: {text}"
+            );
+        }
+        assert!(multi_hop > 0, "expected extended-core multi-hop queries");
+    }
+
+    #[test]
     fn test_algorithm_queries_are_tracked() {
         let repository = UsersQueriesRepository::new(
             100,

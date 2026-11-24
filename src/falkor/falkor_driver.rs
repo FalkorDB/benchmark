@@ -1568,3 +1568,122 @@ RETURN
         }
     }
 }
+
+#[cfg(test)]
+mod memory_layer_tests {
+    use super::*;
+    use redis::Value;
+
+    #[test]
+    fn parse_docker_mem_usage_units() {
+        assert_eq!(
+            parse_docker_mem_usage_to_bytes("408.5MiB"),
+            Some((408.5_f64 * 1024.0 * 1024.0).round() as i64)
+        );
+        assert_eq!(
+            parse_docker_mem_usage_to_bytes("1.5GiB"),
+            Some((1.5 * 1024.0_f64.powi(3)).round() as i64)
+        );
+        assert_eq!(
+            parse_docker_mem_usage_to_bytes("512KiB"),
+            Some(512_i64 * 1024)
+        );
+        assert_eq!(
+            parse_docker_mem_usage_to_bytes("123MB"),
+            Some(123_i64 * 1024 * 1024)
+        );
+        assert_eq!(parse_docker_mem_usage_to_bytes("100B"), Some(100));
+        assert_eq!(parse_docker_mem_usage_to_bytes("  2 GiB "), Some((2.0 * 1024.0_f64.powi(3)).round() as i64));
+        assert_eq!(parse_docker_mem_usage_to_bytes(""), None);
+        assert_eq!(parse_docker_mem_usage_to_bytes("nope"), None);
+        assert_eq!(parse_docker_mem_usage_to_bytes("MiB"), None);
+    }
+
+    #[test]
+    fn parse_redis_info_memory_fields() {
+        let info = "\
+# Memory
+used_memory:1048576
+used_memory_rss:2097152
+mem_fragmentation_ratio:1.50
+used_memory_peak:999
+";
+        let parsed = parse_redis_info_memory(info);
+        assert_eq!(parsed.used_memory_bytes, Some(1_048_576));
+        assert_eq!(parsed.used_memory_rss_bytes, Some(2_097_152));
+        assert!((parsed.mem_fragmentation_ratio.unwrap() - 1.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn endpoint_host_port_parses_schemes() {
+        assert_eq!(
+            endpoint_host_port(Some(&"falkor://10.0.0.1:6380".to_string())),
+            Some(("10.0.0.1".to_string(), 6380))
+        );
+        assert_eq!(
+            endpoint_host_port(Some(&"redis://localhost:6379/0".to_string())),
+            Some(("localhost".to_string(), 6379))
+        );
+        assert_eq!(
+            endpoint_host_port(None),
+            Some(("127.0.0.1".to_string(), 6379))
+        );
+        assert_eq!(endpoint_host_port(Some(&"not-an-endpoint".to_string())), None);
+    }
+
+    #[test]
+    fn redis_value_helpers() {
+        assert_eq!(
+            redis_value_to_string(&Value::SimpleString("abc".into())),
+            Some("abc".into())
+        );
+        assert_eq!(redis_value_to_string(&Value::Int(42)), Some("42".into()));
+        assert_eq!(
+            redis_value_to_string(&Value::BulkString(b"hi".to_vec())),
+            Some("hi".into())
+        );
+        assert_eq!(redis_value_to_f64(&Value::Int(7)), Some(7.0));
+        assert_eq!(
+            redis_value_to_f64(&Value::BulkString(b"3.25".to_vec())),
+            Some(3.25)
+        );
+        assert_eq!(redis_value_to_f64(&Value::SimpleString("x".into())), None);
+    }
+
+    #[test]
+    fn parse_graph_memory_snapshot_total_and_components() {
+        let value = Value::Array(vec![
+            Value::SimpleString("node_count".into()),
+            Value::Double(1.5),
+            Value::SimpleString("total_graph_sz_mb".into()),
+            Value::BulkString(b"12.5".to_vec()),
+            Value::SimpleString("labels".into()),
+            Value::Array(vec![
+                Value::SimpleString("User".into()),
+                Value::Int(3),
+            ]),
+            Value::SimpleString("ignored".into()),
+            Value::SimpleString("nope".into()),
+        ]);
+        let snap = parse_graph_memory_snapshot(value).expect("snapshot");
+        assert!((snap.total_mb - 12.5).abs() < f64::EPSILON);
+        assert!(snap
+            .components
+            .iter()
+            .any(|(k, v)| k == "node_count" && (*v - 1.5).abs() < f64::EPSILON));
+        assert!(snap
+            .components
+            .iter()
+            .any(|(k, v)| k == "labels" && (*v - 3.0).abs() < f64::EPSILON));
+    }
+
+    #[test]
+    fn parse_graph_memory_snapshot_requires_total() {
+        let value = Value::Array(vec![
+            Value::SimpleString("only_component".into()),
+            Value::Int(1),
+        ]);
+        assert!(parse_graph_memory_snapshot(value).is_none());
+        assert!(parse_graph_memory_snapshot(Value::Nil).is_none());
+    }
+}

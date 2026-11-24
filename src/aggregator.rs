@@ -1634,3 +1634,55 @@ fn quantile_u64(
     let idx = ((sorted.len() as f64 - 1.0) * q).round() as usize;
     sorted[idx.min(sorted.len() - 1)]
 }
+
+#[cfg(test)]
+mod memory_format_tests {
+    use super::*;
+
+    #[test]
+    fn format_mem_helpers() {
+        assert_eq!(format_mem_from_kib(0.0), "0MB");
+        assert_eq!(format_mem_from_kib(1024.0), "1.0MB");
+        assert_eq!(format_mem_from_bytes(1024.0 * 1024.0 * 2.0), "2.0MB");
+        assert_eq!(format_mem_from_bytes(1024.0 * 1024.0 * 1024.0 * 2.0), "2.00GB");
+        assert_eq!(format_mem_from_mb(12.5), "12.5MB");
+        assert_eq!(format_mem_from_mb(2048.0), "2.00GB");
+        assert_eq!(format_mem_from_mib(f64::NAN), "0MB");
+    }
+
+    #[test]
+    fn falkor_vendor_cpu_mem_prefers_container_peak() {
+        let text = "\
+falkor_cpu_usage 12.5
+falkor_memory_usage 999999
+falkordb_graph_memory_usage_mb 50
+falkordb_redis_used_memory_rss_bytes 1048576
+falkordb_container_memory_usage_peak_bytes 2097152
+";
+        let idx = MetricsIndex::from_prometheus_text(text).unwrap();
+        let (cpu, mem) = idx.vendor_cpu_mem(Vendor::Falkor);
+        assert!((cpu - 12.5).abs() < f64::EPSILON);
+        assert_eq!(mem, "2.0MB");
+    }
+
+    #[test]
+    fn falkor_vendor_cpu_mem_falls_back_to_redis_then_graph() {
+        let redis_only = "\
+falkor_cpu_usage 1
+falkordb_redis_used_memory_rss_peak_bytes 1048576
+falkor_memory_usage 4096
+";
+        let idx = MetricsIndex::from_prometheus_text(redis_only).unwrap();
+        let (_, mem) = idx.vendor_cpu_mem(Vendor::Falkor);
+        assert_eq!(mem, "1.0MB");
+
+        let graph_only = "\
+falkor_cpu_usage 1
+falkordb_graph_memory_usage_mb 3.5
+falkor_memory_usage 4096
+";
+        let idx = MetricsIndex::from_prometheus_text(graph_only).unwrap();
+        let (_, mem) = idx.vendor_cpu_mem(Vendor::Falkor);
+        assert_eq!(mem, "3.5MB");
+    }
+}
