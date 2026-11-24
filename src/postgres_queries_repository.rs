@@ -817,7 +817,9 @@ impl PostgresUsersQueriesRepository {
                                 FROM hops JOIN friend_edges fe ON fe.src_id = hops.id \
                                 WHERE hops.depth < 5 \
                              ) \
-                             SELECT count(*) AS cnt FROM hops WHERE depth = 5",
+                             SELECT count(*) AS cnt FROM ( \
+                                SELECT id FROM hops WHERE depth = 5 LIMIT 100 \
+                             ) limited",
                         )
                         .param(random.random_vertex())
                         .build()
@@ -832,7 +834,9 @@ impl PostgresUsersQueriesRepository {
                                 FROM hops JOIN friend_edges fe ON fe.src_id = hops.id \
                                 WHERE hops.depth < 6 \
                              ) \
-                             SELECT count(*) AS cnt FROM hops WHERE depth = 6",
+                             SELECT count(*) AS cnt FROM ( \
+                                SELECT id FROM hops WHERE depth = 6 LIMIT 100 \
+                             ) limited",
                         )
                         .param(random.random_vertex())
                         .build()

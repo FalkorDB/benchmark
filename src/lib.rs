@@ -239,7 +239,39 @@ lazy_static! {
     // FalkorDB: derived from `GRAPH.MEMORY USAGE <graph>` (MB).
     pub static ref FALKOR_GRAPH_MEMORY_USAGE_MB: IntGauge = register_int_gauge!(
         "falkordb_graph_memory_usage_mb",
-        "Graph memory usage in MB reported by GRAPH.MEMORY USAGE"
+        "Graph memory usage in MB reported by GRAPH.MEMORY USAGE total_graph_sz_mb"
+    )
+    .unwrap();
+    // Multi-layer Falkor/Redis/container memory (bytes). Collected for external Docker runs too.
+    pub static ref FALKOR_REDIS_USED_MEMORY_BYTES: IntGauge = register_int_gauge!(
+        "falkordb_redis_used_memory_bytes",
+        "Redis allocator used_memory from INFO memory (logical heap)"
+    )
+    .unwrap();
+    pub static ref FALKOR_REDIS_USED_MEMORY_RSS_BYTES: IntGauge = register_int_gauge!(
+        "falkordb_redis_used_memory_rss_bytes",
+        "Redis used_memory_rss from INFO memory (OS RSS as seen by Redis)"
+    )
+    .unwrap();
+    pub static ref FALKOR_REDIS_USED_MEMORY_RSS_PEAK_BYTES: IntGauge = register_int_gauge!(
+        "falkordb_redis_used_memory_rss_peak_bytes",
+        "Peak Redis used_memory_rss observed during the benchmark run"
+    )
+    .unwrap();
+    pub static ref FALKOR_CONTAINER_MEMORY_USAGE_BYTES: IntGauge = register_int_gauge!(
+        "falkordb_container_memory_usage_bytes",
+        "Docker cgroup memory usage (docker stats) when container can be resolved"
+    )
+    .unwrap();
+    pub static ref FALKOR_CONTAINER_MEMORY_USAGE_PEAK_BYTES: IntGauge = register_int_gauge!(
+        "falkordb_container_memory_usage_peak_bytes",
+        "Peak Docker cgroup memory usage observed during the benchmark run"
+    )
+    .unwrap();
+    pub static ref FALKOR_GRAPH_MEMORY_COMPONENT_MB: IntGaugeVec = register_int_gauge_vec!(
+        "falkordb_graph_memory_component_mb",
+        "GRAPH.MEMORY USAGE component sizes in MB (label=component)",
+        &["component"]
     )
     .unwrap();
 

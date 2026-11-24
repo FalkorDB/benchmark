@@ -1,0 +1,2182 @@
+{
+  "runs": [
+    {
+      "vendor": "falkordb-c",
+      "engine-version": "FalkorDB (Redis 7.2.4)",
+      "read-write-ratio": 0.0,
+      "clients": 8,
+      "platform": "arm",
+      "target-messages-per-second": 2000,
+      "edges": 100000,
+      "relationships": 1768515,
+      "started-at-epoch-secs": 1794891633,
+      "result": {
+        "deadline-offset": "0ms",
+        "actual-messages-per-second": 525.0170630545492,
+        "latency": {
+          "p50": "2.303ms",
+          "p95": "52.48ms",
+          "p99": "215.04ms"
+        },
+        "avg-latency-ms": 15.149943620699869,
+        "latency-histogram": {
+          "buckets-ms": [
+            1,
+            1,
+            5,
+            10,
+            25,
+            50,
+            100,
+            250,
+            500,
+            1000,
+            2500,
+            5000,
+            10000
+          ],
+          "cumulative-counts": [
+            131,
+            3179,
+            6276,
+            7941,
+            9101,
+            9476,
+            9630,
+            9950,
+            9973,
+            9990,
+            10000,
+            10000,
+            10000
+          ],
+          "count": 10000
+        },
+        "elapsed-ms": 19047,
+        "cpu-usage": 0.0,
+        "ram-usage": "125.0MB",
+        "errors": 0,
+        "successful-requests": 10000,
+        "operations": {
+          "by-query": {
+            "aggregate_age": 223,
+            "aggregate_age_distinct": 210,
+            "aggregate_age_filtered": 231,
+            "aggregate_age_min_max_avg": 215,
+            "aggregate_count_users": 240,
+            "aggregate_expansion_1": 212,
+            "aggregate_expansion_1_with_filter": 225,
+            "aggregate_expansion_2": 236,
+            "aggregate_expansion_2_with_filter": 242,
+            "aggregate_expansion_3": 240,
+            "aggregate_expansion_3_with_filter": 256,
+            "aggregate_expansion_4": 248,
+            "aggregate_expansion_4_with_filter": 249,
+            "all_shortest_paths_len": 213,
+            "call_subquery": 198,
+            "count_friend_edges_plain": 228,
+            "count_users_plain": 212,
+            "entity_path_introspection": 247,
+            "id_range_scan": 213,
+            "id_seek": 215,
+            "indexed_in_list_predicate": 224,
+            "indexed_or_predicate": 274,
+            "neighbours_2": 243,
+            "neighbours_2_with_data": 209,
+            "neighbours_2_with_data_and_filter": 232,
+            "neighbours_2_with_filter": 233,
+            "optional_friend": 221,
+            "order_by_age": 221,
+            "pattern_cycle": 209,
+            "pattern_long": 229,
+            "pattern_short": 230,
+            "shortest_path": 209,
+            "shortest_path_with_filter": 230,
+            "single_vertex_read": 210,
+            "union_all_ids": 224,
+            "union_distinct_ids": 259,
+            "unwind_rows": 240,
+            "value_join": 237,
+            "value_join_cnt": 235,
+            "var_len_friends": 211,
+            "var_len_with_edge_where_filter": 216,
+            "vertex_on_label_property": 231,
+            "vertex_on_label_property_index": 217,
+            "vertex_on_property": 203
+          },
+          "by-spawn": {
+            "0": 1021,
+            "1": 1438,
+            "2": 1365,
+            "3": 1202,
+            "4": 1324,
+            "5": 1040,
+            "6": 1459,
+            "7": 1151
+          }
+        },
+        "spawn-stats": {
+          "min": 1021,
+          "max": 1459,
+          "p50": 1324,
+          "p95": 1459,
+          "max-min-ratio": 1.4289911851126347,
+          "cv": 0.1284903109187615
+        },
+        "histogram_for_type": {
+          "aggregate_age": [
+            4.255,
+            4.543,
+            4.671,
+            5.023,
+            5.343,
+            5.791,
+            6.527,
+            8.031,
+            9.791,
+            11.263,
+            15.871,
+            0.0
+          ],
+          "aggregate_age_distinct": [
+            5.311,
+            5.599,
+            5.823,
+            6.239,
+            6.527,
+            6.847,
+            7.455,
+            8.255,
+            10.111,
+            11.903,
+            14.591,
+            0.0
+          ],
+          "aggregate_age_filtered": [
+            6.143,
+            6.367,
+            6.559,
+            6.687,
+            7.071,
+            7.935,
+            8.959,
+            9.919,
+            11.455,
+            12.863,
+            14.847,
+            0.0
+          ],
+          "aggregate_age_min_max_avg": [
+            8.159,
+            8.639,
+            8.895,
+            9.215,
+            9.663,
+            10.111,
+            10.879,
+            11.711,
+            12.991,
+            14.911,
+            18.175,
+            0.0
+          ],
+          "aggregate_count_users": [
+            0.505,
+            0.567,
+            0.631,
+            0.679,
+            0.755,
+            0.831,
+            1.003,
+            1.407,
+            2.623,
+            4.607,
+            6.847,
+            0.0
+          ],
+          "aggregate_expansion_1": [
+            0.615,
+            0.683,
+            0.723,
+            0.779,
+            0.843,
+            0.947,
+            1.167,
+            1.807,
+            4.319,
+            5.407,
+            8.639,
+            0.0
+          ],
+          "aggregate_expansion_1_with_filter": [
+            0.619,
+            0.675,
+            0.739,
+            0.799,
+            0.883,
+            0.983,
+            1.167,
+            1.719,
+            3.471,
+            5.343,
+            8.031,
+            0.0
+          ],
+          "aggregate_expansion_2": [
+            0.763,
+            0.915,
+            1.071,
+            1.191,
+            1.527,
+            1.855,
+            2.415,
+            3.903,
+            5.407,
+            6.879,
+            9.087,
+            0.0
+          ],
+          "aggregate_expansion_2_with_filter": [
+            0.807,
+            0.891,
+            0.991,
+            1.151,
+            1.359,
+            1.527,
+            1.839,
+            2.319,
+            2.991,
+            4.223,
+            8.767,
+            0.0
+          ],
+          "aggregate_expansion_3": [
+            1.327,
+            2.831,
+            4.159,
+            6.175,
+            7.839,
+            8.639,
+            9.343,
+            10.367,
+            12.159,
+            14.143,
+            19.967,
+            0.0
+          ],
+          "aggregate_expansion_3_with_filter": [
+            1.751,
+            2.479,
+            3.807,
+            4.991,
+            5.823,
+            7.551,
+            9.215,
+            10.367,
+            11.647,
+            12.991,
+            16.639,
+            0.0
+          ],
+          "aggregate_expansion_4": [
+            7.263,
+            9.471,
+            10.751,
+            11.775,
+            13.759,
+            15.871,
+            18.431,
+            22.015,
+            27.519,
+            30.591,
+            45.567,
+            0.0
+          ],
+          "aggregate_expansion_4_with_filter": [
+            6.655,
+            9.983,
+            11.263,
+            12.287,
+            14.015,
+            16.127,
+            18.815,
+            21.631,
+            25.983,
+            31.615,
+            37.887,
+            0.0
+          ],
+          "all_shortest_paths_len": [
+            3.887,
+            9.855,
+            15.935,
+            22.271,
+            38.399,
+            59.903,
+            145.407,
+            290.815,
+            585.727,
+            999.423,
+            1253.375,
+            0.0
+          ],
+          "call_subquery": [
+            0.635,
+            0.707,
+            0.743,
+            0.791,
+            0.867,
+            0.995,
+            1.231,
+            1.695,
+            4.015,
+            5.503,
+            9.919,
+            0.0
+          ],
+          "count_friend_edges_plain": [
+            0.495,
+            0.567,
+            0.623,
+            0.687,
+            0.771,
+            0.863,
+            1.047,
+            1.391,
+            2.655,
+            5.279,
+            13.375,
+            0.0
+          ],
+          "count_users_plain": [
+            0.485,
+            0.543,
+            0.583,
+            0.639,
+            0.711,
+            0.795,
+            0.947,
+            1.407,
+            3.391,
+            5.151,
+            7.583,
+            0.0
+          ],
+          "entity_path_introspection": [
+            0.687,
+            0.759,
+            0.867,
+            0.911,
+            0.991,
+            1.111,
+            1.295,
+            1.999,
+            3.471,
+            4.799,
+            7.583,
+            0.0
+          ],
+          "id_range_scan": [
+            0.623,
+            0.691,
+            0.727,
+            0.787,
+            0.855,
+            0.931,
+            1.111,
+            1.583,
+            3.055,
+            4.927,
+            8.159,
+            0.0
+          ],
+          "id_seek": [
+            0.539,
+            0.583,
+            0.615,
+            0.683,
+            0.755,
+            0.815,
+            0.907,
+            1.367,
+            3.391,
+            5.119,
+            11.967,
+            0.0
+          ],
+          "indexed_in_list_predicate": [
+            0.695,
+            0.759,
+            0.815,
+            0.899,
+            0.955,
+            1.111,
+            1.359,
+            2.207,
+            4.191,
+            5.439,
+            8.767,
+            0.0
+          ],
+          "indexed_or_predicate": [
+            0.591,
+            0.655,
+            0.695,
+            0.747,
+            0.843,
+            0.991,
+            1.207,
+            1.863,
+            3.583,
+            5.695,
+            8.447,
+            0.0
+          ],
+          "neighbours_2": [
+            0.815,
+            0.939,
+            1.071,
+            1.295,
+            1.503,
+            1.783,
+            2.351,
+            3.535,
+            5.151,
+            6.495,
+            10.239,
+            0.0
+          ],
+          "neighbours_2_with_data": [
+            0.943,
+            1.431,
+            1.911,
+            3.039,
+            3.743,
+            4.959,
+            6.463,
+            10.879,
+            17.535,
+            24.703,
+            38.399,
+            0.0
+          ],
+          "neighbours_2_with_data_and_filter": [
+            1.015,
+            1.359,
+            1.679,
+            2.143,
+            2.655,
+            3.455,
+            4.735,
+            6.015,
+            7.903,
+            10.623,
+            15.487,
+            0.0
+          ],
+          "neighbours_2_with_filter": [
+            0.783,
+            0.907,
+            1.003,
+            1.167,
+            1.319,
+            1.599,
+            2.175,
+            2.671,
+            4.223,
+            5.919,
+            8.831,
+            0.0
+          ],
+          "optional_friend": [
+            0.623,
+            0.679,
+            0.739,
+            0.831,
+            0.915,
+            0.991,
+            1.191,
+            2.095,
+            3.823,
+            4.959,
+            7.519,
+            0.0
+          ],
+          "order_by_age": [
+            40.959,
+            42.239,
+            43.263,
+            43.775,
+            44.543,
+            45.311,
+            46.335,
+            47.871,
+            50.687,
+            53.759,
+            78.847,
+            0.0
+          ],
+          "pattern_cycle": [
+            0.779,
+            0.939,
+            1.071,
+            1.223,
+            1.383,
+            1.623,
+            2.095,
+            2.687,
+            3.583,
+            5.215,
+            8.511,
+            0.0
+          ],
+          "pattern_long": [
+            11.647,
+            13.183,
+            14.655,
+            16.127,
+            17.791,
+            19.839,
+            21.503,
+            23.807,
+            27.519,
+            31.231,
+            39.167,
+            0.0
+          ],
+          "pattern_short": [
+            0.807,
+            0.931,
+            1.103,
+            1.279,
+            1.519,
+            1.895,
+            2.575,
+            3.935,
+            6.527,
+            7.775,
+            9.599,
+            0.0
+          ],
+          "shortest_path": [
+            11.583,
+            49.919,
+            79.359,
+            103.935,
+            125.951,
+            154.623,
+            180.223,
+            200.703,
+            211.967,
+            224.255,
+            238.591,
+            0.0
+          ],
+          "shortest_path_with_filter": [
+            13.567,
+            50.943,
+            88.575,
+            119.807,
+            142.335,
+            159.743,
+            173.055,
+            196.607,
+            217.087,
+            229.375,
+            250.879,
+            0.0
+          ],
+          "single_vertex_read": [
+            0.559,
+            0.607,
+            0.663,
+            0.719,
+            0.767,
+            0.843,
+            0.951,
+            1.399,
+            3.407,
+            4.895,
+            8.191,
+            0.0
+          ],
+          "union_all_ids": [
+            0.599,
+            0.679,
+            0.735,
+            0.783,
+            0.843,
+            0.943,
+            1.063,
+            1.431,
+            2.943,
+            5.183,
+            8.447,
+            0.0
+          ],
+          "union_distinct_ids": [
+            0.615,
+            0.667,
+            0.707,
+            0.779,
+            0.871,
+            0.955,
+            1.135,
+            1.991,
+            4.479,
+            5.439,
+            8.063,
+            0.0
+          ],
+          "unwind_rows": [
+            0.543,
+            0.599,
+            0.655,
+            0.723,
+            0.791,
+            0.883,
+            1.015,
+            1.415,
+            3.503,
+            6.431,
+            10.943,
+            0.0
+          ],
+          "value_join": [
+            6.111,
+            7.519,
+            8.511,
+            9.279,
+            10.175,
+            10.879,
+            11.903,
+            12.415,
+            14.015,
+            15.871,
+            19.199,
+            0.0
+          ],
+          "value_join_cnt": [
+            4.575,
+            4.831,
+            5.055,
+            5.791,
+            6.751,
+            7.359,
+            7.807,
+            8.767,
+            10.687,
+            12.543,
+            21.887,
+            0.0
+          ],
+          "var_len_friends": [
+            0.819,
+            0.923,
+            1.087,
+            1.335,
+            1.631,
+            2.063,
+            2.927,
+            3.839,
+            5.727,
+            7.519,
+            10.687,
+            0.0
+          ],
+          "var_len_with_edge_where_filter": [
+            1.839,
+            3.311,
+            5.823,
+            8.095,
+            12.735,
+            18.303,
+            29.055,
+            49.919,
+            80.383,
+            104.959,
+            211.967,
+            0.0
+          ],
+          "vertex_on_label_property": [
+            0.559,
+            0.603,
+            0.647,
+            0.691,
+            0.811,
+            0.943,
+            1.199,
+            1.839,
+            3.679,
+            5.215,
+            9.983,
+            0.0
+          ],
+          "vertex_on_label_property_index": [
+            0.523,
+            0.607,
+            0.667,
+            0.707,
+            0.791,
+            0.899,
+            1.191,
+            1.775,
+            4.319,
+            5.503,
+            9.023,
+            0.0
+          ],
+          "vertex_on_property": [
+            2.207,
+            2.303,
+            2.431,
+            2.591,
+            2.735,
+            3.055,
+            3.727,
+            5.023,
+            6.015,
+            7.615,
+            13.887,
+            0.0
+          ]
+        },
+        "telemetry_for_type": {
+          "CALL DB.LABELS()": {
+            "wait-ms": 38.083,
+            "exec-ms": 15.25,
+            "report-ms": 24.125
+          },
+          "CALL DB.PROPERTYKEYS()": {
+            "wait-ms": 31.667,
+            "exec-ms": 5.292,
+            "report-ms": 22.458
+          },
+          "CALL DB.RELATIONSHIPTYPES()": {
+            "wait-ms": 23.042,
+            "exec-ms": 3.25,
+            "report-ms": 19.916
+          },
+          "CALL db.indexes()": {
+            "wait-ms": 25.375,
+            "exec-ms": 44.542,
+            "report-ms": 55.166
+          },
+          "CALL db.meta.stats()": {
+            "wait-ms": 31.375,
+            "exec-ms": 66.291,
+            "report-ms": 124.334
+          },
+          "MATCH ()-[r:Friend]->() RETURN count(r)": {
+            "wait-ms": 27.375,
+            "exec-ms": 21.166,
+            "report-ms": 190.418
+          },
+          "MATCH ()-[r:Friend]->() WHERE r.bench_capacity IS NULL RETURN count(r)": {
+            "wait-ms": 39.334,
+            "exec-ms": 278177.105,
+            "report-ms": 125.417
+          },
+          "aggregate_age": {
+            "wait-ms": 149.686,
+            "exec-ms": 4173.291,
+            "report-ms": 52.67
+          },
+          "aggregate_age_distinct": {
+            "wait-ms": 57.039,
+            "exec-ms": 5264.677,
+            "report-ms": 67.927
+          },
+          "aggregate_age_filtered": {
+            "wait-ms": 88.217,
+            "exec-ms": 5915.117,
+            "report-ms": 60.46
+          },
+          "aggregate_age_min_max_avg": {
+            "wait-ms": 67.529,
+            "exec-ms": 8454.558,
+            "report-ms": 71.454
+          },
+          "aggregate_count_users": {
+            "wait-ms": 76.511,
+            "exec-ms": 14.327,
+            "report-ms": 55.882
+          },
+          "aggregate_expansion_1": {
+            "wait-ms": 73.113,
+            "exec-ms": 151.767,
+            "report-ms": 72.868
+          },
+          "aggregate_expansion_1_with_filter": {
+            "wait-ms": 136.494,
+            "exec-ms": 87.726,
+            "report-ms": 95.869
+          },
+          "aggregate_expansion_2": {
+            "wait-ms": 66.4,
+            "exec-ms": 245.408,
+            "report-ms": 143.604
+          },
+          "aggregate_expansion_2_with_filter": {
+            "wait-ms": 110.485,
+            "exec-ms": 268.193,
+            "report-ms": 130.986
+          },
+          "aggregate_expansion_3": {
+            "wait-ms": 107.419,
+            "exec-ms": 1492.986,
+            "report-ms": 707.3
+          },
+          "aggregate_expansion_3_with_filter": {
+            "wait-ms": 79.888,
+            "exec-ms": 1618.318,
+            "report-ms": 590.495
+          },
+          "aggregate_expansion_4": {
+            "wait-ms": 66.718,
+            "exec-ms": 8780.69,
+            "report-ms": 983.856
+          },
+          "aggregate_expansion_4_with_filter": {
+            "wait-ms": 56.408,
+            "exec-ms": 8825.477,
+            "report-ms": 948.195
+          },
+          "all_shortest_paths_len": {
+            "wait-ms": 81.227,
+            "exec-ms": 179873.578,
+            "report-ms": 127.132
+          },
+          "call_subquery": {
+            "wait-ms": 70.012,
+            "exec-ms": 94.525,
+            "report-ms": 99.498
+          },
+          "count_friend_edges_plain": {
+            "wait-ms": 81.342,
+            "exec-ms": 12.034,
+            "report-ms": 70.134
+          },
+          "count_users_plain": {
+            "wait-ms": 113.737,
+            "exec-ms": 4.23,
+            "report-ms": 42.842
+          },
+          "entity_path_introspection": {
+            "wait-ms": 103.293,
+            "exec-ms": 136.73,
+            "report-ms": 125.866
+          },
+          "id_range_scan": {
+            "wait-ms": 47.288,
+            "exec-ms": 16.666,
+            "report-ms": 96.013
+          },
+          "id_seek": {
+            "wait-ms": 89.214,
+            "exec-ms": 15.223,
+            "report-ms": 58.061
+          },
+          "indexed_in_list_predicate": {
+            "wait-ms": 99.713,
+            "exec-ms": 158.527,
+            "report-ms": 76.535
+          },
+          "indexed_or_predicate": {
+            "wait-ms": 81.157,
+            "exec-ms": 87.796,
+            "report-ms": 61.091
+          },
+          "neighbours_2": {
+            "wait-ms": 105.643,
+            "exec-ms": 265.981,
+            "report-ms": 165.255
+          },
+          "neighbours_2_with_data": {
+            "wait-ms": 64.498,
+            "exec-ms": 219.223,
+            "report-ms": 1737.333
+          },
+          "neighbours_2_with_data_and_filter": {
+            "wait-ms": 51.58,
+            "exec-ms": 225.848,
+            "report-ms": 760.58
+          },
+          "neighbours_2_with_filter": {
+            "wait-ms": 122.486,
+            "exec-ms": 260.931,
+            "report-ms": 130.873
+          },
+          "optional_friend": {
+            "wait-ms": 65.001,
+            "exec-ms": 91.122,
+            "report-ms": 83.47
+          },
+          "order_by_age": {
+            "wait-ms": 74.857,
+            "exec-ms": 34459.783,
+            "report-ms": 1960.897
+          },
+          "pattern_cycle": {
+            "wait-ms": 101.156,
+            "exec-ms": 402.833,
+            "report-ms": 138.215
+          },
+          "pattern_long": {
+            "wait-ms": 114.804,
+            "exec-ms": 7906.179,
+            "report-ms": 1621.274
+          },
+          "pattern_short": {
+            "wait-ms": 83.574,
+            "exec-ms": 263.108,
+            "report-ms": 211.822
+          },
+          "shortest_path": {
+            "wait-ms": 103.318,
+            "exec-ms": 119612.77,
+            "report-ms": 133.583
+          },
+          "shortest_path_with_filter": {
+            "wait-ms": 138.758,
+            "exec-ms": 127297.823,
+            "report-ms": 142.128
+          },
+          "single_vertex_read": {
+            "wait-ms": 56.999,
+            "exec-ms": 51.582,
+            "report-ms": 62.329
+          },
+          "union_all_ids": {
+            "wait-ms": 100.615,
+            "exec-ms": 90.621,
+            "report-ms": 82.828
+          },
+          "union_distinct_ids": {
+            "wait-ms": 85.064,
+            "exec-ms": 129.498,
+            "report-ms": 105.94
+          },
+          "unwind_rows": {
+            "wait-ms": 120.99,
+            "exec-ms": 57.035,
+            "report-ms": 123.823
+          },
+          "value_join": {
+            "wait-ms": 47.246,
+            "exec-ms": 4555.996,
+            "report-ms": 733.984
+          },
+          "value_join_cnt": {
+            "wait-ms": 47.078,
+            "exec-ms": 5201.408,
+            "report-ms": 93.404
+          },
+          "var_len_friends": {
+            "wait-ms": 111.633,
+            "exec-ms": 274.365,
+            "report-ms": 160.174
+          },
+          "var_len_with_edge_where_filter": {
+            "wait-ms": 108.028,
+            "exec-ms": 24517.465,
+            "report-ms": 114.107
+          },
+          "vertex_on_label_property": {
+            "wait-ms": 106.724,
+            "exec-ms": 57.145,
+            "report-ms": 45.043
+          },
+          "vertex_on_property": {
+            "wait-ms": 117.481,
+            "exec-ms": 1815.24,
+            "report-ms": 72.731
+          }
+        },
+        "timeout_rate_for_type": {
+          "aggregate_age": 0.0,
+          "aggregate_age_distinct": 0.0,
+          "aggregate_age_filtered": 0.0,
+          "aggregate_age_min_max_avg": 0.0,
+          "aggregate_count_users": 0.0,
+          "aggregate_expansion_1": 0.0,
+          "aggregate_expansion_1_with_filter": 0.0,
+          "aggregate_expansion_2": 0.0,
+          "aggregate_expansion_2_with_filter": 0.0,
+          "aggregate_expansion_3": 0.0,
+          "aggregate_expansion_3_with_filter": 0.0,
+          "aggregate_expansion_4": 0.0,
+          "aggregate_expansion_4_with_filter": 0.0,
+          "all_shortest_paths_len": 0.0,
+          "call_subquery": 0.0,
+          "count_friend_edges_plain": 0.0,
+          "count_users_plain": 0.0,
+          "entity_path_introspection": 0.0,
+          "id_range_scan": 0.0,
+          "id_seek": 0.0,
+          "indexed_in_list_predicate": 0.0,
+          "indexed_or_predicate": 0.0,
+          "neighbours_2": 0.0,
+          "neighbours_2_with_data": 0.0,
+          "neighbours_2_with_data_and_filter": 0.0,
+          "neighbours_2_with_filter": 0.0,
+          "optional_friend": 0.0,
+          "order_by_age": 0.0,
+          "pattern_cycle": 0.0,
+          "pattern_long": 0.0,
+          "pattern_short": 0.0,
+          "shortest_path": 0.0,
+          "shortest_path_with_filter": 0.0,
+          "single_vertex_read": 0.0,
+          "union_all_ids": 0.0,
+          "union_distinct_ids": 0.0,
+          "unwind_rows": 0.0,
+          "value_join": 0.0,
+          "value_join_cnt": 0.0,
+          "var_len_friends": 0.0,
+          "var_len_with_edge_where_filter": 0.0,
+          "vertex_on_label_property": 0.0,
+          "vertex_on_label_property_index": 0.0,
+          "vertex_on_property": 0.0
+        },
+        "failure_rate_for_type": {
+          "aggregate_age": 0.0,
+          "aggregate_age_distinct": 0.0,
+          "aggregate_age_filtered": 0.0,
+          "aggregate_age_min_max_avg": 0.0,
+          "aggregate_count_users": 0.0,
+          "aggregate_expansion_1": 0.0,
+          "aggregate_expansion_1_with_filter": 0.0,
+          "aggregate_expansion_2": 0.0,
+          "aggregate_expansion_2_with_filter": 0.0,
+          "aggregate_expansion_3": 0.0,
+          "aggregate_expansion_3_with_filter": 0.0,
+          "aggregate_expansion_4": 0.0,
+          "aggregate_expansion_4_with_filter": 0.0,
+          "all_shortest_paths_len": 0.0,
+          "call_subquery": 0.0,
+          "count_friend_edges_plain": 0.0,
+          "count_users_plain": 0.0,
+          "entity_path_introspection": 0.0,
+          "id_range_scan": 0.0,
+          "id_seek": 0.0,
+          "indexed_in_list_predicate": 0.0,
+          "indexed_or_predicate": 0.0,
+          "neighbours_2": 0.0,
+          "neighbours_2_with_data": 0.0,
+          "neighbours_2_with_data_and_filter": 0.0,
+          "neighbours_2_with_filter": 0.0,
+          "optional_friend": 0.0,
+          "order_by_age": 0.0,
+          "pattern_cycle": 0.0,
+          "pattern_long": 0.0,
+          "pattern_short": 0.0,
+          "shortest_path": 0.0,
+          "shortest_path_with_filter": 0.0,
+          "single_vertex_read": 0.0,
+          "union_all_ids": 0.0,
+          "union_distinct_ids": 0.0,
+          "unwind_rows": 0.0,
+          "value_join": 0.0,
+          "value_join_cnt": 0.0,
+          "var_len_friends": 0.0,
+          "var_len_with_edge_where_filter": 0.0,
+          "vertex_on_label_property": 0.0,
+          "vertex_on_label_property_index": 0.0,
+          "vertex_on_property": 0.0
+        },
+        "global-timeout-rate-pct": 0.0,
+        "global-failure-rate-pct": 0.0
+      }
+    },
+    {
+      "vendor": "falkordb-rs",
+      "engine-version": "FalkorDB (Redis 8.10.2)",
+      "read-write-ratio": 0.0,
+      "clients": 8,
+      "platform": "arm",
+      "target-messages-per-second": 2000,
+      "edges": 100000,
+      "relationships": 1768515,
+      "started-at-epoch-secs": 1794891654,
+      "result": {
+        "deadline-offset": "0ms",
+        "actual-messages-per-second": 577.1339527904425,
+        "latency": {
+          "p50": "2.303ms",
+          "p95": "52.48ms",
+          "p99": "195.58ms"
+        },
+        "avg-latency-ms": 13.813306746499979,
+        "latency-histogram": {
+          "buckets-ms": [
+            1,
+            1,
+            5,
+            10,
+            25,
+            50,
+            100,
+            250,
+            500,
+            1000,
+            2500,
+            5000,
+            10000
+          ],
+          "cumulative-counts": [
+            217,
+            3223,
+            6315,
+            8037,
+            9121,
+            9484,
+            9651,
+            9954,
+            9978,
+            9993,
+            10000,
+            10000,
+            10000
+          ],
+          "count": 10000
+        },
+        "elapsed-ms": 17327,
+        "cpu-usage": 0.0,
+        "ram-usage": "125.0MB",
+        "errors": 0,
+        "successful-requests": 10000,
+        "operations": {
+          "by-query": {
+            "aggregate_age": 223,
+            "aggregate_age_distinct": 210,
+            "aggregate_age_filtered": 231,
+            "aggregate_age_min_max_avg": 215,
+            "aggregate_count_users": 240,
+            "aggregate_expansion_1": 212,
+            "aggregate_expansion_1_with_filter": 225,
+            "aggregate_expansion_2": 236,
+            "aggregate_expansion_2_with_filter": 242,
+            "aggregate_expansion_3": 240,
+            "aggregate_expansion_3_with_filter": 256,
+            "aggregate_expansion_4": 248,
+            "aggregate_expansion_4_with_filter": 249,
+            "all_shortest_paths_len": 213,
+            "call_subquery": 198,
+            "count_friend_edges_plain": 228,
+            "count_users_plain": 212,
+            "entity_path_introspection": 247,
+            "id_range_scan": 213,
+            "id_seek": 215,
+            "indexed_in_list_predicate": 224,
+            "indexed_or_predicate": 274,
+            "neighbours_2": 243,
+            "neighbours_2_with_data": 209,
+            "neighbours_2_with_data_and_filter": 232,
+            "neighbours_2_with_filter": 233,
+            "optional_friend": 221,
+            "order_by_age": 221,
+            "pattern_cycle": 209,
+            "pattern_long": 229,
+            "pattern_short": 230,
+            "shortest_path": 209,
+            "shortest_path_with_filter": 230,
+            "single_vertex_read": 210,
+            "union_all_ids": 224,
+            "union_distinct_ids": 259,
+            "unwind_rows": 240,
+            "value_join": 237,
+            "value_join_cnt": 235,
+            "var_len_friends": 211,
+            "var_len_with_edge_where_filter": 216,
+            "vertex_on_label_property": 231,
+            "vertex_on_label_property_index": 217,
+            "vertex_on_property": 203
+          },
+          "by-spawn": {
+            "0": 1182,
+            "1": 1200,
+            "2": 1133,
+            "3": 1253,
+            "4": 981,
+            "5": 1498,
+            "6": 1308,
+            "7": 1445
+          }
+        },
+        "spawn-stats": {
+          "min": 981,
+          "max": 1498,
+          "p50": 1253,
+          "p95": 1498,
+          "max-min-ratio": 1.527013251783894,
+          "cv": 0.12524408169650172
+        },
+        "histogram_for_type": {
+          "aggregate_age": [
+            3.919,
+            4.351,
+            4.543,
+            4.799,
+            5.151,
+            5.599,
+            6.335,
+            7.743,
+            9.151,
+            10.687,
+            13.759,
+            0.0
+          ],
+          "aggregate_age_distinct": [
+            4.735,
+            5.407,
+            5.663,
+            6.079,
+            6.431,
+            6.815,
+            7.583,
+            8.511,
+            9.919,
+            10.623,
+            15.359,
+            0.0
+          ],
+          "aggregate_age_filtered": [
+            5.599,
+            6.143,
+            6.367,
+            6.783,
+            7.167,
+            7.487,
+            8.127,
+            9.023,
+            10.623,
+            12.735,
+            15.167,
+            0.0
+          ],
+          "aggregate_age_min_max_avg": [
+            7.487,
+            8.191,
+            8.767,
+            9.407,
+            9.791,
+            10.367,
+            10.943,
+            12.031,
+            13.695,
+            15.551,
+            21.887,
+            0.0
+          ],
+          "aggregate_count_users": [
+            0.483,
+            0.535,
+            0.611,
+            0.651,
+            0.699,
+            0.815,
+            1.087,
+            1.607,
+            3.183,
+            5.535,
+            9.279,
+            0.0
+          ],
+          "aggregate_expansion_1": [
+            0.587,
+            0.651,
+            0.711,
+            0.759,
+            0.839,
+            1.019,
+            1.191,
+            1.575,
+            3.759,
+            4.575,
+            8.063,
+            0.0
+          ],
+          "aggregate_expansion_1_with_filter": [
+            0.571,
+            0.647,
+            0.707,
+            0.767,
+            0.831,
+            0.915,
+            1.103,
+            1.463,
+            2.879,
+            4.575,
+            5.215,
+            0.0
+          ],
+          "aggregate_expansion_2": [
+            0.751,
+            0.899,
+            1.047,
+            1.199,
+            1.383,
+            1.703,
+            2.303,
+            3.231,
+            5.119,
+            6.719,
+            9.279,
+            0.0
+          ],
+          "aggregate_expansion_2_with_filter": [
+            0.767,
+            0.871,
+            0.975,
+            1.127,
+            1.279,
+            1.495,
+            1.951,
+            2.687,
+            4.799,
+            7.103,
+            11.135,
+            0.0
+          ],
+          "aggregate_expansion_3": [
+            1.655,
+            3.039,
+            4.543,
+            6.367,
+            7.519,
+            8.319,
+            8.959,
+            10.111,
+            12.607,
+            14.399,
+            21.503,
+            0.0
+          ],
+          "aggregate_expansion_3_with_filter": [
+            1.399,
+            2.335,
+            3.887,
+            4.895,
+            5.919,
+            7.295,
+            8.703,
+            10.047,
+            11.327,
+            13.247,
+            17.919,
+            0.0
+          ],
+          "aggregate_expansion_4": [
+            7.167,
+            9.471,
+            10.431,
+            11.775,
+            12.799,
+            14.847,
+            17.791,
+            20.735,
+            25.343,
+            31.871,
+            44.799,
+            0.0
+          ],
+          "aggregate_expansion_4_with_filter": [
+            5.535,
+            8.703,
+            10.431,
+            12.031,
+            13.439,
+            15.295,
+            18.559,
+            21.631,
+            25.215,
+            29.311,
+            43.519,
+            0.0
+          ],
+          "all_shortest_paths_len": [
+            3.503,
+            8.511,
+            12.735,
+            18.047,
+            31.359,
+            49.663,
+            108.543,
+            229.375,
+            503.807,
+            917.503,
+            1155.071,
+            0.0
+          ],
+          "call_subquery": [
+            0.627,
+            0.723,
+            0.767,
+            0.831,
+            0.911,
+            1.011,
+            1.191,
+            2.079,
+            4.607,
+            6.047,
+            7.743,
+            0.0
+          ],
+          "count_friend_edges_plain": [
+            0.469,
+            0.535,
+            0.579,
+            0.627,
+            0.703,
+            0.831,
+            1.167,
+            1.943,
+            3.983,
+            4.895,
+            11.135,
+            0.0
+          ],
+          "count_users_plain": [
+            0.461,
+            0.509,
+            0.583,
+            0.631,
+            0.703,
+            0.799,
+            0.975,
+            1.575,
+            2.511,
+            4.543,
+            5.695,
+            0.0
+          ],
+          "entity_path_introspection": [
+            0.647,
+            0.735,
+            0.807,
+            0.899,
+            0.995,
+            1.103,
+            1.383,
+            2.367,
+            4.159,
+            5.407,
+            8.959,
+            0.0
+          ],
+          "id_range_scan": [
+            0.595,
+            0.651,
+            0.723,
+            0.795,
+            0.859,
+            0.959,
+            1.215,
+            1.647,
+            4.319,
+            5.343,
+            8.959,
+            0.0
+          ],
+          "id_seek": [
+            0.489,
+            0.559,
+            0.623,
+            0.667,
+            0.767,
+            0.911,
+            1.215,
+            2.127,
+            4.063,
+            4.863,
+            10.047,
+            0.0
+          ],
+          "indexed_in_list_predicate": [
+            0.671,
+            0.723,
+            0.795,
+            0.847,
+            0.931,
+            1.011,
+            1.231,
+            2.447,
+            4.095,
+            6.367,
+            11.519,
+            0.0
+          ],
+          "indexed_or_predicate": [
+            0.571,
+            0.631,
+            0.699,
+            0.751,
+            0.815,
+            0.919,
+            1.055,
+            1.455,
+            3.247,
+            4.767,
+            8.895,
+            0.0
+          ],
+          "neighbours_2": [
+            0.807,
+            0.959,
+            1.079,
+            1.295,
+            1.559,
+            1.919,
+            2.687,
+            4.127,
+            6.527,
+            7.839,
+            10.495,
+            0.0
+          ],
+          "neighbours_2_with_data": [
+            0.955,
+            1.407,
+            1.975,
+            2.863,
+            3.903,
+            5.023,
+            7.135,
+            9.151,
+            15.103,
+            20.735,
+            31.359,
+            0.0
+          ],
+          "neighbours_2_with_data_and_filter": [
+            0.955,
+            1.319,
+            1.679,
+            2.047,
+            2.767,
+            3.727,
+            4.703,
+            6.047,
+            8.383,
+            9.983,
+            16.063,
+            0.0
+          ],
+          "neighbours_2_with_filter": [
+            0.751,
+            0.843,
+            0.951,
+            1.159,
+            1.287,
+            1.527,
+            1.975,
+            2.671,
+            4.383,
+            5.951,
+            7.999,
+            0.0
+          ],
+          "optional_friend": [
+            0.615,
+            0.679,
+            0.767,
+            0.807,
+            0.891,
+            0.967,
+            1.167,
+            1.623,
+            3.679,
+            5.375,
+            7.999,
+            0.0
+          ],
+          "order_by_age": [
+            34.815,
+            36.607,
+            39.679,
+            41.983,
+            43.263,
+            44.799,
+            46.335,
+            48.639,
+            51.711,
+            55.295,
+            68.607,
+            0.0
+          ],
+          "pattern_cycle": [
+            0.775,
+            0.871,
+            0.999,
+            1.111,
+            1.223,
+            1.495,
+            2.007,
+            2.591,
+            3.871,
+            4.863,
+            9.663,
+            0.0
+          ],
+          "pattern_long": [
+            10.175,
+            12.031,
+            13.567,
+            14.719,
+            16.511,
+            18.687,
+            21.119,
+            23.551,
+            28.927,
+            33.535,
+            54.015,
+            0.0
+          ],
+          "pattern_short": [
+            0.771,
+            0.927,
+            1.079,
+            1.327,
+            1.647,
+            1.983,
+            2.511,
+            4.079,
+            5.631,
+            7.007,
+            11.391,
+            0.0
+          ],
+          "shortest_path": [
+            10.047,
+            39.167,
+            71.679,
+            89.599,
+            118.271,
+            137.215,
+            156.671,
+            174.079,
+            195.583,
+            203.775,
+            238.591,
+            0.0
+          ],
+          "shortest_path_with_filter": [
+            12.991,
+            47.871,
+            78.335,
+            100.351,
+            118.271,
+            135.167,
+            153.599,
+            171.007,
+            189.439,
+            205.823,
+            303.103,
+            0.0
+          ],
+          "single_vertex_read": [
+            0.543,
+            0.615,
+            0.687,
+            0.755,
+            0.847,
+            0.971,
+            1.287,
+            1.983,
+            3.759,
+            4.511,
+            8.575,
+            0.0
+          ],
+          "union_all_ids": [
+            0.595,
+            0.655,
+            0.727,
+            0.787,
+            0.843,
+            0.947,
+            1.079,
+            1.567,
+            3.455,
+            4.991,
+            7.583,
+            0.0
+          ],
+          "union_distinct_ids": [
+            0.555,
+            0.647,
+            0.699,
+            0.743,
+            0.811,
+            0.899,
+            1.111,
+            1.631,
+            4.223,
+            5.599,
+            8.191,
+            0.0
+          ],
+          "unwind_rows": [
+            0.539,
+            0.607,
+            0.671,
+            0.751,
+            0.843,
+            0.971,
+            1.311,
+            2.127,
+            4.191,
+            6.175,
+            11.391,
+            0.0
+          ],
+          "value_join": [
+            5.663,
+            7.135,
+            7.743,
+            8.639,
+            9.407,
+            10.239,
+            11.071,
+            12.415,
+            14.079,
+            16.319,
+            19.711,
+            0.0
+          ],
+          "value_join_cnt": [
+            4.223,
+            4.735,
+            5.215,
+            5.759,
+            6.591,
+            7.231,
+            7.839,
+            8.895,
+            10.303,
+            12.991,
+            15.679,
+            0.0
+          ],
+          "var_len_friends": [
+            0.655,
+            0.791,
+            0.907,
+            1.143,
+            1.423,
+            2.079,
+            2.783,
+            3.935,
+            6.111,
+            7.487,
+            10.495,
+            0.0
+          ],
+          "var_len_with_edge_where_filter": [
+            1.951,
+            3.215,
+            6.303,
+            8.831,
+            12.991,
+            18.175,
+            25.599,
+            52.479,
+            84.479,
+            129.023,
+            224.255,
+            0.0
+          ],
+          "vertex_on_label_property": [
+            0.539,
+            0.607,
+            0.651,
+            0.711,
+            0.767,
+            0.883,
+            1.151,
+            1.607,
+            3.359,
+            4.671,
+            16.127,
+            0.0
+          ],
+          "vertex_on_label_property_index": [
+            0.547,
+            0.595,
+            0.663,
+            0.719,
+            0.799,
+            0.891,
+            1.127,
+            1.743,
+            3.775,
+            5.119,
+            6.527,
+            0.0
+          ],
+          "vertex_on_property": [
+            1.975,
+            2.223,
+            2.335,
+            2.479,
+            2.703,
+            3.071,
+            3.663,
+            4.927,
+            6.431,
+            7.903,
+            10.303,
+            0.0
+          ]
+        },
+        "telemetry_for_type": {
+          "CALL DB.LABELS()": {
+            "wait-ms": 24.042,
+            "exec-ms": 6.875,
+            "report-ms": 98.125
+          },
+          "CALL DB.PROPERTYKEYS()": {
+            "wait-ms": 24.292,
+            "exec-ms": 4.458,
+            "report-ms": 33.875
+          },
+          "CALL DB.RELATIONSHIPTYPES()": {
+            "wait-ms": 13.833,
+            "exec-ms": 5.167,
+            "report-ms": 26.625
+          },
+          "CALL db.indexes()": {
+            "wait-ms": 25.375,
+            "exec-ms": 38.166,
+            "report-ms": 52.501
+          },
+          "CALL db.meta.stats()": {
+            "wait-ms": 30.375,
+            "exec-ms": 68.25,
+            "report-ms": 154.083
+          },
+          "MATCH ()-[r:Friend]->() RETURN count(r)": {
+            "wait-ms": 56.0,
+            "exec-ms": 28.083,
+            "report-ms": 201.751
+          },
+          "MATCH ()-[r:Friend]->() WHERE r.bench_capacity IS NULL RETURN count(r)": {
+            "wait-ms": 24.875,
+            "exec-ms": 273480.605,
+            "report-ms": 111.25
+          },
+          "aggregate_age": {
+            "wait-ms": 73.477,
+            "exec-ms": 3820.263,
+            "report-ms": 45.744
+          },
+          "aggregate_age_distinct": {
+            "wait-ms": 64.374,
+            "exec-ms": 4891.781,
+            "report-ms": 41.872
+          },
+          "aggregate_age_filtered": {
+            "wait-ms": 75.797,
+            "exec-ms": 5703.778,
+            "report-ms": 51.103
+          },
+          "aggregate_age_min_max_avg": {
+            "wait-ms": 99.589,
+            "exec-ms": 8007.002,
+            "report-ms": 51.576
+          },
+          "aggregate_count_users": {
+            "wait-ms": 92.18,
+            "exec-ms": 12.989,
+            "report-ms": 32.14
+          },
+          "aggregate_expansion_1": {
+            "wait-ms": 93.948,
+            "exec-ms": 88.326,
+            "report-ms": 58.215
+          },
+          "aggregate_expansion_1_with_filter": {
+            "wait-ms": 64.829,
+            "exec-ms": 78.356,
+            "report-ms": 65.766
+          },
+          "aggregate_expansion_2": {
+            "wait-ms": 95.016,
+            "exec-ms": 239.841,
+            "report-ms": 121.851
+          },
+          "aggregate_expansion_2_with_filter": {
+            "wait-ms": 60.918,
+            "exec-ms": 247.172,
+            "report-ms": 99.392
+          },
+          "aggregate_expansion_3": {
+            "wait-ms": 91.769,
+            "exec-ms": 1437.397,
+            "report-ms": 547.536
+          },
+          "aggregate_expansion_3_with_filter": {
+            "wait-ms": 111.102,
+            "exec-ms": 1650.075,
+            "report-ms": 465.57
+          },
+          "aggregate_expansion_4": {
+            "wait-ms": 120.462,
+            "exec-ms": 8178.604,
+            "report-ms": 786.536
+          },
+          "aggregate_expansion_4_with_filter": {
+            "wait-ms": 65.868,
+            "exec-ms": 7990.005,
+            "report-ms": 769.734
+          },
+          "all_shortest_paths_len": {
+            "wait-ms": 67.742,
+            "exec-ms": 148772.959,
+            "report-ms": 94.887
+          },
+          "call_subquery": {
+            "wait-ms": 83.967,
+            "exec-ms": 94.712,
+            "report-ms": 76.139
+          },
+          "count_friend_edges_plain": {
+            "wait-ms": 86.721,
+            "exec-ms": 4.797,
+            "report-ms": 40.116
+          },
+          "count_users_plain": {
+            "wait-ms": 69.529,
+            "exec-ms": 3.751,
+            "report-ms": 35.802
+          },
+          "entity_path_introspection": {
+            "wait-ms": 107.976,
+            "exec-ms": 143.284,
+            "report-ms": 98.096
+          },
+          "id_range_scan": {
+            "wait-ms": 53.503,
+            "exec-ms": 16.786,
+            "report-ms": 64.736
+          },
+          "id_seek": {
+            "wait-ms": 187.405,
+            "exec-ms": 11.768,
+            "report-ms": 55.507
+          },
+          "indexed_in_list_predicate": {
+            "wait-ms": 101.389,
+            "exec-ms": 151.403,
+            "report-ms": 57.874
+          },
+          "indexed_or_predicate": {
+            "wait-ms": 62.082,
+            "exec-ms": 83.664,
+            "report-ms": 50.564
+          },
+          "neighbours_2": {
+            "wait-ms": 88.506,
+            "exec-ms": 263.571,
+            "report-ms": 137.038
+          },
+          "neighbours_2_with_data": {
+            "wait-ms": 126.451,
+            "exec-ms": 198.057,
+            "report-ms": 1095.967
+          },
+          "neighbours_2_with_data_and_filter": {
+            "wait-ms": 98.356,
+            "exec-ms": 209.749,
+            "report-ms": 549.947
+          },
+          "neighbours_2_with_filter": {
+            "wait-ms": 77.709,
+            "exec-ms": 234.737,
+            "report-ms": 99.846
+          },
+          "optional_friend": {
+            "wait-ms": 71.977,
+            "exec-ms": 86.548,
+            "report-ms": 64.103
+          },
+          "order_by_age": {
+            "wait-ms": 41.565,
+            "exec-ms": 31860.45,
+            "report-ms": 1549.162
+          },
+          "pattern_cycle": {
+            "wait-ms": 85.238,
+            "exec-ms": 419.088,
+            "report-ms": 95.753
+          },
+          "pattern_long": {
+            "wait-ms": 71.24,
+            "exec-ms": 7792.946,
+            "report-ms": 1303.787
+          },
+          "pattern_short": {
+            "wait-ms": 80.036,
+            "exec-ms": 250.25,
+            "report-ms": 165.093
+          },
+          "shortest_path": {
+            "wait-ms": 121.078,
+            "exec-ms": 103800.661,
+            "report-ms": 92.059
+          },
+          "shortest_path_with_filter": {
+            "wait-ms": 117.248,
+            "exec-ms": 109661.755,
+            "report-ms": 97.31
+          },
+          "single_vertex_read": {
+            "wait-ms": 82.868,
+            "exec-ms": 46.563,
+            "report-ms": 51.318
+          },
+          "union_all_ids": {
+            "wait-ms": 91.891,
+            "exec-ms": 95.924,
+            "report-ms": 59.967
+          },
+          "union_distinct_ids": {
+            "wait-ms": 57.775,
+            "exec-ms": 82.378,
+            "report-ms": 56.247
+          },
+          "unwind_rows": {
+            "wait-ms": 139.752,
+            "exec-ms": 55.652,
+            "report-ms": 54.152
+          },
+          "value_join": {
+            "wait-ms": 57.56,
+            "exec-ms": 4222.436,
+            "report-ms": 557.382
+          },
+          "value_join_cnt": {
+            "wait-ms": 68.684,
+            "exec-ms": 4918.561,
+            "report-ms": 66.956
+          },
+          "var_len_friends": {
+            "wait-ms": 86.747,
+            "exec-ms": 263.061,
+            "report-ms": 131.029
+          },
+          "var_len_with_edge_where_filter": {
+            "wait-ms": 91.204,
+            "exec-ms": 26529.614,
+            "report-ms": 104.426
+          },
+          "vertex_on_label_property": {
+            "wait-ms": 71.156,
+            "exec-ms": 47.39,
+            "report-ms": 45.115
+          },
+          "vertex_on_property": {
+            "wait-ms": 107.722,
+            "exec-ms": 1682.079,
+            "report-ms": 56.388
+          }
+        },
+        "timeout_rate_for_type": {
+          "aggregate_age": 0.0,
+          "aggregate_age_distinct": 0.0,
+          "aggregate_age_filtered": 0.0,
+          "aggregate_age_min_max_avg": 0.0,
+          "aggregate_count_users": 0.0,
+          "aggregate_expansion_1": 0.0,
+          "aggregate_expansion_1_with_filter": 0.0,
+          "aggregate_expansion_2": 0.0,
+          "aggregate_expansion_2_with_filter": 0.0,
+          "aggregate_expansion_3": 0.0,
+          "aggregate_expansion_3_with_filter": 0.0,
+          "aggregate_expansion_4": 0.0,
+          "aggregate_expansion_4_with_filter": 0.0,
+          "all_shortest_paths_len": 0.0,
+          "call_subquery": 0.0,
+          "count_friend_edges_plain": 0.0,
+          "count_users_plain": 0.0,
+          "entity_path_introspection": 0.0,
+          "id_range_scan": 0.0,
+          "id_seek": 0.0,
+          "indexed_in_list_predicate": 0.0,
+          "indexed_or_predicate": 0.0,
+          "neighbours_2": 0.0,
+          "neighbours_2_with_data": 0.0,
+          "neighbours_2_with_data_and_filter": 0.0,
+          "neighbours_2_with_filter": 0.0,
+          "optional_friend": 0.0,
+          "order_by_age": 0.0,
+          "pattern_cycle": 0.0,
+          "pattern_long": 0.0,
+          "pattern_short": 0.0,
+          "shortest_path": 0.0,
+          "shortest_path_with_filter": 0.0,
+          "single_vertex_read": 0.0,
+          "union_all_ids": 0.0,
+          "union_distinct_ids": 0.0,
+          "unwind_rows": 0.0,
+          "value_join": 0.0,
+          "value_join_cnt": 0.0,
+          "var_len_friends": 0.0,
+          "var_len_with_edge_where_filter": 0.0,
+          "vertex_on_label_property": 0.0,
+          "vertex_on_label_property_index": 0.0,
+          "vertex_on_property": 0.0
+        },
+        "failure_rate_for_type": {
+          "aggregate_age": 0.0,
+          "aggregate_age_distinct": 0.0,
+          "aggregate_age_filtered": 0.0,
+          "aggregate_age_min_max_avg": 0.0,
+          "aggregate_count_users": 0.0,
+          "aggregate_expansion_1": 0.0,
+          "aggregate_expansion_1_with_filter": 0.0,
+          "aggregate_expansion_2": 0.0,
+          "aggregate_expansion_2_with_filter": 0.0,
+          "aggregate_expansion_3": 0.0,
+          "aggregate_expansion_3_with_filter": 0.0,
+          "aggregate_expansion_4": 0.0,
+          "aggregate_expansion_4_with_filter": 0.0,
+          "all_shortest_paths_len": 0.0,
+          "call_subquery": 0.0,
+          "count_friend_edges_plain": 0.0,
+          "count_users_plain": 0.0,
+          "entity_path_introspection": 0.0,
+          "id_range_scan": 0.0,
+          "id_seek": 0.0,
+          "indexed_in_list_predicate": 0.0,
+          "indexed_or_predicate": 0.0,
+          "neighbours_2": 0.0,
+          "neighbours_2_with_data": 0.0,
+          "neighbours_2_with_data_and_filter": 0.0,
+          "neighbours_2_with_filter": 0.0,
+          "optional_friend": 0.0,
+          "order_by_age": 0.0,
+          "pattern_cycle": 0.0,
+          "pattern_long": 0.0,
+          "pattern_short": 0.0,
+          "shortest_path": 0.0,
+          "shortest_path_with_filter": 0.0,
+          "single_vertex_read": 0.0,
+          "union_all_ids": 0.0,
+          "union_distinct_ids": 0.0,
+          "unwind_rows": 0.0,
+          "value_join": 0.0,
+          "value_join_cnt": 0.0,
+          "var_len_friends": 0.0,
+          "var_len_with_edge_where_filter": 0.0,
+          "vertex_on_label_property": 0.0,
+          "vertex_on_label_property_index": 0.0,
+          "vertex_on_property": 0.0
+        },
+        "global-timeout-rate-pct": 0.0,
+        "global-failure-rate-pct": 0.0
+      }
+    }
+  ]
+}

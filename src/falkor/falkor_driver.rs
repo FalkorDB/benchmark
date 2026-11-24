@@ -10,7 +10,10 @@ use crate::utils::{
     wait_for_redis_ready,
 };
 use crate::{
-    FALKOR_GRAPH_MEMORY_USAGE_MB, FALKOR_MSG_DEADLINE_OFFSET_GAUGE, OPERATION_COUNTER,
+    FALKOR_CONTAINER_MEMORY_USAGE_BYTES, FALKOR_CONTAINER_MEMORY_USAGE_PEAK_BYTES,
+    FALKOR_GRAPH_MEMORY_COMPONENT_MB, FALKOR_GRAPH_MEMORY_USAGE_MB, FALKOR_MEM_USAGE_GAUGE,
+    FALKOR_MSG_DEADLINE_OFFSET_GAUGE, FALKOR_REDIS_USED_MEMORY_BYTES,
+    FALKOR_REDIS_USED_MEMORY_RSS_BYTES, FALKOR_REDIS_USED_MEMORY_RSS_PEAK_BYTES, OPERATION_COUNTER,
     OPERATION_ERROR_COUNTER, REDIS_DATA_DIR,
 };
 use falkordb::{
@@ -171,40 +174,174 @@ impl Falkor<Started> {
         })
     }
 
-    /// Best-effort collection of graph memory usage via `GRAPH.MEMORY USAGE <graph>`.
+    /// Best-effort multi-layer memory snapshot for Falkor/Redis (and Docker when resolvable).
     ///
-    /// Sets the Prometheus gauge `falkordb_graph_memory_usage_mb` if the command succeeds.
+    /// Layers:
+    /// 1. `GRAPH.MEMORY USAGE` logical graph size (+ component breakdown)
+    /// 2. Redis `INFO memory` (`used_memory`, `used_memory_rss`)
+    /// 3. Docker cgroup RSS via `docker stats` when `FALKOR_DOCKER_CONTAINER` is set or the
+    ///    host port in the endpoint can be matched to a running container publish
+    /// 4. Host process RSS for a local `redis-server` when present (`falkor_memory_usage`)
+    ///
+    /// Peak gauges are monotonically increased across samples within a process.
     pub async fn collect_graph_memory_usage_metrics(&self) {
-        // Avoid stale values when multiple runs happen in a single process.
-        FALKOR_GRAPH_MEMORY_USAGE_MB.set(0);
+        self.collect_memory_layers("falkor").await;
+    }
 
-        let graph_name = "falkor";
-        match self.graph_memory_usage_mb(graph_name).await {
-            Ok(Some(mb)) => {
-                FALKOR_GRAPH_MEMORY_USAGE_MB.set(mb.round().max(0.0) as i64);
+    pub async fn collect_memory_layers(
+        &self,
+        graph_name: &str,
+    ) {
+        let redis_url = falkor_endpoint_to_redis_url(self.endpoint.as_ref());
+
+        // --- Layer 1: GRAPH.MEMORY USAGE ---
+        match self.graph_memory_snapshot(&redis_url, graph_name).await {
+            Ok(Some(snap)) => {
+                FALKOR_GRAPH_MEMORY_USAGE_MB.set(snap.total_mb.round().max(0.0) as i64);
+                FALKOR_GRAPH_MEMORY_COMPONENT_MB.reset();
+                info!(
+                    "memory layer graph: total_graph_sz_mb={} components={:?}",
+                    snap.total_mb, snap.components
+                );
+                for (component, mb) in &snap.components {
+                    FALKOR_GRAPH_MEMORY_COMPONENT_MB
+                        .with_label_values(&[component.as_str()])
+                        .set(mb.round().max(0.0) as i64);
+                }
             }
             Ok(None) => {
-                // Keep the reset-to-0 value.
+                FALKOR_GRAPH_MEMORY_USAGE_MB.set(0);
             }
             Err(e) => {
                 tracing::debug!("Failed collecting falkor graph memory: {}", e);
             }
         }
+
+        // --- Layer 2: Redis INFO memory ---
+        match self.redis_info_memory_bytes(&redis_url).await {
+            Ok(info) => {
+                if let Some(used) = info.used_memory_bytes {
+                    FALKOR_REDIS_USED_MEMORY_BYTES.set(used);
+                }
+                if let Some(rss) = info.used_memory_rss_bytes {
+                    FALKOR_REDIS_USED_MEMORY_RSS_BYTES.set(rss);
+                    let peak = FALKOR_REDIS_USED_MEMORY_RSS_PEAK_BYTES.get().max(rss);
+                    FALKOR_REDIS_USED_MEMORY_RSS_PEAK_BYTES.set(peak);
+                }
+                info!(
+                    "memory layer redis: used_memory={:?} used_memory_rss={:?} frag={:?}",
+                    info.used_memory_bytes, info.used_memory_rss_bytes, info.mem_fragmentation_ratio
+                );
+            }
+            Err(e) => {
+                tracing::debug!("Failed collecting redis INFO memory: {}", e);
+            }
+        }
+
+        // --- Layer 3: Docker cgroup (optional) ---
+        match resolve_and_sample_docker_memory_bytes(self.endpoint.as_ref()).await {
+            Ok(Some((name, bytes))) => {
+                FALKOR_CONTAINER_MEMORY_USAGE_BYTES.set(bytes);
+                let peak = FALKOR_CONTAINER_MEMORY_USAGE_PEAK_BYTES.get().max(bytes);
+                FALKOR_CONTAINER_MEMORY_USAGE_PEAK_BYTES.set(peak);
+                info!(
+                    "memory layer container: name={} usage_bytes={} ({:.1} MiB)",
+                    name,
+                    bytes,
+                    bytes as f64 / (1024.0 * 1024.0)
+                );
+            }
+            Ok(None) => {
+                tracing::debug!("No docker container resolved for Falkor memory sampling");
+            }
+            Err(e) => {
+                tracing::debug!("Failed collecting docker memory: {}", e);
+            }
+        }
+
+        // --- Layer 4: host process RSS (local redis-server only) ---
+        if let Some(bytes) = sample_local_redis_server_rss_bytes() {
+            // Historical gauge is documented as bytes in lib.rs; process.memory() is KiB in sysinfo.
+            // Store KiB here for backward compatibility with format_mem_from_kib in aggregator.
+            let kib = (bytes / 1024) as i64;
+            FALKOR_MEM_USAGE_GAUGE.set(kib);
+            info!(
+                "memory layer process: redis-server rss_bytes={} ({:.1} MiB)",
+                bytes,
+                bytes as f64 / (1024.0 * 1024.0)
+            );
+        }
     }
 
-    async fn graph_memory_usage_mb(
+    async fn graph_memory_snapshot(
         &self,
+        redis_url: &str,
         graph_name: &str,
-    ) -> BenchmarkResult<Option<f64>> {
-        let redis_url = falkor_endpoint_to_redis_url(self.endpoint.as_ref());
-        let client = redis::Client::open(redis_url.as_str())?;
+    ) -> BenchmarkResult<Option<GraphMemorySnapshot>> {
+        let client = redis::Client::open(redis_url)?;
         let mut con = client.get_multiplexed_async_connection().await?;
 
         let mut command = redis::cmd("GRAPH.MEMORY");
         command.arg("USAGE").arg(graph_name);
         let redis_value = con.send_packed_command(&command).await?;
 
-        Ok(parse_graph_memory_total_mb(redis_value))
+        Ok(parse_graph_memory_snapshot(redis_value))
+    }
+
+    async fn redis_info_memory_bytes(
+        &self,
+        redis_url: &str,
+    ) -> BenchmarkResult<RedisMemoryInfo> {
+        let client = redis::Client::open(redis_url)?;
+        let mut con = client.get_multiplexed_async_connection().await?;
+        let raw: String = redis::cmd("INFO")
+            .arg("memory")
+            .query_async(&mut con)
+            .await?;
+        Ok(parse_redis_info_memory(&raw))
+    }
+
+    /// Spawn a background sampler that updates peak Redis RSS / container memory until cancelled.
+    pub fn spawn_memory_peak_sampler(
+        &self,
+        interval: Duration,
+    ) -> (tokio::task::JoinHandle<()>, tokio::sync::oneshot::Sender<()>) {
+        let endpoint = self.endpoint.clone();
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        let handle = tokio::spawn(async move {
+            let falkor = Falkor {
+                path: String::new(),
+                endpoint,
+                state: Started(FalkorProcess::external()),
+            };
+            loop {
+                tokio::select! {
+                    _ = &mut rx => break,
+                    _ = tokio::time::sleep(interval) => {
+                        // Peak-only sample: INFO + docker (skip full GRAPH.MEMORY each tick).
+                        let redis_url = falkor_endpoint_to_redis_url(falkor.endpoint.as_ref());
+                        if let Ok(info) = falkor.redis_info_memory_bytes(&redis_url).await {
+                            if let Some(rss) = info.used_memory_rss_bytes {
+                                FALKOR_REDIS_USED_MEMORY_RSS_BYTES.set(rss);
+                                let peak = FALKOR_REDIS_USED_MEMORY_RSS_PEAK_BYTES.get().max(rss);
+                                FALKOR_REDIS_USED_MEMORY_RSS_PEAK_BYTES.set(peak);
+                            }
+                            if let Some(used) = info.used_memory_bytes {
+                                FALKOR_REDIS_USED_MEMORY_BYTES.set(used);
+                            }
+                        }
+                        if let Ok(Some((_name, bytes))) =
+                            resolve_and_sample_docker_memory_bytes(falkor.endpoint.as_ref()).await
+                        {
+                            FALKOR_CONTAINER_MEMORY_USAGE_BYTES.set(bytes);
+                            let peak = FALKOR_CONTAINER_MEMORY_USAGE_PEAK_BYTES.get().max(bytes);
+                            FALKOR_CONTAINER_MEMORY_USAGE_PEAK_BYTES.set(peak);
+                        }
+                    }
+                }
+            }
+        });
+        (handle, tx)
     }
 
     pub async fn graph_size(&self) -> BenchmarkResult<(u64, u64)> {
@@ -442,27 +579,196 @@ pub fn falkor_endpoint_to_redis_url(endpoint: Option<&String>) -> String {
     }
 }
 
-fn parse_graph_memory_total_mb(value: redis::Value) -> Option<f64> {
-    // Expected to be an array of key/value pairs.
+#[derive(Debug, Clone)]
+struct GraphMemorySnapshot {
+    total_mb: f64,
+    components: Vec<(String, f64)>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct RedisMemoryInfo {
+    used_memory_bytes: Option<i64>,
+    used_memory_rss_bytes: Option<i64>,
+    mem_fragmentation_ratio: Option<f64>,
+}
+
+fn parse_graph_memory_snapshot(value: redis::Value) -> Option<GraphMemorySnapshot> {
     let redis::Value::Array(items) = value else {
         return None;
     };
 
+    let mut total_mb: Option<f64> = None;
+    let mut components: Vec<(String, f64)> = Vec::new();
     let mut i = 0;
     while i + 1 < items.len() {
         let key = redis_value_to_string(&items[i]);
         let val = &items[i + 1];
-
         if let Some(k) = key {
-            if k == "total_graph_sz_mb" || k == "total_graph_size_mb" || k == "total_graph_mb" {
-                return redis_value_to_f64(val);
+            // Nested arrays (e.g. label attribute maps) — flatten first numeric leaf.
+            if let Some(mb) = redis_value_to_f64(val).or_else(|| redis_nested_first_f64(val)) {
+                if k == "total_graph_sz_mb" || k == "total_graph_size_mb" || k == "total_graph_mb" {
+                    total_mb = Some(mb);
+                } else {
+                    components.push((k, mb));
+                }
             }
         }
-
         i += 2;
     }
 
-    None
+    total_mb.map(|total_mb| GraphMemorySnapshot {
+        total_mb,
+        components,
+    })
+}
+
+fn redis_nested_first_f64(v: &redis::Value) -> Option<f64> {
+    match v {
+        redis::Value::Array(items) => {
+            for item in items {
+                if let Some(n) = redis_value_to_f64(item).or_else(|| redis_nested_first_f64(item)) {
+                    return Some(n);
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn parse_redis_info_memory(info: &str) -> RedisMemoryInfo {
+    let mut out = RedisMemoryInfo::default();
+    for line in info.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((k, v)) = line.split_once(':') else {
+            continue;
+        };
+        match k {
+            "used_memory" => out.used_memory_bytes = v.parse().ok(),
+            "used_memory_rss" => out.used_memory_rss_bytes = v.parse().ok(),
+            "mem_fragmentation_ratio" => out.mem_fragmentation_ratio = v.parse().ok(),
+            _ => {}
+        }
+    }
+    out
+}
+
+fn endpoint_host_port(endpoint: Option<&String>) -> Option<(String, u16)> {
+    let ep = endpoint.map(|s| s.as_str()).unwrap_or("falkor://127.0.0.1:6379");
+    let rest = ep
+        .strip_prefix("falkor://")
+        .or_else(|| ep.strip_prefix("redis://"))
+        .unwrap_or(ep);
+    let rest = rest.split('/').next().unwrap_or(rest);
+    let (host, port_s) = rest.rsplit_once(':')?;
+    let port: u16 = port_s.parse().ok()?;
+    Some((host.to_string(), port))
+}
+
+async fn resolve_and_sample_docker_memory_bytes(
+    endpoint: Option<&String>,
+) -> BenchmarkResult<Option<(String, i64)>> {
+    let container = if let Ok(name) = env::var("FALKOR_DOCKER_CONTAINER") {
+        if name.trim().is_empty() {
+            None
+        } else {
+            Some(name)
+        }
+    } else if let Some((_host, port)) = endpoint_host_port(endpoint) {
+        resolve_docker_container_by_host_port(port).await?
+    } else {
+        None
+    };
+
+    let Some(name) = container else {
+        return Ok(None);
+    };
+    let bytes = sample_docker_stats_mem_bytes(&name).await?;
+    Ok(bytes.map(|b| (name, b)))
+}
+
+async fn resolve_docker_container_by_host_port(port: u16) -> BenchmarkResult<Option<String>> {
+    let output = tokio::process::Command::new("docker")
+        .args(["ps", "--format", "{{.Names}}\t{{.Ports}}"])
+        .output()
+        .await
+        .map_err(|e| OtherError(format!("docker ps failed: {e}")))?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let needle_a = format!("{port}->");
+    let needle_b = format!(":{port}->");
+    for line in stdout.lines() {
+        let mut parts = line.split('\t');
+        let Some(name) = parts.next() else { continue };
+        let ports = parts.next().unwrap_or("");
+        if ports.contains(&needle_a) || ports.contains(&needle_b) {
+            return Ok(Some(name.trim().to_string()));
+        }
+    }
+    Ok(None)
+}
+
+async fn sample_docker_stats_mem_bytes(container: &str) -> BenchmarkResult<Option<i64>> {
+    let output = tokio::process::Command::new("docker")
+        .args([
+            "stats",
+            "--no-stream",
+            "--format",
+            "{{.MemUsage}}",
+            container,
+        ])
+        .output()
+        .await
+        .map_err(|e| OtherError(format!("docker stats failed: {e}")))?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let raw = String::from_utf8_lossy(&output.stdout);
+    let usage = raw.split('/').next().unwrap_or("").trim();
+    Ok(parse_docker_mem_usage_to_bytes(usage))
+}
+
+fn parse_docker_mem_usage_to_bytes(s: &str) -> Option<i64> {
+    // e.g. "408.5MiB", "1.2GiB", "512KiB", "123MB"
+    let s = s.trim().replace(' ', "");
+    if s.is_empty() {
+        return None;
+    }
+    let (num_s, mult) = if let Some(rest) = s.strip_suffix("GiB").or_else(|| s.strip_suffix("GB")) {
+        (rest, 1024.0_f64.powi(3))
+    } else if let Some(rest) = s.strip_suffix("MiB").or_else(|| s.strip_suffix("MB")) {
+        (rest, 1024.0_f64.powi(2))
+    } else if let Some(rest) = s.strip_suffix("KiB").or_else(|| s.strip_suffix("KB")) {
+        (rest, 1024.0)
+    } else if let Some(rest) = s.strip_suffix('B') {
+        (rest, 1.0)
+    } else {
+        return None;
+    };
+    let n: f64 = num_s.parse().ok()?;
+    Some((n * mult).round() as i64)
+}
+
+fn sample_local_redis_server_rss_bytes() -> Option<i64> {
+    use sysinfo::{Pid, System};
+    let mut system = System::new_all();
+    system.refresh_all();
+    let pid = system.processes().iter().find_map(|(pid, process)| {
+        let name = process.name().to_str().unwrap_or("");
+        if name == "redis-server" {
+            Some(pid.as_u32())
+        } else {
+            None
+        }
+    })?;
+    let process = system.process(Pid::from(pid as usize))?;
+    // sysinfo::Process::memory returns KiB
+    Some((process.memory() as i64).saturating_mul(1024))
 }
 
 fn redis_value_to_string(v: &redis::Value) -> Option<String> {

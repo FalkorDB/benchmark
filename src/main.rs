@@ -1566,8 +1566,13 @@ async fn run_falkor(
     // get the graph size
     let (node_count, relation_count) = falkor.graph_size().await?;
 
-    // Best-effort graph memory reporting (query-interface metric).
+    // Multi-layer memory: graph / Redis INFO / docker cgroup / local process.
+    // Reset peaks at the start of each run so external sequential comparisons are independent.
+    benchmark::FALKOR_REDIS_USED_MEMORY_RSS_PEAK_BYTES.set(0);
+    benchmark::FALKOR_CONTAINER_MEMORY_USAGE_PEAK_BYTES.set(0);
     falkor.collect_graph_memory_usage_metrics().await;
+    let (memory_sampler_handle, memory_sampler_shutdown) =
+        falkor.spawn_memory_peak_sampler(std::time::Duration::from_secs(2));
 
     // Before running the workload, ensure the benchmark-critical indexes are present
     // and visible to FalkorDB so we avoid long-running queries due to missing indexes.
@@ -1664,6 +1669,11 @@ async fn run_falkor(
         format_number(number_of_queries as u64),
         elapsed
     );
+
+    // Stop peak sampler and take a final multi-layer memory snapshot for metrics.prom.
+    let _ = memory_sampler_shutdown.send(());
+    let _ = memory_sampler_handle.await;
+    falkor.collect_graph_memory_usage_metrics().await;
 
     // Export accurate pXX latency gauges (microseconds)
     {

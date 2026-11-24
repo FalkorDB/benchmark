@@ -1425,19 +1425,31 @@ impl MetricsIndex {
         // Prefer query-interface memory metrics when present.
         let mem_str = match vendor {
             Vendor::Falkor => {
-                // `GRAPH.MEMORY USAGE` reports MB.
+                // Prefer actual utilization when multi-layer capture is present:
+                // container cgroup peak > redis RSS peak > redis RSS > graph logical MB > process RSS.
+                if let Some(bytes) = self
+                    .get_single_value("falkordb_container_memory_usage_peak_bytes")
+                    .or_else(|| self.get_single_value("falkordb_container_memory_usage_bytes"))
+                {
+                    if bytes > 0.0 {
+                        return (cpu, format_mem_from_bytes(bytes));
+                    }
+                }
+                if let Some(bytes) = self
+                    .get_single_value("falkordb_redis_used_memory_rss_peak_bytes")
+                    .or_else(|| self.get_single_value("falkordb_redis_used_memory_rss_bytes"))
+                {
+                    if bytes > 0.0 {
+                        return (cpu, format_mem_from_bytes(bytes));
+                    }
+                }
                 if let Some(mb) = self.get_single_value("falkordb_graph_memory_usage_mb") {
                     if mb > 0.0 {
-                        format_mem_from_mb(mb)
-                    } else {
-                        // Fallback: process RSS (sysinfo, KiB)
-                        let mem_kib = self.get_single_value("falkor_memory_usage").unwrap_or(0.0);
-                        format_mem_from_kib(mem_kib)
+                        return (cpu, format_mem_from_mb(mb));
                     }
-                } else {
-                    let mem_kib = self.get_single_value("falkor_memory_usage").unwrap_or(0.0);
-                    format_mem_from_kib(mem_kib)
                 }
+                let mem_kib = self.get_single_value("falkor_memory_usage").unwrap_or(0.0);
+                format_mem_from_kib(mem_kib)
             }
             Vendor::Memgraph => {
                 // `SHOW STORAGE INFO` reports bytes.
