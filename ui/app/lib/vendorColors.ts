@@ -11,15 +11,22 @@ export function normalizeVendor(vendor: string): VendorKey {
     k.includes("falkordb2") ||
     k === "falkordb-rs" ||
     k.includes("falkordb-rs") ||
+    // Versioned secondary labels from dual-Falkor runs (e.g. falkordb-6.2.1).
+    /^falkordb[-_]?6(\.|\b)/.test(k) ||
     k.includes("secondary") ||
-    k.includes("rust")
-  ) return "falkordb2";
+    k.includes("rust") ||
+    k.includes("valkey")
+  )
+    return "falkordb2";
   if (
     k === "falkordb1" ||
     k.includes("falkordb1") ||
     k === "falkordb-c" ||
-    k.includes("falkordb-c")
-  ) return "falkordb";
+    k.includes("falkordb-c") ||
+    // Versioned C-build labels (e.g. falkordb-4.22.4).
+    /^falkordb[-_]?4(\.|\b)/.test(k)
+  )
+    return "falkordb";
   if (k === "falkordb" || k === "falkor" || k.includes("falkor") || k.includes("r6g") || k.includes("r7g") || k.includes("r8g") || k.includes("r6i") || k.includes("r7i")) return "falkordb";
   if (k === "neo4j") return "neo4j";
   if (k === "memgraph") return "memgraph";
@@ -46,10 +53,12 @@ function getStops(vendor: VendorKey): GradientStops {
         { offset: 1.0, color: cssVar("--FalkorDB-gradient-end", "#7568F2") },
       ];
     case "falkordb2":
-      // Orange -> red gradient to clearly distinguish FalkorDB-2 from FalkorDB-1
+      // Purple → blue: FalkorDB brand purple into a Valkey-adjacent cool blue
+      // so the Rust/secondary stack reads distinct from C-build pink→purple.
       return [
-        { offset: 0.0, color: cssVar("--FalkorDB2-gradient-start", "#ff9a3d") },
-        { offset: 1.0, color: cssVar("--FalkorDB2-gradient-end", "#e63946") },
+        { offset: 0.0, color: cssVar("--FalkorDB2-gradient-start", "#9B6CFF") },
+        { offset: 0.5, color: cssVar("--FalkorDB2-gradient-mid", "#4F6BFF") },
+        { offset: 1.0, color: cssVar("--FalkorDB2-gradient-end", "#0EA5E9") },
       ];
     case "neo4j":
       // Neo4j "Baltic" palette: Dark -> Mid -> Baltic -> Light

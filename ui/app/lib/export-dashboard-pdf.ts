@@ -244,9 +244,23 @@ async function captureSectionsToPdf(
   root: HTMLElement,
   reportTitle: string,
   pagePrefix: string,
-  onProgress?: (message: string) => void
+  onProgress?: (message: string) => void,
+  sectionFilter?: {
+    /** Only capture these data-pdf-section ids (e.g. ["memory"]). */
+    only?: string[];
+    /** Skip these data-pdf-section ids (e.g. ["memory"]). */
+    exclude?: string[];
+  }
 ) {
-  const sections = collectExportSections(root);
+  let sections = collectExportSections(root);
+  if (sectionFilter?.only?.length) {
+    const only = new Set(sectionFilter.only);
+    sections = sections.filter((el) => only.has(el.dataset.pdfSection || ""));
+  }
+  if (sectionFilter?.exclude?.length) {
+    const exclude = new Set(sectionFilter.exclude);
+    sections = sections.filter((el) => !exclude.has(el.dataset.pdfSection || ""));
+  }
   if (!sections.length) {
     onProgress?.(`${pagePrefix}: no chart sections found (skipped)`);
     return;
@@ -310,7 +324,7 @@ export async function exportDashboardToPdf(
   if (subtitle) pdf.text(String(subtitle).slice(0, 100), MARGIN_MM, 50);
   pdf.text(`Generated: ${stamp}`, MARGIN_MM, 60);
   pdf.text(
-    "Concurrent overview + per-query latency histograms (capped list).",
+    "Concurrent overview + shared memory chart + per-query latency histograms.",
     MARGIN_MM,
     72
   );
@@ -337,19 +351,34 @@ export async function exportDashboardToPdf(
       }…`
     );
     await selectWorkload("single");
+    // Pick first query so the single layout (incl. memory chart) is mounted.
+    await selectQuery(queries[0]);
     await waitForChartsIdle(root);
+
+    // Memory usage is identical across individual query views — capture once.
+    onProgress?.("Capturing shared memory chart (once)…");
+    await captureSectionsToPdf(
+      pdf,
+      root,
+      reportTitle,
+      "Single / memory (shared)",
+      onProgress,
+      { only: ["memory"] }
+    );
 
     for (let qi = 0; qi < queries.length; qi++) {
       const q = queries[qi];
       onProgress?.(`Query ${qi + 1}/${queries.length}: ${q}`);
       await selectQuery(q);
       await waitForChartsIdle(root);
+      // Latency only; skip memory (already exported once above).
       await captureSectionsToPdf(
         pdf,
         root,
         reportTitle,
         `Single / ${q}`,
-        onProgress
+        onProgress,
+        { exclude: ["memory"] }
       );
     }
 

@@ -51,7 +51,8 @@ body {
 
     /* Solid accents (used for text/borders) */
     --FalkorDB-color: #7568F2;
-    --FalkorDB2-color: #ff9a3d;
+    /* FalkorDB-rs / secondary: purple → blue (FalkorDB × Valkey-adjacent cool stack) */
+    --FalkorDB2-color: #4F6BFF;
     --Neo4j-color: #0A6190;
     --Memgraph-color: #ff2b4a;
     --Postgres-color: #336791;
@@ -65,8 +66,10 @@ body {
     /* Chart gradients */
     --FalkorDB-gradient-start: #ff66b3;
     --FalkorDB-gradient-end: #7568F2;
-    --FalkorDB2-gradient-start: #ff9a3d;
-    --FalkorDB2-gradient-end: #e63946;
+    /* FalkorDB-rs: Falkor purple into Valkey-leaning blue (distinct from pink→purple C build) */
+    --FalkorDB2-gradient-start: #9B6CFF;
+    --FalkorDB2-gradient-mid: #4F6BFF;
+    --FalkorDB2-gradient-end: #0EA5E9;
 
     /* Neo4j "Baltic" palette (Dark/Mid/Baltic/Light) */
     --Neo4j-gradient-dark-baltic: #014063;
