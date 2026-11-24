@@ -809,9 +809,10 @@ impl MongoUsersQueriesRepository {
                     let seed = random.random_vertex();
                     let mut pipeline = vec![doc! { "$match": { "_id": seed } }];
                     // Previously $graphLookup(maxDepth: 4) + $match{depth: 4} = nodes exactly 5
-                    // edges away.
+                    // edges away. LIMIT 100 mirrors Cypher path cap.
                     pipeline.extend(bounded_traversal_stages(5));
                     pipeline.push(doc! { "$unwind": "$frontier" });
+                    pipeline.push(doc! { "$limit": 100 });
                     pipeline.push(doc! { "$count": "cnt" });
                     MongoOperation::Aggregate {
                         collection: "users".to_string(),
@@ -822,9 +823,10 @@ impl MongoUsersQueriesRepository {
                     let seed = random.random_vertex();
                     let mut pipeline = vec![doc! { "$match": { "_id": seed } }];
                     // Previously $graphLookup(maxDepth: 5) + $match{depth: 5} = nodes exactly 6
-                    // edges away.
+                    // edges away. LIMIT 100 mirrors Cypher path cap.
                     pipeline.extend(bounded_traversal_stages(6));
                     pipeline.push(doc! { "$unwind": "$frontier" });
+                    pipeline.push(doc! { "$limit": 100 });
                     pipeline.push(doc! { "$count": "cnt" });
                     MongoOperation::Aggregate {
                         collection: "users".to_string(),

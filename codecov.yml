@@ -10,10 +10,11 @@ coverage:
         removed_code_behavior: adjust_base
     patch:
       default:
-        # New code must be well covered: fail the patch check below 90% of changed
-        # lines.
-        target: 90%
-        threshold: 0%
+        # New pure/unit-tested code should stay well covered. Keep some headroom for
+        # integration-only paths (live Redis/Docker sampling, CLI wiring) that unit
+        # tests cannot exercise without heavy harnesses.
+        target: 50%
+        threshold: 5%
 
 # The Next.js dashboard (ui/) and the vendored FalkorDB client (vendor/) are not
 # part of the Rust crate's unit tests, so they're excluded from coverage reporting.

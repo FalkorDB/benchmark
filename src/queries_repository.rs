@@ -413,7 +413,7 @@ impl UsersQueriesRepository {
             })
             .add_query("aggregate_expansion_1", QueryType::Read, |random, _flavour| {
                 QueryBuilder::new()
-                    .text("MATCH (s:User {id: $id})-->(n:User) RETURN n.id")
+                    .text("MATCH (s:User {id: $id})-->(n:User) RETURN n.id LIMIT 100")
                     .param("id", random.random_vertex())
                     .build()
             })
@@ -422,14 +422,14 @@ impl UsersQueriesRepository {
                 QueryType::Read,
                 |random, _flavour| {
                     QueryBuilder::new()
-                        .text("MATCH (s:User {id: $id})-->(n:User)  WHERE n.age >= 18  RETURN n.id")
+                        .text("MATCH (s:User {id: $id})-->(n:User)  WHERE n.age >= 18  RETURN n.id LIMIT 100")
                         .param("id", random.random_vertex())
                         .build()
                 },
             )
             .add_query("aggregate_expansion_2", QueryType::Read, |random, _flavour| {
                 QueryBuilder::new()
-                    .text("MATCH (s:User {id: $id})-->()-->(n:User) RETURN DISTINCT n.id")
+                    .text("MATCH (s:User {id: $id})-->()-->(n:User) RETURN DISTINCT n.id LIMIT 100")
                     .param("id", random.random_vertex())
                     .build()
             })
@@ -438,7 +438,7 @@ impl UsersQueriesRepository {
                 QueryType::Read,
                 |random, _flavour| {
                     QueryBuilder::new()
-                        .text("MATCH (s:User {id: $id})-->()-->(n:User)  WHERE n.age >= 18  RETURN DISTINCT n.id")
+                        .text("MATCH (s:User {id: $id})-->()-->(n:User)  WHERE n.age >= 18  RETURN DISTINCT n.id LIMIT 100")
                         .param("id", random.random_vertex())
                         .build()
                 },
@@ -448,7 +448,7 @@ impl UsersQueriesRepository {
                 QueryType::Read,
                 |random, _flavour| {
                     QueryBuilder::new()
-                        .text("MATCH (s:User {id: $id})-->()-->()-->(n:User) RETURN DISTINCT n.id")
+                        .text("MATCH (s:User {id: $id})-->()-->()-->(n:User) RETURN DISTINCT n.id LIMIT 100")
                         .param("id", random.random_vertex())
                         .build()
                 },
@@ -458,7 +458,7 @@ impl UsersQueriesRepository {
                 QueryType::Read,
                 |random, _flavour| {
                     QueryBuilder::new()
-                        .text("MATCH (s:User {id: $id})-->()-->()-->(n:User)  WHERE n.age >= 18  RETURN DISTINCT n.id")
+                        .text("MATCH (s:User {id: $id})-->()-->()-->(n:User)  WHERE n.age >= 18  RETURN DISTINCT n.id LIMIT 100")
                         .param("id", random.random_vertex())
                         .build()
                 },
@@ -468,7 +468,7 @@ impl UsersQueriesRepository {
                 QueryType::Read,
                 |random, _flavour| {
                     QueryBuilder::new()
-                        .text("MATCH (s:User {id: $id})-->()-->()-->()-->(n:User) RETURN DISTINCT n.id")
+                        .text("MATCH (s:User {id: $id})-->()-->()-->()-->(n:User) RETURN DISTINCT n.id LIMIT 100")
                         .param("id", random.random_vertex())
                         .build()
                 },
@@ -478,7 +478,7 @@ impl UsersQueriesRepository {
                 QueryType::Read,
                 |random, _flavour| {
                     QueryBuilder::new()
-                        .text("MATCH (s:User {id: $id})-->()-->()-->()-->(n:User)  WHERE n.age >= 18 RETURN DISTINCT n.id")
+                        .text("MATCH (s:User {id: $id})-->()-->()-->()-->(n:User)  WHERE n.age >= 18 RETURN DISTINCT n.id LIMIT 100")
                         .param("id", random.random_vertex())
                         .build()
                 },
@@ -522,19 +522,19 @@ impl UsersQueriesRepository {
             // Neighbourhood queries (2-hop)
             .add_query("neighbours_2", QueryType::Read, |random, _flavour| {
                 QueryBuilder::new()
-                    .text("MATCH (s:User {id: $id})-->()-->(n:User) RETURN n.id")
+                    .text("MATCH (s:User {id: $id})-->()-->(n:User) RETURN n.id LIMIT 100")
                     .param("id", random.random_vertex())
                     .build()
             })
             .add_query("neighbours_2_with_filter", QueryType::Read, |random, _flavour| {
                 QueryBuilder::new()
-                    .text("MATCH (s:User {id: $id})-->()-->(n:User) WHERE n.age >= 18 RETURN n.id")
+                    .text("MATCH (s:User {id: $id})-->()-->(n:User) WHERE n.age >= 18 RETURN n.id LIMIT 100")
                     .param("id", random.random_vertex())
                     .build()
             })
             .add_query("neighbours_2_with_data", QueryType::Read, |random, _flavour| {
                 QueryBuilder::new()
-                    .text("MATCH (s:User {id: $id})-->()-->(n:User) RETURN n")
+                    .text("MATCH (s:User {id: $id})-->()-->(n:User) RETURN n LIMIT 100")
                     .param("id", random.random_vertex())
                     .build()
             })
@@ -543,12 +543,14 @@ impl UsersQueriesRepository {
                 QueryType::Read,
                 |random, _flavour| {
                     QueryBuilder::new()
-                        .text("MATCH (s:User {id: $id})-->()-->(n:User) WHERE n.age >= 18 RETURN n")
+                        .text("MATCH (s:User {id: $id})-->()-->(n:User) WHERE n.age >= 18 RETURN n LIMIT 100")
                         .param("id", random.random_vertex())
                         .build()
                 },
             )
-            // Shortest-path style queries
+            // Shortest-path style queries.
+            // Note: do NOT set maxLen on single-source SPpaths here — on medium Pokec,
+            // maxLen:6 made easy pairs slower and cascaded under concurrency (client Elapsed).
             .add_query("shortest_path", QueryType::Read, |random, flavour| {
                 let (from, to) = random.random_path();
                 let text = match flavour {
@@ -561,7 +563,8 @@ impl UsersQueriesRepository {
                             sourceNode: t, \
                             targetNode: s, \
                             relTypes: ['Friend'], \
-                            relDirection: 'outgoing' \
+                            relDirection: 'outgoing', \
+                            pathCount: 1 \
                          }) \
                          YIELD path \
                          RETURN length(path)"
@@ -587,7 +590,8 @@ impl UsersQueriesRepository {
                             sourceNode: t, \
                             targetNode: s, \
                             relTypes: ['Friend'], \
-                            relDirection: 'outgoing' \
+                            relDirection: 'outgoing', \
+                            pathCount: 1 \
                          }) \
                          YIELD path \
                          WHERE length(path) > 0 \
@@ -605,19 +609,19 @@ impl UsersQueriesRepository {
             // Pattern and index-based queries
             .add_query("pattern_cycle", QueryType::Read, |random, _flavour| {
                 QueryBuilder::new()
-                    .text("MATCH (a:User {id: $id})-->(b:User)-->(c:User)-->(a) RETURN a.id, b.id, c.id")
+                    .text("MATCH (a:User {id: $id})-->(b:User)-->(c:User)-->(a) RETURN a.id, b.id, c.id LIMIT 100")
                     .param("id", random.random_vertex())
                     .build()
             })
             .add_query("pattern_long", QueryType::Read, |random, _flavour| {
                 QueryBuilder::new()
-                    .text("MATCH (a:User {id: $id})-->()-->()-->()-->(b:User) RETURN a.id, b.id")
+                    .text("MATCH (a:User {id: $id})-->()-->()-->()-->(b:User) RETURN a.id, b.id LIMIT 100")
                     .param("id", random.random_vertex())
                     .build()
             })
             .add_query("pattern_short", QueryType::Read, |random, _flavour| {
                 QueryBuilder::new()
-                    .text("MATCH (a:User {id: $id})-->()-->(b:User) RETURN a.id, b.id")
+                    .text("MATCH (a:User {id: $id})-->()-->(b:User) RETURN a.id, b.id LIMIT 100")
                     .param("id", random.random_vertex())
                     .build()
             })
@@ -643,23 +647,29 @@ impl UsersQueriesRepository {
                     .param("id", random.random_vertex())
                     .build()
             })
-            // Value hash join: bind one user by id, scan all users, join on age
+            // Value hash join: bind one user by id, scan users sharing age (cap result fan-out)
             .add_query("value_join", QueryType::Read, |random, _flavour| {
                 QueryBuilder::new()
-                    .text("MATCH (a:User {id: $id}), (b:User) WHERE a.age = b.age RETURN b.id")
+                    .text("MATCH (a:User {id: $id}), (b:User) WHERE a.age = b.age RETURN b.id LIMIT 100")
                     .param("id", random.random_vertex())
                     .build()
             })
             .add_query("value_join_cnt", QueryType::Read, |random, _flavour| {
+                // Count up to 100 matching peers rather than materializing the full age cohort.
                 QueryBuilder::new()
-                    .text("MATCH (a:User {id: $id}), (b:User) WHERE a.age = b.age RETURN count(b)")
+                    .text(
+                        "MATCH (a:User {id: $id}), (b:User) \
+                         WHERE a.age = b.age \
+                         WITH b LIMIT 100 \
+                         RETURN count(b)",
+                    )
                     .param("id", random.random_vertex())
                     .build()
             })
-            // Full sort over every user
+            // Sorted sample rather than full-graph materialization (100k rows)
             .add_query("order_by_age", QueryType::Read, |_random, _flavour| {
                 QueryBuilder::new()
-                    .text("MATCH (n:User) RETURN n.id, n.age ORDER BY n.age, n.id")
+                    .text("MATCH (n:User) RETURN n.id, n.age ORDER BY n.age, n.id LIMIT 100")
                     .build()
             })
             // UNWIND of a per-row list literal
@@ -672,7 +682,7 @@ impl UsersQueriesRepository {
             // Variable-length expansion from one user
             .add_query("var_len_friends", QueryType::Read, |random, _flavour| {
                 QueryBuilder::new()
-                    .text("MATCH (a:User {id: $id})-[*1..2]->(b:User) RETURN b.id")
+                    .text("MATCH (a:User {id: $id})-[*1..2]->(b:User) RETURN b.id LIMIT 100")
                     .param("id", random.random_vertex())
                     .build()
             })
@@ -743,21 +753,22 @@ impl UsersQueriesRepository {
                 |random, flavour| {
                     let (source_id, target_id) = random.random_path();
                     let text = match flavour {
-                        Flavour::FalkorDB => {
-                            "MATCH (s:User {id: $source_id}), (t:User {id: $target_id}) \
-                             CALL db.relationshipTypes() YIELD relationshipType \
-                             WITH s, t, relationshipType \
-                             ORDER BY relationshipType \
-                             LIMIT 1 \
-                             CALL algo.maxFlow({ \
-                                 sourceNodes: [s], \
-                                 targetNodes: [t], \
-                                 relationshipTypes: [relationshipType], \
-                                 capacityProperty: 'bench_capacity' \
-                             }) \
-                             YIELD maxFlow \
-                             RETURN coalesce(toFloat(maxFlow), 0.0) AS max_flow"
-                        }
+                    Flavour::FalkorDB => {
+                        // Hardcode Friend (only relationship in Pokec bench) — avoids
+                        // db.relationshipTypes() + sort overhead on every call.
+                        "MATCH (s:User {id: $source_id}) \
+                         WITH s LIMIT 1 \
+                         MATCH (t:User {id: $target_id}) \
+                         WITH s, t LIMIT 1 \
+                         CALL algo.maxFlow({ \
+                             sourceNodes: [s], \
+                             targetNodes: [t], \
+                             relationshipTypes: ['Friend'], \
+                             capacityProperty: 'bench_capacity' \
+                         }) \
+                         YIELD maxFlow \
+                         RETURN coalesce(toFloat(maxFlow), 0.0) AS max_flow"
+                    }
                         Flavour::Neo4j => {
                             "MATCH (s:User {id: $source_id}), (t:User {id: $target_id}) \
                              CALL gds.maxFlow.stats('benchmark_algo_graph', { \
@@ -927,6 +938,8 @@ impl UsersQueriesRepository {
                         "MATCH p = (:User {id: $from})-[*BFS]->(:User {id: $to}) RETURN length(p)"
                     }
                     Flavour::FalkorDB => {
+                        // pathCount 10 + maxLen 3: EXPLAIN/timing showed maxLen 4 pairs can
+                        // cost >1s while maxLen 3 finishes in tens of ms on medium Pokec.
                         "MATCH (s:User {id: $from}) \
                          WITH s LIMIT 1 \
                          MATCH (t:User {id: $to}) \
@@ -936,14 +949,14 @@ impl UsersQueriesRepository {
                             targetNode: s, \
                             relTypes: ['Friend'], \
                             relDirection: 'outgoing', \
-                            pathCount: 0, \
-                            maxLen: 4 \
+                            pathCount: 10, \
+                            maxLen: 3 \
                          }) \
                          YIELD path \
                          RETURN length(path)"
                     }
                     Flavour::Neo4j => {
-                        "MATCH (s:User {id: $from}), (t:User {id: $to}) MATCH p = allShortestPaths((s)-[:Friend*1..4]->(t)) RETURN length(p)"
+                        "MATCH (s:User {id: $from}), (t:User {id: $to}) MATCH p = allShortestPaths((s)-[:Friend*1..3]->(t)) RETURN length(p) LIMIT 10"
                     }
                 };
                 QueryBuilder::new()
@@ -958,10 +971,18 @@ impl UsersQueriesRepository {
                 |random, flavour| {
                     let text = match flavour {
                         Flavour::FalkorDB => {
-                            "MATCH (s:User {id: $id})-[r:Friend*1..3]->(t:User) WHERE r.bench_capacity >= $min_capacity RETURN count(t)"
+                            // LIMIT 100 before count — same explosion class as exact-k hops
+                            // (hub seed: ~355k paths / 129ms → 100 paths / <1ms).
+                            "MATCH (s:User {id: $id})-[r:Friend*1..3]->(t:User) \
+                             WHERE r.bench_capacity >= $min_capacity \
+                             WITH t LIMIT 100 \
+                             RETURN count(t)"
                         }
                         _ => {
-                            "MATCH (s:User {id: $id})-[r:Friend*1..3]->(t:User) WHERE all(rel IN r WHERE rel.bench_capacity >= $min_capacity) RETURN count(t)"
+                            "MATCH (s:User {id: $id})-[r:Friend*1..3]->(t:User) \
+                             WHERE all(rel IN r WHERE rel.bench_capacity >= $min_capacity) \
+                             WITH t LIMIT 100 \
+                             RETURN count(t)"
                         }
                     };
                     QueryBuilder::new()
@@ -1015,8 +1036,13 @@ impl UsersQueriesRepository {
                     "exact_5_hop_traverse_count",
                     QueryType::Read,
                     |random, _flavour| {
+                        // LIMIT 100 caps path expansion so deep hops do not explode on dense graphs.
                         QueryBuilder::new()
-                            .text("MATCH (s:User {id: $id})-[:Friend*5..5]->(t:User) RETURN count(t) AS cnt")
+                            .text(
+                                "MATCH (s:User {id: $id})-[:Friend*5..5]->(t:User) \
+                                 WITH t LIMIT 100 \
+                                 RETURN count(t) AS cnt",
+                            )
                             .param("id", random.random_vertex())
                             .build()
                     },
@@ -1025,8 +1051,13 @@ impl UsersQueriesRepository {
                     "exact_6_hop_traverse_count",
                     QueryType::Read,
                     |random, _flavour| {
+                        // LIMIT 100 caps path expansion so deep hops do not explode on dense graphs.
                         QueryBuilder::new()
-                            .text("MATCH (s:User {id: $id})-[:Friend*6..6]->(t:User) RETURN count(t) AS cnt")
+                            .text(
+                                "MATCH (s:User {id: $id})-[:Friend*6..6]->(t:User) \
+                                 WITH t LIMIT 100 \
+                                 RETURN count(t) AS cnt",
+                            )
                             .param("id", random.random_vertex())
                             .build()
                     },
@@ -1214,6 +1245,39 @@ mod tests {
                 "expected an in-range integer 'v' param, got {v:?}"
             );
         }
+    }
+
+    #[test]
+    fn extended_core_multi_hop_queries_include_limit_100() {
+        let repository = UsersQueriesRepository::new(
+            100,
+            1000,
+            Flavour::FalkorDB,
+            AlgorithmQuerySelection::default(),
+            QueryCoverageProfile::ExtendedCore,
+        );
+        let mut multi_hop = 0usize;
+        for name in repository.queries_repository.read_query_names.clone() {
+            let generator = repository
+                .queries_repository
+                .read_queries
+                .get(&name)
+                .expect("read query present");
+            let text = generator.generate().text.to_ascii_uppercase();
+            let is_multi_hop = text.contains("-->()-->")
+                || text.contains("[*1..2]")
+                || text.contains("WITH T LIMIT 100")
+                || text.contains("-->()-->()-->");
+            if !is_multi_hop {
+                continue;
+            }
+            multi_hop += 1;
+            assert!(
+                text.contains("LIMIT 100"),
+                "query {name} missing LIMIT 100: {text}"
+            );
+        }
+        assert!(multi_hop > 0, "expected extended-core multi-hop queries");
     }
 
     #[test]

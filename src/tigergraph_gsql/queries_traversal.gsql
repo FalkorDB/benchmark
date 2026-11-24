@@ -152,6 +152,7 @@ CREATE OR REPLACE QUERY var_len_with_edge_where_filter(VERTEX<User> id, INT min_
 # step, before the final hop's output vertex set dedupes — matching Cypher's non-distinct
 # `count(t)` over `-[:Friend*5..5]->`.
 CREATE OR REPLACE QUERY exact_5_hop_traverse_count(VERTEX<User> id) FOR GRAPH benchmark_graph {
+  # Cap reported paths at 100 to mirror Cypher WITH t LIMIT 100 RETURN count(t).
   SumAccum<INT> @@cnt = 0;
   Start = {id};
   H1 = SELECT t FROM Start:s -(Friend:e)-> User:t;
@@ -159,10 +160,11 @@ CREATE OR REPLACE QUERY exact_5_hop_traverse_count(VERTEX<User> id) FOR GRAPH be
   H3 = SELECT t FROM H2:s -(Friend:e)-> User:t;
   H4 = SELECT t FROM H3:s -(Friend:e)-> User:t;
   H5 = SELECT t FROM H4:s -(Friend:e)-> User:t ACCUM @@cnt += 1;
-  PRINT @@cnt AS cnt;
+  PRINT (@@cnt < 100 ? @@cnt : 100) AS cnt;
 }
 
 CREATE OR REPLACE QUERY exact_6_hop_traverse_count(VERTEX<User> id) FOR GRAPH benchmark_graph {
+  # Cap reported paths at 100 to mirror Cypher WITH t LIMIT 100 RETURN count(t).
   SumAccum<INT> @@cnt = 0;
   Start = {id};
   H1 = SELECT t FROM Start:s -(Friend:e)-> User:t;
@@ -171,5 +173,5 @@ CREATE OR REPLACE QUERY exact_6_hop_traverse_count(VERTEX<User> id) FOR GRAPH be
   H4 = SELECT t FROM H3:s -(Friend:e)-> User:t;
   H5 = SELECT t FROM H4:s -(Friend:e)-> User:t;
   H6 = SELECT t FROM H5:s -(Friend:e)-> User:t ACCUM @@cnt += 1;
-  PRINT @@cnt AS cnt;
+  PRINT (@@cnt < 100 ? @@cnt : 100) AS cnt;
 }
