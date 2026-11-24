@@ -11,6 +11,7 @@ import HorizontalBarChart from "./HorizontalBarChart";
 import VerticalBarChart from "./VerticalBarChart";
 import MemoryBarChart from "./MemoryBarChart";
 import { exportDashboardToPdf } from "../lib/export-dashboard-pdf";
+import { normalizeVendor } from "../lib/vendorColors";
 type RunsManifest = Record<string, { filename: string; timestamp: number }[]>;
 
 const filterDataByVendors = (
@@ -503,7 +504,7 @@ export default function DashBoard({
       toast({
         title: "PDF exported",
         description: availableQueries.length
-          ? `Saved multi-page PDF (concurrent overview + all ${availableQueries.length} query histograms).`
+          ? `Saved multi-page PDF (concurrent overview + 1 memory chart + all ${availableQueries.length} query latency histograms).`
           : "Saved multi-page PDF of the current dashboard charts.",
       });
     } catch (error) {
@@ -701,22 +702,23 @@ export default function DashBoard({
   const getBarColor = useCallback((vendor: string) => {
     const key = (vendor ?? "").toString().trim().toLowerCase();
 
-    // Map vendor identifiers/names to the same CSS vars used by the MAX THROUGHPUT chart.
-    // For aws-tests, the "vendor" is the instance type (e.g. r7i.2xlarge / r8g.2xlarge).
+    // Prefer shared vendor normalization (falkordb-rs / 6.x → purple-blue secondary).
+    // For aws-tests, the "vendor" is often the instance type (e.g. r7i.2xlarge / r8g.2xlarge).
+    const normalized = normalizeVendor(vendor);
     const cssVar =
-      key === "falkordb" || key === "falkor" || key === "falkordb1" || key.includes("falkordb1") || key.includes("standard") || key.includes("falkordb-c")
+      normalized === "falkordb"
         ? "--FalkorDB-color"
-        : key === "falkordb2" || key === "falkordb2" || key.includes("falkordb2") || key.includes("secondary") || key.includes("rust") || key.includes("falkordb-rs")
+        : normalized === "falkordb2"
         ? "--FalkorDB2-color"
-        : key === "neo4j"
+        : normalized === "neo4j"
         ? "--Neo4j-color"
-        : key === "memgraph"
+        : normalized === "memgraph"
         ? "--Memgraph-color"
-        : key === "postgres" || key === "postgresql"
+        : normalized === "postgres"
         ? "--Postgres-color"
-        : key === "mongo" || key === "mongodb"
+        : normalized === "mongo"
         ? "--Mongo-color"
-        : key === "tigergraph"
+        : normalized === "tigergraph"
         ? "--TigerGraph-color"
         : key === "intel" || key === "x86" || key.startsWith("r7i")
         ? "--Intel-color"
@@ -1203,7 +1205,7 @@ export default function DashBoard({
                 onClick={handleExportPdf}
                 disabled={isExportingPdf || !data}
                 className="inline-flex items-center justify-center gap-2 rounded-lg bg-gradient-to-r from-[#EC806C] via-[#B66EBD] to-[#7568F2] px-3 py-2 text-sm font-medium text-white shadow-sm hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
-                title="Export multi-page PDF of concurrent charts and all query histograms"
+                title="Export multi-page PDF: concurrent charts, one shared memory chart, and all query latency histograms"
               >
                 <FileDown className="size-4 shrink-0" />
                 {isExportingPdf ? "Exporting…" : "Export to PDF"}
