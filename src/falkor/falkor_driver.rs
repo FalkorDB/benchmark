@@ -263,7 +263,7 @@ impl Falkor<Started> {
         if let Some(bytes) = sample_local_redis_server_rss_bytes() {
             // Historical gauge is documented as bytes in lib.rs; process.memory() is KiB in sysinfo.
             // Store KiB here for backward compatibility with format_mem_from_kib in aggregator.
-            let kib = (bytes / 1024) as i64;
+            let kib = bytes / 1024;
             FALKOR_MEM_USAGE_GAUGE.set(kib);
             info!(
                 "memory layer process: redis-server rss_bytes={} ({:.1} MiB)",
