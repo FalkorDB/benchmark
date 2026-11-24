@@ -745,10 +745,9 @@ fn parse_docker_mem_usage_to_bytes(s: &str) -> Option<i64> {
         (rest, 1024.0_f64.powi(2))
     } else if let Some(rest) = s.strip_suffix("KiB").or_else(|| s.strip_suffix("KB")) {
         (rest, 1024.0)
-    } else if let Some(rest) = s.strip_suffix('B') {
-        (rest, 1.0)
     } else {
-        return None;
+        let rest = s.strip_suffix('B')?;
+        (rest, 1.0)
     };
     let n: f64 = num_s.parse().ok()?;
     Some((n * mult).round() as i64)
