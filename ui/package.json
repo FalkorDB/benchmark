@@ -23,7 +23,7 @@
     "@radix-ui/react-tooltip": "^1.2.16",
     "@shadcn/ui": "^0.0.4",
     "autoprefixer": "^10.5.4",
-    "chart.js": "^4.4.7",
+    "chart.js": "^4.6.2",
     "chartjs-plugin-datalabels": "^2.2.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
